@@ -12,6 +12,13 @@ read from `scripts/team_launcher.py` when a function runs, as are the calls
 between the functions here; the owner's account comes from `pwd`, the same
 module the launcher holds.
 
+As root, neither step touches the path by name (SYRD-609): `install -d -o`
+on a path the tenant's configuration names followed a link planted there and
+gave its target to the tenant. The directory is made or corrected by
+`scripts/tenant_paths.py dir`, rooted at the owner's home or runtime
+directory, and only for a path inside one of them -- decided on the path as
+written, never by resolving it.
+
 Moved out of `scripts/team_launcher.py` unchanged (SYRD-332). `team_launcher`
 imports this module at its top and still exports every name callers read there.
 This module never imports `team_launcher` at its top.
@@ -28,19 +35,14 @@ if TYPE_CHECKING:
     from scripts.team_launcher import ProjectConfig
 
 def install_owner_state_dir_args(config: ProjectConfig, path: Path) -> list[str]:
+    from scripts import owner_writes
+    from scripts.ticket_board.provision_tenant_paths import tenant_paths_argv
+
     if not config.run_as_user:
         raise ValueError("state directory ownership setup requires run_as_user")
-    return [
-        "install",
-        "-d",
-        "-m",
-        "700",
-        "-o",
-        config.run_as_user,
-        "-g",
-        config.run_as_user,
-        str(path),
-    ]
+    owner = config.run_as_user
+    return tenant_paths_argv(owner_writes.owner_root(owner, path), "dir", "--mode", "0700", "--owner", owner,
+                             "--group", owner, str(path))
 
 
 def _owner_state_roots(config: ProjectConfig) -> tuple[Path, ...]:
@@ -59,10 +61,9 @@ def _owner_state_roots(config: ProjectConfig) -> tuple[Path, ...]:
 
 
 def _is_owner_state_path(config: ProjectConfig, path: Path) -> bool:
-    from scripts import team_launcher as launcher
+    from scripts import owner_writes
 
-    resolved = path.expanduser().resolve(strict=False)
-    return any(resolved == root or resolved.is_relative_to(root) for root in launcher._owner_state_roots(config))
+    return owner_writes.within_owner_root(config.run_as_user, path.expanduser())
 
 
 def ensure_owner_state_dirs(

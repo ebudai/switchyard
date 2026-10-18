@@ -318,6 +318,18 @@ def repair_role_state_ownership(
     except KeyError:
         print_func(f"switchyard: {owner} is not a local account; {config.project}'s role state was left alone")
         return False
+    # The store's roots are the tenant's configuration's to name -- its session directory, each role's name --
+    # so one outside the owner's roots is refused before anything is given away (SYRD-609).
+    from scripts import owner_writes
+
+    roots = launcher.role_state_roots(config)
+    outside = [root for root in roots if not owner_writes.within_owner_root(owner, root)]
+    if outside:
+        print_func(
+            f"switchyard: refusing to touch {config.project}'s role state: {outside[0]} is outside {owner}'s home "
+            "and every directory root chose for it. No ownership was changed."
+        )
+        return False
     failures: list[str] = []
 
     def give_back(path: Path, info: os.stat_result, chown: Callable[[int, int], None]) -> str:
@@ -332,7 +344,7 @@ def repair_role_state_ownership(
             failures.append(f"switchyard: could not give {path} back to {owner}: {exc.strerror}")
         return ""
 
-    for root in launcher.role_state_roots(config):
+    for root in roots:
         _findings, denied = launcher._walk_tenant_state_tree(root, give_back)
         if denied:
             failures.append(f"switchyard: could not walk {denied[0][0]}: {denied[0][1]}")

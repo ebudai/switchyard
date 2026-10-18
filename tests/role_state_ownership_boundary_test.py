@@ -48,6 +48,12 @@ if str(ROOT) not in sys.path:
 from scripts import role_state_ownership as m  # noqa: E402
 from scripts import session_paths  # noqa: E402
 from scripts import team_launcher as t  # noqa: E402
+from scripts import owner_writes  # noqa: E402
+
+# SYRD-609: the repair refuses a store root outside the owner's roots before it gives anything away; that bound is
+# config_path_bounds_test's to prove. These cases are about the move, over stand-in accounts with no home, so here
+# every root they name is within.
+owner_writes.within_owner_root = lambda owner, path: True
 
 CHECKS = 0
 MOVED = ("STATE_TREE_MAX_DEPTH", "_open_tenant_state_root", "_root_placed_link", "_close_quietly", "_walk_tenant_state_tree",
@@ -240,7 +246,9 @@ def test_the_seams_read_through_the_launcher_and_nothing_bound() -> None:
         imports = [ast.unparse(x) for x in ast.walk(node) if isinstance(x, (ast.Import, ast.ImportFrom))]
         if expected:
             first = 1 if ast.get_docstring(node) is not None else 0
-            check(imports == ["from scripts import team_launcher as launcher"] and ast.unparse(node.body[first]) == imports[0],
+            # SYRD-609 adds one, to the repair: the owner's roots, which bound the store it may give back.
+            extra = ["from scripts import owner_writes"] if name == "repair_role_state_ownership" else []
+            check(imports == ["from scripts import team_launcher as launcher", *extra] and ast.unparse(node.body[first]) == imports[0],
                   f"{name}: the launcher imported once, first thing when it runs: {imports}")
         else:
             check(imports == [], f"{name}: reads nothing of the launcher's")

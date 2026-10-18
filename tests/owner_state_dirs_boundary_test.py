@@ -45,8 +45,10 @@ EXPORTED = ("install_owner_state_dir_args", "_owner_state_roots", "_is_owner_sta
 #: calls it through the launcher; the total is unchanged.
 LAUNCHER_CALLS = {"ensure_owner_state_dirs": 3}
 #: Measured on the baseline: the moved code's calls, each through the launcher.
+#: SYRD-609: `_is_owner_state_path` now asks `owner_writes.within_owner_root` -- the path as written, never
+#: resolved -- rather than `_owner_state_roots`, which stays exported and is no longer called here.
 MOVED_CALLS = {"current_user_name": 1, "runtime_dir_for_uid": 1, "_proc_failure_reason": 1,
-               "_owner_state_roots": 1, "_is_owner_state_path": 1, "install_owner_state_dir_args": 1}
+               "_is_owner_state_path": 1, "install_owner_state_dir_args": 1}
 OWNER, UID = "syrd332-owner", 43332
 
 
@@ -185,13 +187,21 @@ def test_the_calls_the_seams_and_the_functions_own_names() -> None:
         check(through == [], f"{function.name}: nothing it binds itself is read as the launcher's: {through}")
 
 
+def made(root: Path, path: Path) -> list[str]:
+    """The argv that makes `path` the owner's: the descriptor helper's `dir`, rooted at `root` (SYRD-609)."""
+    from scripts.ticket_board.provision_tenant_paths import tenant_paths_argv
+
+    return tenant_paths_argv(str(root), "dir", "--mode", "0700", "--owner", OWNER, "--group", OWNER, str(path))
+
+
 def test_the_install_argv() -> None:
     from scripts import owner_state_dirs
 
     path = Path("/nonexistent/syrd332/state dir")
     check(owner_state_dirs.install_owner_state_dir_args(SimpleNamespace(run_as_user=OWNER), path)
-          == ["install", "-d", "-m", "700", "-o", OWNER, "-g", OWNER, "/nonexistent/syrd332/state dir"],
-          "the directory is created mode 700, owned by the owner and its group, the path one argument")
+          == made(Path(f"/home/{OWNER}"), path),
+          "the directory is made mode 0700, owned by the owner and its group, the path one argument, rooted at the "
+          "owner's home (SYRD-609: the descriptor helper, never install -d)")
     for owner in (None, ""):
         try:
             owner_state_dirs.install_owner_state_dir_args(SimpleNamespace(run_as_user=owner), path)
@@ -278,12 +288,11 @@ def test_only_the_owners_directories_are_given_in_order() -> None:
         root = Path(raw)
         home = root / "home" / OWNER
         ran, stopped, _ = run(root, config(root, session=home / "sessions"), root / "run" / "user" / str(UID) / "p")
-        check(stopped is None and ran == [
-            ["install", "-d", "-m", "700", "-o", OWNER, "-g", OWNER, str(home / "sessions")],
-            ["install", "-d", "-m", "700", "-o", OWNER, "-g", OWNER, str(root / "run" / "user" / str(UID) / "p")]],
+        runtime = root / "run" / "user" / str(UID)
+        check(stopped is None and ran == [made(home, home / "sessions"), made(runtime, runtime / "p")],
               f"the session directory, then the pane-state directory, each through the caller's runner: {ran}")
         ran, stopped, _ = run(root, config(root, session=root / "shared" / "sessions"), home / "panes")
-        check(ran == [["install", "-d", "-m", "700", "-o", OWNER, "-g", OWNER, str(home / "panes")]],
+        check(ran == [made(home, home / "panes")],
               f"a directory outside the owner's state is never handed to it: {ran}")
         ran, stopped, _ = run(root, config(root, session=root / "shared"), root / "shared" / "panes")
         check(ran == [] and stopped is None, f"and with neither inside, nothing runs: {ran}")

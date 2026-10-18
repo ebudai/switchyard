@@ -59,6 +59,9 @@ def _role_from_json(project: str, raw: dict[str, Any], *, base: Path, default_wo
     role = str(raw.get("role") or "").strip()
     if not role:
         raise SystemExit("team launcher role entry missing role")
+    # A role's name is a path component of its state store and session directory (SYRD-609).
+    if "/" in role or "\0" in role or role in (".", ".."):
+        raise SystemExit(f"team launcher role name {role!r} must be a single path component")
     tmux_session = str(raw.get("tmux_session") or f"{project}-{role}").strip()
     slot_raw = raw.get("slot")
     slot = None if slot_raw is None else int(slot_raw)

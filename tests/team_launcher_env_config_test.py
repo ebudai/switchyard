@@ -36,8 +36,17 @@ def test_owner_state_dir_install_args_take_effect_on_real_filesystem_for_current
         )
         config = load_project_config("porter", config_path)
         target = tmp_path / "owner-home" / ".local" / "state" / "pgu-ticket-board" / "pane-sessions"
+        # The owner's home, where root makes its state directories by descriptor (SYRD-609).
+        from scripts import owner_writes
 
-        result = subprocess.run(team_launcher.install_owner_state_dir_args(config, target), text=True, capture_output=True)
+        shipped_owner_home = owner_writes.owner_home
+        owner_writes.owner_home = lambda user: str(tmp_path / "owner-home") if user == current_user else shipped_owner_home(user)
+        try:
+            argv = team_launcher.install_owner_state_dir_args(config, target)
+        finally:
+            owner_writes.owner_home = shipped_owner_home
+
+        result = subprocess.run(argv, text=True, capture_output=True)
 
         assert result.returncode == 0, result.stderr
         info = target.stat()

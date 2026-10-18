@@ -103,8 +103,19 @@ def _owned_directory(path: str, owner_user: str) -> bool:
         return False
 
 
+def _runtime_root(owner_user: str) -> list[str]:
+    """The owner's runtime directory (`/run/user/<uid>`): the system's, made for that owner alone."""
+    from scripts import team_launcher as launcher
+
+    try:
+        return [str(launcher.runtime_dir_for_uid(pwd.getpwnam(owner_user).pw_uid))]
+    except KeyError:
+        return []
+
+
 def owner_root(owner_user: str, path: Path) -> str:
-    """The trusted root `path` is written under for `owner_user`: the home, or a project directory root chose.
+    """The trusted root `path` is written under for `owner_user`: the home, the owner's runtime directory, or a
+    project directory root chose.
 
     A path in none of them gets the home, which `tenant_paths` then refuses as
     outside it. Only a normalised absolute path is ever matched.
@@ -113,12 +124,29 @@ def owner_root(owner_user: str, path: Path) -> str:
     text = str(path)
     if text != str(PurePosixPath(text)) or not text.startswith("/") or "/../" in f"{text}/":
         return home
-    candidates = [*sorted(TRUSTED_PROJECT_ROOTS.get(owner_user, ())), *_registered_project_roots()]
+    candidates = [*_runtime_root(owner_user), *sorted(TRUSTED_PROJECT_ROOTS.get(owner_user, ())),
+                  *_registered_project_roots()]
+    runtime = _runtime_root(owner_user)
     for root in [home, *candidates]:
         inside = text == root or text.startswith(root.rstrip("/") + "/")
-        if inside and (root == home or _owned_directory(root, owner_user)):
+        # The home and the runtime directory are the owner's by construction; a project directory only while it is.
+        if inside and (root == home or root in runtime or _owned_directory(root, owner_user)):
             return root
     return home
+
+
+def within_owner_root(owner_user: str, path: Path) -> bool:
+    """Whether root may act on `path` for `owner_user`: a normalised absolute path inside one of the owner's roots.
+
+    For root's work on a path the tenant's configuration names -- its session
+    store, a role's directory, a worktree -- which is otherwise refused rather
+    than followed or normalised in (SYRD-609).
+    """
+    text = str(path)
+    if not owner_user or text != str(PurePosixPath(text)) or not text.startswith("/") or "/../" in f"{text}/":
+        return False
+    root = owner_root(owner_user, path)
+    return text == root or text.startswith(root.rstrip("/") + "/")
 
 
 def owner_handoff_args(owner_user: str, path: Path) -> list[str]:

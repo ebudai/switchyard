@@ -743,6 +743,116 @@ def chown_tree(root: Root, path: str, uid: int, gid: int, if_exists: bool) -> No
         os.close(parent)
 
 
+def copy_tree(source: Root, source_path: str, target: Root, target_path: str, uid: int, gid: int, *,
+              dir_mode: int = 0o755) -> None:
+    """Merge one account's tree into another's without replacing anything there (SYRD-612).
+
+    The source is opened from its own home without following a link at any
+    component: a link inside it is left uncopied, never followed, and nothing
+    on another filesystem is read. Each regular file is copied whole into the
+    target, made `uid`:`gid` with the source's mode and times before it is in
+    place, and only where nothing is at its name -- a link there included --
+    and never over something that arrives after the look (`replace_file`'s
+    `exclusive`). Each directory the target lacks is made `uid`:`gid` with
+    `dir_mode`, and every directory on the way, the target itself included, is
+    given to `uid`:`gid`, as the by-path copy's `chown` did. A missing source
+    is nothing to copy; a link at it is refused.
+    """
+    found = source.leaf(source.relative(source_path))
+    if found is None:
+        return
+    parent, fd, display, status = found
+
+    def copy_one(handle: int, observed: os.stat_result, destination: str) -> None:
+        chunks = []
+        while chunk := os.pread(handle, 1 << 16, sum(len(c) for c in chunks)):
+            chunks.append(chunk)
+        replace_file(target, b"".join(chunks), destination, stat.S_IMODE(observed.st_mode) & 0o777, uid, gid,
+                     parents=(dir_mode, uid, gid), exclusive=True, times=(observed.st_atime_ns, observed.st_mtime_ns))
+
+    def directory(destination: str) -> None:
+        made = target.walk(target.relative(destination), create=(dir_mode, uid, gid))
+        if made is not None:
+            try:
+                target._own(made, destination, None, uid, gid)
+            finally:
+                os.close(made)
+
+    try:
+        if stat.S_ISREG(status.st_mode):
+            copy_one(fd, status, target_path)
+            return
+        if not stat.S_ISDIR(status.st_mode):
+            return
+        directory(target_path)
+        for child, where, child_status in source.tree(fd, display):
+            destination = f"{target_path}/{where[len(display) + 1:]}"
+            if stat.S_ISDIR(child_status.st_mode):
+                directory(destination)
+            else:
+                copy_one(child, child_status, destination)
+    finally:
+        os.close(fd)
+        os.close(parent)
+
+
+def link_target(home: str, path: str) -> str:
+    """Where the link at `path` points, read through its held parent; "" when nothing, or no link, is there."""
+    root = _quiet(home)
+    try:
+        parts = root.relative(path)
+        parent = root.walk(parts[:-1]) if parts else None
+        if parent is None:
+            return ""
+        try:
+            return os.readlink(parts[-1], dir_fd=parent)
+        except OSError:
+            return ""
+        finally:
+            os.close(parent)
+    finally:
+        root.close()
+
+
+def replace_link(root: Root, path: str, target: str) -> None:
+    """Point the link at `path` at `target`: made where only root can reach it and renamed into place (SYRD-612).
+
+    The directory holding it is reached by descriptor from the home, never
+    through a link; a directory at the name is refused rather than replaced.
+    """
+    parts = root.relative(path)
+    if not parts:
+        raise SystemExit("tenant_paths: the home itself is not a link")
+    parent = root.walk(parts[:-1])
+    if parent is None:
+        raise Refused(str(PurePosixPath(path).parent), "does not exist")
+    try:
+        try:
+            existing = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and stat.S_ISDIR(existing.st_mode):
+            raise Refused(path, "is a directory")
+        if existing is not None and stat.S_ISLNK(existing.st_mode) and os.readlink(parts[-1], dir_fd=parent) == target:
+            return
+        root.report(f"link {path} -> {target}")
+        if root.preview:
+            return
+        with root._staging(parent, path, "linked") as stage:
+            os.symlink(target, "new", dir_fd=stage)
+            try:
+                os.rename("new", parts[-1], src_dir_fd=stage, dst_dir_fd=parent)
+            except BaseException:
+                try:
+                    os.unlink("new", dir_fd=stage)
+                except FileNotFoundError:
+                    pass
+                raise
+        os.fsync(parent)
+    finally:
+        os.close(parent)
+
+
 def install_file(root: Root, source: str, path: str, mode: int, uid: int, gid: int) -> None:
     """`install -m MODE -o U -g G SOURCE PATH`: a new file renamed into place, over a link if one is there."""
     with open(source, "rb") as handle:  # root's own staged file
@@ -752,7 +862,7 @@ def install_file(root: Root, source: str, path: str, mode: int, uid: int, gid: i
 
 def replace_file(root: Root, content: bytes, path: str, mode: int | None, uid: int, gid: int, *,
                  parents: tuple[int, int, int] | None = None, parent_mode: int | None = None,
-                 new_mode: int = 0o600, exclusive: bool = False) -> bool:
+                 new_mode: int = 0o600, exclusive: bool = False, times: tuple[int, int] | None = None) -> bool:
     """Publish `content` at `path` whole: a new file, owned and moded before it is written, renamed into place.
 
     `mode` None keeps the mode of the regular file being replaced (`new_mode`,
@@ -772,6 +882,8 @@ def replace_file(root: Root, content: bytes, path: str, mode: int | None, uid: i
     `exclusive` publishes only where nothing is at the name -- a file, a link,
     anything -- and renames with RENAME_NOREPLACE, so something that arrives
     after the look is left as it is too (SYRD-611). Returns whether it wrote.
+    `times` (access, modification, in nanoseconds) are set on the new file
+    before it is in place, as a copy keeps them (SYRD-612).
     """
     parts = root.relative(path)
     if not parts:
@@ -816,6 +928,8 @@ def replace_file(root: Root, content: bytes, path: str, mode: int | None, uid: i
                     view = view[os.write(fd, view):]
                 os.fchown(fd, uid, gid)
                 os.fchmod(fd, mode)
+                if times is not None:
+                    os.utime(fd, ns=times)
                 os.fsync(fd)
                 os.close(fd)
                 fd = -1
@@ -1032,6 +1146,7 @@ def parser() -> argparse.ArgumentParser:
     tree = commands.add_parser("chown-tree", help="chown -R OWNER: PATH")
     tree.add_argument("--owner", required=True)
     tree.add_argument("--if-exists", action="store_true")
+    tree.add_argument("--group", help="the group, when it is not the owner's login group (a rollback's)")
     tree.add_argument("path")
     install = commands.add_parser("install", help="install -m MODE -o U -g G SOURCE PATH")
     install.add_argument("--mode", type=_mode, required=True)
@@ -1073,7 +1188,8 @@ def run(argv: Sequence[str], *, report: Callable[[str], None] | None = None,
         elif args.command == "close-children":
             close_children(root, args.path)
         elif args.command == "chown-tree":
-            chown_tree(root, args.path, uid_of(args.owner), login_gid(args.owner), args.if_exists)
+            chown_tree(root, args.path, uid_of(args.owner),
+                       login_gid(args.owner) if args.group is None else gid_of_required(args.group), args.if_exists)
         elif args.command == "install":
             install_file(root, args.source, args.path, args.mode, uid_of(args.owner), gid_of_required(args.group))
     except Refused as refusal:

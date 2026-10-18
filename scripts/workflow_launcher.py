@@ -90,15 +90,32 @@ def project_roles(raw: dict[str, Any], document: dict[str, Any]) -> dict[str, An
     return result
 
 
-def projection_files(config_path: Path, document: dict[str, Any], *, raw: dict[str, Any] | None = None) -> dict[Path, str]:
+def _tenant_json(path: Path, owner_user: str) -> dict[str, Any] | None:
+    """A tenant document projected from, or None when missing: as root for `owner_user`, read by descriptor -- a
+    link at it or above it refused, so nothing root can read through one is carried into a tenant file (SYRD-612)."""
+    from scripts import owner_writes
+
+    if owner_writes.root_writes_for(owner_user):
+        data = owner_writes.read_owner_bytes(owner_user, path)
+        return None if data is None else json.loads(data.decode("utf-8"))
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def projection_files(config_path: Path, document: dict[str, Any], *, raw: dict[str, Any] | None = None,
+                     owner_user: str = "") -> dict[Path, str]:
     """Every tenant file the declared workflow is projected into, as it should read for `document`.
 
     `raw` is the launcher config to project from when the caller holds a newer
     one than the file -- a runtime switch's rewritten role entry (SYRD-558).
+    `owner_user`: whose tree these are, when root reads them (`_tenant_json`).
     """
     from scripts import team_launcher as launcher
 
-    raw = copy.deepcopy(raw) if raw is not None else json.loads(config_path.read_text())
+    if raw is None:
+        raw = _tenant_json(config_path, owner_user)
+        if raw is None:
+            raise FileNotFoundError(2, "No such file or directory", str(config_path))
+    raw = copy.deepcopy(raw)
     document = validate(document, project=raw["project"])
     projected = project_roles(raw, document)
     layout = Path(projected["layout"])
@@ -118,14 +135,14 @@ def projection_files(config_path: Path, document: dict[str, Any], *, raw: dict[s
         + "\n",
     }
     plan_path = config_path.parent / "plan.json"
-    if plan_path.exists():
-        plan = json.loads(plan_path.read_text())
+    plan = _tenant_json(plan_path, owner_user)
+    if plan is not None:
         plan["workflow"] = validate(document)
         refresh_plan_role_accounts(plan, projected)
         files[plan_path] = json.dumps(plan, indent=2, sort_keys=True) + "\n"
     artifact_path = config_path.parent.parent / f'{projected["project"]}.project.json'
-    if artifact_path.exists():
-        artifact = json.loads(artifact_path.read_text())
+    artifact = _tenant_json(artifact_path, owner_user)
+    if artifact is not None:
         artifact["workflow"] = document
         files[artifact_path] = json.dumps(artifact, indent=2, sort_keys=True) + "\n"
     return files

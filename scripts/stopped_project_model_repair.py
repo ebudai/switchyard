@@ -129,8 +129,18 @@ def check_repair(
         )
 
 
-def make_owner_dirs(directory: Path, config_path: Path) -> None:
-    """Create `directory` and any missing parent, each owned by the configuration's owner."""
+def make_owner_dirs(directory: Path, config_path: Path, *, owner_user: str = "") -> None:
+    """Create `directory` and any missing parent, each owned by the configuration's owner.
+
+    As root for `owner_user` -- the owner the configuration names, never read
+    off a file -- by descriptor from the owner's root, never through a link at
+    any component (SYRD-612).
+    """
+    from scripts import owner_writes
+
+    if owner_writes.root_writes_for(owner_user):
+        owner_writes.ensure_owner_dirs(owner_user, [directory], mode=0o700)
+        return
     owner = os.stat(config_path)
     missing = [path for path in (directory, *directory.parents) if not path.exists()]
     for path in reversed(missing):

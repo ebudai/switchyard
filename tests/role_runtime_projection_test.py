@@ -240,11 +240,11 @@ def test_an_interrupted_write_leaves_a_journal_and_the_same_command_finishes(tmp
 
     written: list[Path] = []
 
-    def dies_on_the_second_file(path: Path, content: str) -> None:
+    def dies_on_the_second_file(path: Path, content: str, **kwargs) -> None:  # SYRD-612: and the owner, passed on
         if len(written) == 1:
             raise KeyboardInterrupt("the process died here")  # not an Exception: nothing in-process undoes it
         written.append(path)
-        real_atomic(path, content)
+        real_atomic(path, content, **kwargs)
 
     workflow_manage.atomic = dies_on_the_second_file
     try:

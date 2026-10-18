@@ -32,6 +32,7 @@ from scripts import runtime_arguments, stopped_project_model_repair
 from scripts.role_command import role_registers_runtime
 from scripts.runtime_projection import (  # SYRD-558: every tenant copy of the declaration
     declared_projection as _declared_projection,
+    projection_text as _projection_text,
     restore_projection as _restore_projection,
     runtime_projection_files,
     stale_projection as _stale_projection,
@@ -127,6 +128,7 @@ class RuntimeJournal:
     #: workflow in several of them, and every one names the role's runtime
     #: (SYRD-558).
     previous_projection: dict[str, str | None] = field(default_factory=dict)
+    owner_user: str = ""  # whose journal and projection these are, from the configuration (SYRD-612)
     slots: tuple[int, ...] = ()
     steps_applied: list[str] = field(default_factory=list)
     started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -149,8 +151,10 @@ class RuntimeJournal:
     def write(self, path: Path) -> None:
         payload = asdict(self)
         payload["slots"] = list(self.slots)
-        team_launcher._write_private_json_atomic(path, payload)
-        stopped_project_model_repair.keep_owner(path, Path(self.config_path))  # root writes the owner's journal
+        # As root, the owner's journal by descriptor from its root, never owned off a by-path stat (SYRD-612).
+        team_launcher._write_private_json_atomic(path, payload, owner_user=self.owner_user or None)
+        if not team_launcher.root_writes_for(self.owner_user):
+            stopped_project_model_repair.keep_owner(path, Path(self.config_path))
 
 
 @dataclass(frozen=True)
@@ -362,7 +366,8 @@ def _effort_kwargs(effort: str | None) -> dict[str, str]:
 
 
 def _verifiable_projection_blockers(
-    config_path: Path, role_name: str, runtime: str, *, model: str | None, effort: str | None = None
+    config_path: Path, role_name: str, runtime: str, *, model: str | None, effort: str | None = None,
+    owner_user: str = "",
 ) -> list[str]:
     """Refuse, before anything stops, a switch its own start check could not confirm.
 
@@ -372,9 +377,9 @@ def _verifiable_projection_blockers(
     been stopped for nothing (SYRD-486). Computed with the same projection the
     switch writes, on a copy.
     """
-    try:
-        raw = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
+    try:  # as root for the owner, by descriptor: nothing read through a link decides this (SYRD-612)
+        raw = json.loads(_projection_text(config_path, owner_user) or "")
+    except (OSError, ValueError, SystemExit) as exc:
         return [f"cannot read {config_path} to check the projection: {exc}"]
     entry = next(
         (item for item in raw.get("roles") or [] if isinstance(item, dict) and item.get("role") == role_name),
@@ -476,15 +481,17 @@ def preflight(
 
     blockers: list[str] = []
     if changing:
+        owner = config.run_as_user or team_launcher.current_user_name()
         blockers.extend(_readiness_blockers(config, role, runtime, runner=runner))
-        blockers.extend(_verifiable_projection_blockers(config_path, role_name, runtime, model=model, effort=effort))
+        blockers.extend(_verifiable_projection_blockers(config_path, role_name, runtime, model=model, effort=effort,
+                                                        owner_user=owner))
         # The whole tenant projection, computed before anything stops: one that
         # cannot be produced must not be discovered after the board moved (SYRD-558).
         try:
             if board_runtime is not None:
                 runtime_projection_files(config_path, role_name=role_name, runtime=runtime,
                                          document=document_with_runtime(document, role=role_name, runtime=runtime),
-                                         model=model, effort=effort)
+                                         model=model, effort=effort, owner_user=owner)
         except RoleRuntimeRefusal as exc:
             blockers.append(str(exc).removeprefix("switchyard: "))
         if busy and not force:
@@ -1122,6 +1129,7 @@ def switch_role_runtime(
     state_dir = pane_state_dir or team_launcher.default_pane_state_dir_for_user(
         config.run_as_user or team_launcher.current_user_name(), project=config.project
     )
+    journal_owner = config.run_as_user or team_launcher.current_user_name()
     journal = RuntimeJournal(
         project=config.project,
         role=role_name,
@@ -1129,13 +1137,13 @@ def switch_role_runtime(
         requested_runtime=runtime,
         previous_workflow_revision=checks.workflow_revision,
         previous_workflow_document=copy.deepcopy(dict(document)),
-        previous_config_bytes=config_path.read_text(encoding="utf-8"),
-        config_path=str(config_path),
+        previous_config_bytes=_projection_text(config_path, journal_owner) or "",
+        config_path=str(config_path), owner_user=journal_owner,
         slots=checks.visible_slots,
     )
     journal_path = journal_path_for(config, config_path=config_path, role_name=role_name)
     if operator:
-        stopped_project_model_repair.make_owner_dirs(journal_path.parent, config_path)
+        stopped_project_model_repair.make_owner_dirs(journal_path.parent, config_path, owner_user=journal.owner_user)
     journal.write(journal_path)
 
     live_changed = False

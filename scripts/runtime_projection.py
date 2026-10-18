@@ -28,6 +28,7 @@ def runtime_projection_files(
     document: Mapping[str, Any] | None,
     model: str | None = None,
     effort: str | None = None,
+    owner_user: str = "",
 ) -> dict[Path, str]:
     """Every tenant file the switch writes, as it will read: computed whole before any is written.
 
@@ -41,8 +42,11 @@ def runtime_projection_files(
     same rule `workflow apply` uses, over the rewritten entry.
     """
     from scripts import role_runtime as rr
+    from scripts.workflow_launcher import _tenant_json
 
-    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw = _tenant_json(config_path, owner_user)
+    if raw is None:
+        raise FileNotFoundError(2, "No such file or directory", str(config_path))
     roles = raw.get("roles")
     if not isinstance(roles, list):
         raise rr.RoleRuntimeRefusal(f"switchyard: {config_path} must define a roles list")
@@ -58,7 +62,7 @@ def runtime_projection_files(
     from scripts.workflow_launcher import projection_files
 
     try:
-        files = projection_files(config_path, dict(document), raw=raw)
+        files = projection_files(config_path, dict(document), raw=raw, owner_user=owner_user)
     except (ValueError, KeyError, TypeError, OSError) as exc:
         raise rr.RoleRuntimeRefusal(
             f"switchyard: cannot project the declared workflow into {config_path.parent}: {exc}"
@@ -109,32 +113,43 @@ def write_runtime_projection(
 ) -> Any:
     """Point the tenant's projection at the new runtime -- every file that names it -- leaving everything else."""
     from scripts import team_launcher
-    from scripts.workflow_manage import apply_files
+    from scripts.workflow_manage import apply_files, prior_text
 
+    # As root for the owner, each file is read and replaced by descriptor from the owner's root, so nothing root can
+    # read through a link the tenant left is carried into the journal or the projection (SYRD-612).
+    owner = config.run_as_user or team_launcher.current_user_name()
     files = runtime_projection_files(
-        config_path, role_name=role_name, runtime=runtime, document=document, model=model, effort=effort
+        config_path, role_name=role_name, runtime=runtime, document=document, model=model, effort=effort,
+        owner_user=owner,
     )
     if journal is not None:
         # Recorded before the first byte is written, so a crash between files
         # leaves a journal that names every one to put back.
-        journal.previous_projection = {
-            str(path): path.read_text(encoding="utf-8") if path.exists() else None for path in files
-        }
+        journal.previous_projection = {str(path): prior_text(path, owner) for path in files}
         if journal_path is not None:
             journal.write(journal_path)
-    apply_files(files)
+    apply_files(files, owner_user=owner)
     for path in files:
         team_launcher.ensure_owner_file(config, path, runner=runner)
     return team_launcher.load_project_config(config.project, config_path)
 
 
-def restore_projection(journal: Any) -> None:
-    from scripts.workflow_manage import atomic
+def projection_text(path: Path, owner_user: str) -> str | None:
+    """A tenant file as it is now, or None: by descriptor as root for the owner (`workflow_manage.prior_text`)."""
+    from scripts.workflow_manage import prior_text
 
+    return prior_text(path, owner_user)
+
+
+def restore_projection(journal: Any) -> None:
+    """Put back what the journal recorded: as root for its owner, by descriptor, never through a link (SYRD-612)."""
+    from scripts.workflow_manage import atomic, remove
+
+    owner = getattr(journal, "owner_user", "")
     previous = journal.previous_projection or {journal.config_path: journal.previous_config_bytes}
     for name, content in previous.items():
         path = Path(name)
         if content is None:
-            path.unlink(missing_ok=True)
+            remove(path, owner)
         else:
-            atomic(path, content)
+            atomic(path, content, owner_user=owner)

@@ -7,7 +7,9 @@
   `GUI_ENVIRONMENT_ALLOWLIST` (`gui_environment_args`, `_gui_runtime_dir`) or,
   for an unprivileged caller, only the Wayland display
   (`normalize_wayland_display`, `GUI_WAYLAND_ENV`, `HOST_WAYLAND_ENV` and their
-  legacy names). `gui_program_path` resolves a program an emptied environment
+  legacy names). Which display is `scripts/wayland_selection.py`'s answer: an
+  explicit override, the caller's own live socket, or the account's only one
+  (SYRD-621). `gui_program_path` resolves a program an emptied environment
   can still run, and `_refusal_command` says why nothing will be opened.
 - **Konsole:** `konsole_launch_args` builds the argv; `launch_konsole_window`
   writes the window-title default beside the layout
@@ -207,15 +209,16 @@ def _gui_launch_prefix(
     privilege_drop, refusal = gui_privilege_drop_args(user)
     if refusal:
         return [], refusal
-    wayland_display = None
-    host_wayland_display = launcher._env_first(HOST_WAYLAND_ENV, LEGACY_HOST_WAYLAND_ENV)
-    if host_wayland_display:
-        wayland_display = normalize_wayland_display(host_wayland_display, gui_user=user)
+    # An explicit override first; then, for an unprivileged caller, its own
+    # session's display when that is a live socket the desktop account owns;
+    # then that account's only live socket. A root crossing never reads the
+    # caller's WAYLAND_DISPLAY. This used to force `wayland-0`, and a desktop
+    # that came back on `wayland-1` got a Konsole that aborted (SYRD-621).
+    from scripts import wayland_selection
+
+    wayland_display, unavailable = wayland_selection.select_wayland_display(user, privileged=bool(privilege_drop))
     if not wayland_display:
-        wayland_name = launcher._env_first(GUI_WAYLAND_ENV, LEGACY_GUI_WAYLAND_ENV) or "wayland-0"
-        wayland_display = normalize_wayland_display(wayland_name, gui_user=user)
-    if not wayland_display:
-        return [], "team-launcher: no host Wayland display; run from Eric desktop session"
+        return [], unavailable
     config_dirs = ""
     if config_dir is not None:
         existing = "" if privilege_drop else str(os.environ.get("XDG_CONFIG_DIRS") or "")
@@ -377,6 +380,11 @@ def launch_konsole_window(
     returncode = proc.poll()
     if returncode is not None:
         _print_konsole_early_exit(returncode, log_path)
+        from scripts import wayland_selection
+
+        hint = wayland_selection.launch_hint(args)
+        if hint:
+            print(f"team-launcher: Konsole did not open: {hint}", file=sys.stderr)
         return returncode
     print(
         f"team-launcher: started {project} in background (Konsole pid {proc.pid}; log {log_path})"

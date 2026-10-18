@@ -92,6 +92,18 @@ pinned name returns. The project and tenant
 must match the target configuration. Missing, rejected or malformed consent
 stops setup without a grant.
 
+The presentation window follows the same rule for the display it opens on
+(SYRD-621, `scripts/wayland_selection.py`). An explicit `HOST_WAYLAND_DISPLAY`,
+then `TEAM_LAUNCHER_WAYLAND_DISPLAY`, comes first, and is held to the same proof
+as every other choice -- a live socket the desktop account owns in its own
+runtime directory, not a link -- or refused by name, never replaced. Otherwise a plain
+`switchyard <project>` from the desktop account's own session uses that
+session's `WAYLAND_DISPLAY` when it is a live socket the account owns in its
+runtime directory, and else the account's only live Wayland socket; several are
+refused by name, as is none. A launch that crosses from root never reads the
+caller's `WAYLAND_DISPLAY`. When the terminal still exits at once, the report
+names the display it was given and the sockets that are live.
+
 ```sh
 switchyard new --desktop-policy /path/to/approved-policy.json
 switchyard upgrade example --desktop-policy /path/to/approved-policy.json

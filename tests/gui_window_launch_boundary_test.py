@@ -188,11 +188,16 @@ def test_the_launch_prefix_reads_the_launchers_environment_when_it_runs() -> Non
 
     def env_first(*names: str) -> str:
         asked.append(names)
-        return "/nonexistent/syrd318/wayland" if names[0] == gui_window_launch.HOST_WAYLAND_ENV else ""
+        return "/run/user/1318/wayland-syrd318" if names[0] == gui_window_launch.HOST_WAYLAND_ENV else ""
 
     saved = os.environ.pop("XDG_CONFIG_DIRS", None)
     try:
-        with patched(team_launcher, _env_first=env_first, **_accounts()):
+        # The override is a fixture name, not a live socket: since SYRD-621 it is held to the socket
+        # proof, which is the selection suite's subject; here only how the environment is read is.
+        from scripts import wayland_selection
+
+        with patched(team_launcher, _env_first=env_first, **_accounts()), \
+                patched(wayland_selection, socket_problem=lambda path, *, uid: ""):
             prefix = gui_window_launch._gui_launch_prefix(gui_user=DESK, config_dir=Path("/nonexistent/cfg"))
         with patched(team_launcher, _env_first=lambda *names: "", **_accounts()):
             default = gui_window_launch._gui_launch_prefix(gui_user=DESK)
@@ -202,12 +207,15 @@ def test_the_launch_prefix_reads_the_launchers_environment_when_it_runs() -> Non
             os.environ["XDG_CONFIG_DIRS"] = saved
     check(asked == [("HOST_WAYLAND_DISPLAY", "PGU_HOST_WAYLAND_DISPLAY")],
           f"the host display is asked of the launcher's _env_first, as rebound: {asked}")
-    check(prefix == (["env", "QT_QPA_PLATFORM=wayland", "WAYLAND_DISPLAY=/nonexistent/syrd318/wayland",
+    check(prefix == (["env", "QT_QPA_PLATFORM=wayland", "WAYLAND_DISPLAY=/run/user/1318/wayland-syrd318",
                       "XDG_CONFIG_DIRS=/nonexistent/cfg:/etc/xdg"], ""),
           f"an unprivileged caller carries only its display and the config dirs: {prefix}")
-    check(default == (["env", "QT_QPA_PLATFORM=wayland", "WAYLAND_DISPLAY=/run/user/1318/wayland-0"], ""),
-          f"with nothing set, the account's own wayland-0: {default}")
-    check(nobody == ([], "team-launcher: no host Wayland display; run from Eric desktop session"),
+    # SYRD-621: with nothing named, the account's own live socket, never a
+    # forced wayland-0; this account has no runtime here, so it is refused by name.
+    check(default == ([], "team-launcher: no live Wayland socket for " + DESK + " in /run/user/1318. Log into that "
+                          "account's desktop session, or name its display with TEAM_LAUNCHER_WAYLAND_DISPLAY=<wayland-N>."),
+          f"with nothing set and nothing live, a refusal naming the runtime: {default}")
+    check(nobody == ([], "team-launcher: no Wayland display: syrd318-nobody is not a local account"),
           f"and an account with no uid has no display: {nobody}")
 
 

@@ -34,10 +34,10 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-if str(ROOT / "tests") not in sys.path:
-    sys.path.insert(0, str(ROOT / "tests"))
+for entry in (str(ROOT), str(ROOT / "tests")):
+    if entry not in sys.path:
+        sys.path.insert(0, entry)
+import fixture_displays  # noqa: E402,F401 -- displays here are fixtures, not the host's sockets (SYRD-621)
 
 from scripts import team_launcher as launcher  # noqa: E402
 import owned_home  # noqa: E402

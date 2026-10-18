@@ -24,6 +24,7 @@ import json
 import pty
 import shlex
 import shutil
+import socket
 import stat
 import struct
 import subprocess
@@ -713,12 +714,26 @@ def test_a_bridged_window_is_opened_on_the_callers_display_not_the_owners() -> N
             assert written.exists() and stat.S_IMODE(written.stat().st_mode) == 0o600
             # And the window really is aimed at that person's compositor: the
             # owner has no runtime directory, so naming it produced a refusal
-            # rather than a window.
-            args = team_launcher.konsole_launch_args(
-                Path(tmp) / "presentation-layout.json", gui_user=caller
-            )
+            # rather than a window. The caller's runtime is a fixture with one
+            # live socket of its own, since which socket is live is the
+            # display's question, not the host's (SYRD-621).
+            from scripts import wayland_selection
+
+            runs = Path(tmp) / "run-user"
+            (runs / str(os.getuid())).mkdir(parents=True, mode=0o700)
+            listening = socket.socket(socket.AF_UNIX)
+            listening.bind(str(runs / str(os.getuid()) / "wayland-1"))
+            original_runs = wayland_selection.RUN_USER_ROOT
+            try:
+                wayland_selection.RUN_USER_ROOT = runs
+                args = team_launcher.konsole_launch_args(
+                    Path(tmp) / "presentation-layout.json", gui_user=caller
+                )
+            finally:
+                wayland_selection.RUN_USER_ROOT = original_runs
+                listening.close()
             assert args[:2] != ["sh", "-lc"], args
-            assert any(f"/run/user/{os.getuid()}/" in part for part in args), args
+            assert f"WAYLAND_DISPLAY={runs / str(os.getuid()) / 'wayland-1'}" in args, args
             refused = team_launcher.konsole_launch_args(
                 Path(tmp) / "presentation-layout.json", gui_user=owner
             )

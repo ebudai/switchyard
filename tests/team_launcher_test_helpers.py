@@ -95,8 +95,8 @@ os.environ["SWITCHYARD_SUDOERS_ROOT"] = str(TEST_SWITCHYARD_PUBLISH_ROOT / "sudo
 os.environ["SWITCHYARD_TENANT_CONTROL_ROOT"] = str(
     TEST_SWITCHYARD_SHARED_INSTALL_ROOT.parent.parent / "tenant-control"
 )
-os.environ["XDG_CURRENT_DESKTOP"] = "GNOME"
-os.environ["KDE_FULL_SESSION"] = ""
+os.environ.update(XDG_CURRENT_DESKTOP="GNOME", KDE_FULL_SESSION="")
+import fixture_displays  # noqa: E402,F401 -- displays here are fixtures, not the host's sockets (SYRD-621)
 
 import scripts.team_launcher as team_launcher
 

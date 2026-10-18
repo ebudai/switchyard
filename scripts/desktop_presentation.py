@@ -201,6 +201,11 @@ def launch_presentation_terminal(
         f"switchyard: {name} exited immediately (status {returncode}) without opening "
         f"{project}'s window; its output is in {log_path}"
     )
+    from scripts import wayland_selection
+
+    hint = wayland_selection.launch_hint(args)
+    if hint:
+        print_func(f"switchyard: {hint}")
     # Never success after saying that. A terminal that should have stayed and
     # exited 0 is still a window that did not open.
     return int(returncode) or 1

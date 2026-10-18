@@ -18,7 +18,9 @@ def test_konsole_launch_uses_gui_user_display_environment() -> None:
         os.environ["HOST_WAYLAND_DISPLAY"] = "/run/user/1000/wayland-0"
         os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
         os.environ["SUDO_USER"] = "root"
-        team_launcher.uid_for_user = lambda _user_name: None
+        # An account Switchyard can resolve: since SYRD-621 a display is only
+        # ever one a known desktop account may be shown on.
+        team_launcher.uid_for_user = lambda _user_name: 1000
 
         assert konsole_launch_args(Path("/tmp/layout.json"), gui_user="user") == [
             "env",
@@ -47,9 +49,11 @@ def test_konsole_launch_uses_gui_user_display_environment() -> None:
 def test_konsole_launch_args_can_set_static_window_title() -> None:
     original_host_wayland = os.environ.get("HOST_WAYLAND_DISPLAY")
     original_legacy_host_wayland = os.environ.get("PGU_HOST_WAYLAND_DISPLAY")
+    original_uid_for_user = team_launcher.uid_for_user
     try:
         os.environ["HOST_WAYLAND_DISPLAY"] = "/run/user/1000/wayland-0"
         os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
+        team_launcher.uid_for_user = lambda _user_name: 1000  # a desktop account that resolves (SYRD-621)
 
         assert konsole_launch_args(Path("/tmp/layout.json"), gui_user="user", window_title="Otto Scheduler") == [
             "env",
@@ -63,6 +67,7 @@ def test_konsole_launch_args_can_set_static_window_title() -> None:
             "/tmp/layout.json",
         ]
     finally:
+        team_launcher.uid_for_user = original_uid_for_user
         if original_host_wayland is None:
             os.environ.pop("HOST_WAYLAND_DISPLAY", None)
         else:
@@ -275,7 +280,9 @@ def test_konsole_launch_defaults_to_sudo_user_uid_without_host_var() -> None:
     original_legacy_wayland_name = os.environ.pop("PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY", None)
     try:
         os.environ["SUDO_USER"] = "eric"
-        os.environ.pop("TEAM_LAUNCHER_WAYLAND_DISPLAY", None)
+        # Named, not the host's: which socket is live is SYRD-621's own suite;
+        # this case is about whose runtime the name is resolved in.
+        os.environ["TEAM_LAUNCHER_WAYLAND_DISPLAY"] = "wayland-0"
         team_launcher.current_user_name = lambda: "root"
         team_launcher.uid_for_user = lambda user_name: 1000 if user_name == "eric" else 0 if user_name == "root" else None
 
@@ -346,7 +353,7 @@ def test_konsole_launch_falls_back_to_clear_error_when_gui_user_missing() -> Non
 
         command = konsole_launch_args(Path("/tmp/layout.json"), gui_user="nobody")
         assert command[:2] == ["sh", "-lc"]
-        assert "no host Wayland display" in command[2]
+        assert "no Wayland display: nobody is not a local account" in command[2]
     finally:
         team_launcher.uid_for_user = original_uid_for_user
         if original_host_wayland is not None:

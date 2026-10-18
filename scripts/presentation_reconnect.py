@@ -239,7 +239,7 @@ def reconnect_presentation(
         return []
     try:
         presentation_controller.reconnect_display_slots(config, config_path=config_path, runner=runner)
-    except Exception as exc:  # noqa: BLE001 - reported, never fatal to the cutover
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - reported, never fatal to the cutover, a refusal too
         return [str(exc)]
     return []
 
@@ -266,5 +266,5 @@ def presentation_is_attached(
         return presentation_controller.presentation_window_attached(
             config, config_path=config_path, runner=runner
         )
-    except Exception:  # noqa: BLE001 - an unreadable presentation is not an attachment
+    except (Exception, SystemExit):  # noqa: BLE001 - an unreadable or refused presentation is not an attachment
         return False

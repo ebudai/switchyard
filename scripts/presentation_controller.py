@@ -748,14 +748,19 @@ def presentation_report(
 
 
 def presentation_enabled(config: team_launcher.ProjectConfig, *, config_path: Path) -> bool:
+    from scripts import owner_writes
+
+    # As root for the owner, the configuration and the state are looked at by descriptor, never through a link the
+    # tenant left at either or above it; one root refuses is no presentation it can use (SYRD-612).
+    owner = config.run_as_user
+    by_descriptor = team_launcher.root_writes_for(owner)
+    state = presentation_state_path(config, config_path=config_path)
     try:
-        raw = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        raw = team_launcher.read_owner_json(owner, config_path) if by_descriptor else json.loads(config_path.read_text(encoding="utf-8"))
+        return isinstance(raw, dict) and (isinstance(raw.get("presentation"), dict) or (
+            owner_writes.owner_file_status(owner, state) is not None if by_descriptor else state.exists()))
+    except (OSError, json.JSONDecodeError, SystemExit):
         return False
-    return isinstance(raw, dict) and (
-        isinstance(raw.get("presentation"), dict)
-        or presentation_state_path(config, config_path=config_path).exists()
-    )
 
 
 def reconnect_display_slots(

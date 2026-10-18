@@ -28,10 +28,12 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from scripts import presentation_controller, team_launcher
-from scripts import runtime_arguments, stopped_project_model_repair
+from scripts import owner_writes, runtime_arguments, stopped_project_model_repair
 from scripts.role_command import role_registers_runtime
 from scripts.runtime_projection import (  # SYRD-558: every tenant copy of the declaration
     declared_projection as _declared_projection,
+    projection_text as _projection_text,
+    required_text as _required_text,
     restore_projection as _restore_projection,
     runtime_projection_files,
     stale_projection as _stale_projection,
@@ -127,6 +129,7 @@ class RuntimeJournal:
     #: workflow in several of them, and every one names the role's runtime
     #: (SYRD-558).
     previous_projection: dict[str, str | None] = field(default_factory=dict)
+    owner_user: str = ""  # whose journal and projection these are, from the configuration (SYRD-612)
     slots: tuple[int, ...] = ()
     steps_applied: list[str] = field(default_factory=list)
     started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -149,8 +152,10 @@ class RuntimeJournal:
     def write(self, path: Path) -> None:
         payload = asdict(self)
         payload["slots"] = list(self.slots)
-        team_launcher._write_private_json_atomic(path, payload)
-        stopped_project_model_repair.keep_owner(path, Path(self.config_path))  # root writes the owner's journal
+        # As root, the owner's journal by descriptor from its root, never owned off a by-path stat (SYRD-612).
+        team_launcher._write_private_json_atomic(path, payload, owner_user=self.owner_user or None)
+        if not team_launcher.root_writes_for(self.owner_user):
+            stopped_project_model_repair.keep_owner(path, Path(self.config_path))
 
 
 @dataclass(frozen=True)
@@ -322,8 +327,8 @@ def _readiness_blockers(
             f"{runtime} is not logged in for {owner_user}"
             + (f"; run: {login}" if login else "")
         )
-    if runtime in team_launcher.FIRST_RUN_TRUST_CLIS and not team_launcher._workdir_is_trusted(
-        runtime, owner_home=owner_home, workdir=Path(role.workdir)
+    if runtime in team_launcher.FIRST_RUN_TRUST_CLIS and not owner_writes.holds_as_owner(  # as the owner (SYRD-612)
+        owner_user, lambda: team_launcher._workdir_is_trusted(runtime, owner_home=owner_home, workdir=Path(role.workdir))
     ):
         blockers.append(f"{runtime} does not trust {role.workdir} yet")
     return tuple(blockers)
@@ -362,7 +367,8 @@ def _effort_kwargs(effort: str | None) -> dict[str, str]:
 
 
 def _verifiable_projection_blockers(
-    config_path: Path, role_name: str, runtime: str, *, model: str | None, effort: str | None = None
+    config_path: Path, role_name: str, runtime: str, *, model: str | None, effort: str | None = None,
+    owner_user: str = "",
 ) -> list[str]:
     """Refuse, before anything stops, a switch its own start check could not confirm.
 
@@ -372,9 +378,9 @@ def _verifiable_projection_blockers(
     been stopped for nothing (SYRD-486). Computed with the same projection the
     switch writes, on a copy.
     """
-    try:
-        raw = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
+    try:  # as root for the owner, by descriptor: nothing read through a link decides this (SYRD-612)
+        raw = json.loads(_projection_text(config_path, owner_user) or "")
+    except (OSError, ValueError, SystemExit) as exc:
         return [f"cannot read {config_path} to check the projection: {exc}"]
     entry = next(
         (item for item in raw.get("roles") or [] if isinstance(item, dict) and item.get("role") == role_name),
@@ -398,12 +404,12 @@ def _verifiable_projection_blockers(
 
 
 def _argument_changes(
-    config_path: Path, role_name: str, runtime: str, *, model: str | None, effort: str | None = None
+    config_path: Path, role_name: str, runtime: str, *, model: str | None, effort: str | None = None, owner_user: str = ""
 ) -> tuple[list[str], str]:
     """What the switch would do to the role's stored arguments, on a copy: (changes, refusal)."""
-    try:
-        raw = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    try:  # as root for the owner, by descriptor (SYRD-612)
+        raw = json.loads(_projection_text(config_path, owner_user) or "")
+    except (OSError, ValueError, SystemExit):
         return [], ""
     entry = next(
         (item for item in raw.get("roles") or [] if isinstance(item, dict) and item.get("role") == role_name),
@@ -449,9 +455,10 @@ def preflight(
         board_url=board_url or config.board_url or DEFAULT_BOARD_URL
     )
 
-    slots = presentation_controller.slots_showing_role(
-        config, config_path=config_path, role_name=role_name
-    ) if presentation_controller.presentation_enabled(config, config_path=config_path) else ()
+    owner = config.run_as_user or team_launcher.current_user_name()
+    # Root only repairs a stopped role, so it reconnects no slot and reads no display state (SYRD-612).
+    slots = presentation_controller.slots_showing_role(config, config_path=config_path, role_name=role_name) if (
+        not team_launcher.root_writes_for(owner) and presentation_controller.presentation_enabled(config, config_path=config_path)) else ()
 
     state_dir = pane_state_dir or team_launcher.default_pane_state_dir_for_user(
         config.run_as_user or team_launcher.current_user_name(), project=config.project
@@ -460,7 +467,7 @@ def preflight(
 
     current_model = str(getattr(role, "model", "") or "")
     board_runtime = _declared_runtime(document, role_name)
-    argument_changes, argument_refusal = _argument_changes(config_path, role_name, runtime, model=model, effort=effort)
+    argument_changes, argument_refusal = _argument_changes(config_path, role_name, runtime, model=model, effort=effort, owner_user=owner)
     # A model-only change restarts the role exactly as a runtime change does,
     # so it earns the same readiness and busy checks. Asking "is the runtime
     # changing" skipped both for the one repair this ticket exists to enable.
@@ -477,15 +484,16 @@ def preflight(
     blockers: list[str] = []
     if changing:
         blockers.extend(_readiness_blockers(config, role, runtime, runner=runner))
-        blockers.extend(_verifiable_projection_blockers(config_path, role_name, runtime, model=model, effort=effort))
+        blockers.extend(_verifiable_projection_blockers(config_path, role_name, runtime, model=model, effort=effort,
+                                                        owner_user=owner))
         # The whole tenant projection, computed before anything stops: one that
         # cannot be produced must not be discovered after the board moved (SYRD-558).
         try:
             if board_runtime is not None:
                 runtime_projection_files(config_path, role_name=role_name, runtime=runtime,
                                          document=document_with_runtime(document, role=role_name, runtime=runtime),
-                                         model=model, effort=effort)
-        except RoleRuntimeRefusal as exc:
+                                         model=model, effort=effort, owner_user=owner)
+        except SystemExit as exc:  # a refusal, or a descriptor read's (SYRD-612)
             blockers.append(str(exc).removeprefix("switchyard: "))
         if busy and not force:
             blockers.append(
@@ -682,10 +690,7 @@ def _restart_worker(
             raise RuntimeError(f"could not stop {role.tmux_session} (exit {kill.returncode})")
         if on_stopped is not None:
             on_stopped()
-    team_launcher.clear_session_record_for_role(
-        role, team_launcher.role_session_dir(config, role)
-    )
-    team_launcher.clear_pane_idle_state_for_role(role, pane_state_dir=pane_state_dir)
+    stopped_project_model_repair.clear_role_records(config, role, pane_state_dir=pane_state_dir)
     if not was_live:
         return False
     await_holders_gone(
@@ -733,9 +738,10 @@ def journal_path_for(config: team_launcher.ProjectConfig, *, config_path: Path, 
     )
 
 
-def _journal_role(journal: RuntimeJournal, config_path: Path):
-    """The launcher's config and the journal's role, as the config says now."""
-    config = team_launcher.load_project_config(journal.project, config_path)
+def _journal_role(journal: RuntimeJournal, config_path: Path, held: team_launcher.ProjectConfig | None = None):
+    """The launcher's config and the journal's role, as the config says now -- or, as root, the one root held (SYRD-612)."""
+    held = held if held is not None and team_launcher.root_writes_for(journal.owner_user) else None
+    config = held or team_launcher.load_project_config(journal.project, config_path)
     return config, team_launcher._role_by_name(config, journal.role)
 
 
@@ -745,6 +751,7 @@ def _observe(
     config_path: Path,
     read_board: Callable[[], tuple[dict[str, Any], int]],
     runner: Callable[..., subprocess.CompletedProcess[Any]],
+    held: team_launcher.ProjectConfig | None = None,
 ) -> dict[str, Any]:
     """What the board, the launcher config and the worker say right now.
 
@@ -764,13 +771,13 @@ def _observe(
         observed["board_error"] = f"{type(exc).__name__}: {exc}"
     role = None
     try:
-        raw = json.loads(Path(journal.config_path).read_text(encoding="utf-8"))
+        raw = json.loads(_required_text(Path(journal.config_path), journal.owner_user))  # by descriptor (SYRD-612)
         entry = next(item for item in raw.get("roles") or [] if item.get("role") == journal.role)
         cli = entry.get("cli") if isinstance(entry.get("cli"), list) else []
         observed["launcher_runtime"] = team_launcher._command_name(str(cli[0])) if cli else None
         observed["launcher_live_commands"] = entry.get("live_commands")
-        _config, role = _journal_role(journal, config_path)
-    except Exception as exc:  # noqa: BLE001
+        _config, role = _journal_role(journal, config_path, held)
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - a descriptor refusal is a finding too
         observed["launcher_error"] = f"{type(exc).__name__}: {exc}"
     if role is not None:
         try:
@@ -876,6 +883,7 @@ def _rollback(
     read_board: Callable[[], tuple[dict[str, Any], int]] | None = None,
     handover: RuntimeHandover | None = None,
     stopped_holders: set[Holder] | None = None,
+    held: team_launcher.ProjectConfig | None = None,
 ) -> str:
     """Undo exactly the steps that were applied: board, projection, then worker.
 
@@ -892,7 +900,7 @@ def _rollback(
     attempt_holder: Holder | None = None
     if "worker_stopped" in applied:
         try:
-            attempt_config, attempt_role = _journal_role(journal, config_path)
+            attempt_config, attempt_role = _journal_role(journal, config_path, held)
             attempt_holder = board_holder(attempt_config, attempt_role, handover)
         except Exception:  # noqa: BLE001 - the pane's own process is still waited for
             attempt_holder = None
@@ -900,7 +908,7 @@ def _rollback(
     def attempt(step: str, undo: Callable[[], None]) -> bool:
         try:
             undo()
-        except Exception as exc:  # noqa: BLE001 - every failure must be reported, not raised
+        except (Exception, SystemExit) as exc:  # noqa: BLE001 - every failure must be reported, not raised
             problems.append(f"{step}: {exc}")
             print_func(f"switchyard: rollback of {step} failed: {exc}")
             return False
@@ -929,7 +937,7 @@ def _rollback(
         # may never have been written at all.
         journal.rollback_problems = list(problems)
         journal.observed = (
-            _observe(journal, config_path=config_path, read_board=read_board, runner=runner)
+            _observe(journal, config_path=config_path, read_board=read_board, runner=runner, held=held)
             if read_board is not None
             else {"board_error": "no board reader was available"}
         )
@@ -955,7 +963,7 @@ def _rollback(
             # Unlike the forward path, this is not "replace it if it is running":
             # the journal records that it *was* running, and bringing it back is
             # the whole point of the rollback.
-            config, role = _journal_role(journal, config_path)
+            config, role = _journal_role(journal, config_path, held)
             # The original session was stopped by this switch, so any session
             # under the role's name now is the attempt being undone -- live even
             # when its check said otherwise (SYRD-447). Starting "attach or
@@ -1034,6 +1042,7 @@ def switch_role_runtime(
     # Root repairing a stopped role's model needs no Director: the gate that
     # names this repair is what keeps the Director down (SYRD-593).
     operator = stopped_project_model_repair.operator_repair(environ)
+    stopped_project_model_repair.refuse_root_director(operator)
     _require_director(config, {**environ, "TICKET_BOARD_CALLER_ROLE": DIRECTOR_ROLE} if operator else environ)
     if force and not reason.strip():
         raise RoleRuntimeRefusal(
@@ -1066,7 +1075,7 @@ def switch_role_runtime(
         # workflow can still name another runtime: an interrupted write, or a
         # switch made before this one wrote them all (Otto, SYRD-558). The same
         # command brings them in line with the board, with no worker restarted.
-        stale = _stale_projection(_declared_projection(config_path, document)) if checks.board_runtime is not None and not operator else {}
+        stale = _stale_projection(_declared_projection(config_path, document)) if checks.board_runtime is not None and os.geteuid() else {}
         if stale and not dry_run:
             from scripts.workflow_manage import apply_files
 
@@ -1122,6 +1131,7 @@ def switch_role_runtime(
     state_dir = pane_state_dir or team_launcher.default_pane_state_dir_for_user(
         config.run_as_user or team_launcher.current_user_name(), project=config.project
     )
+    journal_owner = config.run_as_user or team_launcher.current_user_name()
     journal = RuntimeJournal(
         project=config.project,
         role=role_name,
@@ -1129,13 +1139,13 @@ def switch_role_runtime(
         requested_runtime=runtime,
         previous_workflow_revision=checks.workflow_revision,
         previous_workflow_document=copy.deepcopy(dict(document)),
-        previous_config_bytes=config_path.read_text(encoding="utf-8"),
-        config_path=str(config_path),
+        previous_config_bytes=_required_text(config_path, journal_owner),
+        config_path=str(config_path), owner_user=journal_owner,
         slots=checks.visible_slots,
     )
     journal_path = journal_path_for(config, config_path=config_path, role_name=role_name)
     if operator:
-        stopped_project_model_repair.make_owner_dirs(journal_path.parent, config_path)
+        stopped_project_model_repair.make_owner_dirs(journal_path.parent, config_path, owner_user=journal.owner_user)
     journal.write(journal_path)
 
     live_changed = False
@@ -1192,7 +1202,7 @@ def switch_role_runtime(
                 raise RuntimeError(unbound)
             journal.record("slots")
             journal.write(journal_path)
-    except Exception as exc:  # noqa: BLE001 - a half-applied switch must not look like success
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - a half-applied switch must not look like success
         print_func(f"switchyard: {role_name} runtime switch failed: {exc}")
         read_workflow = workflow_reader or workflow_document
         remaining = _rollback(
@@ -1205,7 +1215,7 @@ def switch_role_runtime(
             print_func=print_func,
             read_board=lambda: read_workflow(board_url=config.board_url or DEFAULT_BOARD_URL),
             handover=handover,
-            stopped_holders=stopped,
+            stopped_holders=stopped, held=config,
         )
         if remaining:
             if not journal.rollback_problems:
@@ -1216,12 +1226,12 @@ def switch_role_runtime(
                 f"switchyard: {role_name} is left between runtimes and needs an operator: {remaining}.{recovery} "
                 f"The exact prior state is in {journal_path}."
             ) from exc
-        journal_path.unlink(missing_ok=True)
+        stopped_project_model_repair.remove_journal(journal_path, journal.owner_user, print_func)
         raise RoleRuntimeRefusal(
             f"switchyard: {role_name} still runs {checks.current_runtime}; the switch was undone: {exc}"
         ) from exc
 
-    journal_path.unlink(missing_ok=True)
+    stopped_project_model_repair.remove_journal(journal_path, journal.owner_user, print_func)
     return RuntimeSwitchResult(
         project=config.project,
         role=role_name,

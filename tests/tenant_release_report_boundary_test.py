@@ -54,6 +54,9 @@ MOVED = ("TenantReleaseStatus", "tenant_release_deploy_command", "tenant_release
          "OWNER_BOUNDARY_SCRIPT", "_owner_boundary_env_args", "capture_release_pointer", "deploy_release_in_transaction",
          "restore_release_pointer")
 LOCAL_IMPORTS = {"tenant_release_deploy_command": ["from scripts.ticket_board.project_provision import readable_system_unit_path"],
+                 # SYRD-612: the release pointer in the owner's home, read and put back by descriptor.
+                 "capture_release_pointer": ["from scripts import owner_writes"],
+                 "restore_release_pointer": ["from scripts import owner_writes"],
                  # SYRD-605: and the no-follow helper's argv, for the listener unit in the owner's home.
                  "tenant_release_unit_install_command": ["from scripts.ticket_board.project_provision import system_unit_proof_chain",
                                                         "from scripts.ticket_board.provision_tenant_paths import tenant_paths_argv"]}
@@ -66,7 +69,7 @@ SEAMS = {
     'tenant_release_unit_install_command': {'_quote_command': 6},
     'report_tenant_release_upgrade': {'_format_release_path': 1, '_format_release_sha': 1, '_quote_command': 1, 'recorded_rollout_command': 3, 'release_update_blocked': 1, 'switchyard_privileged_provision_root': 1, 'tenant_release_deploy_command': 1, 'tenant_release_listener_command': 3, 'tenant_release_status': 1, 'tenant_release_unit_install_command': 1},
     '_owner_boundary_env_args': {'DEFAULT_PANE_BASE_PATH': 1, 'OWNER_BOUNDARY_SCRIPT': 1, '_owner_home_bin_dirs': 1, '_prepend_paths': 1},
-    'capture_release_pointer': {'_tenant_board_root_from_config_or_plan': 1},
+    'capture_release_pointer': {'_tenant_board_root_from_config_or_plan': 1, 'current_user_name': 1},
     'deploy_release_in_transaction': {'tenant_release_deploy_command': 1, 'tenant_release_status': 1},
 }
 #: Every seam name a stand-in on the launcher has been shown to reach; checked last.
@@ -394,11 +397,12 @@ def test_the_release_pointer_is_captured_and_put_back() -> None:
         (board / "releases" / "old").mkdir(parents=True)
         (board / "releases" / "new").mkdir()
         with patched(t, _tenant_board_root_from_config_or_plan=seam("_tenant_board_root_from_config_or_plan", lambda config, path: None)):
-            check(m.capture_release_pointer(SimpleNamespace(project="p379")) == (None, ""), "no board root: nothing to capture")
-        with patched(t, _tenant_board_root_from_config_or_plan=lambda config, path: board):
-            check(m.capture_release_pointer(SimpleNamespace(project="p379")) == (board / "current", ""), "no pointer yet: nothing it pointed at")
+            check(m.capture_release_pointer(SimpleNamespace(project="p379", run_as_user="")) == (None, ""), "no board root: nothing to capture")
+        with patched(t, _tenant_board_root_from_config_or_plan=lambda config, path: board,
+                     current_user_name=seam("current_user_name", lambda: "syrd379-owner")):
+            check(m.capture_release_pointer(SimpleNamespace(project="p379", run_as_user="")) == (board / "current", ""), "no pointer yet: nothing it pointed at")
             (board / "current").symlink_to("releases/old")
-            captured = m.capture_release_pointer(SimpleNamespace(project="p379"), config_path=Path("/c"))
+            captured = m.capture_release_pointer(SimpleNamespace(project="p379", run_as_user=""), config_path=Path("/c"))
         check(captured == (board / "current", "releases/old"), f"the link's own text is kept: {captured}")
         runner = refuse("a runner")
         pointer, target = captured

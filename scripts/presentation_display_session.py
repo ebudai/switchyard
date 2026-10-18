@@ -8,6 +8,7 @@ Callers decide mapping, viewer, live recovery and desktop handoff.
 from __future__ import annotations
 
 import hashlib
+import json
 import shlex
 import subprocess
 from pathlib import Path
@@ -82,9 +83,25 @@ def _role_status(
             text=True,
         )
         pane_dead = proc.returncode != 0 or str(getattr(proc, "stdout", "") or "").strip() == "1"
-    resumable = bool(team_launcher.session_id_for_role(role, team_launcher.role_session_dir(config, role)))
+    resumable = bool(_recorded_session_id(config, role))
     state = "live" if live and not pane_dead else "dead" if live else "missing"
     return {"role": role_name, "state": state, "live": live and not pane_dead, "resumable": resumable}
+
+
+def _recorded_session_id(config: team_launcher.ProjectConfig, role: team_launcher.RoleConfig) -> str:
+    """The role's resume id, for its slot's label: as root for the owner by descriptor, never through a link the
+    tenant left at its record or above it -- one root refuses labels the slot not resumable (SYRD-612)."""
+    session_dir = team_launcher.role_session_dir(config, role)
+    if not team_launcher.root_writes_for(config.run_as_user):
+        return team_launcher.session_id_for_role(role, session_dir)
+    try:
+        data = team_launcher.read_owner_bytes(config.run_as_user, session_dir / team_launcher.session_file_name(role.target))
+        parsed = json.loads(data.decode("utf-8")) if data is not None else None
+    except (OSError, ValueError, SystemExit):
+        return ""
+    if not isinstance(parsed, dict) or str(parsed.get("target") or "") != role.target:
+        return ""
+    return str(parsed.get("session_id") or "").strip()
 
 
 def _worker_has_independent_client(

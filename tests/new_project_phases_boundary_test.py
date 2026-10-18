@@ -481,8 +481,9 @@ def test_the_credential_source_and_the_desktop_policy() -> None:
 
 
 def test_the_order_and_every_refusal_stops_what_follows() -> None:
-    expected = ["agy", "desktop", "validate", "registration", "existing-owner", "confirm", "auth-home", "plan", "review",
-                "dedupe", "require"]
+    # SYRD-599 UAT: the confirmation is the last thing asked, after the whole role plan and its review.
+    expected = ["agy", "desktop", "validate", "registration", "existing-owner", "auth-home", "plan", "review",
+                "dedupe", "require", "confirm"]
     with tempfile.TemporaryDirectory(prefix="syrd369.") as tmp:
         tmp = Path(tmp)
         world = World(tmp)
@@ -497,8 +498,8 @@ def test_the_order_and_every_refusal_stops_what_follows() -> None:
               f"an existing owner confirmed with the resolved agy source: {owner}")
         confirm = next(e[1] for e in world.log if e[0] == "confirm")
         check(confirm["project_dir"] == tmp / "p" and confirm["owner_user"] == OWNER and confirm["yes"] is False,
-              f"then the new project confirmed: {confirm}")
-    for step in ("agy", "desktop", "validate", "registration", "existing-owner", "confirm", "plan", "require"):
+              f"and, last, the new project confirmed: {confirm}")
+    for step in ("agy", "desktop", "validate", "registration", "existing-owner", "plan", "require", "confirm"):
         with tempfile.TemporaryDirectory(prefix="syrd369.") as tmp:
             tmp = Path(tmp)
             world = World(tmp, fail=step)
@@ -515,7 +516,8 @@ def test_only_root_goes_on_to_the_roles() -> None:
         got = run(world, inputs(tmp, project_name="N", slug="s369", agent_name=OWNER, project_path=tmp / "p", euid_getter=lambda: 1000))
         check(isinstance(got, SystemExit) and got.code == "switchyard: new requires sudo; re-run as `sudo ./switchyard new`",
               f"refused as not root: {got!r}")
-        check(world.names()[-1] == "confirm" and "plan" not in world.names(), f"after the confirmation, before any role: {world.names()}")
+        check(world.names()[-1] == "existing-owner" and not {"plan", "confirm"} & set(world.names()),
+              f"before any role, and before anything is confirmed: {world.names()}")
 
 
 def test_supplied_roles() -> None:

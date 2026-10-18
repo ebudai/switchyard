@@ -117,6 +117,14 @@ added by `with_router`. See `scripts/router_onboarding.py` and
 `docs/team-launcher.md`. Off, nothing changes. Upgrades never read the
 artifact, so a release never turns Router on.
 
+Router is the last choice `switchyard new` asks, and `Proceed? [y/N]` comes
+after it: the roles, Router's line and the project are reviewed, then the one
+confirmation is asked, before P1, the first step that can install or change
+anything. Live UAT found the confirmation asked before any role was chosen, so
+an Enter on Router's default went straight into provisioning and Claude's
+first-run sign-in; `tests/new_project_final_confirmation_test.py` drives the
+real interactive command through that path. `--yes` still answers it.
+
 ## Declaration
 
 A document declares Router with `switchyard router-role <project> enable

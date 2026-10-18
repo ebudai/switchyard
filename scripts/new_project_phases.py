@@ -8,11 +8,12 @@ phase's old position, by the launcher's own name.
   the one-statement runner normalization, then the project, slug, owner, shell,
   path and roles -- from the design artifact, or asked for -- the agy
   credential source, the desktop policy decided and validated, the
-  registration checked, an existing owner confirmed, the new project
-  confirmed, the root gate, the guided or supplied role plan, and the artifact,
+  registration checked, an existing owner confirmed, the root gate, the guided
+  or supplied role plan and its review, the Router summary, then the new
+  project confirmed -- last, after every choice (SYRD-599) -- and the artifact,
   design and onboarding paths with the progress stages. Every refusal is the
   command's own `SystemExit`, in the command's order, and nothing is created
-  before the root gate. Going on returns a frozen `NewProjectChoices`: the
+  before the confirmation. Going on returns a frozen `NewProjectChoices`: the
   twenty-one values the rest of the command reads -- `runner` the plain runner
   every later step uses, `first_run_runner` exactly what the caller passed.
 - **P1, host and agent CLI checks** (`_check_new_project_preflight`, SYRD-370):
@@ -226,15 +227,12 @@ def _resolve_new_project_choices(
         print_func=print_func,
         agy_credential_source=resolved_agy_credential_source,
     )
-    launcher._confirm_switchyard_new(
-        slug=resolved_slug,
-        owner_user=owner_user,
-        project_name=resolved_project_name,
-        project_dir=project_dir,
-        yes=yes,
-        input_func=input_func,
-        print_func=print_func,
-    )
+    # What was resolved is said as soon as it is known, so even a run the root
+    # gate refuses shows it. The question is asked last, below (SYRD-599 UAT).
+    print_func(f"switchyard: project name: {resolved_project_name}")
+    print_func(f"switchyard: slug: {resolved_slug}")
+    print_func(f"switchyard: owner user: {owner_user}")
+    print_func(f"switchyard: project path: {project_dir}")
     if euid_getter() != 0:
         raise SystemExit("switchyard: new requires sudo; re-run as `sudo ./switchyard new`")
     selected_role_models: dict[str, str] = {}
@@ -279,6 +277,20 @@ def _resolve_new_project_choices(
     from scripts import router_onboarding
 
     print_func(router_onboarding.summary_line(selected_router))
+    # The one confirmation, and it comes last: after every choice -- Router,
+    # the final one, included -- and the whole review, and before P1, the
+    # first step that can install or change anything. It used to come before
+    # the roles were chosen, so the answer to the last role question, an Enter
+    # on Router's default, was what started provisioning (SYRD-599 UAT).
+    launcher._confirm_switchyard_new(
+        slug=resolved_slug,
+        owner_user=owner_user,
+        project_name=resolved_project_name,
+        project_dir=project_dir,
+        yes=yes,
+        input_func=input_func,
+        print_func=print_func,
+    )
 
     artifact_path = (from_artifact or (launcher._switchyard_dir(project_dir) / f"{resolved_slug}.project.json")).expanduser().resolve(strict=False)
     design_document = project_dir / launcher.SWITCHYARD_DESIGN_FILE_NAME

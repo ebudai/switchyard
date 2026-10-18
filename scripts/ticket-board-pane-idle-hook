@@ -43,6 +43,13 @@ UUID_RE = re.compile(
 )
 SESSION_START_ACTIVE_WORK_SOURCES = {"clear", "compact", "resume"}
 SESSION_START_HOOK_SOURCES = {"hermes.on_session_start"}
+#: Runtimes whose turn hooks are the first word of a conversation switch in the
+#: pane (SYRD-622). agy opens a conversation the User /resumes in the pane with
+#: no SessionStart -- only PreInvocation, PostInvocation and Stop follow, naming
+#: it -- so on agy a turn from the pane's own provider is that switch. Claude
+#: Code and Codex announce a /resume or /clear with SessionStart (SYRD-569), and
+#: their turns with another id stay refused.
+PANE_SWITCH_TURN_SOURCE_PREFIXES = ("gemini.",)
 #: Must match notify_listener.TURN_START_EVENTS (SYRD-268).
 TURN_START_EVENTS = frozenset({"UserPromptSubmit", "PreInvocation", "pre_llm_call"})
 #: Turn ends whose runtime says what is still running when the turn ends.
@@ -567,7 +574,8 @@ def _should_write_session(
         return True
     if pane_provider_switch:
         # The pane's own provider opened another conversation in the pane -- the
-        # User's /resume, a /clear -- and that is the one to resume next (SYRD-569).
+        # User's /resume, a /clear -- and that is the one to resume next (SYRD-569;
+        # on agy, said by its first turn there, SYRD-622).
         return True
     if launched_session_id:
         if incoming_session_id == launched_session_id:
@@ -687,6 +695,11 @@ def _session_start_active_work_opening(source: str) -> str:
 
 def _is_session_start_hook_source(source: str) -> bool:
     return source.endswith(".SessionStart") or source in SESSION_START_HOOK_SOURCES
+
+
+def _may_report_pane_switch(source: str) -> bool:
+    """Whether this hook's session id can be the pane's provider opening another conversation."""
+    return _is_session_start_hook_source(source) or source.startswith(PANE_SWITCH_TURN_SOURCE_PREFIXES)
 
 
 def _session_start_context(context: str) -> dict[str, object]:
@@ -938,7 +951,7 @@ def main(argv: list[str] | None = None) -> int:
     launched_session_id = args.session_id.strip() or _env_session_id(os.environ)
     resume_session_id = args.session_id.strip() or _launcher_resume_session_id(os.environ)
     switched = bool(existing_session_id and session_id and session_id != existing_session_id)
-    provider = _started_by_pane_provider(os.getpid()) if switched and _is_session_start_hook_source(args.source) else 0
+    provider = _started_by_pane_provider(os.getpid()) if switched and _may_report_pane_switch(args.source) else 0
     if _should_write_session(
         target=target,
         existing_session_id=existing_session_id,

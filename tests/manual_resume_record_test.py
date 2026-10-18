@@ -311,7 +311,7 @@ def scenario(root: Path, work: Path) -> dict:
                                         "recorded": recorded(role)}
 
         # 3. What is still refused: a CLI started inside the pane, at its start and at its turns, and a turn
-        #    event with another id from the pane's own provider.
+        #    event with another id from the pane's own provider -- except agy's, which is its switch (SYRD-622).
         refused = {}
         for n, (name, cli) in enumerate(sorted(PROVIDERS.items()), start=1):
             role = roles[name]
@@ -470,9 +470,19 @@ def candidate(after: dict) -> None:
           f"a resumed pane whose provider opens another conversation (/clear) records that one: {got}")
 
     for name, got in after["refused"].items():
-        check(got["ran"]["done"] and got["after"] == got["before"] == sid(35 + sorted(PROVIDERS).index(name) + 1),
-              f"{name}: a CLI started inside the pane, and a turn with another id, cannot replace the record: {got}")
+        n = sorted(PROVIDERS).index(name) + 1
         kept = [e for e in got["history"] if e["by"] == "hook"]
+        if PROVIDERS[name] == "agy":
+            # SYRD-622: agy announces a /resume only through its next turn, so a turn from the pane's own agy
+            # with another id is that switch; the CLI started inside the pane is still refused.
+            check(got["ran"]["done"] and got["before"] == sid(35 + n) and got["after"] == sid(45 + n)
+                  and [e["event"] for e in kept] == ["kept", "kept", "recorded"]
+                  and all(e["session_id"] == got["before"] for e in kept[:2]) and kept[2]["previous"] == got["before"],
+                  f"{name}: a CLI started inside the pane cannot replace the record, and the pane's own agy turn "
+                  f"with another id does (tests/agy_resume_record_test.py): {got}")
+            continue
+        check(got["ran"]["done"] and got["after"] == got["before"] == sid(35 + n),
+              f"{name}: a CLI started inside the pane, and a turn with another id, cannot replace the record: {got}")
         check(len(kept) == 3 and all(e["event"] == "kept" and e["session_id"] == got["before"] for e in kept),
               f"{name}: each refusal is kept in the history, naming the conversation kept and the one refused: {kept}")
     got = after["outside_pane"]

@@ -139,6 +139,16 @@ def agy_conversation_store_exists(session_id: str, *, root: Path | None = None) 
     return (root / "conversations" / f"{session_id}.db").is_file() or (root / "brain" / session_id).is_dir()
 
 
+def agy_conversation_root_for_session_dir(session_dir: Path) -> Path:
+    """The Antigravity store of the account whose session directory this is."""
+    from scripts import team_launcher as launcher
+
+    session_home = _home_from_session_dir(session_dir)
+    if session_home != Path.home():
+        return session_home / launcher.AGY_CREDENTIAL_DIR_NAME
+    return launcher.AGY_CONVERSATION_ROOT
+
+
 def _home_from_session_dir(session_dir: Path) -> Path:
     expanded = session_dir.expanduser()
     parts = expanded.parts
@@ -306,13 +316,7 @@ def _resume_preflight_allows_attempt(role: RoleConfig, session_id: str, *, sessi
         return _hermes_resume_preflight(role, session_id, session_dir=session_dir)
     if not _uses_agy_conversation_resume(role):
         return True, ""
-    session_home = _home_from_session_dir(session_dir)
-    agy_root = (
-        session_home / launcher.AGY_CREDENTIAL_DIR_NAME
-        if session_home != Path.home()
-        else launcher.AGY_CONVERSATION_ROOT
-    )
-    if agy_conversation_store_exists(session_id, root=agy_root):
+    if agy_conversation_store_exists(session_id, root=agy_conversation_root_for_session_dir(session_dir)):
         return True, ""
     return (
         False,

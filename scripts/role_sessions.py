@@ -115,6 +115,10 @@ def _start_role_session(
         from scripts.stranded_session_records import adopt_stranded_session_record
 
         adopt_stranded_session_record(role, session_dir)
+        # SYRD-622: agy may have opened the role's conversation without a hook to record it.
+        from scripts.agy_last_conversation import adopt_agy_last_conversation
+
+        adopt_agy_last_conversation(role, session_dir)
     session_id = launcher.session_id_for_role(role, session_dir) if prefer_resume else ""
     if not prefer_resume:
         _decided(role, session_dir, seed_source, "fresh_requested")

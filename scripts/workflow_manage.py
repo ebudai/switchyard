@@ -329,6 +329,31 @@ def _migrate_director_onboarding(config_path: Path, cfg: dict) -> dict:
     return cfg
 
 
+# Every operation that writes the tenant's projection, rollback journal or onboarding.
+TENANT_WRITES = frozenset({
+    "apply", "rollback", "set-role-prompt", "clear-role-prompt", "migrate-director-onboarding",
+    "add-design-stage", "enable-router", "disable-router",
+})
+
+
+def refuse_root_write(operation: str) -> None:
+    """Root does not make the Director's workflow writes (SYRD-623).
+
+    Each reads and writes the tenant's provision directory by path, and some do
+    so before the board -- which would refuse root -- is asked. This CLI has no
+    trusted record of whose tree that is, so it refuses before any of it, even
+    for a dry run, rather than learn the owner from the tenant's own config.
+    """
+    if operation not in TENANT_WRITES or os.geteuid() != 0:
+        return
+    raise SystemExit(
+        f"ticket-board-workflow: {operation} writes the tenant's workflow projection and rollback "
+        "journal, so root does not run it. Run the same command from the project's registered "
+        "Director session, unprivileged, not under sudo or pkexec; the onboarding migration is "
+        "`switchyard finish-upgrade <project>` there."
+    )
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -386,6 +411,7 @@ def main(argv=None):
         help="read the onboarding prompt from a file, or from stdin when given as -",
     )
     args = parser.parse_args(argv)
+    refuse_root_write(args.operation)
     if args.operation == "prepare-role":
         if not args.config or not args.role:
             parser.error("prepare-role requires --config and --role")

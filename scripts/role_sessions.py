@@ -119,8 +119,22 @@ def _start_role_session(
         from scripts.agy_last_conversation import adopt_agy_last_conversation
 
         adopt_agy_last_conversation(role, session_dir)
+    recovery = None
+    if prefer_resume and _uses_fresh_session_per_ticket(role):
+        # SYRD-626: a launch is not a ticket boundary; the board says what this role's work needs.
+        from dataclasses import replace
+
+        from scripts import role_context_recovery
+
+        recovery = role_context_recovery.prepare(role, session_dir, entry=seed_source)
+        if recovery is not None and recovery.action == "refuse":
+            return 1
+        if recovery is not None and recovery.action == "fresh":
+            prefer_resume = False
+        if recovery is not None and recovery.action == "resume":
+            role = replace(role, fresh_session_per_ticket=False)  # this launch resumes; the next ticket still clears
     session_id = launcher.session_id_for_role(role, session_dir) if prefer_resume else ""
-    if not prefer_resume:
+    if not prefer_resume and recovery is None:
         _decided(role, session_dir, seed_source, "fresh_requested")
     if prefer_resume and not session_id:
         _decided(role, session_dir, seed_source, "no_record",

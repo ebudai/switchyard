@@ -963,6 +963,9 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 **extension_operations.reservation_fields(self.app),  # SYRD-539 pull_queue, SYRD-568 queues
             })
             return
+        if parsed.path.startswith("/api/context-recovery/"):  # SYRD-626: what a launch of this role must resume
+            self.send_json(extension_operations.context_recovery(self.app, urllib.parse.unquote(parsed.path.removeprefix("/api/context-recovery/"))))
+            return
         if parsed.path == "/api/reminder-snoozes":  # SYRD-537
             self.send_json({"batches": extension_operations.reminder_snoozes(self.app)})
             return

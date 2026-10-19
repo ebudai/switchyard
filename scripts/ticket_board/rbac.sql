@@ -341,4 +341,24 @@ GRANT EXECUTE ON FUNCTION ticket_board.consume_ui_delegation(text, text, text, t
 GRANT EXECUTE ON FUNCTION ticket_board.withdraw_signoff(text, text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.signoff_raised(text, text) TO ticket_board_service;
 
+-- SYRD-626: context continuations.
+REVOKE ALL ON ticket_board.ticket_context_continuations, ticket_board.ticket_context_fresh_requests FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.ticket_lineage(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.ticket_context_entered_at(text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.ticket_context_entries(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.decide_ticket_context_continuation(text, text, jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.apply_ticket_context_continuation(text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.ticket_context_continuation_note(text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.request_fresh_ticket_context(text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.ticket_context_continuation(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.role_context_recovery(text) FROM PUBLIC;
+GRANT SELECT ON ticket_board.ticket_context_continuations, ticket_board.ticket_context_fresh_requests
+    TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.decide_ticket_context_continuation(text, text, jsonb) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.apply_ticket_context_continuation(text, text) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.ticket_context_continuation_note(text, text) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.request_fresh_ticket_context(text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.ticket_context_continuation(text) TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.role_context_recovery(text) TO ticket_board_service;
+
 COMMIT;

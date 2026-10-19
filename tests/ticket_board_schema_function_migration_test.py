@@ -5,11 +5,15 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from scripts.ticket_board.migration_order import key as migration_key  # noqa: E402
 SCHEMA_PATH = "scripts/ticket_board/schema.sql"
 MIGRATIONS_PREFIX = "scripts/ticket_board/migrations/"
 FUNCTION_START_RE = re.compile(
@@ -119,7 +123,9 @@ def functions_replaced_by_added_migrations(commit: str) -> set[str]:
 def latest_migration_function_bodies(commit: str) -> dict[str, str]:
     output = git_text("ls-tree", "-r", "--name-only", commit, "--", MIGRATIONS_PREFIX)
     latest: dict[str, str] = {}
-    for path in sorted(line.strip() for line in output.splitlines() if line.strip().endswith(".sql")):
+    # In the order the runner applies them, by number (SYRD-617): pgu1000 after pgu999.
+    for path in sorted((line.strip() for line in output.splitlines() if line.strip().endswith(".sql")),
+                       key=lambda path: migration_key(Path(path).name)):
         latest.update(extract_schema_function_bodies(git_show(commit, path)))
     return latest
 

@@ -87,6 +87,8 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
     "dismiss_notification": {"director"},
     # SYRD-598: lowering one named approval, with why; the database checks control authority.
     "withdraw_signoff": {"director"},
+    # SYRD-626: a package boundary -- start this ticket in a fresh conversation.
+    "force_fresh_context": {"director"},
 }
 
 #: The two operations that exist to move a ticket the declared workflow will
@@ -132,6 +134,9 @@ COMPOSED_OPERATION_CAPABILITIES = {
     # Director could otherwise give it: the Director's edit authority. The
     # database checks director_edit itself (SYRD-548).
     "set_report_intake": frozenset({"director_edit"}),
+    # How the next ticket's conversation starts is the Director's edit of that
+    # ticket; the database checks director_edit itself (SYRD-626).
+    "force_fresh_context": frozenset({"director_edit"}),
     # Withdrawing an approval is the control role's: the capabilities that define it (SYRD-49). The
     # database checks role_controls_project itself (SYRD-598).
     "withdraw_signoff": frozenset({"set_manually_controlled", "merge"}),

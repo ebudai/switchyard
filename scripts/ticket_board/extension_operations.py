@@ -8,10 +8,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import pull_queue, reminder_snooze, report_intake, router_role, size_review, ui_delegation
+from . import context_continuation, pull_queue, reminder_snooze, report_intake, router_role, size_review, ui_delegation
 
 OPERATIONS = (reminder_snooze.OPERATIONS | size_review.OPERATIONS | report_intake.OPERATIONS
-              | router_role.OPERATIONS | ui_delegation.OPERATIONS)
+              | router_role.OPERATIONS | ui_delegation.OPERATIONS | context_continuation.OPERATIONS)
 
 
 def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: str,
@@ -26,6 +26,8 @@ def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: s
         if ticket_id is not None:
             raise ValueError(f"{operation} is a board policy, not a ticket's")
         return report_intake.perform(app, operation, payload, caller_role=caller_role)
+    if operation in context_continuation.OPERATIONS:  # SYRD-626
+        return context_continuation.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
     if operation in ui_delegation.OPERATIONS:  # SYRD-598
         return ui_delegation.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
     return size_review.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
@@ -46,11 +48,13 @@ def ticket_fields(row: Any) -> dict[str, Any]:
     privileged_jobs is root's record of each privileged job asked for the
     ticket, as the board service read it (SYRD-113); routing is what Router
     classifies against while it holds the ticket, and its decisions after,
-    null on a ticket Router never touched (SYRD-599).
+    null on a ticket Router never touched (SYRD-599); context_continuation is
+    whether its first hand-off continued its author's conversation and why, or
+    the Director's request that it start fresh, null when neither (SYRD-626).
     """
     return {"reminder_snooze": row.get("reminder_snooze"), "size_review": row.get("size_review"),
             "serial_queue": row.get("serial_queue"), "privileged_jobs": row.get("privileged_jobs") or [],
-            "routing": row.get("routing")}
+            "routing": row.get("routing"), "context_continuation": row.get("context_continuation")}
 
 
 def reservation_fields(app: Any) -> dict[str, Any]:
@@ -80,6 +84,11 @@ def serial_queues(app: Any) -> dict[str, list[dict[str, Any]]]:
             "active": bool(row["active"]), "waiting_on": [str(t) for t in row["waiting_on"] or []],
         })
     return queues
+
+
+def context_recovery(app: Any, role: str) -> dict[str, Any]:
+    """GET /api/context-recovery/<role>: what a launch of the role must resume (SYRD-626)."""
+    return context_continuation.recovery(app, role)
 
 
 def reminder_snoozes(app: Any) -> list[dict[str, Any]]:

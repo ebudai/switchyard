@@ -187,7 +187,9 @@ BEGIN
         WITH ordered AS (
             SELECT
                 name,
-                row_number() OVER (ORDER BY applied_at, name) AS new_seq
+                -- Rows recorded at one moment keep the order they were recorded in:
+                -- the name's text is not the apply order past pgu999 (SYRD-617).
+                row_number() OVER (ORDER BY applied_at, seq NULLS LAST, name) AS new_seq
             FROM ticket_board.schema_migrations
         )
         UPDATE ticket_board.schema_migrations AS target

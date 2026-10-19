@@ -362,10 +362,21 @@ def attach_role_to_slot(
         from scripts.agy_last_conversation import adopt_agy_last_conversation
 
         adopt_agy_last_conversation(role, session_dir)
-    session_id = launcher.session_id_for_role(role, session_dir)
     from scripts.role_sessions import _decided
 
-    if not exists:
+    resume, recovered = True, False
+    if not exists and launcher._uses_fresh_session_per_ticket(role):
+        # SYRD-626: bringing a role back is a launch, not a ticket boundary; the board says what its work needs.
+        from scripts import role_context_recovery
+
+        recovery = role_context_recovery.prepare(role, session_dir, entry="team_launcher.attach_role")
+        if recovery is not None and recovery.action == "refuse":
+            return 1
+        resume = recovery is None or recovery.action == "resume"
+        recovered = recovery is not None and recovery.action == "resume"
+    session_id = launcher.session_id_for_role(role, session_dir)
+
+    if not exists and resume:
         if not session_id:
             _decided(role, session_dir, "team_launcher.attach_role", "no_record",
                      f"team-launcher: cannot attach {role.role}; no live session or recorded resume id")
@@ -384,9 +395,12 @@ def attach_role_to_slot(
     )
     updated_role = launcher._role_by_name(updated_config, role.role)
     if not exists:
+        from dataclasses import replace
+
         prepare_hermes_home_for_role(updated_role, session_dir=session_dir)
         start_proc = runner(
-            tmux_new_session_args(updated_role, session_dir=session_dir, pane_state_dir=pane_state_dir, resume=True)
+            tmux_new_session_args(replace(updated_role, fresh_session_per_ticket=False) if recovered else updated_role,
+                                  session_dir=session_dir, pane_state_dir=pane_state_dir, resume=resume)
         )
         if start_proc.returncode != 0:
             launcher._write_role_visibility(

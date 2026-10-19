@@ -6,7 +6,7 @@ import logging
 import subprocess
 from typing import Any, Callable
 
-from . import session_context
+from . import context_continuation, session_context
 from .notification_ledger import NotificationLedger
 
 #: What each supported CLI is told, in its own composer, to start the next
@@ -117,6 +117,12 @@ class NotificationSessionClear:
         return session_context.before_delivery(self._context_listener(), conn, self.gate(), ticket_id=ticket_id,
                                                role=target_role, now=time.time(), handoff=handoff)
 
+    def announced(self, conn: Any, ticket_id: str, target_role: str, kind: str, message: str) -> str:
+        """The notice as it is delivered: a continued ticket's hand-off says so first (SYRD-626)."""
+        if kind not in SESSION_CLEAR_KINDS or target_role not in self.ephemeral_roles():
+            return message
+        return context_continuation.announced(conn, ticket_id, target_role, message)
+
     def _record_session_clear(self, conn: Any, ticket_id: str, target_role: str) -> bool:
         result = conn.execute(
             "SELECT ticket_board.record_role_session_clear(%s::text, %s::text)",
@@ -165,6 +171,11 @@ class NotificationSessionClear:
             self.ledger.requeue(conn, notification_id, attempts, f"ticket_context_{decision}",
                                 delay_seconds=session_context.RESUME_WAIT_SECONDS / 3)
             return False
+        # SYRD-626: the next ticket of the same package may continue the pane's conversation instead.
+        continued = context_continuation.before_clear(self, conn, notification_id=notification_id, ticket_id=ticket_id,
+                                                      target_role=target_role, kind=kind, target=target, attempts=attempts)
+        if continued is not None:
+            return continued
         if not command:
             self.logger.error(
                 "Holding notification %s for %s: no clear command is known for runtime %r of ephemeral role %s",

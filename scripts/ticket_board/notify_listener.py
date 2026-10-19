@@ -1093,7 +1093,7 @@ WHERE (r.definition->>'active')::boolean
             if self.dispatch.send(
                 conn, notification_id=notification_id, ticket_id=ticket_id,
                 target_role=target_role, kind=kind, target=target,
-                message=message, payload=payload, attempts=attempts,
+                message=self.session_clear.announced(conn, ticket_id, target_role, kind, message), payload=payload, attempts=attempts,
                 pane_busy=pane_busy, activity_trace=activity_trace,
                 composer_before=composer_before,
             ):

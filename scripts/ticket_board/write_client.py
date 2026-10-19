@@ -1183,6 +1183,10 @@ class TicketBoardWriteClient:
         payload = {"path": path, "rationale": rationale, "standing": standing, "apply": apply}
         return self._ticket_action(ticket_id, "approve_size_exception", payload, caller_role=caller_role)
 
+    def force_fresh_context(self, ticket_id: str, *, reason: str, caller_role: str | None = None) -> dict[str, Any]:
+        """Start this ticket in a fresh conversation, not its author's previous one (SYRD-626). Before its hand-off only."""
+        return self._ticket_action(ticket_id, "force_fresh_context", {"reason": reason}, caller_role=caller_role)
+
     def withdraw_signoff(self, ticket_id: str, *, signoff: str, reason: str, caller_role: str | None = None) -> dict[str, Any]:
         """Lower one named sign-off that is given, with why (SYRD-598). The control role's; never raises one."""
         return self._ticket_action(ticket_id, "withdraw_signoff", {"signoff": signoff, "reason": reason}, caller_role=caller_role)

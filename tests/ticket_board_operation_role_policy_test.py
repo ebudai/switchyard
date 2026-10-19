@@ -87,6 +87,8 @@ def test_server_keeps_identical_aliases_and_no_reverse_import() -> None:
         "set_report_intake": frozenset({"director_edit"}),
         # SYRD-598: withdrawing a sign-off takes the hold's and the integrator's capability, never director_edit.
         "withdraw_signoff": frozenset({"set_manually_controlled", "merge"}),
+        # SYRD-626: how the next ticket's conversation starts is the Director's edit of that ticket.
+        "force_fresh_context": frozenset({"director_edit"}),
     }
 
 
@@ -107,7 +109,9 @@ def test_default_environment() -> None:
     assert table["measure_size"] == ["director"]
     # SYRD-598 added withdraw_signoff, the control role's (and a confirmed board-UI action's).
     assert table["withdraw_signoff"] == ["director"]
-    assert len(table) == 46, len(table)  # SYRD-548: set_report_intake; SYRD-598: withdraw_signoff
+    # SYRD-626 added force_fresh_context, the Director's package boundary.
+    assert table["force_fresh_context"] == ["director"]
+    assert len(table) == 47, len(table)  # SYRD-548: set_report_intake; SYRD-598: withdraw_signoff; SYRD-626
 
 
 def test_role_environment_is_read_at_import() -> None:

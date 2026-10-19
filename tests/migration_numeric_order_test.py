@@ -303,6 +303,26 @@ def test_a_failed_migration_is_reported_rolled_back_and_resumed(cluster, scratch
     check(history(conn) == ["pgu998_a.sql", "pgu999_b.sql", "pgu1000_c.sql", "pgu1001_d.sql"], f"history: {history(conn)}")
 
 
+def test_history_recorded_at_one_moment_keeps_its_order(cluster, scratch: Path) -> None:
+    """Rows recorded by one statement share a time; renumbering must keep their order, not re-sort their names."""
+    directory = scratch / "one-moment"
+    directory.mkdir()
+    steps = [998, 999, 1000, 1001]
+    for step in steps:
+        (directory / f"pgu{step}_moment.sql").write_text(chained(step, None if step == 998 else step - 1))
+    conn = createdb(cluster, "one_moment")
+    psql(conn, "CREATE SCHEMA ticket_board; CREATE SEQUENCE ticket_board.schema_migrations_seq AS bigint; "
+               "CREATE TABLE ticket_board.schema_migrations (name text PRIMARY KEY, "
+               "seq bigint NOT NULL DEFAULT nextval('ticket_board.schema_migrations_seq'), "
+               "applied_at timestamptz NOT NULL DEFAULT now()); "
+               "CREATE UNIQUE INDEX schema_migrations_seq_idx ON ticket_board.schema_migrations (seq); "
+               "INSERT INTO ticket_board.schema_migrations(name) VALUES "
+               + ", ".join(f"('pgu{step}_moment.sql')" for step in steps) + ";")
+    run = migrate(conn, directory)
+    check(run.returncode == 0 and applied(run) == [], f"the runner keeps a history recorded at one moment: {run.stderr[-800:]}")
+    check(history(conn) == [f"pgu{step}_moment.sql" for step in steps], f"in the order it was recorded: {history(conn)}")
+
+
 def git(*args: str) -> str:
     return subprocess.run(["git", "-C", str(ROOT), *args], check=True, capture_output=True, text=True).stdout
 
@@ -319,18 +339,20 @@ def text_order_runner(scratch: Path) -> Path:
     return runner
 
 
-NEW_FILES = {
-    # Each fails unless the one before it has been recorded, so running early is an error, not a quiet difference.
-    "pgu1000_syrd617_probe.sql": (
-        "DO $$ BEGIN IF NOT EXISTS (SELECT FROM ticket_board.schema_migrations "
-        "WHERE name = 'pgu999_syrd598_board_ui_delegations.sql') THEN "
-        "RAISE EXCEPTION 'pgu1000 ran before pgu999'; END IF; END $$;\n"
-        "CREATE OR REPLACE FUNCTION ticket_board.syrd617_probe() RETURNS int LANGUAGE sql AS $f$ SELECT 1000 $f$;\n"),
-    "pgu1001_syrd617_probe.sql": (
-        "DO $$ BEGIN IF NOT EXISTS (SELECT FROM ticket_board.schema_migrations "
-        "WHERE name = 'pgu1000_syrd617_probe.sql') THEN RAISE EXCEPTION 'pgu1001 ran before pgu1000'; END IF; END $$;\n"
-        "CREATE OR REPLACE FUNCTION ticket_board.syrd617_probe() RETURNS int LANGUAGE sql AS $f$ SELECT 1001 $f$;\n"),
-}
+def probes() -> dict[str, str]:
+    """Two probes numbered after the newest real migration, each failing unless the one before it was recorded,
+    so running early is an error, not a quiet difference. (pgu1000 itself became a real migration, SYRD-626.)"""
+    newest = ordered_files(MIGRATIONS)[-1].name
+    first, second = migration_order.number(newest) + 1, migration_order.number(newest) + 2
+    made, before = {}, newest
+    for value in (first, second):
+        name = f"pgu{value}_syrd617_probe.sql"
+        made[name] = ("DO $$ BEGIN IF NOT EXISTS (SELECT FROM ticket_board.schema_migrations "
+                      f"WHERE name = '{before}') THEN RAISE EXCEPTION 'pgu{value} ran before {before}'; END IF; END $$;\n"
+                      "CREATE OR REPLACE FUNCTION ticket_board.syrd617_probe() RETURNS int LANGUAGE sql "
+                      f"AS $f$ SELECT {value} $f$;\n")
+        before = name
+    return made
 
 CATALOG = """
 SELECT string_agg(sig || ' ' || md5(def), E'\\n' ORDER BY sig) FROM (
@@ -343,8 +365,15 @@ SELECT string_agg(c, E'\\n' ORDER BY c) FROM (
 
 
 def test_a_historical_board_upgrades_past_999_and_matches_a_fresh_one(cluster, scratch: Path) -> None:
+    # The text-order runner only ever saw migrations up to pgu999; everything past it arrives with the upgrade.
+    real = ordered_files(MIGRATIONS)
+    later = [path for path in real if migration_order.number(path.name) > 999]
+    new_files = {**{path.name: path.read_text() for path in later}, **probes()}
     tree = scratch / "tree/migrations"
-    shutil.copytree(MIGRATIONS, tree)
+    tree.mkdir(parents=True)
+    for path in real:
+        if migration_order.number(path.name) <= 999:
+            shutil.copy(path, tree / path.name)
     shutil.copy(SCHEMA, tree.parent / "schema.sql")  # laid out as a release: pgu589 includes ../schema.sql
     old_runner = text_order_runner(scratch)
 
@@ -354,41 +383,44 @@ def test_a_historical_board_upgrades_past_999_and_matches_a_fresh_one(cluster, s
     psql(historical, "CREATE ROLE ticket_board_service LOGIN; CREATE ROLE ticket_board_listener LOGIN;")
     psql(historical, SCHEMA.read_text())
     run = migrate(historical, tree, runner=old_runner)
-    check(run.returncode == 0, f"the text-order runner builds today's board: {run.stderr[-2000:]}")
+    check(run.returncode == 0, f"the text-order runner builds the board it built: {run.stderr[-2000:]}")
     # Names and times in sequence order. The values of `seq` are not compared: every run of either runner
-    # renumbers them densely by (applied_at, name), closing the gap pgu589's re-included schema.sql leaves.
+    # renumbers them densely, closing the gap pgu589's re-included schema.sql leaves.
     built = psql(historical, "SELECT string_agg(name || '@' || applied_at, ',' ORDER BY seq) "
                              "FROM ticket_board.schema_migrations;")
 
     # Every historical file now fails if it is run again, and the new ones arrive.
     for path in tree.glob("*.sql"):
         path.write_text(f"DO $$ BEGIN RAISE EXCEPTION 'replayed {path.name}'; END $$;\n" + path.read_text())
-    for name, body in NEW_FILES.items():
+    for name, body in new_files.items():
         (tree / name).write_text(body)
     run = migrate(historical, tree)
     check(run.returncode == 0, f"the upgrade past 999 succeeds: {run.stderr[-2000:]}")
-    check(applied(run) == list(NEW_FILES), f"applying exactly pgu1000 then pgu1001, and replaying nothing: {applied(run)}")
+    check(applied(run) == list(new_files) and len(new_files) >= 2,
+          f"applying exactly what is past 999, in number order, and replaying nothing: {applied(run)}")
+    names = ", ".join(f"'{name}'" for name in new_files)
     kept = psql(historical, "SELECT string_agg(name || '@' || applied_at, ',' ORDER BY seq) "
-                            "FROM ticket_board.schema_migrations WHERE name NOT LIKE 'pgu100%';")
+                            f"FROM ticket_board.schema_migrations WHERE name NOT IN ({names});")
     check(kept == built, "the history it had is untouched: same names, order and times: "
           f"{[(a, b) for a, b in zip(built.split(','), kept.split(',')) if a != b][:3]}")
-    check(history(historical)[-2:] == list(NEW_FILES), "and the new files are appended to it, in order")
-    check(psql(historical, "SELECT ticket_board.syrd617_probe();") == "1001", "pgu1001's body is the one left")
+    check(history(historical)[-len(new_files):] == list(new_files), "and the new files are appended to it, in order")
+    check(psql(historical, "SELECT ticket_board.syrd617_probe();") == str(migration_order.number(list(new_files)[-1])),
+          "the last probe's body is the one left")
     rerun = migrate(historical, tree)
     check(rerun.returncode == 0 and applied(rerun) == [], f"a second upgrade applies nothing: {rerun.stderr[-1000:]}")
 
     fresh_tree = scratch / "fresh/migrations"
     shutil.copytree(MIGRATIONS, fresh_tree)
     shutil.copy(SCHEMA, fresh_tree.parent / "schema.sql")
-    for name, body in NEW_FILES.items():
+    for name, body in probes().items():
         (fresh_tree / name).write_text(body)
     fresh = createdb(cluster, "fresh")
     psql(fresh, SCHEMA.read_text())
     run = migrate(fresh, fresh_tree)
     check(run.returncode == 0, f"a fresh install of the same tree succeeds: {run.stderr[-2000:]}")
-    check(applied(run)[-2:] == list(NEW_FILES) and applied(run) == [p.name for p in ordered_files(fresh_tree)
-                                                                      if p.name in applied(run)],
-          "applying in number order, pgu1000 and pgu1001 last")
+    check(applied(run)[-len(new_files):] == list(new_files) and applied(run) == [p.name for p in ordered_files(fresh_tree)
+                                                                                  if p.name in applied(run)],
+          "applying in number order, everything past 999 last")
     check(history(fresh) == history(historical), "fresh and upgraded boards record the same history, in the same order")
     fresh_catalog, upgraded_catalog = psql(fresh, CATALOG), psql(historical, CATALOG)
     check(fresh_catalog.count("\n") > 300, f"the catalog was read: {fresh_catalog.count(chr(10))} lines")
@@ -412,6 +444,7 @@ def main() -> int:
         test_the_runner_applies_past_999_in_number_order(cluster, scratch)
         test_nothing_ambiguous_is_applied(cluster, scratch)
         test_a_failed_migration_is_reported_rolled_back_and_resumed(cluster, scratch)
+        test_history_recorded_at_one_moment_keeps_its_order(cluster, scratch)
         test_a_historical_board_upgrades_past_999_and_matches_a_fresh_one(cluster, scratch)
     print(f"migration_numeric_order_test: {CHECKS} checks ok")
     return 0

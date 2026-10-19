@@ -518,6 +518,21 @@ rotating workers means stopping some and starting others; the document is not ed
 persistent (non-ephemeral) implementer is routed by the Director and never pulls. The board
 never starts a worker, so claims never exceed the workers you run (SYRD-573).
 
+**A package keeps its conversation.** On a pull board an ephemeral implementer normally starts
+each new ticket in a cleared conversation. A ticket that shares a parent hierarchy (`parent_id`,
+at any depth) with the ticket the same worker had just before continues that conversation
+instead: no `/clear`, and its notice opens with one board line naming both tickets and the
+shared ancestor. The board checks, once and durably, that:
+- the earlier ticket passed the release gate (`scheduling.release_after`);
+- nothing else was taken in between;
+- no returned work is waiting to be restored;
+- the pane is still in that ticket's session, from the same process, runtime and worktree.
+
+Blockers, titles, branches and queue order never count. The decision and its reason are the
+ticket's `context_continuation`. A check that cannot be completed starts fresh and tells you
+once. To start a package's first ticket fresh anyway, before it is handed over, run
+`ticket-board-write force-fresh-context <ticket> --reason "..."` (SYRD-626).
+
 **Blocked is not deferred.** If a ticket waits on another, set a blocker and leave it in
 its owning stage. Moving it to backlog reads as abandoned.
 

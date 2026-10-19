@@ -502,6 +502,12 @@ def _build_parser() -> argparse.ArgumentParser:
     clear_snooze.add_argument("--ticket", action="append", default=[], dest="tickets", help="only this ticket; repeat")
     add_free_text_argument(clear_snooze, "--reason", required=True, help="why ordinary reminders resume now")
     clear_snooze.add_argument("--apply", action="store_true", help="clear it; without it nothing is written")
+    fresh_context = subparsers.add_parser(
+        "force-fresh-context",
+        help="Director: start a ticket in a fresh conversation at a package boundary, before its hand-off (SYRD-626)",
+    )
+    fresh_context.add_argument("ticket_id")
+    add_free_text_argument(fresh_context, "--reason", required=True, help="why this ticket starts fresh")
     size_exception = subparsers.add_parser(
         "approve-size-exception",
         help="Director: approve one open size finding at its measured size; previews unless --apply (SYRD-541)",
@@ -792,6 +798,8 @@ def main(argv: list[str] | None = None) -> int:
             response = client.approve_size_exception(
                 args.ticket_id, path=args.path, rationale=args.rationale, standing=args.standing, apply=args.apply
             )
+        elif command == "force_fresh_context":
+            response = client.force_fresh_context(args.ticket_id, reason=args.reason)
         elif command == "withdraw_signoff":
             response = client.withdraw_signoff(args.ticket_id, signoff=args.signoff, reason=args.reason)
         elif command == "measure_size":
@@ -856,7 +864,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if command in {"merge", "dismiss_notification", "verify_caller", "add_user_acceptance_relay",
                    "snooze_reminders", "clear_reminder_snooze", "claim_next", "approve_size_exception",
-                   "enable_size_review", "measure_size", "set_report_intake"}:
+                   "enable_size_review", "measure_size", "set_report_intake", "force_fresh_context"}:
         print(json.dumps(response))
     else:
         print(json.dumps(_ticket_from_response(response)))

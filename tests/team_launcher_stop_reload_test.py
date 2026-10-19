@@ -336,6 +336,11 @@ def test_configured_fresh_session_reload_supersedes_recorded_session_and_starts_
         )
         runner = FakeRunner(existing_sessions={"porter-bulk"}, current_commands={"porter-bulk:0.0": "hermes"})
         stderr = StringIO()
+        # SYRD-626: a launch asks the board first; fresh is its answer only when nothing handed over is held.
+        from scripts import role_context_recovery
+        asked: list[str] = []
+        original_get = role_context_recovery.board_get
+        role_context_recovery.board_get = lambda url: asked.append(url) or {"action": "fresh", "reason": "bulk holds no active ticket"}
 
         with redirect_stderr(stderr):
             result = run_role_pane(
@@ -351,7 +356,9 @@ def test_configured_fresh_session_reload_supersedes_recorded_session_and_starts_
         sidecar_path = session_dir / f"{session_file_name(role.target)}.superseded"
         sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
         assert sidecar["session_id"] == "previous-hermes-ticket-session"
-        assert "configured for fresh sessions per ticket" in stderr.getvalue()
+        role_context_recovery.board_get = original_get
+        assert asked == [f"{config.board_url.rstrip('/')}/api/context-recovery/bulk"], asked
+        assert "configured for fresh sessions per ticket and bulk holds no active ticket" in stderr.getvalue()
         new_session = next(call for call in runner.calls if call[:2] == ["tmux", "new-session"])
         assert "--resume" not in new_session[-1]
         assert "previous-hermes-ticket-session" not in new_session[-1]

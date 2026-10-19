@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# SYRD-627: no live home, pane store or runtime directory, here or in any child.
+if [ -z "${SWITCHYARD_TEST_DISPOSABLE_ROOT:-}" ]; then
+  exec python3 "$(dirname "${BASH_SOURCE[0]}")/live_boundary.py" --run -- bash "${BASH_SOURCE[0]}" "$@"
+fi
 
 # SYRD-89 R3. A published board release root must be traversable by the board
 # service whatever umask the deploy inherited.

@@ -31,6 +31,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+import live_boundary  # noqa: E402
+
+live_boundary.isolate()  # SYRD-627: no live home, pane store or runtime directory, here or in a child
+
 ROOT = Path(__file__).resolve().parents[1]
 for extra in (str(ROOT), str(ROOT / "scripts"), str(ROOT / "tests")):
     if extra not in sys.path:

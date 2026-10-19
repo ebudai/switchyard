@@ -39,6 +39,10 @@ import tempfile
 import zlib
 from pathlib import Path
 
+import live_boundary  # noqa: E402
+
+live_boundary.isolate()  # SYRD-627: no live home, pane store or runtime directory, here or in a child
+
 ROOT = Path(__file__).resolve().parents[1]
 BEFORE = "3d410cadd9a81835fad9422bb9513707c4140ec9"  # main before SYRD-247's resumed implementation
 PROJECT = "imgproj"

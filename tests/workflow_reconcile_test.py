@@ -23,6 +23,10 @@ for extra in (str(ROOT), str(ROOT / "tests")):
     if extra not in sys.path:
         sys.path.insert(0, extra)
 
+import live_boundary  # noqa: E402
+
+live_boundary.isolate()  # SYRD-627: no live home, pane store or runtime directory, here or in a child
+
 from scripts import team_launcher as launcher  # noqa: E402
 from scripts.ticket_board.project_provision import workflow_document_digest  # noqa: E402
 

@@ -3,6 +3,10 @@
 
 from __future__ import annotations
 
+import live_boundary  # noqa: E402
+
+live_boundary.isolate()  # SYRD-627: this suite wrote pane stores into the invoking account's live home
+
 from team_launcher_test_helpers import *
 
 def test_control_repository_launch_uses_role_worktrees_and_preserves_repository() -> None:

@@ -43,7 +43,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 if str(ROOT / "tests") not in sys.path:
     sys.path.insert(0, str(ROOT / "tests"))
-
+import live_boundary; live_boundary.isolate()  # noqa: E402,E702 - SYRD-627, kept to this file's line budget
 from team_launcher_test_helpers import *  # noqa: F401,F403
 from scripts import presentation_controller as presentation  # noqa: E402
 

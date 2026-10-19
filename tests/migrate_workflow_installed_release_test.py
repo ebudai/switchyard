@@ -51,6 +51,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import live_boundary  # noqa: E402
+
+live_boundary.isolate()  # SYRD-627: no live home, pane store or runtime directory, here or in a child
+
 from ticket_board_pane_env import strip_ticket_board_pane_env  # noqa: E402
 
 strip_ticket_board_pane_env(os.environ)

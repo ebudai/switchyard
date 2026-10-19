@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# SYRD-627: no live home, pane store or runtime directory, here or in any child.
+if [ -z "${SWITCHYARD_TEST_DISPOSABLE_ROOT:-}" ]; then
+  exec python3 "$(dirname "${BASH_SOURCE[0]}")/live_boundary.py" --run -- bash "${BASH_SOURCE[0]}" "$@"
+fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACT="$REPO_ROOT/deploy/SYRD-85-activate-audited-board.sh"

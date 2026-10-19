@@ -5,6 +5,10 @@ from __future__ import annotations
 
 import pwd
 
+import live_boundary  # noqa: E402
+
+live_boundary.isolate()  # SYRD-627: this suite once wrote into the invoking account's live home
+
 from team_launcher_test_helpers import *
 from scripts import owner_writes  # noqa: E402
 
@@ -265,8 +269,19 @@ def test_upgrade_repairs_generated_runtime_session_dir_to_durable_owner_state() 
 def test_launch_auto_upgrades_generated_session_dir_before_starting_panes() -> None:
     current_user = team_launcher.current_user_name()
     original_uid_for_user = team_launcher.uid_for_user
+    original_getpwnam, original_runtime_dir = pwd.getpwnam, team_launcher.runtime_dir_for_uid
+    # SYRD-627: the current account's home and runtime directory are a fixture's. With the real ones, every run
+    # appended otto-role0 records to the invoking account's live ~/.local/state and made /run/user/<uid> stores.
+    fixture = Path(tempfile.mkdtemp(prefix="pgu-launcher-upgrade-home."))
+    home, runtime = fixture / "home" / current_user, fixture / "run" / str(os.getuid())
+    home.mkdir(parents=True)
+    runtime.mkdir(parents=True)
+    me = original_getpwnam(current_user)
     try:
         team_launcher.uid_for_user = lambda user_name: os.getuid() if user_name == current_user else original_uid_for_user(user_name)
+        pwd.getpwnam = lambda name: pwd.struct_passwd((me.pw_name, me.pw_passwd, me.pw_uid, me.pw_gid, me.pw_gecos,
+                                                        str(home), me.pw_shell)) if name == current_user else original_getpwnam(name)
+        team_launcher.runtime_dir_for_uid = lambda uid: runtime if uid == os.getuid() else original_runtime_dir(uid)
         with tempfile.TemporaryDirectory(prefix="pgu-launcher-upgrade-session.") as tmp:
             provision_dir = Path(tmp) / ".switchyard" / "provision"
             provision_dir.mkdir(parents=True)
@@ -278,7 +293,7 @@ def test_launch_auto_upgrades_generated_session_dir_before_starting_panes() -> N
             config_path = _write_launcher_config(provision_dir, role_count=1)
             raw_config = json.loads(config_path.read_text(encoding="utf-8"))
             raw_config["run_as_user"] = current_user
-            raw_config["session_dir"] = f"/run/user/{os.getuid()}/otto-ticket-board/pane-sessions"
+            raw_config["session_dir"] = f"{runtime}/otto-ticket-board/pane-sessions"
             config_path.write_text(json.dumps(raw_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             config = load_project_config("otto", config_path)
             runner = FakeRunner()
@@ -302,8 +317,10 @@ def test_launch_auto_upgrades_generated_session_dir_before_starting_panes() -> N
             upgraded = json.loads(config_path.read_text(encoding="utf-8"))
     finally:
         team_launcher.uid_for_user = original_uid_for_user
+        pwd.getpwnam, team_launcher.runtime_dir_for_uid = original_getpwnam, original_runtime_dir
+        shutil.rmtree(fixture, ignore_errors=True)
 
-    expected_session_dir = f"/home/{current_user}/.local/state/otto-ticket-board/pane-sessions"
+    expected_session_dir = f"{home}/.local/state/otto-ticket-board/pane-sessions"
     assert upgraded["session_dir"] == expected_session_dir
     assert "upgraded session dir" in stdout.getvalue()
     hook_install_calls = [
@@ -314,17 +331,17 @@ def test_launch_auto_upgrades_generated_session_dir_before_starting_panes() -> N
     assert hook_install_calls
     assert hook_install_calls[0][:1] == ["env"]
     assert f"TICKET_BOARD_PROJECT=otto" in hook_install_calls[0]
-    assert f"TICKET_BOARD_PANE_STATE_DIR=/run/user/{os.getuid()}/otto-ticket-board/pane-state" in hook_install_calls[0]
+    assert f"TICKET_BOARD_PANE_STATE_DIR={runtime}/otto-ticket-board/pane-state" in hook_install_calls[0]
     assert f"TICKET_BOARD_PANE_SESSION_DIR={expected_session_dir}" in hook_install_calls[0]
     assert str(ROOT / "scripts" / "ticket-board-install-pane-hooks") in hook_install_calls[0]
     assert "install" in hook_install_calls[0]
     assert "--home" in hook_install_calls[0]
-    assert f"/home/{current_user}" in hook_install_calls[0]
+    assert str(home) in hook_install_calls[0]
     tmux_new_calls = [call for call in runner.calls if call[:3] == ["tmux", "new-session", "-d"]]
     assert tmux_new_calls
     assert runner.calls.index(hook_install_calls[0]) < runner.calls.index(tmux_new_calls[0])
     assert f"TICKET_BOARD_PANE_SESSION_DIR={expected_session_dir}" in tmux_new_calls[0][-1]
-    assert "TICKET_BOARD_PANE_SESSION_DIR=/run/" not in tmux_new_calls[0][-1]
+    assert f"TICKET_BOARD_PANE_SESSION_DIR={runtime}" not in tmux_new_calls[0][-1]
 
 def test_launch_repairs_generated_project_owner_hooks_before_starting_panes() -> None:
     class OwnerTmuxRunner(FakeRunner):

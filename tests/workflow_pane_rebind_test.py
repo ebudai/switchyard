@@ -49,6 +49,10 @@ for extra in (str(ROOT), str(ROOT / "scripts"), str(ROOT / "tests")):
     if extra not in sys.path:
         sys.path.insert(0, extra)
 
+import live_boundary  # noqa: E402
+
+live_boundary.isolate()  # SYRD-627: no live home, pane store or runtime directory, here or in a child
+
 from ticket_board_pane_env import strip_ticket_board_pane_env  # noqa: E402
 
 strip_ticket_board_pane_env(os.environ)

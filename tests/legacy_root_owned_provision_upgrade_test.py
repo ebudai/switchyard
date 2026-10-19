@@ -32,9 +32,13 @@ if str(ROOT) not in sys.path:
 if str(ROOT / "tests") not in sys.path:
     sys.path.insert(0, str(ROOT / "tests"))
 
+import live_boundary  # noqa: E402
+
+live_boundary.isolate()  # SYRD-627: no live home, pane store or runtime directory, here or in a child
+
 from scripts import team_launcher as launcher  # noqa: E402
 from scripts.ticket_board.project_provision import build_plan, write_artifacts  # noqa: E402
-from owner_home_sandbox import root_stage_in  # noqa: E402
+from owner_home_sandbox import root_stage_in, stand_in_home  # noqa: E402
 
 PROJECT = "porter"
 
@@ -45,13 +49,23 @@ def _root_file(path: Path, text: str, mode: int = 0o644) -> None:
     path.chmod(mode)
 
 
+SHIPPED_CONTROL_REPOSITORY = launcher._new_project_control_repository
+
+
 class Tenant:
     """A mefp-shaped legacy tenant, built fresh for each case."""
 
     def __init__(self, owner: str) -> None:
         self.owner = owner
+        # The owner's home is a fixture's: root never builds a tenant in a real one (SYRD-627).
+        self.home = Path(tempfile.mkdtemp(prefix="syrd227-home."))
+        self.home.chmod(0o755)
+        stand_in_home(owner, self.home)
+        # A new tenant's control repository is placed under /home/<owner> by name, not by account.
+        launcher._new_project_control_repository = lambda project, user: (
+            self.home / ".local" / "state" / "switchyard" / "projects" / project / "control.git"
+            if user == owner else SHIPPED_CONTROL_REPOSITORY(project, user))
         self.account = pwd.getpwnam(owner)
-        self.home = Path(self.account.pw_dir)
         self.tmp = Path(tempfile.mkdtemp(prefix=".syrd227-legacy.", dir=self.home))
         self.tmp.chmod(0o755)
         self.provision = self.tmp / "checkout" / ".switchyard" / "provision"
@@ -105,7 +119,7 @@ class Tenant:
         } | {".": (self.provision.lstat().st_uid, b"")}
 
     def close(self) -> None:
-        shutil.rmtree(self.tmp, ignore_errors=True)
+        shutil.rmtree(self.home, ignore_errors=True)
 
 
 def _case(owner: str, name: str, body) -> None:

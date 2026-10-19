@@ -27,6 +27,10 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import live_boundary  # noqa: E402
+
+live_boundary.isolate()  # SYRD-627: no live home, pane store or runtime directory, here or in a child
+
 from team_launcher_test_helpers import *
 
 CHECKS = 0

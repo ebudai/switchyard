@@ -32,6 +32,10 @@ import tarfile
 import tempfile
 from pathlib import Path
 
+import live_boundary  # noqa: E402
+
+live_boundary.isolate()  # SYRD-627: no live home, pane store or runtime directory, here or in a child
+
 ROOT = Path(__file__).resolve().parents[1]
 BEFORE = "c99bfb856be5fa73410e5cba69b9e21db4d71a39"  # main before SYRD-575
 PROJECT = "uat575"

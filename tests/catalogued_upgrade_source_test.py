@@ -35,6 +35,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+import live_boundary  # noqa: E402
+
+live_boundary.isolate()  # SYRD-627: no live home, pane store or runtime directory, here or in a child
+
 ROOT = Path(__file__).resolve().parents[1]
 BEFORE = "6726370266aa342f3eae4a2d9400a41d520d8f4a"  # main before SYRD-529
 OLD_PIN = "49abeb4b00d47805e515af455ce506cb4ae41888"  # MEFP's recorded pin

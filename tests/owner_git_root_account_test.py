@@ -34,6 +34,10 @@ for extra in (str(ROOT), str(ROOT / "tests")):
     if extra not in sys.path:
         sys.path.insert(0, extra)
 
+import live_boundary  # noqa: E402
+
+live_boundary.isolate()  # SYRD-627: no live home, pane store or runtime directory, here or in a child
+
 import control_repository_writes_test as fixture  # noqa: E402
 from control_repository_writes_test import OWNER, Host, Runner, lookups, snapshot, standing_in  # noqa: E402
 from scripts import launcher_checkout, owner_git, project_worktrees  # noqa: E402

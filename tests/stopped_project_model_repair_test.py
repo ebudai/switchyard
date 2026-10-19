@@ -59,6 +59,10 @@ import tempfile
 import threading
 from pathlib import Path
 
+import live_boundary  # noqa: E402
+
+live_boundary.isolate()  # SYRD-627: no live home, pane store or runtime directory, here or in a child
+
 ROOT = Path(__file__).resolve().parents[1]
 BEFORE = "c9fd9c6350751e32446281bc1abde79a39503d5b"  # main before SYRD-593
 PROJECT = "otto"

@@ -39,6 +39,10 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import live_boundary  # noqa: E402
+
+live_boundary.isolate()  # SYRD-627: no live home, pane store or runtime directory, here or in a child
+
 ROOT = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 and not sys.argv[1].startswith("--") else Path(__file__).resolve().parents[1]
 UNITS = Path("/etc/systemd/system")
 CONFIG = Path("/etc/switchyard/board-supervisor")

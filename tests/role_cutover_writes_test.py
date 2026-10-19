@@ -45,6 +45,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+if str(ROOT / "tests") not in sys.path:
+    sys.path.insert(0, str(ROOT / "tests"))
+
+import live_boundary  # noqa: E402
+
+live_boundary.isolate()  # SYRD-627: no live home, pane store or runtime directory, here or in a child
 
 from scripts import team_launcher as launcher  # noqa: E402,I001
 from scripts import board_services, presentation_controller, role_identity_cutover, role_runtime  # noqa: E402
@@ -178,6 +184,10 @@ class Host:
         return snapshot(self.foreign) == self.untouched and sorted(p.name for p in self.foreign.iterdir()) == ["file", "secret.json"]
 
     def make(self, path: Path, text: str, uid: int, mode: int = 0o644) -> Path:
+        # The ownership walk below has a floor only inside the fixture's homes: a path outside them -- once, a pane
+        # store production resolved from the environment -- would have every ancestor chowned (SYRD-627).
+        if self.homes not in path.parents:
+            raise AssertionError(f"Host.make writes only under the fixture's homes, not {path}")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
         for item in [path, *path.parents]:

@@ -21,6 +21,10 @@ import tempfile
 import threading
 from pathlib import Path
 
+import live_boundary  # noqa: E402
+
+live_boundary.isolate()  # SYRD-627: no live home, pane store or runtime directory, here or in a child
+
 ROOT = Path(__file__).resolve().parents[1]
 BEFORE = "e986c4964f2aa8f1fa10a11c0bc3f8135bfc4190"  # main when SYRD-598 was cut
 PANE_ENV_PREFIXES = ("TICKET_BOARD_", "PGU_TICKET_BOARD_", "DIRECTORCTL")

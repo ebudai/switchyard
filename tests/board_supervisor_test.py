@@ -43,6 +43,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import live_boundary  # noqa: E402
+
+live_boundary.isolate()  # SYRD-627: no live home, pane store or runtime directory, here or in a child
+
 ROOT = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 and not sys.argv[1].startswith("--") else Path(__file__).resolve().parents[1]
 USERS = {"boardsvc": 900, "alpha": 1001, "beta": 1002, "stranger": 1003}
 SHARED_GID = 1500

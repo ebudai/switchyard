@@ -35,6 +35,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
+import live_boundary  # noqa: E402
+
+live_boundary.isolate()  # SYRD-627: no live home, pane store or runtime directory, here or in a child
+
 from scripts import team_launcher as launcher  # noqa: E402
 
 SLUG = "syrd"

@@ -38,6 +38,10 @@ if str(ROOT) not in sys.path:
 if str(ROOT / "tests") not in sys.path:
     sys.path.insert(0, str(ROOT / "tests"))
 
+import live_boundary  # noqa: E402
+
+live_boundary.isolate()  # SYRD-627: this suite wrote pane stores into the invoking account's live home
+
 from team_launcher_test_helpers import *  # noqa: F403,E402
 from team_launcher_test_helpers import (  # noqa: E402
     RecordingProcessLauncher,

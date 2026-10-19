@@ -17,6 +17,7 @@ import tempfile
 from pathlib import Path
 
 from team_launcher_test_helpers import *
+from root_tree_stand_in import roots_own
 
 
 class _RunningTenant:
@@ -362,19 +363,18 @@ def _upgrade(
         team_launcher.migrate_declarative_director_onboarding = (
             lambda config, **kwargs: migrations.append(config.project) or True
         )
-        config = team_launcher.load_project_config(
-            json.loads(config_path.read_text(encoding="utf-8"))["project"], config_path
-        )
-        result = team_launcher.upgrade_project_command(
-            config,
-            config_path=config_path,
-            dry_run=dry_run,
-            source_repo=source_repo,
-            deploy_ref=deploy_ref,
-            tooling_root=config_path.parent / "tooling",
-            runner=runner or FakeRunner(),
-            print_func=printed.append,
-        )
+        config = team_launcher.load_project_config(json.loads(config_path.read_text(encoding="utf-8"))["project"], config_path)
+        with roots_own(source_repo):  # the fixture source stands in for root's installed release (SYRD-630)
+            result = team_launcher.upgrade_project_command(
+                config,
+                config_path=config_path,
+                dry_run=dry_run,
+                source_repo=source_repo,
+                deploy_ref=deploy_ref,
+                tooling_root=config_path.parent / "tooling",
+                runner=runner or FakeRunner(),
+                print_func=printed.append,
+            )
     finally:
         team_launcher.os.geteuid = original_euid
         team_launcher.local_account_exists = original_exists

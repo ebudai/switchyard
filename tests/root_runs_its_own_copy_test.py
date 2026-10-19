@@ -49,6 +49,7 @@ for entry in (str(ROOT), str(ROOT / "tests")):
 from scripts import root_packet  # noqa: E402
 from scripts import team_launcher as launcher  # noqa: E402
 from scripts.ticket_board import project_provision  # noqa: E402
+from root_tree_stand_in import roots_own  # noqa: E402
 from team_launcher_test_helpers import FakeRunner  # noqa: E402
 
 PROJECT = "porter607"
@@ -182,8 +183,9 @@ class PacketHost:
 
 def provision(sb: Sandbox, host: PacketHost, printed: list[str], *, output_dir: Path | None = None,
               source_repo: Path = ROOT) -> object:
+    # The source checkout stands in for root's installed release, which root alone controls (SYRD-630).
     with patch.object(project_provision, "render_operator_commands", generated_packet(sb.marker)), \
-            patch.dict(os.environ, sb.env):
+            patch.dict(os.environ, sb.env), roots_own(source_repo):
         try:
             return launcher.new_project_command(
                 PROJECT, owner_user=OWNER, owner_home=sb.home, repository=sb.repository, source_repo=source_repo,

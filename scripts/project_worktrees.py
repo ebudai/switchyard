@@ -204,6 +204,7 @@ def _config_git_owner_rules(config: ProjectConfig) -> list[GitOwnerRule]:
     owner_user = config.run_as_user or launcher.current_user_name()
     if not owner_user:
         return []
+    as_root = os.geteuid() == 0
     # Specific role roots precede the broad worktree base.  A migrated config
     # can therefore validate each worktree through its declared role account,
     # while missing paths still inherit the project owner rule used during
@@ -213,7 +214,9 @@ def _config_git_owner_rules(config: ProjectConfig) -> list[GitOwnerRule]:
         for role in config.roles
         if launcher.role_run_as_user(config, role)
         and config.repository is not None
-        and launcher._normalized_path(Path(role.workdir)) != launcher._normalized_path(config.repository)
+        # As root, the paths as written: `resolve()` would compare where links lead (SYRD-630).
+        and (str(Path(role.workdir)) != str(config.repository) if as_root
+             else launcher._normalized_path(Path(role.workdir)) != launcher._normalized_path(config.repository))
     ]
     roots: list[Path] = []
     if config.repository is not None:
@@ -587,8 +590,12 @@ def role_worktree_foreign_store(config: ProjectConfig, role: RoleConfig) -> str:
     left -- is not this project's to reset (SYRD-545). A `.git` that cannot be
     read is no evidence, and the ordinary check below still runs.
     """
+    from scripts import team_launcher as launcher
+
     if config.control_repository is None:
         return ""
+    if launcher.root_writes_for(config.run_as_user):
+        return _role_worktree_foreign_store_as_root(config, role)
     dot_git = Path(role.workdir) / ".git"
     try:
         if dot_git.is_dir():
@@ -622,6 +629,63 @@ def role_worktree_foreign_store(config: ProjectConfig, role: RoleConfig) -> str:
         f"{role.workdir} {detail}; nothing here adopts or resets another store's worktree. Move it aside "
         "and launch again, and the launch creates it from this project's store."
     )
+
+
+def _role_worktree_foreign_store_as_root(config: ProjectConfig, role: RoleConfig) -> str:
+    """`role_worktree_foreign_store` as root for the owner (SYRD-630): `.git` looked at and read by descriptor from
+    the owner's root -- a link there or above it refused, never followed -- and the `gitdir:` it names compared as
+    written, never resolved. A refusal raises `SystemExit`."""
+    from scripts import owner_writes
+    from scripts.owner_git import _lexical
+
+    owner = config.run_as_user
+    dot_git = Path(role.workdir) / ".git"
+    status = owner_writes.owner_entry_status(owner, dot_git)
+    if status is None:
+        return ""
+    if stat.S_ISLNK(status.st_mode):
+        return (
+            f"{dot_git} is a link; nothing here follows, adopts or resets it. Move {role.workdir} aside and launch "
+            "again, and the launch creates the worktree."
+        )
+    if stat.S_ISDIR(status.st_mode):
+        return (
+            f"{role.workdir} is a repository of its own, not a worktree of this project's commit store "
+            f"{config.control_repository}; nothing here adopts or resets it. Move it aside and launch "
+            "again, and the launch creates the worktree."
+        )
+    raw = owner_writes.read_owner_bytes(owner, dot_git) if stat.S_ISREG(status.st_mode) else None
+    text = (raw or b"").decode("utf-8", "replace").strip()
+    if not text.startswith("gitdir:"):
+        return ""
+    named = text[len("gitdir:"):].strip()
+    gitdir = PurePosixPath(named if named.startswith("/") else f"{str(role.workdir).rstrip('/')}/{named}")
+    store = PurePosixPath(str(config.control_repository))
+    if _lexical(gitdir) and _lexical(store) and gitdir.parent == store / "worktrees":
+        entry = owner_writes.owner_entry_status(owner, Path(str(gitdir)))
+        if entry is not None and stat.S_ISDIR(entry.st_mode):
+            return ""
+    named_store = gitdir.parent.parent if gitdir.parent.name == "worktrees" else gitdir
+    detail = (
+        f"is a worktree of {named_store}, not of this project's commit store {config.control_repository}"
+        if named_store != store
+        else f"was added to a commit store at {store} that has since been replaced: it names {gitdir}, "
+        "which this store does not have"
+    )
+    return (
+        f"{role.workdir} {detail}; nothing here adopts or resets another store's worktree. Move it aside "
+        "and launch again, and the launch creates it from this project's store."
+    )
+
+
+def _role_worktree_present_as_root(config: ProjectConfig, role_path: Path) -> bool:
+    """Whether a role's worktree is there, by descriptor from the owner's root; a link there or above it refused."""
+    from scripts import owner_writes
+
+    status = owner_writes.owner_entry_status(config.run_as_user, role_path)
+    if status is not None and stat.S_ISLNK(status.st_mode):
+        raise SystemExit(f"switchyard: refusing {role_path} for {config.run_as_user}: it is a link, never followed")
+    return status is not None
 
 
 def ensure_control_repository(
@@ -900,9 +964,16 @@ def ensure_control_role_worktrees(
 
     failed: dict[str, str] = {}
     kept: dict[str, str] = {}
+    as_root = launcher.root_writes_for(config.run_as_user)
     for role in config.roles:
         role_path = Path(role.workdir)
-        if not role_path.exists():
+        try:
+            present = _role_worktree_present_as_root(config, role_path) if as_root else role_path.exists()
+            foreign = role_worktree_foreign_store(config, role) if present else ""
+        except SystemExit as refusal:
+            failed[role.role] = str(refusal)
+            continue
+        if not present:
             add_proc = launcher.run_owner_correct_git(
                 git_control_worktree_add_args(config, role),
                 runner=runner,
@@ -911,7 +982,6 @@ def ensure_control_role_worktrees(
             if add_proc.returncode != 0:
                 failed[role.role] = launcher._proc_failure_reason(add_proc, f"worktree add failed with exit {add_proc.returncode}")
             continue
-        foreign = role_worktree_foreign_store(config, role)
         if foreign:
             failed[role.role] = foreign
             continue

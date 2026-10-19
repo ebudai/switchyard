@@ -33,6 +33,7 @@ if str(ROOT / "tests") not in sys.path:
     sys.path.insert(0, str(ROOT / "tests"))
 
 from team_launcher_test_helpers import *
+from root_tree_stand_in import roots_own
 from team_launcher_upgrade_cutover_test import (
     _RunningTenant,
     _declarative_tenant,
@@ -228,15 +229,17 @@ def _cutover(config_path: Path, *, runner, source_repo: Path, **kwargs):
     original_euid = team_launcher.os.geteuid
     try:
         team_launcher.os.geteuid = lambda: 0
-        result = team_launcher.cutover_role_identities_command(
-            team_launcher.load_project_config(PROJECT, config_path),
-            config_path=config_path,
-            source_repo=source_repo,
-            tooling_dir=config_path.parent / "tooling" / PROJECT,
-            runner=runner,
-            print_func=printed.append,
-            **kwargs,
-        )
+        # The fixture source stands in for root's installed release (SYRD-630).
+        with roots_own(source_repo):
+            result = team_launcher.cutover_role_identities_command(
+                team_launcher.load_project_config(PROJECT, config_path),
+                config_path=config_path,
+                source_repo=source_repo,
+                tooling_dir=config_path.parent / "tooling" / PROJECT,
+                runner=runner,
+                print_func=printed.append,
+                **kwargs,
+            )
     finally:
         team_launcher.os.geteuid = original_euid
     return result, "\n".join(printed)

@@ -6,9 +6,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pwd
 import re
+import stat
 import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -23,12 +24,19 @@ MANAGED_MARKER = "# switchyard-managed-repository-hook-v1"
 DEFAULT_REGISTRY_DIR = Path("/etc/switchyard/projects")
 PROJECT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
+#: How this process came to install hooks, when root asked (SYRD-614): "owner" in a child that became the
+#: repository's owner, "root" in a tree root alone controls. Either way git keeps its own ownership check.
+_ACTING = ""
+
 
 def _git(repository: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     environment = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull}
     repository_path = repository.expanduser().resolve(strict=False)
+    # Only an unprivileged caller's own invocation narrows git's ownership check to this repository; root never
+    # turns it off, and the owner needs no exception for its own repository.
+    trust = [] if (_ACTING or os.geteuid() == 0) else ["-c", f"safe.directory={repository_path}"]
     return subprocess.run(
-        ["git", "-c", f"safe.directory={repository_path}", "-C", str(repository_path), *args],
+        ["git", *trust, "-C", str(repository_path), *args],
         check=check,
         capture_output=True,
         text=True,
@@ -79,18 +87,137 @@ def _atomic_install_text(path: Path, text: str, *, owner: tuple[int, int]) -> No
         temporary.unlink(missing_ok=True)
 
 
-def _install_file(source: Path, destination: Path, *, owner: tuple[int, int]) -> None:
+def _install_file(content: bytes, destination: Path, *, owner: tuple[int, int]) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
-    os.close(descriptor)
     temporary = Path(temporary_name)
     try:
-        shutil.copyfile(source, temporary)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(content)
         os.chmod(temporary, 0o755)
         os.chown(temporary, *owner)
         os.replace(temporary, destination)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _leaf_status(text: str) -> os.stat_result | None:
+    """What is at `text`, walked by descriptor from `/` without following a link; None when it is missing.
+
+    A link at it or at any directory above it raises, so where it leads is never what root decides by."""
+    held = os.open("/", os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        status = os.fstat(held)
+        walked = ""
+        for name in text.split("/")[1:]:
+            walked += "/" + name
+            try:
+                status = os.stat(name, dir_fd=held, follow_symlinks=False)
+            except FileNotFoundError:
+                return None
+            if stat.S_ISLNK(status.st_mode):
+                raise RuntimeError(f"refusing {text}: {walked} is a link")
+            if walked == text:
+                return status
+            if not stat.S_ISDIR(status.st_mode):
+                raise RuntimeError(f"refusing {text}: {walked} is not a directory")
+            following = os.open(name, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=held)
+            os.close(held)
+            held = following
+        return status
+    finally:
+        os.close(held)
+
+
+def _root_actor(path: Path) -> pwd.struct_passwd | None:
+    """Who root installs hooks as for `path` (SYRD-614): its owner, found by descriptor and only inside that
+    owner's own roots (SYRD-609), or None for root itself in a tree root alone controls. Anything else -- a
+    link, a path that is not normalised and absolute, a missing one, another account's file outside its roots,
+    root's own file where somebody else could replace it -- raises, and nothing is installed."""
+    from scripts import owner_git, owner_writes
+
+    text = owner_git._lexical(path)
+    if not text:
+        raise RuntimeError(f"refusing {path}: root names a repository only by a normalised absolute path")
+    status = _leaf_status(text)
+    if status is None:
+        raise RuntimeError(f"refusing {path}: it does not exist")
+    if status.st_uid == 0:
+        problem, controlled = owner_git._walk_git_target(text)
+        if controlled and not problem:
+            return None
+        raise RuntimeError(f"refusing {path}: it is root's, but not in a tree root alone controls")
+    try:
+        account = pwd.getpwuid(status.st_uid)
+    except KeyError:
+        raise RuntimeError(f"refusing {path}: uid {status.st_uid} is no account") from None
+    try:
+        inside = owner_writes.within_owner_root(account.pw_name, Path(text))
+    except (KeyError, ValueError, OSError):
+        inside = False
+    if not inside:
+        raise RuntimeError(f"refusing {path}: it is {account.pw_name}'s, but outside {account.pw_name}'s own roots")
+    return account
+
+
+def _acting(account: pwd.struct_passwd | None, action) -> tuple[Path, ...]:
+    """`action()`'s installed paths, run as `account` -- in a child that has become it first, so every git command
+    and every file is the owner's and a link leads only where the owner can go -- or as root for None."""
+    global _ACTING
+    from scripts.account_drop import _drop_to_account
+
+    if account is None:
+        _ACTING = "root"
+        try:
+            return tuple(action())
+        finally:
+            _ACTING = ""
+    reader, writer = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - reported through the pipe
+        os.close(reader)
+        try:
+            os.chdir("/")
+            _drop_to_account(account.pw_uid, account.pw_gid)
+            os.environ["HOME"] = account.pw_dir
+            _ACTING = "owner"
+            answer = {"installed": [str(path) for path in action()]}
+        except BaseException as exc:
+            answer = {"error": f"{type(exc).__name__}: {exc}"}
+        with os.fdopen(writer, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps(answer))
+        os._exit(0)
+    os.close(writer)
+    with os.fdopen(reader, encoding="utf-8") as stream:
+        said = stream.read()
+    _pid, status = os.waitpid(pid, 0)
+    try:
+        answer = json.loads(said) if os.waitstatus_to_exitcode(status) == 0 else {}
+    except ValueError:
+        answer = {}
+    if "error" in answer:
+        raise RuntimeError(f"installing as {account.pw_name}: {answer['error']}")
+    if "installed" not in answer:
+        raise RuntimeError(f"the installation as {account.pw_name} did not finish")
+    return tuple(Path(path) for path in answer["installed"])
+
+
+def _not_for_root(repository: Path) -> None:
+    if os.geteuid() == 0 and not _ACTING:
+        raise RuntimeError(
+            f"refusing to install hooks in {repository} as root: install_repository_policy or install_project_config "
+            "installs them as the repository's owner")
+
+
+#: Each release's helpers, read once -- by root, before a child that has become the owner needs them.
+_HELPERS: dict[str, tuple[tuple[str, bytes], ...]] = {}
+
+
+def _helpers(source_root: Path) -> tuple[tuple[str, bytes], ...]:
+    key = str(source_root)
+    if key not in _HELPERS:
+        _HELPERS[key] = tuple((name, (source_root / "scripts" / source).read_bytes()) for name, source in PRE_COMMIT_HELPERS)
+    return _HELPERS[key]
 
 
 def _preserve_existing_hook(hook: Path, *, replace_warning_only: bool = False) -> Path:
@@ -168,12 +295,14 @@ def render_template_pre_commit() -> str:
 def install_local_warning(repository: Path, *, source_root: Path, line_limit: int = DEFAULT_LINE_LIMIT) -> Path:
     if line_limit <= 0:
         raise ValueError("line limit must be positive")
+    _not_for_root(repository)
+    helpers = _helpers(source_root)
     hooks = _hooks_path(repository)
     owner = _owner(hooks)
     hooks.mkdir(parents=True, exist_ok=True)
     os.chown(hooks, *owner)
-    for installed_name, source_name in PRE_COMMIT_HELPERS:
-        _install_file(source_root / "scripts" / source_name, hooks / installed_name, owner=owner)
+    for installed_name, content in helpers:
+        _install_file(content, hooks / installed_name, owner=owner)
     hook = hooks / "pre-commit"
     upstream = _preserve_existing_hook(hook, replace_warning_only=True)
     if upstream != hooks / "pre-commit.switchyard-upstream":
@@ -186,6 +315,7 @@ def install_local_warning(repository: Path, *, source_root: Path, line_limit: in
 def install_main_guard(repository: Path, *, project: str) -> Path:
     if not PROJECT_RE.fullmatch(project):
         raise ValueError("project must match ^[a-z0-9][a-z0-9_-]{0,63}$")
+    _not_for_root(repository)
     hooks = _hooks_path(repository)
     owner = _owner(hooks)
     hooks.mkdir(parents=True, exist_ok=True)
@@ -231,6 +361,13 @@ def install_repository_policy(
     local_warning: bool = True,
     main_guard: bool = True,
 ) -> tuple[Path, ...]:
+    if os.geteuid() == 0 and not _ACTING:
+        # Root installs as the repository's owner, or in its own tree, never as root in a tree the tenant chose.
+        account = _root_actor(repository)
+        if local_warning:
+            _helpers(source_root)
+        return _acting(account, lambda: install_repository_policy(
+            repository, source_root=source_root, project=project, local_warning=local_warning, main_guard=main_guard))
     installed: list[Path] = []
     if local_warning:
         installed.append(install_local_warning(repository, source_root=source_root))
@@ -240,6 +377,14 @@ def install_repository_policy(
 
 
 def install_project_config(config_path: Path, *, source_root: Path) -> tuple[Path, ...]:
+    if os.geteuid() == 0 and not _ACTING:
+        # The configuration's owner reads it and installs into what it names, as itself (SYRD-614). Root's own
+        # configuration, in a tree root alone controls, is read here; each repository it names is still
+        # installed below as that repository's owner.
+        account = _root_actor(config_path)
+        _helpers(source_root)
+        if account is not None:
+            return _acting(account, lambda: install_project_config(config_path, source_root=source_root))
     config = json.loads(config_path.read_text(encoding="utf-8"))
     project = str(config["project"])
     repositories = [Path(str(config["repository"]))]

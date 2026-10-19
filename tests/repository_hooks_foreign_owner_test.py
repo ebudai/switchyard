@@ -2,7 +2,8 @@
 """Exercise repository hook Git access across a real ownership boundary.
 
 When run as root this test creates a temporary bare repository, transfers it to
-a non-root account, and performs the full guard installation twice. An
+a non-root account, proves root's own git and installer refuse it, and performs
+the full guard installation twice as that account (SYRD-614). An
 unprivileged process cannot create such a fixture; in that mode the test uses a
 real foreign-owned bare repository for the Git trust-boundary regression. The
 writable installation/idempotency path remains covered by repository_hooks_test.py.
@@ -22,7 +23,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from scripts.repository_hooks import MANAGED_MARKER, _git, install_main_guard
+from scripts.repository_hooks import MANAGED_MARKER, _acting, _git, install_main_guard
 
 
 def untrusted_git(repository: Path) -> subprocess.CompletedProcess[str]:
@@ -78,16 +79,27 @@ exit 0
         upstream.chmod(0o755)
         uid, gid = foreign_uid()
         chown_tree(repository, uid, gid)
+        Path(raw_temp).chmod(0o755)
 
-        assert_narrow_git_access(repository)
-        install_main_guard(repository, project="pgu")
+        # Root no longer turns git's ownership check off (SYRD-614): its own git refuses the foreign repository,
+        # and the hook installer refuses to install there as root.
+        rejected = _git(repository, "rev-parse", "--git-common-dir", check=False)
+        assert rejected.returncode != 0 and "dubious ownership" in rejected.stderr, rejected.stderr
+        try:
+            install_main_guard(repository, project="pgu")
+            raise AssertionError("root installed into a foreign repository as root")
+        except RuntimeError as exc:
+            assert "as root" in str(exc), exc
+        owner = pwd.getpwuid(uid)
+        as_owner = lambda: (install_main_guard(repository, project="pgu"),)  # noqa: E731
+        _acting(owner, as_owner)
         preserved = repository / "hooks" / "update.switchyard-upstream"
         assert preserved.read_text(encoding="utf-8") == upstream_text
         assert preserved.stat().st_uid == uid
 
         # Re-running over PGU's partial-rollout shape must retain the original
         # upstream and must never create a second-generation wrapper.
-        install_main_guard(repository, project="pgu")
+        _acting(owner, as_owner)
         assert preserved.read_text(encoding="utf-8") == upstream_text
         assert MANAGED_MARKER in upstream.read_text(encoding="utf-8")
         assert not (repository / "hooks" / "update.switchyard-upstream.switchyard-upstream").exists()

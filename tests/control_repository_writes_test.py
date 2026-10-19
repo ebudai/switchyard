@@ -40,7 +40,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts import team_launcher as launcher  # noqa: E402,I001
-from scripts import project_worktrees, tenant_paths  # noqa: E402
+from scripts import tenant_paths  # noqa: E402
 
 OWNER, OWNER_UID, FOREIGN_UID = "1500", 1500, 1700
 CHECKS = 0
@@ -391,29 +391,21 @@ def outside(host: Host) -> None:
 
 
 class Git:
-    """The owner-correct git chokepoint, stood in: which git root would have had the owner run, in order.
+    """The git root had run, from the runner's record: through the real chokepoint, which names the owner (SYRD-630)."""
 
-    Which account runs git -- `run_owner_correct_git` and the rules `_config_git_owner_rules` feeds it -- is decided
-    by resolving the configured paths, and changes nothing as root: every command it lets through runs as the owner.
-    It is the chokepoint for all of the launcher's git, not this repair, and is filed on its own under SYRD-606.
-    """
-
-    def __init__(self) -> None:
-        self.calls: list[list[str]] = []
-
-    def __call__(self, args, *, runner, owner_rules=(), **kwargs):
-        self.calls.append(list(args))
-        return subprocess.CompletedProcess(args, 0, "", "")
+    def __init__(self, runner: Runner) -> None:
+        self.calls = [call for call in runner.calls if "git" in call]
 
     def ran(self, word: str) -> bool:
         return any(word in call for call in self.calls)
 
 
 def ensure(host: Host, runner: Runner | None = None) -> tuple[object, Git, list[str]]:
-    git = Git()
-    with standing_in(launcher, run_owner_correct_git=git), \
-            standing_in(project_worktrees, _config_git_owner_rules=lambda config: []), lookups(host.homes) as seen:
-        result = launcher.ensure_control_repository(host.config, runner=runner or Runner())
+    runner = runner or Runner()
+    with lookups(host.homes) as seen:
+        result = launcher.ensure_control_repository(host.config, runner=runner)
+    git = Git(runner)
+    check(all(call[:3] == ["sudo", "-u", OWNER] for call in git.calls), f"every git the owner's: {git.calls}")
     return result, git, seen
 
 

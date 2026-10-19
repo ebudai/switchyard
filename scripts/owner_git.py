@@ -29,10 +29,12 @@ through the launcher, exactly as before. This module never imports
 
 from __future__ import annotations
 
+import os
 import pwd
+import stat
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Sequence
 
 
@@ -76,7 +78,78 @@ def _git_target_path_from_args(args: Sequence[str]) -> Path | None:
     return None
 
 
+def _lexical(path: Path | str) -> str:
+    """`path` exactly as written when it is a normalised absolute path, else "": what root matches, never resolved."""
+    text = str(path)
+    if not text.startswith("/") or text != str(PurePosixPath(text)) or "/../" in f"{text}/":
+        return ""
+    return text
+
+
+def _lexically_under(text: str, root: str) -> bool:
+    return text == root or text.startswith(root.rstrip("/") + "/")
+
+
+def _walk_git_target(text: str) -> tuple[str, bool]:
+    """Why root may not name `text` as a git target, and whether root alone controls it -- walked by descriptor
+    from `/` without following a link or looking up a pathname.
+
+    A link at any component that exists is refused. Root controls the target only when every component exists,
+    belongs to root and is writable by nobody else, so nobody else can choose what it names.
+    """
+    held = os.open("/", os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        status = os.fstat(held)
+        controlled = status.st_uid == 0 and not status.st_mode & 0o022
+        walked = ""
+        for name in text.split("/")[1:]:
+            walked += "/" + name
+            try:
+                status = os.stat(name, dir_fd=held, follow_symlinks=False)
+            except FileNotFoundError:
+                return "", False
+            if stat.S_ISLNK(status.st_mode):
+                return f"{walked} is a link", False
+            controlled = controlled and status.st_uid == 0 and not status.st_mode & 0o022
+            if not stat.S_ISDIR(status.st_mode):
+                return ("", controlled) if walked == text else (f"{walked} is not a directory", False)
+            following = os.open(name, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=held)
+            os.close(held)
+            held = following
+        return "", controlled
+    except OSError as exc:
+        return f"cannot walk to {text}: {exc.strerror or exc}", False
+    finally:
+        os.close(held)
+
+
+def _root_git_owner(target: Path, owner_rules: Sequence[GitOwnerRule]) -> tuple[str, str]:
+    """Who runs git at `target` when root asks (SYRD-630): the account a rule names for it, matched on the path
+    as written -- never resolved, never by who owns what it leads to -- or root, only in a tree root alone
+    controls. A link at the target or above it, a path that is not normalised and absolute, and an unmatched
+    target root does not control are refused, never followed or handed to an account by path."""
+    from scripts import team_launcher as launcher
+
+    text = _lexical(target)
+    if not text:
+        return "", f"refusing git target {target}: root names one only by a normalised absolute path"
+    owner = next((rule.owner_user for rule in owner_rules
+                  if rule.owner_user and _lexical(rule.root) and _lexically_under(text, _lexical(rule.root))), "")
+    problem, controlled = _walk_git_target(text)
+    if problem:
+        return "", f"refusing git target {target}: {problem}"
+    root = launcher.current_user_name()
+    if owner and owner != root:
+        return owner, ""
+    if controlled:
+        return root, ""
+    why = "it is not root's alone" if owner else "no owner rule names it, and it is not root's alone"
+    return "", f"refusing git target {target}: {why}, and root runs git only in a tree nobody else controls"
+
+
 def _git_owner_for_target(target: Path, owner_rules: Sequence[GitOwnerRule]) -> tuple[str, str]:
+    if os.geteuid() == 0:
+        return _root_git_owner(target, owner_rules)
     # A configured target must not be redirected after validation.  In
     # particular, do not follow a role-owned worktree symlink into another
     # tenant and then choose that destination's owner (SYRD-66).
@@ -305,15 +378,26 @@ def _owner_project_git_runner(
 ) -> Callable[..., subprocess.CompletedProcess[Any]]:
     from scripts import team_launcher as launcher
 
-    normalized_roots = [launcher._normalized_path(project_dir), *(launcher._normalized_path(path) for path in owned_roots)]
+    as_root = os.geteuid() == 0
+    if as_root:
+        # Root matches the roots and each path as written (SYRD-630): `resolve()` would decide by where a link leads.
+        lexical = [_lexical(path) for path in (project_dir, *owned_roots)]
+        normalized_roots = [Path(text) for text in lexical if text]
+    else:
+        normalized_roots = [launcher._normalized_path(project_dir), *(launcher._normalized_path(path) for path in owned_roots)]
     owner_rules = [GitOwnerRule(root, owner_user) for root in normalized_roots]
 
     def is_owned_path(path: Path) -> bool:
+        if as_root:
+            text = _lexical(path)
+            return bool(text) and any(_lexically_under(text, str(root)) for root in normalized_roots)
         return any(_path_is_under(path, root) for root in normalized_roots)
 
     def wrapped(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
         if len(args) >= 3 and args[:2] == ["mkdir", "-p"] and is_owned_path(Path(args[2])):
             return runner(["sudo", "-u", owner_user, *args], **kwargs)
+        if as_root and len(args) >= 3 and args[:2] == ["mkdir", "-p"]:
+            return subprocess.CompletedProcess(list(args), 125, stderr=f"refusing to make {args[2]} as root: it is in none of {owner_user}'s project roots")
         if len(args) >= 3 and args[:2] == ["test", "-x"] and is_owned_path(Path(args[2])):
             return runner(["sudo", "-u", owner_user, *args], **kwargs)
         if args[:1] == ["git"]:

@@ -6,6 +6,7 @@ import stat
 from unittest.mock import patch
 
 from team_launcher_test_helpers import *
+from root_tree_stand_in import roots_own
 
 def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
     current_user = team_launcher.current_user_name()
@@ -1454,22 +1455,20 @@ def test_fresh_provisioning_emits_no_role_account_handoff() -> None:
         # so provisioning is driven as the root it is on a host.
         privileged_root = tmp_path / "etc-switchyard"
 
-        with _provisioning_as_root(privileged_root), redirect_stdout(StringIO()):
-            assert (
-                new_project_command(
-                    "porter",
-                    owner_user=current_user,
-                    source_repo=source_repo,
-                    commit_git_dir="/srv/git/review-cache.git",
-                    repository=project_repo,
-                    output_dir=output_dir,
-                    runner=FakeRunner(),
-                    port_in_use=lambda _port: False,
-                    socket_exists=lambda _path: False,
-                    print_func=printed.append,
-                )
-                == 0
-            )
+        # The fixture source stands in for root's installed release (SYRD-630).
+        with _provisioning_as_root(privileged_root), roots_own(source_repo), redirect_stdout(StringIO()):
+            assert new_project_command(
+                "porter",
+                owner_user=current_user,
+                source_repo=source_repo,
+                commit_git_dir="/srv/git/review-cache.git",
+                repository=project_repo,
+                output_dir=output_dir,
+                runner=FakeRunner(),
+                port_in_use=lambda _port: False,
+                socket_exists=lambda _path: False,
+                print_func=printed.append,
+            ) == 0
 
         handoff = privileged_root / "porter" / "porter-role-accounts.sh"
         assert not handoff.exists(), printed

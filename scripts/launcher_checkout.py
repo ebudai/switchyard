@@ -27,6 +27,7 @@ in the launcher.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -137,7 +138,8 @@ def _launcher_checkout_runner(
 ) -> tuple[Callable[..., subprocess.CompletedProcess[Any]] | None, str]:
     from scripts import team_launcher as launcher
 
-    owner_user, error = launcher._path_owner_user(repo)
+    # As root, never who owns what the path leads to: root's own checkout, proven by descriptor, or none (SYRD-630).
+    owner_user, error = launcher._git_owner_for_target(repo, ()) if os.geteuid() == 0 else launcher._path_owner_user(repo)
     if not owner_user:
         return None, error or "owner is unknown"
     return _owner_correct_git_runner(runner=runner, owner_rules=[launcher.GitOwnerRule(repo, owner_user)]), ""

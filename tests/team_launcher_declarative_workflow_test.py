@@ -16,6 +16,8 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tests"))
+from root_tree_stand_in import roots_own
 from scripts.ticket_board.workflow_config import validate
 from scripts.workflow_launcher import (
     board_unit_role_account_gap,
@@ -75,8 +77,9 @@ def provisioning_ownership(owner):
                 # scoped chown executes, against disposable namespace files.
                 return host(args, **kwargs)
 
-            assert (
-                launcher.new_project_command(
+            # The checkout stands in for root's installed release (SYRD-630).
+            with roots_own(ROOT):
+                provisioned = launcher.new_project_command(
                     "cerulean",
                     owner_user=owner,
                     owner_home=root / "owner-home",
@@ -90,8 +93,7 @@ def provisioning_ownership(owner):
                     socket_exists=lambda path: False,
                     print_func=lambda text: None,
                 )
-                == 0
-            )
+            assert provisioned == 0
             config = output / "cerulean.json"
             raw = json.loads(config.read_text())
             layout = Path(raw["layout"])

@@ -256,8 +256,10 @@ def privileged_cases() -> None:
     document.write_text(json.dumps(with_uiux(adopted)), encoding="utf-8")
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
-            patch.object(wm, "_hand_projection_to_tenant", lambda *_paths: None):
-        # The hand-over is a no-op for the unprivileged tenant this stands in for.
+            patch.object(wm, "_hand_projection_to_tenant", lambda *_paths: None), \
+            patch.object(wm, "refuse_root_write", lambda _operation: None):
+        # The hand-over is a no-op, and root's refusal (SYRD-623) never reached, for the unprivileged tenant this
+        # stands in for.
         check(wm.main(["apply", "--document", str(document), "--config", str(config_path),
                        "--board-url", base]) == 0, err.getvalue()[-800:])
     live = board(None)[0]
@@ -345,7 +347,8 @@ def privileged_cases() -> None:
     main_role["runtime"] = "claude" if moved_from != "claude" else "codex"
     document.write_text(json.dumps(second), encoding="utf-8")
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), \
-            patch.object(wm, "_hand_projection_to_tenant", lambda *_paths: None):
+            patch.object(wm, "_hand_projection_to_tenant", lambda *_paths: None), \
+            patch.object(wm, "refuse_root_write", lambda _operation: None):
         check(wm.main(["apply", "--document", str(document), "--config", str(config_path),
                        "--board-url", base]) == 0, "the tenant's second apply")
     live2 = board(None)[0]

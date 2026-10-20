@@ -539,6 +539,9 @@ def test_expansions(scratch: Path) -> None:
     elsewhere.mkdir()
     (elsewhere / "writes.sh").write_text(f"touch {live}/home/from-a-file\n")
     (elsewhere / "itself.sh").write_text(f". {elsewhere}/itself.sh\n")
+    (elsewhere / "library.sh").write_text("never_called() { loginctl enable-linger nobody; }\n"
+                                          'write() { touch "$1"; }\n'
+                                          f"write_live() {{ touch {live}/home/library; }}\n")
     before = os.lstat(live / "home")
     code = ("import os, subprocess, sys\n"
             "L, E = sys.argv[1] + '/home', sys.argv[2]\n"
@@ -570,12 +573,26 @@ def test_expansions(scratch: Path) -> None:
             "attempt('expanded heredoc', f'cat > {E}/doc <<EOF\\n$(touch {L}/heredoc)\\nEOF')\n"
             "attempt('unset variable', 'touch \"$NOPE_SYRD627/x\"')\n"
             "attempt('positional', 'f() { touch \"$1\"; }; f x')\n"
-            "attempt('loop variable', 'for f in a b; do touch \"$f\"; done')\n"
+            "attempt('loop variable', f'for f in {E}/a {L}/b; do touch \"$f\"; done')\n"
+            "attempt('read variable', 'read x; touch \"$x\"')\n"
+            "attempt('function before its variable', f'f() {{ rm -rf \"$D\"; }}; D={L}; f')\n"
+            "attempt('trap', f\"D={L}; trap 'rm -rf \\\"$D\\\"' EXIT\")\n"
+            "attempt('trap through a function', f'cleanup() {{ rm -rf \"$D\"; }}; trap cleanup EXIT; D={L}')\n"
+            "attempt('library function', f'. {E}/library.sh; write_live')\n"
+            "attempt('library wrapper', f'. {E}/library.sh; write {L}/wrapped')\n"
+            "attempt('a value set in one branch', f'if x; then D={E}; else D={L}; fi; touch \"$D/q\"')\n"
+            "attempt('sudo shim', f'sudo() {{ \"$@\"; }}; sudo touch {L}/shim')\n"
+            "attempt('unknown command', '$(echo rm) -rf /x')\n"
             "attempt('stdin', 'echo x | xargs rm')\n"
             "attempt('relative after an unknown cd', 'cd \"$NOPE_SYRD627\"; touch x', cwd=E)\n"
             "attempt('past the depth limit', f'. {E}/itself.sh')\n"
             "attempt('safe variable', f'P={E}; touch \"$P/fine\"')\n"
             "attempt('safe export', f'export P={E}; touch \"$P/fine-export\"')\n"
+            "attempt('uncalled library function', f'. {E}/library.sh; echo hi')\n"
+            "attempt('library wrapper, safe', f'. {E}/library.sh; write {E}/wrapped')\n"
+            "attempt('guarded cleanup', 'cleanup() { if [ -n \"${work_root:-}\" ]; then rm -rf -- \"$work_root\"; fi; }; trap cleanup EXIT')\n"
+            "attempt('repository root', 'R=\"$(cd \"$(dirname \"$0\")\" && pwd)\"; touch \"$R/root\"', cwd=E)\n"
+            "attempt('mktemp', 'w=$(mktemp -d); mkdir -p \"$w/x\"')\n"
             "attempt('safe default', 'touch \"${NOPE_SYRD627:-' + E + '}/fine-default\"')\n"
             "attempt('quoted heredoc', f\"cat > {E}/doc2 <<'EOF'\\n$(touch {L}/data)\\nEOF\")\n"
             "attempt('single-quoted', f\"echo '$(touch {L}/literal)' > {E}/literal\")\n"
@@ -584,8 +601,11 @@ def test_expansions(scratch: Path) -> None:
     refused = ("variable", "exported", "chown through a variable", "HOME", "XDG", "tilde", "default", "substitution",
                "backtick", "substitution as the target", "eval", "script file", "sourced", "find -delete", "sed -i", "if",
                "case", "function", "cd in a group", "expanded heredoc", "unset variable", "positional", "loop variable",
-               "stdin", "relative after an unknown cd", "past the depth limit")
-    ran = ("safe variable", "safe export", "safe default", "quoted heredoc", "single-quoted", "cd scoped to a group")
+               "stdin", "relative after an unknown cd", "past the depth limit", "read variable",
+               "function before its variable", "trap", "trap through a function", "library function", "library wrapper",
+               "a value set in one branch", "sudo shim", "unknown command")
+    ran = ("safe variable", "safe export", "uncalled library function", "library wrapper, safe", "guarded cleanup",
+           "repository root", "mktemp", "safe default", "quoted heredoc", "single-quoted", "cd scoped to a group")
     expected = ";".join([f"{name} refused" for name in refused] + [f"{name} ran" for name in ran])
     env = {**os.environ, live_boundary.LIVE_ROOTS_ENV: str(live), live_boundary.INVOKER_UID_ENV: str(os.getuid()),
            "PYTHONPATH": str(live_boundary.SITE_DIR)}

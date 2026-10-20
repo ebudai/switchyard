@@ -39,6 +39,7 @@ CANDIDATES = 32
 ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
 _PARAMETER = re.compile(r"\$\{(?P<braced>[A-Za-z_]\w*(?:\[0\])?|[0-9@*#?$!])(?P<rest>[^}]*)\}"
                         r"|\$(?P<bare>[A-Za-z_]\w*|[0-9@*#?$!])")
+_POSITIONAL_PROGRAMS = frozenset({'"$@"', "$@", "$*", "${@}", '"${@}"', "$1", '"$1"', "${1}"})
 #: Commands that only drop or alter lines of the files they read.
 _FILTERS = frozenset({"sed", "cat", "grep", "head", "tail", "cut", "tr"})
 _FUNCTION_HEAD = re.compile(r"^([A-Za-z_][\w.:-]*)\(\)$")
@@ -284,6 +285,13 @@ def substituted(body: str, variables: dict, cwd: str | None) -> list[str] | None
             value = os.path.normpath(os.path.join(here or "/", operands[0]))
         elif (name == "command" and arguments[:1] == ["-v"] and len(operands) == 1) or (name == "which" and operands):
             value = shutil.which(operands[0], path=_first(variables.get("PATH"))) or ""
+        elif name == "id" and arguments in (["-u"], ["-ur"]):
+            value = str(os.geteuid())
+        elif (name == "id" and arguments in (["-un"], ["-nu"])) or (name == "whoami" and not arguments):
+            try:
+                value = pwd.getpwuid(os.geteuid()).pw_name
+            except KeyError:
+                return None
         elif name == "mktemp":
             value = _mktemp(arguments, variables, here)
             if value is None:
@@ -410,6 +418,7 @@ class Shell:
         self.set_positional(positional)
         self.functions: dict[str, list[tuple[list[str], str | None, bool, str, str | None]]] = {}
         self.called: set[str] = set()
+        self.wrappers: set[str] = set()  # functions that run their arguments as a command
         self.every_function = False
         self.traps: list[tuple[str, str | None]] = []
 
@@ -445,10 +454,39 @@ class Reader:
         if source:
             shell.assign("0", [source])
             shell.variables["BASH_SOURCE"] = shell.variables["BASH_SOURCE[0]"] = [source]
+        self._segments(commands(script), shell, cwd, depth)
+        if finish:
+            self._finish(shell, cwd, depth)
+
+    def _segments(self, items, shell: Shell, cwd: str | None, depth: int) -> None:
+        """Commands in order, as the shell meets them: function definitions kept for their calls, `cd` held within
+        its group, and an `if` branch whose condition is known to be false skipped."""
         here, groups = cwd, []
-        capturing: list[tuple[str, int]] = []  # (function, group depth its body opened at)
+        capture: list = []  # [function, depth of its braces] while a function's body is being kept
         pending: str | None = None
-        for words, body, quoted, raw in commands(script):
+        frames: list[dict] = []  # one per open `if`: its condition's value, whether a branch was taken, which part
+        for item in items:
+            words, body, quoted, raw = item
+            if capture:
+                opened = sum(1 for w in itertools.takewhile(lambda w: w in KEYWORDS, words) if w in ("(", "{"))
+                closes = len(words) - len(list(itertools.dropwhile(lambda w: w in (")", "}"), reversed(words))))
+                open_now = capture[1] + opened
+                if closes >= open_now:
+                    # The function's own closer is the open_now-th trailing closer; those before it stay in the body.
+                    kept = words[:len(words) - closes] + words[len(words) - closes:][:open_now - 1]
+                    shell.functions[capture[0]].append((kept, body, quoted, raw, here))
+                    capture.clear()
+                else:
+                    capture[1] = open_now - closes
+                    shell.functions[capture[0]].append((words, body, quoted, raw, here))
+                continue
+            first = next((w for w in words if w not in ("(", "{")), "")
+            if first in ("if", "elif", "then", "else", "fi"):
+                words = self._condition(first, words, frames, shell, here)
+                if words is None:
+                    continue
+            if any(_skipping(frame) for frame in frames):
+                continue
             words = list(itertools.dropwhile(lambda w: w in KEYWORDS and w not in ("(", "{"), words))
             head = _FUNCTION_HEAD.match(words[0]) if words else None
             if words[:1] == ["function"] and len(words) > 1:
@@ -456,28 +494,53 @@ class Reader:
             elif head:
                 pending, words = head.group(1), words[1:]
             if pending and words[:1] in (["{"], ["("]):
-                capturing.append((pending, len(groups)))
-                shell.functions.setdefault(pending, [])
-                pending = None
-            opened = 0
+                name, pending = pending, None
+                shell.functions[name] = []
+                rest = words[1:]
+                closes = len(rest) - len(list(itertools.dropwhile(lambda w: w in (")", "}"), reversed(rest))))
+                if closes:
+                    shell.functions[name].append((rest[:len(rest) - closes], body, quoted, raw, here))
+                else:
+                    capture[:] = [name, 1]
+                    if rest:
+                        shell.functions[name].append((rest, body, quoted, raw, here))
+                if rest and rest[0] in _POSITIONAL_PROGRAMS:
+                    shell.wrappers.add(name)
+                continue
             while words[:1] in (["("], ["{"]):
                 groups.append(here)
-                opened += 1
                 words = list(itertools.dropwhile(lambda w: w in KEYWORDS and w not in ("(", "{"), words[1:]))
             closes = 0
             while words and words[-1] in (")", "}"):
                 closes += 1
                 words = words[:-1]
-            if capturing and (len(groups) > capturing[-1][1] or opened):
-                shell.functions[capturing[-1][0]].append((words, body, quoted, raw, here))
-            else:
-                here = self._one(words, body, quoted, raw, shell, here, depth)
+            here = self._one(words, body, quoted, raw, shell, here, depth)
             for _ in range(closes):
                 here = groups.pop() if groups else here
-                if capturing and len(groups) <= capturing[-1][1]:
-                    capturing.pop()
-        if finish:
-            self._finish(shell, cwd, depth)
+
+    def _condition(self, keyword: str, words: list[str], frames: list[dict], shell: Shell,
+                   here: str | None) -> list[str] | None:
+        """Follow `if`/`elif`/`then`/`else`/`fi`; returns the command the segment still holds (None: none)."""
+        rest = words[words.index(keyword) + 1:]
+        if keyword == "if":
+            frames.append({"value": None if any(map(_skipping, frames)) else evaluate(rest, shell.variables, here),
+                           "taken": False, "part": "condition"})
+            return rest  # the condition is itself a command that runs
+        if not frames:
+            return rest
+        frame = frames[-1]
+        if keyword == "fi":
+            frames.pop()
+            return rest or None
+        if frame["value"] is True and frame["part"] == "then":
+            frame["taken"] = True
+        if keyword == "elif":
+            frame["part"] = "condition"
+            if not frame["taken"]:
+                frame["value"] = evaluate(rest, shell.variables, here)
+            return None if frame["taken"] else rest
+        frame["part"] = "then" if keyword == "then" else "else"
+        return rest or None
 
     def _finish(self, shell: Shell, cwd: str | None, depth: int) -> None:
         """Called functions (every function, once a command's name could not be known) and traps, read with every
@@ -535,8 +598,9 @@ class Reader:
         shell.set_positional(arguments)
         self.calling.append(name)
         try:
-            for words, body, quoted, raw, defined_here in shell.functions[name]:
-                self._one(words, body, quoted, raw, shell, defined_here, depth + 1)
+            body = shell.functions[name]
+            self._segments([(w, b, q, r) for w, b, q, r, _here in body], shell, body[0][4] if body else None,
+                           depth + 1)
         finally:
             self.calling.pop()
             shell.set_positional(None)
@@ -606,8 +670,8 @@ class Reader:
                 arguments = [expand(word, shell.variables, here) for word in words[1:]]
                 known = None if any(v is None or len(v) != 1 for v in arguments) else [v[0] for v in arguments]
                 self._call(words[0], known, shell, depth)
-                if len(words) > 1:
-                    # A function may run its arguments ("$@"): they are checked as a command too.
+                if len(words) > 1 and words[0] in shell.wrappers:
+                    # A function that runs its arguments ("$@"): they are checked as a command too.
                     self.check(words[1:], here, shell.variables, depth)
         if body is not None:
             reader = [w for w in words if not ASSIGNMENT.match(w)]
@@ -617,6 +681,85 @@ class Reader:
                 for nested in substitutions(body):
                     self.script(nested, shell, here, depth + 1, finish=False)
         return here
+
+
+def _skipping(frame: dict) -> bool:
+    """Whether the `if` part being read cannot run: a later part once a branch was taken, a `then` whose
+    condition is false, an `else` whose condition is true."""
+    if frame["taken"]:
+        return True
+    return (frame["part"] == "then" and frame["value"] is False) or (frame["part"] == "else" and frame["value"] is True)
+
+
+def evaluate(words: list[str], variables: dict, cwd: str | None) -> bool | None:
+    """Whether an `if` condition holds, when the guard can know: `[[ ... ]]`, `[ ... ]` and `test` over values it
+    can expand, with ==, =, !=, -n, -z, -eq, -ne, !, &&, || (-a, -o). None for anything else."""
+    negate = False
+    while words[:1] == ["!"]:
+        negate, words = not negate, words[1:]
+    if not words:
+        return None
+    if words[0] == "[[" and words[-1] == "]]":
+        inner = words[1:-1]
+    elif words[0] == "[" and words[-1] == "]":
+        inner = words[1:-1]
+    elif words[0] == "test":
+        inner = words[1:]
+    else:
+        return None
+    value = _disjunction(inner, variables, cwd)
+    return None if value is None else value != negate
+
+
+def _disjunction(words: list[str], variables: dict, cwd: str | None) -> bool | None:
+    parts = _split_on(words, ("||", "-o"))
+    values = [_conjunction(part, variables, cwd) for part in parts]
+    if True in values:
+        return True
+    return None if None in values else False
+
+
+def _conjunction(words: list[str], variables: dict, cwd: str | None) -> bool | None:
+    values = [_term(part, variables, cwd) for part in _split_on(words, ("&&", "-a"))]
+    if False in values:
+        return False
+    return None if None in values else True
+
+
+def _split_on(words: list[str], operators: tuple[str, ...]) -> list[list[str]]:
+    parts, current = [], []
+    for word in words:
+        if word in operators:
+            parts.append(current)
+            current = []
+        else:
+            current.append(word)
+    parts.append(current)
+    return parts
+
+
+def _term(words: list[str], variables: dict, cwd: str | None) -> bool | None:
+    negate = False
+    while words[:1] == ["!"]:
+        negate, words = not negate, words[1:]
+    values = [expand(word, variables, cwd) if word not in _TEST_OPERATORS else [word] for word in words]
+    if any(v is None or len(v) != 1 for v in values):
+        return None
+    words = [v[0] for v in values]
+    if len(words) == 2 and words[0] in ("-n", "-z"):
+        result = bool(words[1]) if words[0] == "-n" else not words[1]
+    elif len(words) == 3 and words[1] in ("==", "=", "!="):
+        result = (words[0] == words[2]) != (words[1] == "!=")
+    elif len(words) == 3 and words[1] in ("-eq", "-ne") and all(re.fullmatch(r"-?\d+", w) for w in words[::2]):
+        result = (int(words[0]) == int(words[2])) != (words[1] == "-ne")
+    elif len(words) == 1:
+        result = bool(words[0])
+    else:
+        return None
+    return result != negate
+
+
+_TEST_OPERATORS = frozenset({"==", "=", "!=", "-n", "-z", "-eq", "-ne", "!"})
 
 
 def _combine_all(candidates: list[list[str] | None]) -> list[str] | None:

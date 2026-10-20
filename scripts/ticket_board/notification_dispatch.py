@@ -253,6 +253,8 @@ class NotificationDispatch:
                 # SYRD-583: what was holding the pane, when its children were.
                 **({"holders": [holder.as_detail() for holder in activity_trace.holders]}
                    if getattr(activity_trace, "holders", ()) else {}),
+                # SYRD-633: a blocked hook's source, instant, classification and session.
+                **({"blocked": activity_trace.blocked} if getattr(activity_trace, "blocked", None) else {}),
             },
             "decision": decision,
             "decision_reason": reason,

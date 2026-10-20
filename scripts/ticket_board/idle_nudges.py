@@ -46,6 +46,8 @@ class IdleNudges:
         self._seen_turn_end_idle_since_by_role: dict[str, str] = {}
         self._consumed_present_idle_since_by_role: dict[str, str] = {}
         self._work_observed_at_by_role: dict[str, str] = {}
+        #: Set by `blocked_pane.run` once the board keeps blocked-pane episodes (SYRD-633).
+        self.blocked_panes_on_board = False
 
     def _reset_busy_backoff_for_idle_roles(self, conn: Any, idle_since_by_role: dict[str, str]) -> int:
         if not idle_since_by_role:
@@ -163,6 +165,10 @@ class IdleNudges:
         if gate_owner is None or not hasattr(gate_owner, "permission_prompt_waits"):
             # No gate means no pane state to read, which is "cannot tell" --
             # and cannot tell is not the same as nobody is waiting.
+            return 0
+        if self.blocked_panes_on_board:
+            # SYRD-633: this pass already reported every blocked pane, whatever
+            # wrote it, as an episode the Director hears of once.
             return 0
         waiting = gate_owner.permission_prompt_waits()
         if not waiting:

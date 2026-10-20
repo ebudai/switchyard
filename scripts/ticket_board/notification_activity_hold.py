@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from . import background_child, composer_hold
+from . import background_child, blocked_pane, composer_hold
 from .notification_dispatch import ComposerSnapshot, NotificationDispatch
 from .notification_eligibility import TERMINAL_STATES, NotificationEligibility
 from .notification_ledger import NotificationLedger
@@ -93,6 +93,19 @@ class ChildHoldTrace(ActivityTrace):
     holders: tuple[background_child.Holder, ...] = ()
 
 
+@dataclass(frozen=True)
+class BlockedHoldTrace(ActivityTrace):
+    """A blocked hook's hold, with what wrote it and what runs under the pane (SYRD-633).
+
+    The reason stays `hook_blocked`, so nothing about the hold changes: the
+    children are named, never released past, because a notice typed into a
+    question answers it.
+    """
+
+    holders: tuple[background_child.Holder, ...] = ()
+    blocked: dict[str, Any] | None = None
+
+
 class NotificationActivityHold:
     def __init__(
         self,
@@ -136,6 +149,15 @@ class NotificationActivityHold:
                     # turn is over while the composer holds the pane.
                     return ComposerHoldTrace(trace.busy, trace.reason, trace.region_digest,
                                              composer_hold.trusted_idle(gate_owner.state_store.read(target)))
+                if trace.busy and trace.reason == blocked_pane.HOOK_BLOCKED:
+                    try:
+                        found = blocked_pane.read(gate_owner, target)
+                    except Exception as exc:  # evidence for the trace, never a reason the hold changes
+                        self.logger.warning("Failed to describe %s's blocked hook: %s", target, exc)
+                        found = None
+                    if found is not None:
+                        return BlockedHoldTrace(trace.busy, trace.reason, trace.region_digest, found.holders,
+                                                found.as_detail())
                 child_holders = getattr(gate_owner, "child_holders", None)
                 holders = child_holders(target) if trace.busy and trace.reason in CHILD_HOLD_REASONS and callable(
                     child_holders) else ()

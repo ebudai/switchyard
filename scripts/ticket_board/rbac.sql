@@ -361,4 +361,11 @@ GRANT EXECUTE ON FUNCTION ticket_board.request_fresh_ticket_context(text, text) 
 GRANT EXECUTE ON FUNCTION ticket_board.ticket_context_continuation(text) TO ticket_board_service, ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.role_context_recovery(text) TO ticket_board_service;
 
+-- SYRD-633: blocked pane episodes.
+REVOKE ALL ON ticket_board.blocked_pane_episodes FROM PUBLIC;
+GRANT SELECT ON ticket_board.blocked_pane_episodes TO ticket_board_service;
+REVOKE EXECUTE ON FUNCTION ticket_board.close_blocked_pane(bigint, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.note_blocked_panes(jsonb, interval) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ticket_board.note_blocked_panes(jsonb, interval) TO ticket_board_listener;
+
 COMMIT;

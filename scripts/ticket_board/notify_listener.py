@@ -49,7 +49,7 @@ from .pane_activity_gate import (
 )
 from .idle_nudges import IdleNudges
 from . import reminder_snooze
-from . import capacity_retry, delivery_proof, pull_pickup, replaced_delivery, stall_episode
+from . import blocked_pane, capacity_retry, delivery_proof, pull_pickup, replaced_delivery, stall_episode
 from .notification_ledger import NotificationLedger
 from .notification_activity_hold import (
     NotificationActivityHold, ActivityTrace, SELF_REMINDER_KINDS,
@@ -1127,9 +1127,9 @@ WHERE (r.definition->>'active')::boolean
             self._log_missing_hook_state()
             while not self.stop_event.is_set():
                 self.refresh_workflow(conn)
-                # SYRD-537: a due batch's notice is written before any producer
-                # runs, so it is the oldest optional row about its members.
+                # SYRD-537: a due batch's notice is written before any producer runs, so it is the oldest optional row about its members.
                 self.process_reminder_snooze_due(conn)
+                blocked_pane.run(self, conn)  # SYRD-633: every blocked pane, before the reminders that then leave it alone
                 self.process_idle_turn_end_nudges(conn)
                 self.process_idle_stall_nudges(conn)
                 self.process_serial_focus_queue_wakeups(conn)

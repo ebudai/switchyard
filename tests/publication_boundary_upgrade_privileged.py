@@ -18,6 +18,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import live_boundary  # noqa: E402
+
+live_boundary.isolate()  # SYRD-627: no live home, pane store or runtime directory, here or in a child
+
 
 def enter(root: Path, repo: Path) -> None:
     subprocess.run(["mount", "--make-rprivate", "/"], check=False)

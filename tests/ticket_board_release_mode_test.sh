@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# SYRD-627: no live home, pane store or runtime directory, here or in any child.
+if [ -z "${SWITCHYARD_TEST_DISPOSABLE_ROOT:-}" ]; then
+  exec python3 "$(dirname "${BASH_SOURCE[0]}")/live_boundary.py" --run -- bash "${BASH_SOURCE[0]}" "$@"
+fi
 
 # SYRD-89 R3. A published board release root must be traversable by the board
 # service whatever umask the deploy inherited.
@@ -215,11 +219,12 @@ grep -q 'symlink' <<<"$link_refusal" \
     || fail "the symlink refusal must say what is wrong, got: $link_refusal"
 
 # A reused root the mask cannot save: no named entry, wrong group. Raising the
-# mask is not enough, so it must refuse with the command that fixes it rather
-# than hand an unreadable tree to the canary.
+# mask is not enough, so it must point to the supported provisioning repair
+# rather than hand an unreadable tree to the canary.
 refusal="$( ( ensure_release_root_serviceable "$probe/plain750" ) 2>&1 || true )"
-grep -q 'setfacl -m' <<<"$refusal" \
-    || fail "a root with no named entry must refuse with the exact setfacl command, got: $refusal"
+grep -q "Re-run this project's provisioning (switchyard upgrade fixture as root, then its operator packet)" \
+    <<<"$refusal" \
+    || fail "a root with no named entry must refuse with the supported provisioning repair, got: $refusal"
 as_service test -r "$probe/plain750" \
     && fail "the refusal path must not have granted access"
 

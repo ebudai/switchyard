@@ -37,6 +37,10 @@ for entry in (ROOT, Path(__file__).resolve().parent):
     if str(entry) not in sys.path:
         sys.path.insert(0, str(entry))
 
+import live_boundary  # noqa: E402
+
+live_boundary.isolate()  # SYRD-627: no live home, pane store or runtime directory, here or in a child
+
 from scripts import tenant_paths  # noqa: E402
 
 HELPER = str(ROOT / "scripts" / "tenant_paths.py")

@@ -33,6 +33,10 @@ import threading
 import time
 from pathlib import Path
 
+import live_boundary  # noqa: E402
+
+live_boundary.isolate()  # SYRD-627: this suite wrote otto-role0 records into the invoking account's live home
+
 ROOT = Path(__file__).resolve().parents[1]
 BEFORE = "9f762d180e572e21c8c5ab807384ab066f433b9c"  # main when SYRD-595 was cut (SYRD-594 merged)
 PANE_ENV_PREFIXES = ("TICKET_BOARD_", "PGU_TICKET_BOARD_", "DIRECTORCTL")

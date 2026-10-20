@@ -86,9 +86,26 @@ def hold_owner_root(owner_user: str, root: Path, *, ids: tuple[int, int] | None 
                                            getpwuid=pwd.getpwuid)
 
 
+SHIPPED_GETPWNAM, SHIPPED_GETPWUID, SHIPPED_GETPWALL = pwd.getpwnam, pwd.getpwuid, pwd.getpwall
+
+
+def stand_in_home(owner_user: str, home: Path) -> None:
+    """For a suite whose root child would otherwise build its tenant in the owner's real home: `home` is that
+    account's home in this process, for root's writes and for every account lookup (SYRD-627 -- no suite writes in a
+    real home). A later call replaces an earlier one."""
+    hold_owner_root(owner_user, home)
+
+    def swap(entry: pwd.struct_passwd) -> pwd.struct_passwd:
+        return pwd.struct_passwd((*entry[:5], str(home), entry[6])) if entry.pw_name == owner_user else entry
+
+    pwd.getpwnam = lambda name: swap(SHIPPED_GETPWNAM(name))
+    pwd.getpwuid = lambda uid: swap(SHIPPED_GETPWUID(uid))
+    pwd.getpwall = lambda: [swap(entry) for entry in SHIPPED_GETPWALL()]
+
+
 @contextlib.contextmanager
 def root_stage_in(directory: Path):
-    """Root's staging directory, for a suite whose root child writes in a real home (SYRD-611).
+    """Root's staging directory, for a suite whose root child writes in a home of its own (SYRD-611).
 
     Root stages in a directory only it can change on the destination's filesystem -- the home's parent on a
     host, which a user namespace cannot own -- so, while this holds, a private one made in `directory` instead.

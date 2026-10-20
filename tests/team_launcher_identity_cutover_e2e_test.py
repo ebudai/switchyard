@@ -28,6 +28,10 @@ if str(ROOT / "tests") not in sys.path:
 # Every pane this suite opens would otherwise ask the live tenant's systemd
 # user manager for a transient scope, however private its tmux socket is
 # (SYRD-55).
+import live_boundary  # noqa: E402
+
+live_boundary.isolate()  # SYRD-627: no live home, pane store or runtime directory, here or in a child
+
 from tmux_bus_isolation import isolate_tmux_bus
 
 isolate_tmux_bus()

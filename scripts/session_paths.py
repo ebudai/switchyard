@@ -26,6 +26,7 @@ This module never imports `team_launcher` at its top.
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -49,11 +50,31 @@ def _explicit_pane_state_dir_from_env() -> Path | None:
     return Path(value).expanduser() if value else None
 
 
+def _ambient_store_is_this_accounts(user_name: str) -> bool:
+    """Whether the caller's pane stores may stand for `user_name`'s: only when it is the caller's own account.
+
+    TICKET_BOARD_PANE_SESSION_DIR and TICKET_BOARD_PANE_STATE_DIR name the CURRENT
+    pane's stores, as account_session_dir says. Honoured for another account, they
+    handed that account the caller's live store: a project configuration with no
+    session_dir, loaded in the Audit pane for an owner that is not Audit's
+    account, put that project's records in Audit's own store, and a test running
+    as namespace root then chowned the live home to its owner (SYRD-627). An
+    account this host cannot resolve keeps the ambient store, as before.
+    """
+    from scripts import team_launcher as launcher
+
+    user = user_name.strip()
+    if not user:
+        return True
+    uid = launcher.uid_for_user(user)
+    return uid is None or uid == os.geteuid()
+
+
 def default_session_dir_for_user(user_name: str) -> Path:
     from scripts import team_launcher as launcher
 
     explicit = _explicit_session_dir_from_env()
-    if explicit is not None:
+    if explicit is not None and _ambient_store_is_this_accounts(user_name):
         return explicit
     owner_home = launcher.home_dir_for_user(user_name)
     if owner_home is None:
@@ -65,7 +86,7 @@ def default_pane_state_dir_for_user(user_name: str, *, project: str) -> Path:
     from scripts import team_launcher as launcher
 
     explicit = _explicit_pane_state_dir_from_env()
-    if explicit is not None:
+    if explicit is not None and _ambient_store_is_this_accounts(user_name):
         return explicit
     user = user_name.strip()
     if not user:

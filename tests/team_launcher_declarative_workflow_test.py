@@ -17,6 +17,10 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
+import live_boundary  # noqa: E402
+
+live_boundary.isolate()  # SYRD-627: no live home, pane store or runtime directory, here or in a child
+
 from root_tree_stand_in import roots_own
 from scripts.ticket_board.workflow_config import validate
 from scripts.workflow_launcher import (

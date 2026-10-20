@@ -571,8 +571,9 @@ def test_expansions(scratch: Path) -> None:
             "attempt('function', f'f() {{ touch {L}/function; }}; f')\n"
             "attempt('cd in a group', f'( cd {L} && touch group )')\n"
             "attempt('expanded heredoc', f'cat > {E}/doc <<EOF\\n$(touch {L}/heredoc)\\nEOF')\n"
-            "attempt('unset variable', 'touch \"$NOPE_SYRD627/x\"')\n"
-            "attempt('positional', 'f() { touch \"$1\"; }; f x')\n"
+            "attempt('unset variable, empty as in the shell', 'touch \"$NOPE_SYRD627/x\"')\n"
+            "attempt('positional, known at the call', 'f() { touch \"$1\"; }; f x')\n"
+            "attempt('positional from a read', f'f() {{ touch \"$1\"; }}; read y; f \"$y\"')\n"
             "attempt('loop variable', f'for f in {E}/a {L}/b; do touch \"$f\"; done')\n"
             "attempt('read variable', 'read x; touch \"$x\"')\n"
             "attempt('function before its variable', f'f() {{ rm -rf \"$D\"; }}; D={L}; f')\n"
@@ -600,13 +601,13 @@ def test_expansions(scratch: Path) -> None:
             "print(';'.join(out))\n")
     refused = ("variable", "exported", "chown through a variable", "HOME", "XDG", "tilde", "default", "substitution",
                "backtick", "substitution as the target", "eval", "script file", "sourced", "find -delete", "sed -i", "if",
-               "case", "function", "cd in a group", "expanded heredoc", "unset variable", "positional", "loop variable",
+               "case", "function", "cd in a group", "expanded heredoc", "positional from a read", "loop variable",
                "stdin", "relative after an unknown cd", "past the depth limit", "read variable",
                "function before its variable", "trap", "trap through a function", "library function", "library wrapper",
                "a value set in one branch", "sudo shim", "unknown command")
-    ran = ("safe variable", "safe export", "uncalled library function", "library wrapper, safe", "guarded cleanup",
+    ran = ("unset variable, empty as in the shell", "positional, known at the call", "safe variable", "safe export", "uncalled library function", "library wrapper, safe", "guarded cleanup",
            "repository root", "mktemp", "safe default", "quoted heredoc", "single-quoted", "cd scoped to a group")
-    expected = ";".join([f"{name} refused" for name in refused] + [f"{name} ran" for name in ran])
+    expected = {**{name: "refused" for name in refused}, **{name: "ran" for name in ran}}
     env = {**os.environ, live_boundary.LIVE_ROOTS_ENV: str(live), live_boundary.INVOKER_UID_ENV: str(os.getuid()),
            "PYTHONPATH": str(live_boundary.SITE_DIR)}
     for label, argv in (("a Python child", [sys.executable, "-c", code]),
@@ -614,10 +615,12 @@ def test_expansions(scratch: Path) -> None:
                                                "-c", code])):
         done = subprocess.run([*argv, str(live), str(elsewhere)], env=env, capture_output=True, text=True, timeout=180)
         after = os.lstat(live / "home")
-        check(done.stdout.strip() == expected and sorted(os.listdir(live / "home")) == []
+        outcomes = dict(item.rsplit(" ", 1) for item in done.stdout.strip().split(";") if " " in item)
+        wrong = {name: outcomes.get(name) for name in expected if outcomes.get(name) != expected[name]}
+        check(not wrong and len(outcomes) == len(expected) and sorted(os.listdir(live / "home")) == []
               and (after.st_uid, after.st_gid, after.st_mode) == (before.st_uid, before.st_gid, before.st_mode),
               f"{label}: every expanded write under a live root is refused (126), nothing is created or chowned, and "
-              f"what is safe runs: {done.stdout} {sorted(os.listdir(live / 'home'))} {done.stderr[-800:]}")
+              f"what is safe runs: wrong {wrong}, landed {sorted(os.listdir(live / 'home'))} {done.stderr[-800:]}")
 
 
 def test_sentinel_contents(scratch: Path) -> None:

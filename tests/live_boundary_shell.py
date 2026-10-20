@@ -39,6 +39,8 @@ CANDIDATES = 32
 ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
 _PARAMETER = re.compile(r"\$\{(?P<braced>[A-Za-z_]\w*(?:\[0\])?|[0-9@*#?$!])(?P<rest>[^}]*)\}"
                         r"|\$(?P<bare>[A-Za-z_]\w*|[0-9@*#?$!])")
+#: Commands that only drop or alter lines of the files they read.
+_FILTERS = frozenset({"sed", "cat", "grep", "head", "tail", "cut", "tr"})
 _FUNCTION_HEAD = re.compile(r"^([A-Za-z_][\w.:-]*)\(\)$")
 
 
@@ -131,6 +133,7 @@ def commands(script: str) -> list[tuple[list[str], str | None, bool, str]]:
     current: list[str] = []
     pending: list[tuple[int, str, bool, bool]] = []
     quote, depth, tick, index, size = "", 0, False, 0, len(script)
+    test = ""  # inside [[ ... ]] or (( ... )), where && and || are operators: the closing delimiter
 
     def finish() -> None:
         text = "".join(current).strip()
@@ -191,11 +194,22 @@ def commands(script: str) -> list[tuple[list[str], str | None, bool, str]]:
             continue
         elif char == ")" and depth:
             depth -= 1
+        elif not test and not depth and not tick and script.startswith(("[[", "((" ), index) \
+                and (not current or current[-1].isspace() or current[-1] in "!"):
+            test = "]]" if char == "[" else "))"
+            current.extend((char, following))
+            index += 2
+            continue
+        elif test and script.startswith(test, index):
+            test = ""
+            current.extend((char, following))
+            index += 2
+            continue
         elif char == "#" and not depth and not tick and (not current or current[-1].isspace()):
             while index < size and script[index] != "\n":
                 index += 1
             continue
-        elif char in ";&|\n" and not depth and not tick:
+        elif char in ";&|\n" and not depth and not tick and not (test and char in "&|"):
             previous = current[-1] if current else ""
             if (char == "&" and (following == ">" or previous in "<>")) or (char == "|" and previous == ">"):
                 current.append(char)
@@ -480,6 +494,32 @@ class Reader:
                 for text, here in traps:
                     self.script(text, shell, here, depth + 1, finish=False)
 
+    def _filtered(self, command: str, shell: Shell, here: str | None, depth: int) -> tuple[str | None, str | None]:
+        """What `source <(filter FILE...)` sources, for a filter that only drops or alters lines of the files it
+        reads (sed, cat, grep, head, tail, cut, tr): those files whole. The filter itself is checked as a command."""
+        self.script(command, shell, here, depth + 1, finish=False)
+        try:
+            words = split(command)
+        except ValueError:
+            return None, None
+        if not words or words[0] not in _FILTERS:
+            return None, None
+        files = []
+        for word in reversed(words[1:]):
+            if word.startswith("-"):
+                break
+            values = expand(word, shell.variables, here)
+            if not values or len(values) != 1:
+                return None, None
+            path = values[0] if values[0].startswith("/") else (os.path.join(here, values[0]) if here else None)
+            text = self.read_file(path) if path else None
+            if text is None:
+                break
+            files.insert(0, (path, text))
+        if not files:
+            return None, None
+        return "\n".join(text for _path, text in files), files[0][0]
+
     def _call(self, name: str, arguments: list[str] | None, shell: Shell, depth: int) -> None:
         """A function's body, read as it runs: with these arguments as its positional parameters (None: unknown).
         A function already being read further up is not read again."""
@@ -539,13 +579,16 @@ class Reader:
             self.script(" ".join(words[1:]), shell, here, depth + 1, finish=False)
             return here
         if words[:1] in (["."], ["source"]) and len(words) > 1:
-            path = expand(words[1], shell.variables, here)
-            text = None
-            if path and len(path) == 1:
+            path = expand(words[1], shell.variables, here) if not words[1].startswith("<(") else None
+            text = resolved = None
+            if words[1].startswith("<(") and words[1].endswith(")"):
+                text, resolved = self._filtered(words[1][2:-1], shell, here, depth)
+            elif path and len(path) == 1:
                 resolved = path[0] if path[0].startswith("/") else (os.path.join(here, path[0]) if here else None)
                 text = self.read_file(resolved) if resolved else None
             if text is None:
                 self.refuse(f"a sourced file the guard cannot read: {words[1]}")
+                return here
             self.script(text, shell, here, depth + 1, source=resolved, finish=False)
             return here
         if words:

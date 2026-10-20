@@ -538,6 +538,7 @@ def test_expansions(scratch: Path) -> None:
     (live / "home").mkdir(parents=True)
     elsewhere.mkdir()
     (elsewhere / "writes.sh").write_text(f"touch {live}/home/from-a-file\n")
+    (elsewhere / "itself.sh").write_text(f". {elsewhere}/itself.sh\n")
     before = os.lstat(live / "home")
     code = ("import os, subprocess, sys\n"
             "L, E = sys.argv[1] + '/home', sys.argv[2]\n"
@@ -571,7 +572,10 @@ def test_expansions(scratch: Path) -> None:
             "attempt('positional', 'f() { touch \"$1\"; }; f x')\n"
             "attempt('loop variable', 'for f in a b; do touch \"$f\"; done')\n"
             "attempt('stdin', 'echo x | xargs rm')\n"
+            "attempt('relative after an unknown cd', 'cd \"$NOPE_SYRD627\"; touch x', cwd=E)\n"
+            "attempt('past the depth limit', f'. {E}/itself.sh')\n"
             "attempt('safe variable', f'P={E}; touch \"$P/fine\"')\n"
+            "attempt('safe default', 'touch \"${NOPE_SYRD627:-' + E + '}/fine-default\"')\n"
             "attempt('quoted heredoc', f\"cat > {E}/doc2 <<'EOF'\\n$(touch {L}/data)\\nEOF\")\n"
             "attempt('single-quoted', f\"echo '$(touch {L}/literal)' > {E}/literal\")\n"
             "attempt('cd scoped to a group', f'( cd {L} ); touch after', cwd=E)\n"
@@ -579,8 +583,8 @@ def test_expansions(scratch: Path) -> None:
     refused = ("variable", "exported", "chown through a variable", "HOME", "XDG", "tilde", "default", "substitution",
                "backtick", "substitution as the target", "eval", "script file", "sourced", "find -delete", "sed -i", "if",
                "case", "function", "cd in a group", "expanded heredoc", "unset variable", "positional", "loop variable",
-               "stdin")
-    ran = ("safe variable", "quoted heredoc", "single-quoted", "cd scoped to a group")
+               "stdin", "relative after an unknown cd", "past the depth limit")
+    ran = ("safe variable", "safe default", "quoted heredoc", "single-quoted", "cd scoped to a group")
     expected = ";".join([f"{name} refused" for name in refused] + [f"{name} ran" for name in ran])
     env = {**os.environ, live_boundary.LIVE_ROOTS_ENV: str(live), live_boundary.INVOKER_UID_ENV: str(os.getuid()),
            "PYTHONPATH": str(live_boundary.SITE_DIR)}

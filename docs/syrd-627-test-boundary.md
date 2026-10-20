@@ -77,20 +77,25 @@ it; the two shell suites re-execute themselves through
   traversable (0711) and TMPDIR is sticky and open (1777), so a stand-in owner
   a suite runs as another identity can reach its fixture. The home, state and
   runtime leaves stay 0700.
-- **Guard.** Every Python process of the run refuses, before acting, any of
-  these that resolves under the invoking account's real home or `/run/user/<uid>`:
+- **Guard.** `isolate()` builds `tests/live_boundary_shim.c` as a private
+  shared object and preloads it into every dynamically linked child. It
+  refuses any actual operation that resolves under the invoking account's real
+  home or `/run/user/<uid>`, after a shell has expanded variables, arrays,
+  functions and substitutions:
   - chown, chmod, rename or replace, mkdir, rmdir, unlink, link or symlink,
     utime, truncate;
   - a write-mode `open` or `os.open`;
-  - a mutating command (`chown`, `install`, `mkdir`, `mv`, `cp`, `rm`, `ln`,
-    `touch`, `setfacl`, ...) started through subprocess.
+  - destructive process controls, including broad or foreign-group signals,
+    real privilege/service tools, and shared tmux sockets.
 
-  In the test's own checkout, writes are allowed but chowns never are. Children
-  load the guard through `tests/boundary_site/sitecustomize.py`, which
-  `isolate()` puts on PYTHONPATH. Paths are resolved with `posix.lstat` and
-  `posix.readlink` directly, so a suite's own recorder of `os.lstat` or
-  `Path.resolve` never sees the guard. Each refusal names the command and the
-  stack.
+  The Python guard remains the first layer for direct subprocess argv, so a
+  plainly unsafe command is rejected before exec with status 126 and a stack.
+  Children also load it through `tests/boundary_site/sitecustomize.py`, which
+  `isolate()` puts on PYTHONPATH. The native layer carries the same live and
+  writable roots through exec and cleared environments. Its refusal reports
+  `test boundary: refused` and the real operation; the calling tool or shell
+  may translate EACCES or EPERM into its own nonzero status. In the test's own
+  checkout, writes are allowed but chowns never are.
 - **Sentinel.** At isolation it snapshots:
   - the chain (the home, `.local`, `.local/state` and the runtime directory):
     owner, group, mode and inode;
@@ -165,8 +170,9 @@ own. These were left in place for the Director.
 
 ## The boundary's process rules
 
-Each rule is checked before the command runs, in every Python process of an
-isolated run, namespace children included.
+Direct subprocess argv is checked before exec in every Python process of an
+isolated run. The native interposer checks the operations that dynamically
+linked children actually attempt, including shell and namespace children.
 
 - **tmux never reaches a shared default directory.** `isolate()` always gives the
   run a disposable TMUX_TMPDIR, and drops a TMUX that names the account's
@@ -191,41 +197,27 @@ isolated run, namespace children included.
   when its leader descends from the caller or started after `isolate()`.
   Targeted single-process signals and signal-0 probes are unaffected.
 
-A refused command fails as one that cannot run would: status 126, with the
-reason on its stderr. A suite that copes with a failing tool, as with sudo
-failing inside a user namespace, behaves as it does without the boundary. The
-real tool never runs, and the refusal is still reported to the boundary's stderr
-and log. A refused signal raises PermissionError, which is what `kill` raises
-for EPERM.
+A direct Python refusal fails before exec with status 126 and its reason on
+stderr. A native refusal returns EACCES or EPERM from the libc operation, so
+the program or shell chooses the resulting nonzero status; the boundary's
+diagnostic is the stable evidence. A refused Python signal raises
+`PermissionError`, matching `kill` on EPERM.
 
-Commands are read past their wrappers (env, timeout, nice, setsid, ...), the
-wrappers' options, and any sudo. A `sh -c`, `shell=True` or `os.system` script
-is read command by command. An argument that merely names a tool, as in
-`grep -r systemctl`, is not a match.
+The Python guard reads direct argv past wrappers (`env`, `timeout`, `nice`,
+`setsid`, and similar), their options, and any stand-in sudo. It deliberately
+does not parse `sh -c`, `shell=True`, `os.system`, script files, heredocs,
+functions, arrays, substitutions, or `eval`. The invoked shell interprets
+those normally, and the native layer checks the resulting `open`, `mkdir`,
+`rename`, `unlink`, ownership, mode, link, timestamp, truncation, exec, signal
+and tmux-socket operations. Thus an argument that merely contains a tool name
+is harmless, while a command assembled as `command=(touch "$path");
+"${command[@]}"` is refused when `touch` opens the live path.
 
-**Writes, however they are spelled.** For every command line, directly or as a
-command of a script, the guard collects what it would write:
-- each redirection target (`>`, `>>`, `>|`, `2>`, `&>`, attached or not);
-- each path operand of a mutating command (chown, chmod, install, mkdir, mv,
-  cp, rm, ln, touch, tee, setfacl, truncate, rsync, mkfifo, mknod, unlink,
-  shred);
-- `dd of=`.
-
-Owner and mode operands, and option values such as `-m 0644`, are not paths.
-cp, install, ln and rsync write only their destination (`-t DIR` or the last
-operand), except `install -d`, which creates every operand. mv writes all its
-operands, since it removes its sources. install counts as an ownership change
-only with `-o` or `-g`. A relative path is resolved against the directory the
-command runs in: Popen's `cwd`, the current directory, or a `cd` earlier in the
-same script. Any target under a live root is refused before the command runs.
-
-Scripts are split the way a shell splits them. Separators divide commands only
-outside quotes, `$(...)` and backticks. A backslash-newline continues a line,
-and comments are dropped. A heredoc's body is data, not commands, unless the
-command reading it is a shell (`bash <<EOF`, `sudo sh <<EOF`), in which case
-the body is checked as a script. Generated privileged scripts carry quoted
-commands inside heredocs, and splitting them naively was mistaken for writes.
-A shell given `-n` only parses its script, so that script is not checked.
+The native layer cannot mediate statically linked programs, setuid programs
+that discard `LD_PRELOAD`, or code issuing raw syscalls without libc. Direct
+argv policy covers the known privileged and process-control tools, and the
+exit sentinel remains the backstop for any live-state change outside the
+interposer.
 
 The sentinel also records each tmux server listening in the account's
 directory, and the server the run was started from. A server that stops or
@@ -246,9 +238,10 @@ allows a short settle, because `kill-server` returns before the server exits.
 - **Chown walks need a floor.** A fixture that changes ownership along a path
   stops at a root it created, and refuses a path outside that root, instead of
   walking to `/`.
-- **Commands go through the guard.** A command a suite runs through subprocess
-  is checked the same way. Shell commands inside a shell suite are covered by
-  the sentinel, not the guard.
+- **Commands go through both layers.** Direct argv is checked before exec. A
+  shell command is interpreted normally, then its actual libc effects are
+  checked by the native guard. The sentinel still proves that nothing escaped
+  either layer.
 - **tmux names its own server.** Use `-S` or `-L` under a directory the test
   created, or rely on the disposable TMUX_TMPDIR `isolate()` sets. Never remove
   TMUX and TMUX_TMPDIR and then run a bare tmux.
@@ -280,6 +273,10 @@ allows a short settle, because `kill-server` returns before the server exits.
     naming the command;
   - it allows a write but no chown in a writable root;
   - it is invisible to an `os.lstat` recorder.
+- **Runtime shell effects:** variable, function, `eval`, script-file,
+  substitution, `find -delete`, `sed -i`, and Bash-array commands are expanded
+  by the real shell and refused at their actual operation. Safe arrays and
+  quoted heredocs continue to run.
 - **`isolate()`** leaves a child none of the pane's variables.
 - **The sentinel** fails a run with status 97 when a namespace command chowns the
   live store, naming that command.

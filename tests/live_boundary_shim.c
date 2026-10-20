@@ -672,7 +672,12 @@ static int ours(pid_t pid) {
     long long parent = 0;
     unsigned long long start = 0;
     if (stat_fields(pid, &parent, &start) < 0) return 1;  /* nothing there to harm */
-    if (run_start && start >= run_start) return 1;
+    /* A test may deliberately establish its boundary after this library first
+     * handled an unrelated libc call. Read that timestamp at the decision,
+     * rather than freezing the loader-time value. */
+    const char *current = getenv("SWITCHYARD_TEST_RUN_START");
+    unsigned long long boundary = current ? strtoull(current, NULL, 10) : run_start;
+    if (boundary && start >= boundary) return 1;
     pid_t me = getpid(), cursor = pid;
     for (int hops = 0; hops < 64; hops++) {
         if (cursor == me) return 1;

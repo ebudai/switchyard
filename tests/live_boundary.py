@@ -41,7 +41,6 @@ import builtins
 import errno
 import hashlib
 import io
-import itertools
 import os
 import posix
 import pwd
@@ -56,23 +55,13 @@ import time
 import traceback
 from pathlib import Path
 
-try:
-    import live_boundary_shell as shell
-except ImportError:  # imported from elsewhere than its own directory
-    import importlib.util
-
-    _spec = importlib.util.spec_from_file_location("live_boundary_shell",
-                                                   Path(__file__).with_name("live_boundary_shell.py"))
-    shell = importlib.util.module_from_spec(_spec)
-    sys.modules["live_boundary_shell"] = shell
-    _spec.loader.exec_module(shell)
-
 LIVE_ROOTS_ENV = "SWITCHYARD_TEST_LIVE_ROOTS"
 ALLOW_ENV = "SWITCHYARD_TEST_WRITABLE"
 DISPOSABLE_ENV = "SWITCHYARD_TEST_DISPOSABLE_ROOT"
 LOG_ENV = "SWITCHYARD_TEST_BOUNDARY_LOG"
 INVOKER_UID_ENV = "SWITCHYARD_TEST_INVOKER_UID"
 SITE_DIR = Path(__file__).resolve().parent / "boundary_site"
+SHIM_SOURCE = Path(__file__).resolve().with_name("live_boundary_shim.c")
 REPOSITORY = Path(__file__).resolve().parents[1]
 #: What a role pane carries that names live stores, a live tmux server or the caller's own identity.
 SCRUBBED_PREFIXES = ("TICKET_BOARD_", "PGU_TICKET_BOARD_", "DIRECTORCTL", "XDG_", "TMUX")
@@ -342,19 +331,14 @@ def _kill_targets(arguments: list[str]) -> list[str]:
 
 _ESCALATORS = frozenset({"sudo", "doas", "pkexec", "runuser"})
 _WRAPPERS = frozenset({"env", "timeout", "nice", "nohup", "setsid", "stdbuf", "unshare", "ionice", "chrt"})
-#: Words a shell reads before the command itself: reserved words, and what opens a group.
-_KEYWORDS = shell.KEYWORDS | {"function"}
-_SHELLS = shell.SHELLS
 
 
 def _program(words: list[str]) -> tuple[str, str, list[str]]:
     """The command a line really runs, past leading assignments, wrappers (env, timeout, ...) and their options,
     assignments and durations: its name, the word that names it, and its arguments."""
     index = 0
-    while index < len(words) and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[index]) or words[index] in _KEYWORDS
-                                  or re.match(r"^[A-Za-z_][\w.-]*\(\)$", words[index])
-                                  or (words[index].endswith(")") and not words[index].startswith("$("))):
-        index += 2 if words[index] == "function" else 1
+    while index < len(words) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[index]):
+        index += 1
     while index < len(words):
         name = os.path.basename(words[index])
         if name not in _WRAPPERS:
@@ -441,156 +425,45 @@ def _mutation_targets(words: list[str]) -> list[tuple[str, str]]:
                                         None)
             operands = [target] if target else operands[-1:]
         targets += [(f"exec {program}", operand) for operand in operands if operand != "-"]
-    if program == "find" and any(w in ("-delete", "-exec", "-execdir", "-ok", "-okdir") for w in effective):
-        starts = []
-        for word in effective[1:]:
-            if word in ("-H", "-L", "-P"):
-                continue
-            if word.startswith(("-", "(", "!")):
-                break
-            starts.append(word)
-        targets += [("exec find", start) for start in starts or ["."]]
-    if program == "sed" and any(w == "--in-place" or w.startswith("--in-place=")
-                                or (w.startswith("-") and not w.startswith("--") and "i" in w[1:]) for w in effective[1:]):
-        operands = [w for w in effective[1:] if not w.startswith("-")]
-        scripted = any(w in ("-e", "-f", "--expression", "--file") for w in effective)
-        targets += [("exec sed -i", operand) for operand in (operands if scripted else operands[1:])]
-    if program == "xargs":
-        inner = [w for w in effective[1:] if not w.startswith("-")]
-        if inner and (os.path.basename(inner[0]) in MUTATING_COMMANDS or os.path.basename(inner[0]) == "find"):
-            targets.append((f"exec xargs {os.path.basename(inner[0])}", "$(stdin)"))  # what it writes is not known
     return targets
 
 
-def _check_mutations(words: list[str], cwd: str | None, variables: dict | None = None) -> None:
-    """Refuse a command line that would write under a live root -- relative paths resolved against `cwd`.
-
-    In a script (`variables` given) each target is expanded first; one the guard cannot resolve -- an unknown
-    variable, a substitution, a relative path after an unresolvable `cd` -- is refused: the guard fails closed."""
+def _check_mutations(words: list[str], cwd: str) -> None:
+    """Refuse a command line that would write under a live root -- relative paths resolved against `cwd`."""
     effective = _effective([w for w in words if not _REDIRECT.match(w)])
     program = os.path.basename(effective[0]) if effective else ""
     chown = program in {"chown", "chgrp"} or (program == "install" and any(
         w in ("-o", "-g") or w.startswith(("--owner", "--group")) for w in effective))
     for operation, target in _mutation_targets(words):
-        if target == "$(stdin)":
-            candidates = None
-        else:
-            candidates = [target] if variables is None else shell.expand(target, variables, cwd)
-        if candidates is None or (cwd is None and not all(c.startswith("/") for c in candidates)):
-            _refuse_command(words, f"{operation} to {target}, which the guard cannot resolve")
-        for candidate in candidates:
-            path = candidate if candidate.startswith("/") else os.path.join(cwd, candidate)
-            _check(operation, _resolve(path), chown=chown and operation != "redirect")
-
-
-_POSITIONAL_COMMANDS = frozenset({'"$@"', "$@", "$*", "${@}", '"${@}"'})
+        path = target if target.startswith("/") else os.path.join(cwd, target)
+        _check(operation, _resolve(path), chown=chown and operation != "redirect")
 
 
 def _check_command(words: list[str], environ=None, depth: int = 0, functions: frozenset = frozenset(),
-                   cwd: str | None = "", variables: dict | None = None) -> list[str]:
+                   cwd: str | None = None) -> None:
     """Privileged and service commands, kills by name, kills of everything or of a foreign process group, and writes
-    under a live root (relative to `cwd`, the current directory by default; None when a script's `cd` could not be
-    followed). Returns the names of what it runs.
+    under a live root (relative to `cwd`, the current directory by default).
 
-    `functions` are names the enclosing shell script defines for itself, which are not the system's tools;
-    `variables` what the script has assigned, each to every value it was given (None outside a script: an argv is
-    not expanded)."""
-    cwd = os.getcwd() if cwd == "" else cwd
-    if variables is not None and words and ("$" in words[0] or "`" in words[0]):
-        if words[0] in _POSITIONAL_COMMANDS or re.fullmatch(r'"?\$\{?[0-9]\}?"?', words[0]):
-            return []  # a function's arguments run as a command: checked where the function is called
-        programs = shell.expand(words[0], variables, cwd)
-        if programs is None:
-            _refuse_command(words, f"a command the guard cannot resolve ({words[0]})")
-        names = []
-        for program in programs:
-            names += _check_command([program, *words[1:]], environ, depth, functions, cwd, variables)
-        return names
-    _check_mutations(words, cwd, variables)
+    `functions` are names the enclosing shell script defines for itself, which are not the system's tools."""
+    cwd = cwd or os.getcwd()
+    _check_mutations(words, cwd)
     name, word, rest = _program(words)
-    if name == "tmux" and variables is not None:
-        expanded = [shell.expand(w, variables, cwd) for w in words]
-        if any(values is None or len(values) != 1 for values in expanded):
-            _refuse_command(words, "tmux on a socket the guard cannot resolve")
-        _check_tmux([values[0] for values in expanded], os.environ if environ is None else environ)
     real = word not in functions and _is_real(word, environ)
     if name in PRIVILEGED_COMMANDS and _verb(rest) not in QUERY_VERBS.get(name, ()) and real:
         _refuse_command(words, f"the real {name}")
     if name in BROAD_KILL_COMMANDS and real:
         _refuse_command(words, f"{name}, which kills by name")
-    names = [name]
-    if name in _ESCALATORS:
+    if name in _ESCALATORS and depth < 4:
         # A stand-in sudo runs what it is given: that command is checked as if run directly.
         inner = _escalated(rest)
-        if depth >= shell.DEPTH:
-            _refuse_command(words, "a command nested too deeply to read")
         _check_tmux(inner, os.environ if environ is None else environ)
-        names += _check_command(inner, environ, depth + 1, functions, cwd, variables)
+        _check_command(inner, environ, depth + 1, functions, cwd)
     if name == "kill":
         for target in _kill_targets(rest):
             if target.startswith("-") and target[1:].isdigit() and (target == "-1" or not _ours(int(target[1:]))):
                 _refuse_command(words, "a kill of every process or of a process group not this run's")
-    if name in _SHELLS:
-        _check_shell(words, rest, environ, depth, cwd, variables)
-    return names
-
-
-def _check_shell(words: list[str], rest: list[str], environ, depth: int, cwd: str | None,
-                 variables: dict | None) -> None:
-    """A shell's script -- `-c` text or a file -- read before the shell runs it, in a shell of its own that
-    starts from what its parent knew. `sh -n` only parses: nothing runs."""
-    options = rest[:rest.index("-c")] if "-c" in rest else list(itertools.takewhile(lambda w: w.startswith("-"), rest))
-    if any(w.startswith("-") and not w.startswith("--") and "n" in w[1:] for w in options):
-        return
-    if "-c" in rest:
-        script = rest[rest.index("-c") + 1] if rest.index("-c") + 1 < len(rest) else ""
-        arguments, source = rest[rest.index("-c") + 2:], None
-    elif len(rest) > len(options):
-        script, source = _script_file(rest[len(options)], cwd, variables)
-        arguments = rest[len(options) + 1:]
-        if script is None:
-            return  # nothing there to run
-        arguments = [source, *arguments]
-    else:
-        return  # a shell reading its stdin: not a script the guard can see
-    child = shell.Shell({} if variables is not None else (os.environ if environ is None else environ))
-    if variables is not None:
-        child.variables = {key: (None if value is None else list(value)) for key, value in variables.items()}
-    expanded = [[a] if variables is None else shell.expand(a, variables, cwd) for a in arguments]
-    known = None if any(values is None or len(values) != 1 for values in expanded) else [v[0] for v in expanded]
-    child.assign("0", [known[0]] if known else [os.path.basename(words[0]) if words else "sh"])
-    child.set_positional(None if known is None else known[1:])
-
-    def check(command: list[str], here: str | None, assigned: dict, level: int) -> list[str]:
-        _check_tmux(command, os.environ if environ is None else environ)
-        return _check_command(command, environ, level, frozenset(child.functions), here, assigned)
-
-    def refuse(why: str) -> None:
-        _refuse_command(words, why)
-
-    shell.Reader(check, _read_text, refuse).script(script, child, cwd, depth + 1, source)
-
-
-def _read_text(path: str) -> str | None:
-    try:
-        with _real_open(path, encoding="utf-8", errors="replace") as handle:
-            return handle.read(1 << 20)
-    except OSError:
-        return None
-
-
-def _script_file(path: str, cwd: str | None, variables: dict | None) -> tuple[str | None, str | None]:
-    """The text and path of a script a shell is given to run as a file, when the guard can read it."""
-    candidates = [path] if variables is None else shell.expand(path, variables, cwd)
-    if not candidates or len(candidates) != 1:
-        return None, None
-    expanded = candidates[0]
-    if not expanded.startswith("/"):
-        if cwd is None:
-            return None, None
-        expanded = os.path.join(cwd, expanded)
-    text = _read_text(expanded)
-    return (text, expanded) if text is not None else (None, None)
+    # Shell scripts are checked as they execute by the native guard. Interpreting
+    # script text here both diverges from the shell and rejects safe constructs.
 
 
 def _stat_fields(pid: int) -> list[str]:
@@ -707,6 +580,31 @@ def install_guard_from_env() -> None:
     roots = [r for r in os.environ.get(LIVE_ROOTS_ENV, "").split(":") if r]
     if roots:
         install_guard(roots, [w for w in os.environ.get(ALLOW_ENV, "").split(":") if w])
+
+
+def install_native_guard(directory: Path) -> Path:
+    """Build and preload the syscall boundary for this isolated run.
+
+    Python's guard still rejects dangerous direct argv before a command starts,
+    with status 126 and a Python stack.  Shell scripts are deliberately not
+    interpreted here: their real, expanded filesystem and process operations
+    are checked by this interposer when they reach libc.
+    """
+    compiler = next((path for name in ("cc", "gcc", "clang") if (path := shutil.which(name))), None)
+    if compiler is None:
+        raise RuntimeError("test boundary: cc, gcc or clang is required to build the native guard")
+    target = directory / "live-boundary.so"
+    command = [compiler, "-std=c11", "-fPIC", "-shared", "-Wall", "-Wextra", "-Werror", "-Wconversion",
+               "-Wshadow", "-Wformat=2", "-Wundef", "-Wstrict-prototypes", "-o", str(target),
+               str(SHIM_SOURCE), "-ldl"]
+    built = subprocess.run(command, capture_output=True, text=True, check=False)
+    if built.returncode:
+        detail = built.stderr.strip() or built.stdout.strip() or f"compiler exited {built.returncode}"
+        raise RuntimeError(f"test boundary: native guard did not build: {detail}")
+    target.chmod(0o755)
+    inherited = [item for item in os.environ.get("LD_PRELOAD", "").split(":") if item and item != str(target)]
+    os.environ["LD_PRELOAD"] = ":".join([str(target), *inherited])
+    return target
 
 
 # --------------------------------------------------------------------------
@@ -968,7 +866,13 @@ def isolate() -> Path | None:
             private = tempfile.mkdtemp(prefix="sytx.")
             os.environ["TMUX_TMPDIR"] = private
             atexit.register(shutil.rmtree, private, True)
-        install_guard(roots, [str(REPOSITORY)])
+        native = Path(tempfile.mkdtemp(prefix="sylb."))
+        native.chmod(0o711)
+        atexit.register(shutil.rmtree, native, True)
+        writable = [str(REPOSITORY)]
+        os.environ.update({LIVE_ROOTS_ENV: ":".join(roots), ALLOW_ENV: ":".join(writable)})
+        install_native_guard(native)
+        install_guard(roots, writable)
         return None
     parent = os.environ.get("TMPDIR") or "/tmp"
     if _under(_realpath(parent), resolved):
@@ -996,6 +900,7 @@ def isolate() -> Path | None:
                         ("GIT_COMMITTER_NAME", "Switchyard Test"), ("GIT_COMMITTER_EMAIL", "test@switchyard.invalid")):
         os.environ.setdefault(name, value)
     tempfile.tempdir = None
+    install_native_guard(root)
     install_guard(roots, writable)
     sentinel = Sentinel(home, runtime, uid, tmux=live_tmux, live=live)
     atexit.register(_remove, root)

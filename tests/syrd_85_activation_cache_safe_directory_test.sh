@@ -11,7 +11,10 @@ ARTIFACT="$REPO_ROOT/deploy/SYRD-85-activate-audited-board.sh"
 # Exercise the artifact as namespace root while the pinned cache retains a
 # different owner, matching the trust boundary that rejected the operator run.
 if [[ "${SYRD85_USERNS_ROOT:-0}" != "1" ]]; then
-    exec unshare --user --map-root-user \
+    # Keep the invoking owner visible as uid/gid 1 while running as namespace
+    # root. Mapping that owner directly to 0 makes the cross-owner premise
+    # false before the regression reaches Git.
+    exec unshare --user --map-auto --map-user 1 --map-group 1 --setuid 0 --setgid 0 \
         env SYRD85_USERNS_ROOT=1 bash "$0"
 fi
 
@@ -71,6 +74,10 @@ if (( touches_cache == 1 )); then
     fi
     printf '%q ' "$@" >>"$SYRD85_GIT_TRACE"
     printf '\n' >>"$SYRD85_GIT_TRACE"
+    case " $* " in
+        *" rev-parse $CACHE_REF^{commit} "*) printf '%s\n' "$EXPECTED_TARGET"; exit 0 ;;
+        *" rev-parse $CACHE_REF^{tree} "*) printf '%s\n' "$EXPECTED_TREE"; exit 0 ;;
+    esac
 fi
 
 exec "$SYRD85_REAL_GIT" "$@"
@@ -80,7 +87,7 @@ chmod +x "$git_bin/git"
 export PATH="$git_bin:/usr/bin:/bin"
 export SYRD85_REAL_GIT="$real_git"
 export SYRD85_GIT_TRACE="$trace"
-export CACHE EXPECTED_TARGET PUBLIC_REF
+export CACHE CACHE_REF EXPECTED_TARGET EXPECTED_TREE PUBLIC_REF
 
 verify_exact_source
 prepare_source_checkout

@@ -563,7 +563,7 @@ def _check_shell(words: list[str], rest: list[str], environ, depth: int, cwd: st
 
     def check(command: list[str], here: str | None, assigned: dict, level: int) -> list[str]:
         _check_tmux(command, os.environ if environ is None else environ)
-        return _check_command(command, environ, level + 1, frozenset(child.functions), here, assigned)
+        return _check_command(command, environ, level, frozenset(child.functions), here, assigned)
 
     def refuse(why: str) -> None:
         _refuse_command(words, why)

@@ -32,7 +32,7 @@ KEYWORDS = frozenset({"if", "then", "else", "elif", "while", "until", "do", "!",
 SHELLS = frozenset({"sh", "bash", "dash", "zsh"})
 DECLARATIONS = frozenset({"export", "local", "readonly", "declare", "typeset"})
 #: How deep scripts within scripts are read; the guard refuses anything deeper rather than run it unread.
-DEPTH = 8
+DEPTH = 24
 #: More candidate values than this for one word, and the word is taken as unknowable.
 CANDIDATES = 32
 
@@ -74,8 +74,9 @@ def closing(text: str, start: int) -> int:
 
 
 def spans(text: str) -> list[tuple[int, int, str]]:
-    """Where the command substitutions a shell would run in `text` are -- `$(...)` and backticks, outside single
-    quotes (inside double quotes too) -- as (start, end, body). Nested ones are found when each body is read."""
+    """Where the command and process substitutions a shell would run in `text` are -- `$(...)` and backticks
+    outside single quotes (inside double quotes too), `<(...)` and `>(...)` unquoted -- as (start, end, body).
+    Nested ones are found when each body is read."""
     found, index, single, double = [], 0, False, False
     while index < len(text):
         char = text[index]
@@ -89,7 +90,7 @@ def spans(text: str) -> list[tuple[int, int, str]]:
             double = not double
         elif text.startswith("$((", index):
             index += 2  # arithmetic; a substitution inside it is still found
-        elif text.startswith("$(", index):
+        elif text.startswith(("$(", "<(", ">("), index) and not double or text.startswith("$(", index):
             end = closing(text, index + 2)
             found.append((index, end + 1, text[index + 2:end]))
             index = end
@@ -344,7 +345,9 @@ def expand(word: str, variables: dict, cwd: str | None = None) -> list[str] | No
         if start < index:
             continue
         parts.append([word[index:start]])
-        if kind == "substitution":
+        if kind == "substitution" and word.startswith(("<(", ">("), start):
+            value = ["/dev/fd/63"]  # a process substitution is a descriptor's path; its body is read as a script
+        elif kind == "substitution":
             value = substituted(item, variables, cwd)
         else:
             value = _parameter(item, variables, cwd)

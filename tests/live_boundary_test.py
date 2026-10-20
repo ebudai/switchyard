@@ -585,7 +585,7 @@ def test_expansions(scratch: Path) -> None:
             "attempt('sudo shim', f'sudo() {{ \"$@\"; }}; sudo touch {L}/shim')\n"
             "attempt('unknown command', '$(echo rm) -rf /x')\n"
             "attempt('stdin', 'echo x | xargs rm')\n"
-            "attempt('relative after an unknown cd', 'cd \"$NOPE_SYRD627\"; touch x', cwd=E)\n"
+            "attempt('relative after an unknown cd', 'read d; cd \"$d\"; touch x', cwd=E)\n"
             "attempt('past the depth limit', f'. {E}/itself.sh')\n"
             "attempt('safe variable', f'P={E}; touch \"$P/fine\"')\n"
             "attempt('safe export', f'export P={E}; touch \"$P/fine-export\"')\n"

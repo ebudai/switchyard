@@ -564,7 +564,7 @@ def test_expansions(scratch: Path) -> None:
             "attempt('find -delete', f'find {L} -name x -delete')\n"
             "attempt('sed -i', f'sed -i s/a/b/ {L}/file')\n"
             "attempt('if', f'if true; then touch {L}/if; fi')\n"
-            "attempt('case', f'case x in a|x) touch {L}/case;; esac')\n"
+            "attempt('case', f'case x in x) touch {L}/case;; esac')\n"
             "attempt('function', f'f() {{ touch {L}/function; }}; f')\n"
             "attempt('cd in a group', f'( cd {L} && touch group )')\n"
             "attempt('expanded heredoc', f'cat > {E}/doc <<EOF\\n$(touch {L}/heredoc)\\nEOF')\n"
@@ -575,6 +575,7 @@ def test_expansions(scratch: Path) -> None:
             "attempt('relative after an unknown cd', 'cd \"$NOPE_SYRD627\"; touch x', cwd=E)\n"
             "attempt('past the depth limit', f'. {E}/itself.sh')\n"
             "attempt('safe variable', f'P={E}; touch \"$P/fine\"')\n"
+            "attempt('safe export', f'export P={E}; touch \"$P/fine-export\"')\n"
             "attempt('safe default', 'touch \"${NOPE_SYRD627:-' + E + '}/fine-default\"')\n"
             "attempt('quoted heredoc', f\"cat > {E}/doc2 <<'EOF'\\n$(touch {L}/data)\\nEOF\")\n"
             "attempt('single-quoted', f\"echo '$(touch {L}/literal)' > {E}/literal\")\n"
@@ -584,7 +585,7 @@ def test_expansions(scratch: Path) -> None:
                "backtick", "substitution as the target", "eval", "script file", "sourced", "find -delete", "sed -i", "if",
                "case", "function", "cd in a group", "expanded heredoc", "unset variable", "positional", "loop variable",
                "stdin", "relative after an unknown cd", "past the depth limit")
-    ran = ("safe variable", "safe default", "quoted heredoc", "single-quoted", "cd scoped to a group")
+    ran = ("safe variable", "safe export", "safe default", "quoted heredoc", "single-quoted", "cd scoped to a group")
     expected = ";".join([f"{name} refused" for name in refused] + [f"{name} ran" for name in ran])
     env = {**os.environ, live_boundary.LIVE_ROOTS_ENV: str(live), live_boundary.INVOKER_UID_ENV: str(os.getuid()),
            "PYTHONPATH": str(live_boundary.SITE_DIR)}

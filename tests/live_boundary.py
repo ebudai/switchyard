@@ -41,6 +41,7 @@ import builtins
 import errno
 import hashlib
 import io
+import itertools
 import os
 import posix
 import pwd
@@ -330,6 +331,8 @@ def _kill_targets(arguments: list[str]) -> list[str]:
 
 _ESCALATORS = frozenset({"sudo", "doas", "pkexec", "runuser"})
 _WRAPPERS = frozenset({"env", "timeout", "nice", "nohup", "setsid", "stdbuf", "unshare", "ionice", "chrt"})
+#: Words a shell reads before the command itself: reserved words, and what opens a group.
+_KEYWORDS = frozenset({"if", "then", "else", "elif", "while", "until", "do", "!", "{", "(", "time", "function"})
 _SHELLS = frozenset({"sh", "bash", "dash", "zsh"})
 
 
@@ -337,8 +340,10 @@ def _program(words: list[str]) -> tuple[str, str, list[str]]:
     """The command a line really runs, past leading assignments, wrappers (env, timeout, ...) and their options,
     assignments and durations: its name, the word that names it, and its arguments."""
     index = 0
-    while index < len(words) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[index]):
-        index += 1
+    while index < len(words) and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[index]) or words[index] in _KEYWORDS
+                                  or re.match(r"^[A-Za-z_][\w.-]*\(\)$", words[index])
+                                  or (words[index].endswith(")") and not words[index].startswith("$("))):
+        index += 2 if words[index] == "function" else 1
     while index < len(words):
         name = os.path.basename(words[index])
         if name not in _WRAPPERS:
@@ -387,14 +392,15 @@ def _verb(arguments: list[str]) -> str:
     return ""
 
 
-def _script_commands(script: str) -> list[tuple[list[str], str | None]]:
-    """A shell script's simple commands, in order, as words, each with the body of its heredoc if it has one.
+def _script_commands(script: str) -> list[tuple[list[str], str | None, bool, str]]:
+    """A shell script's simple commands, in order, as words, each with the body of its heredoc if it has one,
+    whether that heredoc's delimiter was quoted (its body then is not expanded), and the command's own text.
 
     Separators (`;`, `&`, `|`, `&&`, `||`, newlines) split commands only outside quotes, `$(...)` and backticks; a
     backslash-newline continues a line; comments are dropped; a heredoc's body is not read as commands."""
     commands: list[list] = []
     current: list[str] = []
-    pending: list[tuple[int, str, bool]] = []
+    pending: list[tuple[int, str, bool, bool]] = []
     quote, depth, tick, index, size = "", 0, False, 0, len(script)
 
     def finish() -> None:
@@ -406,6 +412,7 @@ def _script_commands(script: str) -> list[tuple[list[str], str | None]]:
             words = shlex.split(text)
         except ValueError:
             return
+        quoted = bool(re.search(r"<<-?\s*['\"\\\\]", text))  # a quoted delimiter: the body is not expanded
         kept, at = [], 0
         while at < len(words):
             word = words[at]
@@ -416,11 +423,11 @@ def _script_commands(script: str) -> list[tuple[list[str], str | None]]:
                 if not marker and at + 1 < len(words):
                     at += 1
                     marker = words[at]
-                pending.append((len(commands), marker, strip))
+                pending.append((len(commands), marker, strip, quoted))
             else:
                 kept.append(word)
             at += 1
-        commands.append([kept, None])
+        commands.append([kept, None, False, text])
 
     while index < size:
         char = script[index]
@@ -468,7 +475,7 @@ def _script_commands(script: str) -> list[tuple[list[str], str | None]]:
             finish()
             index += 2 if char in "&|" and following == char else 1
             if char == "\n" and pending:
-                for slot, marker, strip in pending:
+                for slot, marker, strip, quoted in pending:
                     body = []
                     while index < size:
                         end = script.find("\n", index)
@@ -477,13 +484,104 @@ def _script_commands(script: str) -> list[tuple[list[str], str | None]]:
                         if (line.lstrip("\t") if strip else line) == marker:
                             break
                         body.append(line)
-                    commands[slot][1] = "\n".join(body)
+                    commands[slot][1], commands[slot][2] = "\n".join(body), quoted
                 pending.clear()
             continue
         current.append(char)
         index += 1
     finish()
-    return [(words, body) for words, body in commands]
+    return [(words, body, quoted, raw) for words, body, quoted, raw in commands]
+
+
+def _closing(text: str, start: int) -> int:
+    """The index of the `)` closing a `$(` whose body starts at `start` (or the end of `text`)."""
+    depth, quote, index = 1, "", start
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if char == "\\" and quote == '"':
+                index += 1
+            elif char == quote:
+                quote = ""
+        elif char == "\\":
+            index += 1
+        elif char in "'\"":
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if not depth:
+                return index
+        index += 1
+    return len(text)
+
+
+def _substitutions(text: str) -> list[str]:
+    """The bodies of the command substitutions a shell would run in `text`: `$(...)` and backticks, outside single
+    quotes (inside double quotes too). Nested ones are found when each body is checked in turn."""
+    bodies, index, single, double = [], 0, False, False
+    while index < len(text):
+        char = text[index]
+        if single:
+            single = char != "'"
+        elif char == "\\":
+            index += 1
+        elif char == "'" and not double:
+            single = True
+        elif char == '"':
+            double = not double
+        elif text.startswith("$((", index):
+            index += 2  # arithmetic; a substitution inside it is still found
+        elif text.startswith("$(", index):
+            end = _closing(text, index + 2)
+            bodies.append(text[index + 2:end])
+            index = end
+        elif char == "`":
+            end = index + 1
+            while end < len(text) and text[end] != "`":
+                end += 2 if text[end] == "\\" else 1
+            bodies.append(text[index + 1:end].replace("\\`", "`"))
+            index = end
+        index += 1
+    return bodies
+
+
+_ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
+_PARAMETER = re.compile(r"\$\{(?P<braced>[A-Za-z_]\w*)(?:(?P<op>:?[-=])(?P<default>[^}]*))?\}|\$(?P<bare>[A-Za-z_]\w*)")
+
+
+def _expand(word: str, variables: dict) -> str | None:
+    """`word` as the shell would expand it, from what the script and its environment assigned: `~`, `~user`, `$NAME`,
+    `${NAME}`, `${NAME:-default}`. None when the guard cannot know the value -- an unset or unknowable variable, a
+    positional parameter, a command substitution -- for the caller to refuse."""
+    if word.startswith("~"):
+        head, slash, tail = word.partition("/")
+        if head == "~":
+            home = variables.get("HOME")
+        else:
+            try:
+                home = pwd.getpwnam(head[1:]).pw_dir
+            except KeyError:
+                home = None
+        if not home:
+            return None
+        word = home + slash + tail
+    unknown = False
+
+    def value(match: re.Match) -> str:
+        nonlocal unknown
+        name = match.group("braced") or match.group("bare")
+        found = variables.get(name)
+        if found is None and match.group("op"):
+            found = _expand(match.group("default"), variables)
+        if found is None:
+            unknown = True
+            return ""
+        return found
+
+    expanded = _PARAMETER.sub(value, word)
+    return None if unknown or "$" in expanded or "`" in expanded else expanded
 
 
 def _mutation_targets(words: list[str]) -> list[tuple[str, str]]:
@@ -524,62 +622,183 @@ def _mutation_targets(words: list[str]) -> list[tuple[str, str]]:
                                         None)
             operands = [target] if target else operands[-1:]
         targets += [(f"exec {program}", operand) for operand in operands if operand != "-"]
+    if program == "find" and any(w in ("-delete", "-exec", "-execdir", "-ok", "-okdir") for w in effective):
+        starts = []
+        for word in effective[1:]:
+            if word in ("-H", "-L", "-P"):
+                continue
+            if word.startswith(("-", "(", "!")):
+                break
+            starts.append(word)
+        targets += [("exec find", start) for start in starts or ["."]]
+    if program == "sed" and any(w == "--in-place" or w.startswith("--in-place=")
+                                or (w.startswith("-") and not w.startswith("--") and "i" in w[1:]) for w in effective[1:]):
+        operands = [w for w in effective[1:] if not w.startswith("-")]
+        scripted = any(w in ("-e", "-f", "--expression", "--file") for w in effective)
+        targets += [("exec sed -i", operand) for operand in (operands if scripted else operands[1:])]
+    if program == "xargs":
+        inner = [w for w in effective[1:] if not w.startswith("-")]
+        if inner and (os.path.basename(inner[0]) in MUTATING_COMMANDS or os.path.basename(inner[0]) == "find"):
+            targets.append((f"exec xargs {os.path.basename(inner[0])}", "$(stdin)"))  # what it writes is not known
     return targets
 
 
-def _check_mutations(words: list[str], cwd: str) -> None:
-    """Refuse a command line that would write under a live root -- relative paths resolved against `cwd`."""
+def _check_mutations(words: list[str], cwd: str | None, variables: dict | None = None) -> None:
+    """Refuse a command line that would write under a live root -- relative paths resolved against `cwd`.
+
+    In a script (`variables` given) each target is expanded first; one the guard cannot resolve -- an unknown
+    variable, a substitution, a relative path after an unresolvable `cd` -- is refused: the guard fails closed."""
     effective = _effective([w for w in words if not _REDIRECT.match(w)])
     program = os.path.basename(effective[0]) if effective else ""
     chown = program in {"chown", "chgrp"} or (program == "install" and any(
         w in ("-o", "-g") or w.startswith(("--owner", "--group")) for w in effective))
     for operation, target in _mutation_targets(words):
-        path = target if target.startswith("/") else os.path.join(cwd, target)
+        expanded = target if variables is None and target != "$(stdin)" else _expand(target, variables or {})
+        if expanded is not None and expanded.startswith("/"):
+            path = expanded
+        elif expanded is not None and cwd is not None:
+            path = os.path.join(cwd, expanded)
+        else:
+            _refuse_command(words, f"{operation} to {target}, which the guard cannot resolve")
         _check(operation, _resolve(path), chown=chown and operation != "redirect")
 
 
-def _check_command(words: list[str], environ=None, depth: int = 0, functions: frozenset = frozenset(),
-                   cwd: str | None = None) -> None:
-    """Privileged and service commands, kills by name, kills of everything or of a foreign process group, and writes
-    under a live root (relative to `cwd`, the current directory by default).
+#: How deep scripts within scripts are read; anything deeper is refused rather than run unread.
+_SCRIPT_DEPTH = 8
 
-    `functions` are names the enclosing shell script defines for itself, which are not the system's tools."""
-    cwd = cwd or os.getcwd()
-    _check_mutations(words, cwd)
+
+def _check_command(words: list[str], environ=None, depth: int = 0, functions: frozenset = frozenset(),
+                   cwd: str | None = "", variables: dict | None = None) -> None:
+    """Privileged and service commands, kills by name, kills of everything or of a foreign process group, and writes
+    under a live root (relative to `cwd`, the current directory by default; None when a script's `cd` could not be
+    followed).
+
+    `functions` are names the enclosing shell script defines for itself, which are not the system's tools;
+    `variables` what it has assigned (None outside a script: an argv is not expanded)."""
+    cwd = os.getcwd() if cwd == "" else cwd
+    _check_mutations(words, cwd, variables)
     name, word, rest = _program(words)
     real = word not in functions and _is_real(word, environ)
     if name in PRIVILEGED_COMMANDS and _verb(rest) not in QUERY_VERBS.get(name, ()) and real:
         _refuse_command(words, f"the real {name}")
     if name in BROAD_KILL_COMMANDS and real:
         _refuse_command(words, f"{name}, which kills by name")
-    if name in _ESCALATORS and depth < 4:
+    if name in _ESCALATORS:
         # A stand-in sudo runs what it is given: that command is checked as if run directly.
         inner = _escalated(rest)
         _check_tmux(inner, os.environ if environ is None else environ)
-        _check_command(inner, environ, depth + 1, functions, cwd)
+        _check_nested(inner, environ, depth, functions, cwd, variables)
     if name == "kill":
         for target in _kill_targets(rest):
             if target.startswith("-") and target[1:].isdigit() and (target == "-1" or not _ours(int(target[1:]))):
                 _refuse_command(words, "a kill of every process or of a process group not this run's")
-    # `sh -n` reads a script without running any of it: nothing to refuse.
-    noexec = any(w.startswith("-") and not w.startswith("--") and "n" in w[1:] for w in rest[:rest.index("-c")]) \
-        if "-c" in rest else False
-    if name in _SHELLS and "-c" in rest and depth < 4 and not noexec:
-        script = rest[rest.index("-c") + 1] if rest.index("-c") + 1 < len(rest) else ""
-        defined = functions | set(re.findall(r"(?:^|[\s;&|{(])(?:function\s+)?([A-Za-z_][\w.-]*)\s*\(\)", script)) \
-            | set(re.findall(r"\bfunction\s+([A-Za-z_][\w.-]*)", script))
-        here = cwd
-        for inner, body in _script_commands(script):
-            if inner[:1] == ["cd"] and len(inner) > 1:
-                here = os.path.join(here, inner[1])  # later relative paths in the script are under it
-                continue
-            if inner:
-                _check_tmux(inner, os.environ if environ is None else environ)
-                _check_command(inner, environ, depth + 1, frozenset(defined), here)
-            # A heredoc is data -- unless what reads it is a shell, which runs it.
+    script = None
+    if name in _SHELLS:
+        # `sh -n` reads a script without running any of it: nothing to refuse.
+        options = rest[:rest.index("-c")] if "-c" in rest else list(itertools.takewhile(lambda w: w.startswith("-"), rest))
+        noexec = any(w.startswith("-") and not w.startswith("--") and "n" in w[1:] for w in options)
+        if "-c" in rest and not noexec:
+            script = rest[rest.index("-c") + 1] if rest.index("-c") + 1 < len(rest) else ""
+        elif not noexec and len(rest) > len(options):
+            script = _script_file(rest[len(options)], cwd, variables)
+    elif name in (".", "source") and rest:
+        script = _script_file(rest[0], cwd, variables)
+    elif name == "eval":
+        script = " ".join(rest)
+    if script is not None:
+        if depth >= _SCRIPT_DEPTH:
+            _refuse_command(words, "a script nested too deeply to read")
+        _check_script(script, environ, depth + 1, functions, cwd, variables)
+
+
+def _check_nested(words, environ, depth, functions, cwd, variables) -> None:
+    if depth >= _SCRIPT_DEPTH:
+        _refuse_command(words, "a command nested too deeply to read")
+    _check_command(words, environ, depth + 1, functions, cwd, variables)
+
+
+def _script_file(path: str, cwd: str | None, variables: dict | None) -> str | None:
+    """The text of a script a shell is given to run as a file, when the guard can read it."""
+    expanded = path if variables is None else _expand(path, variables)
+    if expanded is None:
+        return None
+    if not expanded.startswith("/"):
+        if cwd is None:
+            return None
+        expanded = os.path.join(cwd, expanded)
+    try:
+        with _real_open(expanded, encoding="utf-8", errors="replace") as handle:
+            return handle.read(1 << 20)
+    except OSError:
+        return None
+
+
+_DECLARATIONS = frozenset({"export", "local", "readonly", "declare", "typeset"})
+
+
+def _check_script(script: str, environ, depth: int, functions: frozenset, cwd: str | None,
+                  variables: dict | None) -> None:
+    """Every command of a shell script, in order, as the shell would expand it: what it assigns, where it `cd`s,
+    the commands in its substitutions, and a heredoc a shell reads or that the shell expands."""
+    defined = functions | set(re.findall(r"(?:^|[\s;&|{(])(?:function\s+)?([A-Za-z_][\w.-]*)\s*\(\)", script)) \
+        | set(re.findall(r"\bfunction\s+([A-Za-z_][\w.-]*)", script))
+    defined = frozenset(defined)
+    known = dict(os.environ if environ is None else environ) if variables is None else dict(variables)
+    here, groups = cwd, []
+
+    def one(inner: list[str], body: str | None, quoted: bool) -> None:
+        nonlocal here
+        if inner[:1] == ["case"]:
+            inner = inner[inner.index("in") + 1:] if "in" in inner else []
+            inner = list(itertools.dropwhile(lambda w: w.endswith(")") and not w.startswith("$("), inner))
+        if inner and all(_ASSIGNMENT.match(w) for w in inner):
+            for assignment in inner:
+                key, value = _ASSIGNMENT.match(assignment).groups()
+                known[key] = _expand(value, known)
+            return
+        if inner[:1] and inner[0] in _DECLARATIONS:
+            for assignment in inner[1:]:
+                match = _ASSIGNMENT.match(assignment)
+                if match:
+                    known[match.group(1)] = _expand(match.group(2), known)
+            return
+        if inner[:1] in (["for"], ["read"], ["select"]) and len(inner) > 1:
+            for key in (inner[1:2] if inner[0] != "read" else [w for w in inner[1:] if not w.startswith("-")]):
+                known[key] = None  # a value the script takes at run time: unknown
+            return
+        if inner[:1] == ["cd"]:
+            target = _expand(inner[1], known) if len(inner) > 1 else known.get("HOME")
+            if target is None or (here is None and not target.startswith("/")):
+                here = None  # where later relative paths lead is no longer known
+            else:
+                here = target if target.startswith("/") else os.path.join(here, target)
+            return
+        if inner:
+            _check_tmux(inner, os.environ if environ is None else environ)
+            _check_nested(inner, environ, depth, defined, here, known)
+        if body is not None:
             reader = _effective(inner)
-            if body is not None and reader and os.path.basename(reader[0]) in _SHELLS and "-c" not in reader:
-                _check_command([os.path.basename(reader[0]), "-c", body], environ, depth + 1, frozenset(defined), here)
+            if reader and os.path.basename(reader[0]) in _SHELLS and "-c" not in reader:
+                _check_nested([os.path.basename(reader[0]), "-c", body], environ, depth, defined, here, known)
+            elif not quoted:
+                for nested in _substitutions(body):
+                    _check_nested(["sh", "-c", nested], environ, depth, defined, here, known)
+
+    for inner, body, quoted, raw in _script_commands(script):
+        for nested in _substitutions(raw):
+            _check_nested(["sh", "-c", nested], environ, depth, defined, here, known)
+        # A `cd` inside ( ... ) or { ... } holds until the group closes.
+        inner = list(itertools.dropwhile(lambda w: w in _KEYWORDS and w not in ("(", "{"), inner))
+        while inner[:1] in (["("], ["{"]):
+            groups.append(here)
+            inner = list(itertools.dropwhile(lambda w: w in _KEYWORDS and w not in ("(", "{"), inner[1:]))
+        closes = 0
+        while inner and inner[-1] in (")", "}"):
+            closes += 1
+            inner = inner[:-1]
+        one(inner, body, quoted)
+        for _ in range(closes):
+            here = groups.pop() if groups else here
 
 
 def _stat_fields(pid: int) -> list[str]:

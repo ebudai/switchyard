@@ -526,6 +526,75 @@ def test_mutations(scratch: Path) -> None:
               f"elsewhere run: {done.stdout} {sorted(os.listdir(live / 'home'))} {done.stderr[-800:]}")
 
 
+def test_expansions(scratch: Path) -> None:
+    """A write a script would make through what the shell expands is refused before the shell runs: a variable, an
+    exported one, $HOME and XDG paths, a tilde, `${X:-default}`, a command substitution and a backtick (their bodies
+    run too), eval, a sourced or executed script file, find -delete, sed -i, compound commands and groups. A target the
+    guard cannot resolve -- an unset variable, a positional parameter, a loop variable, stdin -- is refused as well:
+    it fails closed. (SYRD-627 Audit.)"""
+    import live_boundary
+
+    live, elsewhere = scratch / "expansions-live", scratch / "expansions-elsewhere"
+    (live / "home").mkdir(parents=True)
+    elsewhere.mkdir()
+    (elsewhere / "writes.sh").write_text(f"touch {live}/home/from-a-file\n")
+    before = os.lstat(live / "home")
+    code = ("import os, subprocess, sys\n"
+            "L, E = sys.argv[1] + '/home', sys.argv[2]\n"
+            "out = []\n"
+            "def attempt(name, script, env=None, cwd=None):\n"
+            "    done = subprocess.run(['sh', '-c', script], capture_output=True, timeout=10,\n"
+            "                          env=None if env is None else {**os.environ, **env}, cwd=cwd)\n"
+            "    refused = done.returncode == 126 and b'test boundary: refused' in done.stderr\n"
+            "    out.append(name + (' refused' if refused else ' ran'))\n"
+            "attempt('variable', f'P={L}; touch \"$P/variable\"')\n"
+            "attempt('exported', f'export P={L}; mkdir \"$P/exported\"')\n"
+            "attempt('chown through a variable', f'P={L}; chown -h 0 \"$P\"')\n"
+            "attempt('HOME', 'touch \"$HOME/home\"', env={'HOME': L})\n"
+            "attempt('XDG', 'mkdir -p \"$XDG_STATE_HOME/x\"', env={'XDG_STATE_HOME': L})\n"
+            "attempt('tilde', 'touch ~/tilde', env={'HOME': L})\n"
+            "attempt('default', 'touch \"${NOPE_SYRD627:-' + L + '}/default\"')\n"
+            "attempt('substitution', f'echo \"$(touch {L}/substitution)\"')\n"
+            "attempt('backtick', f'echo \"`touch {L}/backtick`\"')\n"
+            "attempt('substitution as the target', f'touch \"$(echo {E})/z\"')\n"
+            "attempt('eval', f\"eval 'touch {L}/eval'\")\n"
+            "attempt('script file', f'bash {E}/writes.sh')\n"
+            "attempt('sourced', f'. {E}/writes.sh')\n"
+            "attempt('find -delete', f'find {L} -name x -delete')\n"
+            "attempt('sed -i', f'sed -i s/a/b/ {L}/file')\n"
+            "attempt('if', f'if true; then touch {L}/if; fi')\n"
+            "attempt('case', f'case x in a|x) touch {L}/case;; esac')\n"
+            "attempt('function', f'f() {{ touch {L}/function; }}; f')\n"
+            "attempt('cd in a group', f'( cd {L} && touch group )')\n"
+            "attempt('expanded heredoc', f'cat > {E}/doc <<EOF\\n$(touch {L}/heredoc)\\nEOF')\n"
+            "attempt('unset variable', 'touch \"$NOPE_SYRD627/x\"')\n"
+            "attempt('positional', 'f() { touch \"$1\"; }; f x')\n"
+            "attempt('loop variable', 'for f in a b; do touch \"$f\"; done')\n"
+            "attempt('stdin', 'echo x | xargs rm')\n"
+            "attempt('safe variable', f'P={E}; touch \"$P/fine\"')\n"
+            "attempt('quoted heredoc', f\"cat > {E}/doc2 <<'EOF'\\n$(touch {L}/data)\\nEOF\")\n"
+            "attempt('single-quoted', f\"echo '$(touch {L}/literal)' > {E}/literal\")\n"
+            "attempt('cd scoped to a group', f'( cd {L} ); touch after', cwd=E)\n"
+            "print(';'.join(out))\n")
+    refused = ("variable", "exported", "chown through a variable", "HOME", "XDG", "tilde", "default", "substitution",
+               "backtick", "substitution as the target", "eval", "script file", "sourced", "find -delete", "sed -i", "if",
+               "case", "function", "cd in a group", "expanded heredoc", "unset variable", "positional", "loop variable",
+               "stdin")
+    ran = ("safe variable", "quoted heredoc", "single-quoted", "cd scoped to a group")
+    expected = ";".join([f"{name} refused" for name in refused] + [f"{name} ran" for name in ran])
+    env = {**os.environ, live_boundary.LIVE_ROOTS_ENV: str(live), live_boundary.INVOKER_UID_ENV: str(os.getuid()),
+           "PYTHONPATH": str(live_boundary.SITE_DIR)}
+    for label, argv in (("a Python child", [sys.executable, "-c", code]),
+                        ("a namespace child", ["unshare", "--user", "--map-auto", "--map-root-user", sys.executable,
+                                               "-c", code])):
+        done = subprocess.run([*argv, str(live), str(elsewhere)], env=env, capture_output=True, text=True, timeout=180)
+        after = os.lstat(live / "home")
+        check(done.stdout.strip() == expected and sorted(os.listdir(live / "home")) == []
+              and (after.st_uid, after.st_gid, after.st_mode) == (before.st_uid, before.st_gid, before.st_mode),
+              f"{label}: every expanded write under a live root is refused (126), nothing is created or chowned, and "
+              f"what is safe runs: {done.stdout} {sorted(os.listdir(live / 'home'))} {done.stderr[-800:]}")
+
+
 def test_sentinel_contents(scratch: Path) -> None:
     """The sentinel sees a store record rewritten, appended to, created or deleted by the account itself, not only an
     owner change; the live pane's own records may change contents, as its hooks do, and nothing more."""
@@ -624,6 +693,7 @@ def main() -> int:
             test_tmux(scratch)
             test_commands(scratch)
             test_mutations(scratch)
+            test_expansions(scratch)
             test_sentinel_contents(scratch)
         finally:
             subprocess.run(["unshare", "--user", "--map-auto", "--map-root-user", "chown", "-R", "-h", "0:0", str(scratch)],

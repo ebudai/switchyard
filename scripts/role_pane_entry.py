@@ -46,10 +46,26 @@ if TYPE_CHECKING:
     from scripts.team_launcher import ProjectConfig, RoleConfig
 
 
+#: The provider-session identity a pane's own process carries, and a command run from it inherits.
+AMBIENT_PANE_SESSION_ENV_KEYS = ("TICKET_BOARD_PANE_SESSION_ID", "PGU_PANE_SESSION_ID")
+
+
+def without_ambient_pane_session(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """`environ` (default: this process's) without the calling pane's provider-session identity.
+
+    For a command that starts ANOTHER declared role in its own detached session
+    (SYRD-635): that role's identity is its own recorded session, which its pane
+    command sets itself, so the caller's must not travel with it -- and must not
+    trip the guard below, which is for entering another role's session from this one.
+    """
+    source = os.environ if environ is None else environ
+    return {key: value for key, value in source.items() if key not in AMBIENT_PANE_SESSION_ENV_KEYS}
+
+
 def _ambient_pane_session_ids(environ: Mapping[str, str] | None = None) -> dict[str, str]:
     source = os.environ if environ is None else environ
     result: dict[str, str] = {}
-    for key in ("TICKET_BOARD_PANE_SESSION_ID", "PGU_PANE_SESSION_ID"):
+    for key in AMBIENT_PANE_SESSION_ENV_KEYS:
         value = str(source.get(key) or "").strip()
         if value:
             result[key] = value

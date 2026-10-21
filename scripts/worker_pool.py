@@ -1150,18 +1150,12 @@ def start_worker(
     """
     import subprocess
 
-    from scripts import team_launcher as launcher
+    from scripts import role_pane_entry, team_launcher as launcher, worker_start_gate
 
     runner = runner or subprocess.run
-    state = next((candidate for candidate in readiness if candidate.role == member), None)
-    if state is None:
-        raise ValueError(f"{member} is not a live member of the {pool.name} pool")
-    if state.blockers and not force:
-        detail = "; ".join(state.blockers)
-        if any(blocker in state.blockers for blocker in PREPARATION_BLOCKERS):
-            # Preparation is its own supported step; start does not do it.
-            detail += f". Prepare it first, then start it again: {prepare_role_command(config_path, member)}"
-        return WorkerAction(member, "not started", detail)
+    state, refused = worker_start_gate.start_refusal(pool, member, readiness=readiness, config_path=config_path, force=force)
+    if refused:
+        return WorkerAction(member, "not started", refused)
     # Asked now, not taken from the readiness read: a restart reads readiness
     # before its stop, and "already running" from that read started nothing
     # while the worker was down (SYRD-477).
@@ -1183,7 +1177,8 @@ def start_worker(
         no_attach=True,
         run_as_user=pane_user,
     )
-    result = runner(args)
+    # The worker is another role in its own session: the caller's pane identity stays here (SYRD-635).
+    result = runner(args, env=role_pane_entry.without_ambient_pane_session())
     # The pane command's exit status is not a worker: a resume it could not
     # verify in time exits 0, and so does a runtime that exits straight after.
     # Only what is running now answers "started".
@@ -1232,11 +1227,16 @@ def stop_worker(config, member: str, *, runner=None) -> WorkerAction:
 def restart_worker(config, pool, member: str, **kwargs) -> list[WorkerAction]:
     """Stop and start one worker, which is how a stuck runtime is recovered.
 
-    Deliberately two recorded actions rather than one: a restart whose stop
-    succeeded and whose start did not is a stopped worker, and saying
-    "restarted" over that would be the report disagreeing with the machine.
+    Two recorded actions: a stopped worker whose start failed is not "restarted".
+    What start would refuse is asked before anything is stopped (SYRD-635).
     """
     runner = kwargs.get("runner")
+    from scripts.worker_start_gate import start_refusal
+    _state, refused = start_refusal(pool, member, readiness=kwargs["readiness"], config_path=kwargs["config_path"],
+                                    force=kwargs.get("force", False))
+    if refused:
+        state, seen = observe_worker(config, member, runner=runner)
+        return [WorkerAction(member, "not restarted", f"{refused}; nothing was stopped: {_as_now(state, seen)}")]
     stopped = stop_worker(config, member, runner=runner)
     if not stopped.succeeded:
         # Nothing is started over a worker that was not stopped: the start

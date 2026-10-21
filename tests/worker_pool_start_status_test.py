@@ -202,13 +202,16 @@ def test_mixed_outcomes_fail_the_command_that_did_not_get_what_it_asked_for(tmp:
     check(host.run("start", "impl-1")[0] == 0, "the prepared worker starts")
     code, said = host.run("start", "impl-2")
     check(code == 1 and "impl-2 not started" in said, (code, said))
-    # Within one command: a restart whose stop worked and whose start was
-    # refused left a stopped worker; both halves are reported, and it fails.
+    # Within one command: a restart whose start would be refused fails -- and,
+    # since SYRD-635, is refused before its stop, so the worker is left running
+    # rather than stopped for nothing.
     code, said = host.run("restart", "impl-2")
     check(code == 1, (code, said))
-    check("impl-2 stopped" in said and "impl-2 not started" in said, said)
-    check(host.killed, "the stop really ran")
-    # Stopping a worker that is not running is what stop asked for.
+    check("impl-2 not restarted" in said and "nothing was stopped" in said and "impl-2 stopped" not in said, said)
+    check(not host.killed, "nothing was stopped")
+    # Stopping it is what stop asked for; stopping it again is too.
+    code, said = host.run("stop", "impl-2")
+    check(code == 0 and "impl-2 stopped" in said and host.killed, (code, said))
     code, said = host.run("stop", "impl-2")
     check(code == 0 and "impl-2 already stopped" in said, (code, said))
 

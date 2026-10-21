@@ -14,8 +14,10 @@ parts of each that are not the gate's sampling or the listener's decision:
   oldest member, when that started, its command line and its working directory.
 * **Whose ticket started it.** Ticket worktrees are named after their ticket
   (`syrd-579-app`), and commands name the paths they work on, so a ticket id is
-  read from the directory first and the command second. Only an id the board
-  actually has counts, so `claude-1006` in a temp path is nobody's ticket.
+  read from the directory first and the command second -- but only from a
+  worktree git itself registered, never from a name alone: the VM kit's
+  `~/syrd-248-vm` is SYRD-248's name, not its worktree (SYRD-636). Only an id
+  the board actually has counts.
 * **Whether that ticket is still the role's.** A child whose ticket has gone to
   another role, or finished, is a lease that has lapsed: it may not hold that
   role's later work. Nothing here stops it -- the Director is told how to.
@@ -33,8 +35,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-#: A ticket id as worktrees and commands spell it: `syrd-579`, `PGU-801`.
+#: A ticket id as worktrees spell it: `syrd-579`, `PGU-801`.
 _TICKET_ID = re.compile(r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9]{0,15})-(\d{1,7})(?!\d)")
+#: An absolute path in a command line, up to whatever ends a shell word.
+_PATH = re.compile(r"""(?<![\w.~-])(/[^\s"';|&()<>`]+)""")
 #: A `pgrep` with `-f` in its options, and its pattern.
 _PGREP_F = re.compile(r"""\bpgrep((?:\s+-[A-Za-z]+)+)\s+(?:--\s+)?(?:"([^"]*)"|'([^']*)'|([^\s;|&)]+))""")
 #: How much of a command line the Director is shown.
@@ -68,13 +72,12 @@ class Holder:
         return f"{self.pgid or self.pid}@{int(self.started_at)}"
 
     def candidate_tickets(self) -> list[str]:
-        """Ticket ids this child names: its directory's first, then its command's."""
+        """Ticket ids of the worktrees this child is in, or names: its directory's first, then its command's."""
         found: list[str] = []
-        for text in (self.cwd, self.command):
-            for prefix, number in _TICKET_ID.findall(text or ""):
-                ticket = f"{prefix.upper()}-{int(number)}"
-                if ticket not in found:
-                    found.append(ticket)
+        for path in [self.cwd] + _PATH.findall(self.command or ""):
+            ticket = worktree_ticket(path)
+            if ticket and ticket not in found:
+                found.append(ticket)
         return found
 
     @property
@@ -117,6 +120,64 @@ class Holder:
                        bool(raw.get("detached", True)))
         except (KeyError, TypeError, ValueError):
             return None
+
+
+def worktree_ticket(path: str) -> str:
+    """The ticket id of the git worktree `path` is in, or "" when it is in none.
+
+    A worktree is a directory whose `.git` file names a registration whose own
+    `gitdir` names that file back: what `git worktree add` writes. A clone, a
+    copied worktree and a plain directory named like a ticket are not one.
+    """
+    if not path.startswith("/"):
+        return ""
+    for directory in (Path(path), *Path(path).parents):
+        dot_git = directory / ".git"
+        try:
+            pointer = dot_git.read_text(encoding="utf-8", errors="replace")[:4096] if dot_git.is_file() else ""
+        except OSError:
+            continue
+        if not pointer.startswith("gitdir: "):
+            continue
+        registration = Path(pointer[len("gitdir: "):].strip())
+        try:
+            back = (registration / "gitdir").read_text(encoding="utf-8", errors="replace")[:4096].strip()
+        except OSError:
+            return ""
+        if back != str(dot_git):
+            return ""
+        found = _TICKET_ID.search(directory.name)
+        return f"{found.group(1).upper()}-{int(found.group(2))}" if found else ""
+    return ""
+
+
+def checked_stop(pgid: int, start_ticks: int) -> str:
+    """A stop that signals the process group only while its leader is still the one reported, and says what it did.
+
+    One `sh -c` with no backslash and no inner single quote, so bash, zsh and
+    fish pass it on alike. The leader must still have started at the same tick:
+    a pid and its start time are one process, and a session leader keeps its
+    group, so a number since reused by anything -- the provider included -- is
+    never signalled. Whether it stopped counts only members that are not
+    zombies: one orphaned to a parent that reaps late has stopped (SYRD-636).
+    """
+    return (f"sh -c 'g={pgid}; s=$(sed \"s/.*) //\" /proc/$g/stat 2>/dev/null | cut -d\" \" -f20); "
+            f"if [ \"$s\" != \"{start_ticks}\" ]; then echo \"process group $g is not the one reported "
+            "(gone, or its number reused): nothing sent\"; exit 1; fi; kill -s TERM -- -$g; n=0; "
+            "while ps -e -o pgid= -o stat= | grep -q \"^ *$g [^Z]\" && [ $n -lt 10 ]; do sleep 1; n=$((n+1)); done; "
+            "if ps -e -o pgid= -o stat= | grep -q \"^ *$g [^Z]\"; then echo \"process group $g is still running\"; "
+            "exit 1; fi; "
+            "echo \"process group $g stopped\"'")
+
+
+def start_ticks(proc_root: Path, pid: int) -> int:
+    """When `pid` started, in the kernel's clock ticks since boot; 0 when that cannot be read."""
+    stat = _read(proc_root / str(pid) / "stat").decode("utf-8", errors="replace")
+    fields = stat[stat.rfind(")") + 2:].split() if ")" in stat else []
+    try:
+        return int(fields[19])
+    except (IndexError, ValueError):
+        return 0
 
 
 def _read(path: Path) -> bytes:
@@ -183,8 +244,8 @@ def _elapsed(seconds: float) -> str:
 
 
 def sentence(holder: Holder, origin: dict[str, Any] | None, *, now: float | None = None,
-             provider_pid: int | None = None) -> str:
-    """What the Director is told about one holder."""
+             provider_pid: int | None = None, stop: str = "") -> str:
+    """What the Director is told about one holder; `stop`, when given, is the way to end it."""
     now = time.time() if now is None else now
     running = (f"running for {_elapsed(now - holder.started_at)}, since "
                f"{time.strftime('%Y-%m-%d %H:%M:%S %z', time.localtime(holder.started_at))}"
@@ -201,7 +262,7 @@ def sentence(holder: Holder, origin: dict[str, Any] | None, *, now: float | None
     endless = (" It waits on a `pgrep -f` whose pattern matches its own command line, so it can never end by itself."
                if holder.self_matching else "")
     return (f"pid {holder.pid} (process group {holder.pgid or 'unknown'}), {running}, {turn}, {whose}{command}{where}.{endless} "
-            f"Nothing was stopped. To end it: {holder.recovery(provider_pid)}.")
+            f"Nothing was stopped. To end it: {stop or holder.recovery(provider_pid)}.")
 
 
 def origins(conn: Any, holders: Iterable[Holder]) -> dict[str, dict[str, Any]]:

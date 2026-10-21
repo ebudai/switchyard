@@ -232,6 +232,13 @@ background command an end, and finish it before you move the ticket on.
   One ran for eighteen hours and held the next ticket back the whole time.
 - **Always set a deadline, and stop only what you started when it passes.**
   Check that it really stopped.
+- **Shut down VMs and long-lived services before you submit the ticket that
+  started them.** A VM, a database or a server started for a comparison has no
+  deadline of its own. Stop it cleanly once its results are in (a VM's own
+  `poweroff`), and check it is gone. Two VMs left from finished work once ran
+  overnight under a pane, 8 CPUs and 16 GiB each.
+- **Start long-lived work from the ticket's worktree**, or name a path in it
+  in the command, so the board can tell whose it is.
 
 ```bash
 long-command & pid=$!                      # the one process to wait for
@@ -244,8 +251,11 @@ fi
 ```
 
 Your CLI's own background-task tools work too, if they tell you when the
-command exits. The board names a ticket's leftover processes to the director
-with their pid, and does not stop them itself.
+command exits. When your next ticket is handed over, the board tells the
+director once about anything an earlier ticket left running under your pane,
+with its pid and, when its worktree says, its ticket; it stops nothing itself.
+Work for a ticket you still own, and a run under `timeout` that has not reached
+its deadline, is left out.
 
 **Do not poll to watch progress.** A loop that keeps re-reading an unchanged
 ticket, the board, or another role's pane spends your model quota and tells you

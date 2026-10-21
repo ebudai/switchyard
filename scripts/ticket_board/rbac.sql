@@ -433,4 +433,8 @@ GRANT EXECUTE ON FUNCTION ticket_board.board_stall_notice_is_current(jsonb) TO t
 GRANT EXECUTE ON FUNCTION ticket_board.board_stall_status(timestamptz) TO ticket_board_service, ticket_board_listener;
 -- End of SYRD-637.
 
+-- SYRD-636: the listener reports a hand-over's leftover background work to the Director.
+REVOKE ALL ON FUNCTION ticket_board.note_handoff_child(text, text, text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ticket_board.note_handoff_child(text, text, text, text) TO ticket_board_listener;
+
 COMMIT;

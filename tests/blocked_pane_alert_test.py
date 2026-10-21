@@ -106,6 +106,20 @@ def alive(pid: int) -> bool:
     return stat[stat.rfind(")") + 2:].split()[0] != "Z"
 
 
+def ticket_worktree(path: Path) -> Path:
+    """A real ticket worktree, cut by `git worktree add` from a repository beside it: only a worktree git registered
+    names a child's ticket, never a directory's name alone (SYRD-636)."""
+    repo = path.parent / ".repo"
+    run = lambda *argv, cwd: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *argv], cwd=cwd,
+                                             check=True, capture_output=True)
+    if not repo.exists():
+        repo.mkdir()
+        run("init", "-q", cwd=repo)
+        run("commit", "-q", "--allow-empty", "-m", "init", cwd=repo)
+    run("worktree", "add", "-q", "-b", path.name, str(path), cwd=repo)
+    return path
+
+
 def scenario(root: Path, full: bool) -> dict:
     for extra in (str(root), str(root / "tests"), str(ROOT / "tests")):
         if extra not in sys.path:
@@ -345,8 +359,7 @@ def scenario(root: Path, full: bool) -> dict:
             route("PGU-627", "app")
             one_pass()
             seen["first_delivered"] = sent_to_app("PGU-627")
-            wt627 = worktrees / "pgu-627-app"
-            wt627.mkdir()
+            wt627 = ticket_worktree(worktrees / "pgu-627-app")
             # Busy the whole time, as a VM is: a loop that only sleeps is sometimes sampled between its sleeps,
             # read as stale and let past without the lease (SYRD-583 measured it), which is not what is tested here.
             vm = spawn("app", wt627, "while :; do :; done  # disposable VM for pgu-627")

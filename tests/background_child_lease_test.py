@@ -114,6 +114,20 @@ def start_time(pid: int) -> int:
     return int(stat[stat.rfind(")") + 2:].split()[19])
 
 
+def ticket_worktree(path: Path) -> Path:
+    """A real ticket worktree, cut by `git worktree add` from a repository beside it: only a worktree git registered
+    names a child's ticket, never a directory's name alone (SYRD-636)."""
+    repo = path.parent / ".repo"
+    run = lambda *argv, cwd: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *argv], cwd=cwd,
+                                             check=True, capture_output=True)
+    if not repo.exists():
+        repo.mkdir()
+        run("init", "-q", cwd=repo)
+        run("commit", "-q", "--allow-empty", "-m", "init", cwd=repo)
+    run("worktree", "add", "-q", "-b", path.name, str(path), cwd=repo)
+    return path
+
+
 def scenario(root: Path, full: bool) -> dict:
     for extra in (str(root), str(root / "tests"), str(ROOT / "tests")):
         if extra not in sys.path:
@@ -349,8 +363,7 @@ def scenario(root: Path, full: bool) -> dict:
             route("PGU-579", "app")
             one_pass()
             seen["first_delivered"] = sent_to_app("PGU-579")
-            wt579 = worktrees / "pgu-579-app"
-            wt579.mkdir()
+            wt579 = ticket_worktree(worktrees / "pgu-579-app")
             # Started from a directory whose name looks like an id the board does
             # not have; only the command names the ticket's worktree.
             decoy = worktrees / "node-18-scratch"
@@ -443,12 +456,10 @@ def scenario(root: Path, full: bool) -> dict:
 
             # 8. Work for the ticket app still owns is not a lapsed lease: a build
             #    the last turn left running keeps app's pane, untouched.
-            wt590 = worktrees / "pgu-590-app"
-            wt590.mkdir()
+            wt590 = ticket_worktree(worktrees / "pgu-590-app")
             build = spawn("app", wt590, "while :; do :; done")
             build_start = start_time(build)
-            wt581 = worktrees / "pgu-581-app"
-            wt581.mkdir()
+            wt581 = ticket_worktree(worktrees / "pgu-581-app")
             lapsed_waiter = spawn("app", wt581, f'while pgrep -f "syrd583-lapsed-wait" >/dev/null; do sleep {WAIT_SECONDS}; done '
                                                 '# syrd583-lapsed-wait')
             turn_ends("app")
@@ -533,8 +544,14 @@ def units() -> None:
     check("`kill -TERM -- -10`" in holder.recovery(7) and "never the provider (pid 7)" in holder.recovery(7)
           and "`kill -TERM 12`" in pane.recovery(7) and "-- -4" not in pane.recovery(7),
           f"the stop is its own process group, or for a child in the pane's group the process alone: {pane.recovery(7)}")
-    check(holder.candidate_tickets() == ["SYRD-579"] and bc.Holder(1, 1, 1, 0.0, "x", "/tmp/claude-1006/pgu-12-a").candidate_tickets()
-          == ["CLAUDE-1006", "PGU-12"], "ids are read from the directory, then the command; the board decides which exist")
+    with tempfile.TemporaryDirectory(prefix="syrd583u.") as tmp:
+        worktree = ticket_worktree(Path(tmp) / "syrd-579-app")
+        named = bc.Holder(10, 10, 10, 1.0, "bash -c x", str(worktree)).candidate_tickets()
+        by_command = bc.Holder(10, 10, 10, 1.0, f"bash -c make -C {worktree}/tests", "/tmp/syrd-12-scratch").candidate_tickets()
+        loose = bc.Holder(1, 1, 1, 0.0, "x", "/tmp/claude-1006/pgu-12-a").candidate_tickets()
+    check(named == by_command == ["SYRD-579"] and loose == [],
+          f"ids are read from a worktree the directory is in, then one the command names; never from a name alone: "
+          f"{named} {by_command} {loose}")
 
 
 def tree_at(commit: str, into: Path) -> Path:

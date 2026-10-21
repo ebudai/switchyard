@@ -8,6 +8,7 @@ import re
 from typing import Any
 
 from .documentation_gate import validate_documentation_gate
+from .publisher_stage import validate_publisher
 from .router_role import router_holds, validate_router
 
 SCHEMA = "switchyard.workflow.v1"
@@ -1090,6 +1091,7 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
     )
     validate_router(cfg, need)
     validate_documentation_gate(cfg, need)
+    validate_publisher(cfg, need)  # SYRD-625
     return cfg
 
 

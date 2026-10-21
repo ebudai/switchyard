@@ -72,6 +72,8 @@ available for the built-in `pgu` board.
 | `documentation` | Documentation | librarian or director (optional) |
 | `inspection` | Inspection | inspector |
 | `audit` | Audit | audit |
+| `publication` | Publication | publisher (optional) |
+| `publication_failed` | Publication failed | director (optional) |
 | `dat` | DAT | director |
 | `user_review` | UAT | user |
 | `director_review` | Final Sign-Off | director |
@@ -146,6 +148,18 @@ system working, not a bug to route around.
 - The Librarian holds nothing else: no routing, publication beyond its documentation ref,
   merge or acceptance. See `switchyard-librarian-guide.md`.
 
+**Publisher** (a system actor with no pane, model or session; only where the project runs it)
+- The `publication` stage follows Audit: every approval out of Audit enters it. The
+  board's listener publishes the exact approved candidate to the integration branch, as
+  a compare-and-swap fast-forward on the public tip, then:
+  - `publication_published` — on to where Audit used to approve into (User Review or Final
+    Sign-Off by the usual gates), with evidence in a comment;
+  - `publication_return` — back to the implementer when the candidate must change (main
+    advanced, more than one commit, a merge, history differs, published nowhere), every
+    sign-off cleared, with the exact diagnostic;
+  - `publication_escalate` — to `publication_failed`, the Director's, for anything else.
+- Nobody else can take those three moves. You never publish main yourself.
+
 **Director**
 - `route` — the general move, from almost anywhere to almost anywhere. Director-only.
 - `reassign` — a new owner in the same stage, with `--assignee` and a required `--reason`.
@@ -155,6 +169,8 @@ system working, not a bug to route around.
 - `cancel` — → cancelled
 - `mark-done` — director_review → done (with `--commit-hash`)
 - `director-dat-sign-off` / `director-dat-kick-back`
+- `publication_retry` / `publication_kick_back` — from `publication_failed`: back to the
+  Publisher, or to the implementer with every sign-off cleared (`workflow-action`)
 - `set-blockers`, `release-external-blocker`, `set-manually-controlled`, `edit-fields`
 - `release-draft` — draft → analysis
 - `force-move` / `override-move` — last resort; **always narrate in a comment**

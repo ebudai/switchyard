@@ -109,6 +109,7 @@ Commands:
   router-role      turn on or off the Router role that picks Implementation owners
   documentation-gate
                    turn on or off the documentation gate, decided by a Librarian or the Director
+  publisher        turn on or off the Publisher, which publishes approved work to the integration branch
   onboarding-readiness
                    report whether every registered tenant has migrated director onboarding
   stop             suspend a project: window, sessions, listener and board, reversibly
@@ -119,7 +120,7 @@ Commands:
   validate-models  check configured role models without starting panes
   paste-image      hand one copied image to a role, as the project's desktop owner
 
-Bare project names start or attach the project. Recognized commands: board-skill, new, register, upgrade, repair-boundary, approve-desktop, adopt-workflow, migrate-workflow, rebind-workflow-panes, resume-provision, finish-upgrade, cutover-roles, publication-status, rollout-log, recover-display, privileged-action, install-shared-release, release-status, deploy-release, add-role, worker-pool, set-owner-identity, present, attach, replace-window, set-vcs-close-role, set-role-runtime, reconcile-role-models, agy-credential, seed-role-credentials, role-prompt, design-stage, router-role, documentation-gate, onboarding-readiness, stop, start, teardown, status, validate-models, paste-image.
+Bare project names start or attach the project. Recognized commands: board-skill, new, register, upgrade, repair-boundary, approve-desktop, adopt-workflow, migrate-workflow, rebind-workflow-panes, resume-provision, finish-upgrade, cutover-roles, publication-status, rollout-log, recover-display, privileged-action, install-shared-release, release-status, deploy-release, add-role, worker-pool, set-owner-identity, present, attach, replace-window, set-vcs-close-role, set-role-runtime, reconcile-role-models, agy-credential, seed-role-credentials, role-prompt, design-stage, router-role, documentation-gate, publisher, onboarding-readiness, stop, start, teardown, status, validate-models, paste-image.
 ```
 
 <!-- switchyard-help:end -->

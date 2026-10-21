@@ -30,7 +30,7 @@ from typing import Sequence
 
 # Roles that never run a local process: the human uses the browser or the
 # authenticated HTTP path, so no Unix account is created for them.
-NON_PROCESS_ROLES = frozenset({"user", "unassigned"})
+NON_PROCESS_ROLES = frozenset({"user", "unassigned", "publisher"})  # publisher: SYRD-625, a system actor
 
 
 def role_account_name(project: str, role: str) -> str:

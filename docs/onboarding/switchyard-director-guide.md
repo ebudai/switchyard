@@ -178,6 +178,18 @@ its verdict stands. A Librarian holds nothing but those decisions: it does not r
 publish beyond its own documentation ref, merge or accept. See
 `switchyard-librarian-guide.md` (SYRD-624).
 
+**Let the Publisher integrate where it runs.** A project may turn on the Publisher
+(`switchyard publisher <project> enable`). It is a mechanical system actor with no model,
+pane or session, run by the board's listener. After Audit, it publishes the exact
+approved candidate to the integration branch as a compare-and-swap fast-forward. It
+verifies the public branch and the board's cache, then hands the ticket on to User
+Review or your Final Sign-Off, where you close it on the same candidate. A candidate it
+cannot fast-forward goes back to its implementer, with every sign-off cleared. A
+credential, policy, target, journal or helper failure lands in `publication_failed` for
+you, with the exact diagnostic: fix it, then `publication_retry`, or
+`publication_kick_back` to the implementer. It never rebases, merges, edits, force-pushes
+or waives a gate (SYRD-625).
+
 **Recover a stalled ticket rather than overriding it.** When an owner reports
 completion or a dependency and does not transition, `recover-stalled-ticket <id>
 --reason "..."` takes the one declared no-code transition that owner could have

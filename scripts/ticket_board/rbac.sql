@@ -385,4 +385,25 @@ GRANT EXECUTE ON FUNCTION ticket_board.set_uat_instructions(text, text, text, te
 GRANT EXECUTE ON FUNCTION ticket_board.ask_director(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.ticket_uat(text) TO ticket_board_service, ticket_board_listener;
 
+-- SYRD-625: the Publisher's journal and its listener-only functions.
+REVOKE ALL ON ticket_board.publication_attempts FROM PUBLIC;
+REVOKE ALL ON SEQUENCE ticket_board.publication_attempts_id_seq FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.publisher_pending() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.publisher_begin(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.publisher_step(bigint, text, text, jsonb, jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.publisher_finish(bigint, text, text, jsonb, jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.supersede_publication_attempts(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.publication_attempt_current(bigint) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.publisher_declared(jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.publication_missing_signoffs(jsonb, jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.publication_size_problem(text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.publication_ready(ticket_board.tickets) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.enforce_publisher_window() FROM PUBLIC;
+GRANT SELECT ON ticket_board.publication_attempts TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.publisher_pending() TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.publisher_begin(text) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.publisher_step(bigint, text, text, jsonb, jsonb) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.publisher_finish(bigint, text, text, jsonb, jsonb) TO ticket_board_listener;
+-- End of SYRD-625.
+
 COMMIT;

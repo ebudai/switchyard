@@ -366,8 +366,8 @@ def test_the_guard_itself_refuses_a_spawn_an_exec_a_lookup_and_a_connection() ->
 #: What the thirteen read on project_provision when they run: its own, or re-exported there by the earlier slices.
 KEPT = ("shell_quote", "SHARED_RELEASE_CURRENT", "repository_group_commands", "repository_group_name", "role_worktree_access_commands",
         "role_tooling_staging_commands", "tenant_control_commands", "resolve_control_user", "invoking_human")
-#: The three constants, as the baseline wrote them: (annotation, value).
-CONSTANT_TEXT = {"NON_PROCESS_ROLES": (None, "frozenset({'user', 'unassigned'})"), "ROLE_ACCOUNT_MIGRATION_SUFFIX": (None, "'-role-accounts.sh'"),
+#: The three constants, as the baseline wrote them: (annotation, value). SYRD-625 adds the Publisher, never a process.
+CONSTANT_TEXT = {"NON_PROCESS_ROLES": (None, "frozenset({'user', 'unassigned', 'publisher'})"), "ROLE_ACCOUNT_MIGRATION_SUFFIX": (None, "'-role-accounts.sh'"),
                  "ROLE_CONTROL_SUDOERS_HEREDOC": (None, "'SWITCHYARD_ROLE_CONTROL_SUDOERS'")}
 #: The call-time import every function that reads project_provision starts with, with the direct-script fallback.
 CALL_TIME_IMPORT = ("try:\n    from . import project_provision as provision\n"

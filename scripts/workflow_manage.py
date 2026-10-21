@@ -178,6 +178,20 @@ def _document_with_documentation_gate(current: dict, args: argparse.Namespace, p
         parser.error(str(exc))
 
 
+def _document_with_publisher(current: dict, args: argparse.Namespace, parser: argparse.ArgumentParser) -> dict:
+    """SYRD-625: the tenant's own document with the Publisher's publication stage after Audit, or without it."""
+    from scripts.ticket_board.publisher_stage import with_publisher, without_publisher
+
+    if not current.get("document"):
+        parser.error("no workflow configuration is active for this board")
+    try:
+        if args.operation == "disable-publisher":
+            return without_publisher(current["document"])
+        return with_publisher(current["document"])
+    except ValueError as exc:
+        parser.error(str(exc))
+
+
 def _project_dir_for(config_path: Path, document: dict) -> Path | None:
     """Where this tenant's project lives, from the artifact the projection already knows."""
     project = document.get("project")
@@ -351,6 +365,7 @@ TENANT_WRITES = frozenset({
     "apply", "rollback", "set-role-prompt", "clear-role-prompt", "migrate-director-onboarding",
     "add-design-stage", "enable-router", "disable-router",
     "enable-documentation-gate", "disable-documentation-gate",  # SYRD-624
+    "enable-publisher", "disable-publisher",  # SYRD-625
 })
 
 
@@ -391,6 +406,8 @@ def main(argv=None):
             "disable-router",
             "enable-documentation-gate",
             "disable-documentation-gate",
+            "enable-publisher",
+            "disable-publisher",
         ],
     )
     parser.add_argument("--document", type=Path)
@@ -582,6 +599,10 @@ def main(argv=None):
     elif args.operation in {"enable-documentation-gate", "disable-documentation-gate"}:
         # And again for the documentation gate (SYRD-624).
         cfg = _document_with_documentation_gate(current, args, parser)
+        files = projection_files(args.config, cfg)
+    elif args.operation in {"enable-publisher", "disable-publisher"}:
+        # And for the Publisher's publication stage (SYRD-625).
+        cfg = _document_with_publisher(current, args, parser)
         files = projection_files(args.config, cfg)
     else:
         if not args.document:

@@ -108,6 +108,7 @@ SWITCHYARD_COMMANDS = (
     "design-stage",
     "router-role",
     "documentation-gate",
+    "publisher",
     "onboarding-readiness",
     "stop",
     # The other half of `stop`: bring a suspended tenant back in dependency
@@ -168,7 +169,7 @@ SWITCHYARD_UNPRIVILEGED_COMMANDS = frozenset(
     # Escalated, it would read root's clipboard, which does not exist (SYRD-247).
     {
         "present", "attach", "board-skill", "role-prompt", "design-stage", "router-role", "documentation-gate",
-        "set-role-runtime",
+        "publisher", "set-role-runtime",
         "reconcile-role-models", "finish-upgrade", "worker-pool", "privileged-action", "status",
         "paste-image",
     }
@@ -214,6 +215,7 @@ Commands:
   router-role      turn on or off the Router role that picks Implementation owners
   documentation-gate
                    turn on or off the documentation gate, decided by a Librarian or the Director
+  publisher        turn on or off the Publisher, which publishes approved work to the integration branch
   onboarding-readiness
                    report whether every registered tenant has migrated director onboarding
   stop             suspend a project: window, sessions, listener and board, reversibly

@@ -943,6 +943,15 @@ the tip the candidate was prepared against, push with `--force-with-lease`
 against exactly that value, and let the forge refuse an integration that landed
 in between rather than overwriting it.
 
+A project can hand that routine to the Publisher instead (`switchyard publisher
+<project> enable`, SYRD-625). The Publisher is a stage after Audit, taken by a
+system actor that the notify listener runs as the project account. It publishes
+the exact approved candidate with that lease discipline: one commit on the tip,
+pushed from a verified bundle under `--force-with-lease` on that tip. It then
+verifies the public branch and the trusted cache before recording the move on.
+It returns lineage problems to the implementer and everything else to the
+Director. See `docs/syrd-625-publisher.md`.
+
 One limit worth stating: processes sharing a uid can `ptrace` each other unless
 the host restricts it, so the process boundary above is as strong as
 `kernel.yama.ptrace_scope` on that host. It is the same limit the board's own

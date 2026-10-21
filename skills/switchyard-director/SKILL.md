@@ -401,6 +401,25 @@ evidence is not.
 
 Then close with the workflow's completion action, which requires the commit hash.
 
+### When the Publisher integrates
+
+On a project with the Publisher (`switchyard publisher <project> enable`),
+integration is not your routine. Work Audit approves waits in `publication`
+while the Publisher, a mechanical system actor with no model or pane, run by the
+board's listener, publishes the exact approved candidate. It pushes a
+compare-and-swap fast-forward on the public tip, verifies the public branch and
+the trusted cache, and hands the ticket on to User Review or Final Sign-Off.
+There you close it on that same candidate: it is already on main, so check that
+it landed, and do not integrate it again.
+
+A candidate it cannot fast-forward goes back to its implementer by itself.
+Anything else lands in `publication_failed` with the exact diagnostic and the
+repairs it tried: a credential, a hook or branch protection, the publication
+target, the journal, sign-offs or size review. Fix the cause, then send the
+ticket back with `publication_retry`, or return it with `publication_kick_back`.
+Never integrate a ticket by hand while it is in `publication`. See
+`docs/syrd-625-publisher.md`.
+
 ## Release, upgrade and rollback
 
 - `switchyard upgrade <project>` refreshes generated project artifacts and

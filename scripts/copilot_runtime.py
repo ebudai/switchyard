@@ -216,14 +216,34 @@ SCREEN_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("trust", ("confirm folder trust", "do you trust the files in this folder?")),
     ("account_picker", ("what account do you want to log into?",)),
     ("permission", ("do you want to run this command?", "do you want to allow", "do you want to edit")),
-    ("login", ("please use /login to sign in", "you must be logged in to send messages")),
+    # Signed in, and refused the models: the ready input is drawn beneath this,
+    # so it must be read before the input (SYRD-634 DAT, an account whose
+    # Copilot policy denies the CLI). Startup prints the first, a prompt the
+    # second. Copilot's own words; the reason after them is the server's.
+    ("model_access", ("model catalog failed to load", "failed to load models:")),
+    ("login", ("please use /login to sign in", "you must be logged in to send messages",
+               "authorization error. your credentials may be expired or invalid")),
 )
 _WORKING = re.compile(r"^\s*[◎◉○●◌◍]\s+Working\b", re.M)
 _READY_STATUS = re.compile(r"·\s*/ commands\s*·")
 
 
+def access_detail(text: str) -> str:
+    """The line Copilot printed for a refused model catalog, without its glyph; "" when there is none."""
+    for line in text.splitlines():
+        lowered = line.lower()
+        if any(marker in lowered for marker in dict(SCREEN_MARKERS)["model_access"]):
+            return line.strip().lstrip("!✗ ").strip()
+    return ""
+
+
 def classify_screen(text: str) -> str:
-    """One of fatal, trust, account_picker, permission, login, working, ready, unknown."""
+    """One of fatal, trust, account_picker, permission, model_access, login, working, ready, unknown.
+
+    `ready` is only what the screen shows -- the input is drawn and nothing is
+    refused on it. Whether the account may use a model is `screen_status`'s
+    question, answered by the model picker.
+    """
     lowered = text.lower()
     for state, markers in SCREEN_MARKERS:
         if any(marker in lowered for marker in markers):
@@ -260,23 +280,35 @@ def native_executable(resolved: Path) -> Path | None:
     return None
 
 
-#: How long the status probe waits for Copilot to draw something it can name,
-#: and how long a ready screen must stay ready: the sign-in notice is drawn
-#: after the input box (tests/fixtures/copilot-1.0.101/screens/unauthenticated.txt).
-STATUS_PROBE_TIMEOUT_SECONDS = 60.0
-STATUS_PROBE_SETTLE_SECONDS = 4.0
+#: How long the status probe may take, start to answer. Past it the account is
+#: `model_unconfirmed`: not ready, because nothing showed it may use a model.
+STATUS_PROBE_TIMEOUT_SECONDS = 90.0
 STATUS_PROBE_POLL_SECONDS = 0.3
+#: How long one `/model` may take to open before it is asked again: typed while
+#: the model catalog is still loading it opens nothing (measured, 1.0.101).
+MODEL_PICKER_RETRY_SECONDS = 4.0
+#: The picker's own search row: drawn only once the catalog has loaded.
+MODEL_PICKER_MARKER = "search models"
 
 
 def screen_status(argv: list[str], *, cwd: str, timeout: float = STATUS_PROBE_TIMEOUT_SECONDS,
-                  settle: float = STATUS_PROBE_SETTLE_SECONDS, extra_env: Mapping[str, str] | None = None
-                  ) -> tuple[str, str]:
-    """Start interactive Copilot in a private tmux server, name its first settled screen, and end it.
+                  extra_env: Mapping[str, str] | None = None) -> tuple[str, str]:
+    """Start interactive Copilot in a private tmux server, find out whether it can be used, and end it.
 
     Copilot has no non-interactive sign-in check, and asking a model would spend
     a request, so this reads what a person would see: (state, screen), where
-    state is a `classify_screen` state, `exited` when the CLI ended first, or
-    `timeout`. No prompt is ever typed, so no session or hook event starts.
+    state is a `classify_screen` state, `model_unconfirmed`, `exited` when the
+    CLI ended first, or `timeout` when it never drew anything to name.
+
+    A drawn input is not readiness. An account its Copilot policy refuses gets
+    the same input, with the refusal drawn only if the catalog answers early
+    enough -- 12 s late, it is drawn nowhere until somebody asks (SYRD-634
+    Audit). So once the input is up this opens Copilot's own model picker,
+    `/model`, again every MODEL_PICKER_RETRY_SECONDS until it answers: the
+    picker is `ready`, a refusal `model_access`, a sign-in line `login`, and no
+    answer by the deadline `model_unconfirmed` -- never ready. `/model` is a
+    local command: no prompt is sent, no session or hook starts, and the picker
+    is closed without choosing anything.
     """
     import shlex
     import tempfile
@@ -290,7 +322,14 @@ def screen_status(argv: list[str], *, cwd: str, timeout: float = STATUS_PROBE_TI
                                   f"{shlex.join(argv)}; sleep 2"], env=env, capture_output=True, text=True)
         if started.returncode != 0:
             return "exited", started.stderr
-        screen, ready_since = "", None
+
+        def keys(*sequence: str) -> None:
+            for key in sequence:
+                subprocess.run([*tmux, "send-keys", "-t", "0", *(["-l", key[1:]] if key.startswith("=") else [key])],
+                               env=env, capture_output=True)
+                time.sleep(0.2)
+
+        screen, asked_at, asked = "", None, False
         deadline = time.monotonic() + timeout
         try:
             while time.monotonic() < deadline:
@@ -298,17 +337,20 @@ def screen_status(argv: list[str], *, cwd: str, timeout: float = STATUS_PROBE_TI
                 if shot.returncode != 0:
                     return "exited", screen
                 screen = shot.stdout
+                if asked and MODEL_PICKER_MARKER in screen.lower():
+                    keys("Escape")
+                    return "ready", screen
                 state = classify_screen(screen)
-                if state == "ready":
-                    ready_since = ready_since or time.monotonic()
-                    if time.monotonic() - ready_since >= settle:
-                        return state, screen
-                elif state != "unknown":
+                if state not in {"ready", "unknown", "working"}:
                     return state, screen
-                else:
-                    ready_since = None
+                if state == "ready" or asked:
+                    if asked_at is None or time.monotonic() - asked_at >= MODEL_PICKER_RETRY_SECONDS:
+                        if asked:
+                            keys("Escape", "C-u")
+                        keys("=/model", "Enter")
+                        asked, asked_at = True, time.monotonic()
                 time.sleep(STATUS_PROBE_POLL_SECONDS)
-            return "timeout", screen
+            return ("model_unconfirmed" if asked else "timeout"), screen
         finally:
             subprocess.run([*tmux, "kill-server"], env=env, capture_output=True)
 
@@ -335,8 +377,9 @@ def main(argv: list[str]) -> int:
     # is added to trustedFolders).
     with tempfile.TemporaryDirectory(prefix="copilot-status-cwd-") as cwd:
         state, _screen = screen_status(argv[2:], cwd=cwd, extra_env={"COPILOT_ALLOW_ALL": "true"})
-    # The screen is not printed: it can show the account or folder names.
-    print(json.dumps({"state": state}))
+    # The screen is not printed: it can show the account or folder names. A
+    # refused model catalog's own line is, so the person is told why.
+    print(json.dumps({"state": state, **({"detail": access_detail(_screen)} if state == "model_access" else {})}))
     return 0 if state == "ready" else 1
 
 

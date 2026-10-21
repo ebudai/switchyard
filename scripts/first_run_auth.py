@@ -96,6 +96,10 @@ class FirstRunAuthReport:
     #: finished. Their roles will open it in the pane, so this is said rather
     #: than left to be discovered there.
     incomplete_provider_setup: list[tuple[str, list[str]]] = field(default_factory=list)
+    #: Providers signed in whose account is refused their models, with the
+    #: reason they printed (SYRD-634). Their roles are in unauthenticated_roles
+    #: too: they block a launch the same way, and are told in their own terms.
+    access_denied: dict[str, str] = field(default_factory=dict)
 
     @property
     def roles_awaiting_restart(self) -> tuple[str, ...]:
@@ -395,6 +399,7 @@ def run_first_run_auth_phase(
     unfinished_first_run = {cli for cli, _roles in incomplete_setup}
 
     authenticated_now: dict[str, list[str]] = {}
+    access_denied: dict[str, str] = {}
     #: What the completion check last read, so the phase does not ask twice for
     #: the same answer: the bounded step below already probes to know when it
     #: is finished, and that probe is the phase's answer too.
@@ -459,6 +464,8 @@ def run_first_run_auth_phase(
             missing_cli_roles[step.cli] = list(step.roles)
         elif auth_status != "authenticated":
             unauthenticated[step.cli] = list(step.roles)
+            if auth_status in ("access_denied", "access_unconfirmed"):
+                access_denied[step.cli] = launcher.auth_blocker_text(step.cli, auth_status, effective_owner)
         else:
             # This run is what made that provider usable. Every role configured
             # for it that is already running started before it (SYRD-191).
@@ -586,6 +593,7 @@ def run_first_run_auth_phase(
         owner_shell_issue=manifest.owner_shell_issue,
         authenticated_now=authenticated_now,
         incomplete_provider_setup=incomplete_setup,
+        access_denied=access_denied,
     )
 
 
@@ -631,7 +639,8 @@ def report_first_run_auth_warnings(
         )
     for cli, roles in report.unauthenticated_roles.items():
         print_func(
-            f"warning: switchyard: {cli} is still unauthenticated; affected roles: {', '.join(roles)}"
+            f"warning: switchyard: {report.access_denied.get(cli) or f'{cli} is still unauthenticated'}; "
+            f"affected roles: {', '.join(roles)}"
         )
     for cli, roles in report.incomplete_provider_setup:
         print_func(
@@ -691,7 +700,7 @@ def stop_before_launch_for_unauthenticated_providers(
         "finish, so those roles would come up unable to do anything:"
     ]
     for cli, roles in sorted(report.unauthenticated_roles.items()):
-        lines.append(f"  {cli}: {', '.join(roles)} (sign-in not finished)")
+        lines.append(f"  {cli}: {', '.join(roles)} ({report.access_denied.get(cli) or 'sign-in not finished'})")
     for entry in report.incomplete_provider_setup:
         cli, roles = entry[0], entry[1]
         lines.append(f"  {cli}: {', '.join(roles)} (first-run setup did not complete)")

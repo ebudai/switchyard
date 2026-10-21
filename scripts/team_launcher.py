@@ -408,7 +408,7 @@ from scripts.provider_auth_status import (
     PROBE_TIMED_OUT_STATUS,
     _claude_account_setup_complete,
     _cli_auth_probe_passed,
-    _cli_auth_status,
+    _cli_auth_status, auth_blocker_text,
     _owner_cli_is_installed,
     _owner_home_for_auth,
     _provider_account_setup_complete,

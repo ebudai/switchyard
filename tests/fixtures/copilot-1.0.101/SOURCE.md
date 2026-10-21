@@ -35,3 +35,36 @@ The throwaway paths are rewritten to `/home/owner`, and the work folder is `/hom
 | hooks/quota-429.jsonl | three `errorOccurred` (`errorContext: model_call`, recoverable), no `agentStop` |
 | hooks/preassigned-session-id.jsonl | `--session-id=11111111-2222-4333-8444-555555555555` names the new session |
 | hooks/session-id-resume-then-in-session-resume.jsonl | `--session-id=<existing id>` resumes it; `/resume <other id>` in session switches to that one |
+
+## A signed-in account refused its models (SYRD-634 DAT)
+
+Live UAT found an account whose Copilot policy denies the CLI: it signs in, then
+prints `Model catalog failed to load: ... access denied by Copilot policy` above an
+ordinary ready input, and every prompt fails. The same 1.0.101 binary was recorded
+in that state offline, without an account:
+
+- bwrap with no network; a fake `COPILOT_GITHUB_TOKEN`; `HTTPS_PROXY` set to a local
+  CONNECT proxy that terminates TLS with a throwaway CA (`NODE_EXTRA_CA_CERTS`).
+- The proxy answers GitHub's API as a signed-in business seat, and answers the
+  model catalog (`GET https://api.business.githubcopilot.com/models`) and every
+  model call with 403 `{"error": {"message": "access denied by Copilot policy"}}`,
+  the reason the live pane showed. The `allowed` control answers the catalog.
+- Every other endpoint answered 404, so the MCP lines on these screens
+  ("Third-party MCP servers are disabled ...", "Failed to connect to MCP server")
+  come from the stand-in API, not from the account under test. They appear on the
+  allowed control too.
+
+| file | what the CLI did |
+|---|---|
+| screens/model-catalog-denied-auto.txt | no model configured, startup: "! Model catalog failed to load: Error: 403 access denied by Copilot policy" above the ready input |
+| screens/model-catalog-denied-auto-prompt.txt | the same, after one prompt: "✗ Failed to load models: Error: 403 ..." |
+| screens/model-catalog-denied-model.txt | `--model claude-haiku-5.5`, startup: the same catalog line above the ready input |
+| screens/model-catalog-denied-model-prompt.txt | the same, after one prompt: the model call's 403 as "✗ Authorization error. Your credentials may be expired or invalid. Run /login to sign in again." |
+| screens/model-catalog-allowed.txt | the control: catalog answered, no catalog line, the ready input |
+| screens/model-picker-allowed.txt | `/model` typed once the input is drawn, catalog answered: the picker, "Search models…", listing the catalog's model |
+| screens/model-picker-denied.txt | `/model` with the catalog refused: "✗ Failed to load models: access denied by Copilot policy." and no picker |
+| screens/model-picker-slow-denied.txt | the catalog refused 12 s late: no startup line at all, and only after repeated `/model` the "Model catalog failed to load" line |
+
+A refusal that arrives late is never drawn at startup (12 s late: no line by 20 s), and `/model` typed while the
+catalog is still loading opens nothing; typed again once it has loaded, it opens the picker or reports the refusal.
+So readiness is the picker itself, asked for until it answers, and never a quiet screen.

@@ -323,10 +323,7 @@ def _readiness_blockers(
         blockers.append(f"{runtime} is not installed for {owner_user}")
     elif status not in {"authenticated", "unknown"}:
         login = " ".join(team_launcher.FIRST_RUN_AUTH_LOGIN_COMMANDS.get(runtime, ()))
-        blockers.append(
-            f"{runtime} is not logged in for {owner_user}"
-            + (f"; run: {login}" if login else "")
-        )
+        blockers.append(team_launcher.auth_blocker_text(runtime, status, owner_user, login))
     if runtime in team_launcher.FIRST_RUN_TRUST_CLIS and not owner_writes.holds_as_owner(  # as the owner (SYRD-612)
         owner_user, lambda: team_launcher._workdir_is_trusted(runtime, owner_home=owner_home, workdir=Path(role.workdir),
                                                             **team_launcher._trust_kwargs(runtime, role))

@@ -1,0 +1,45 @@
+ [Current]  Sessions   Issues   Pull requests   Gists
+
+   response: HTTP 404 Not Found: {"message": "Not Found (prob…. Execute '/mcp show github-mcp-server' to inspect or check the logs.                            ┃
+                                                                                                                                                               ┃
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+   Auto routes based on your task, real-time system health, and model performance. Learn More
+
+   Optimize for
+     Efficiency — Favors faster models while preserving the quality needed for the task.
+     Balance — Balances model quality and speed while adapting to each task.
+     Intelligence — Favors stronger models for complex work while remaining adaptive for simpler tasks.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+ Session only. Auto chooses a model; it does not change Autopilot or Assisted Permissions. Use `/config model` for future sessions.
+
+                         Cost  Tier                                                                                                                           ┃
+ ❯ Auto                  —  ← Balance →                                                                                                                       ┃
+                                                                                                                                                              ┃
+                         Cost                                                                                                                                 ┃
+   New models                                                                                                                                                 ┃
+   Probe Model           1x                                                                                                                                   ┃
+                                                                                                                                                              ┃
+   Unavailable models                                                                                                                                         ┃
+   claude-sonnet-5.5     1x                                                                                                                                   ┃
+   claude-sonnet-5       1x                                                                                                                                   ┃
+   claude-fable-5.1      15x                                                                                                                                  ┃
+   claude-fable-5        15x                                                                                                                                  ┃
+   claude-opus-5.5       15x                                                                                                                                  ┃
+   claude-opus-5         15x                                                                                                                                  ┃
+   claude-opus-4.8       15x                                                                                                                                  ┃
+   claude-opus-4.8-fast  30x                                                                                                                                  ┃
+   claude-sonnet-4.6     1x                                                                                                                                   ┃
+   claude-haiku-5.5      1x                                                                                                                                   ┃
+   claude-haiku-4.5      0.33x                                                                                                                                ┃
+   gpt-6.1-sol           1x                                                                                                                                   ┃
+   gpt-6-sol             1x                                                                                                                                   ┃
+   gpt-6-luna            1x                                                                                                                                   ┃
+   gpt-6-astra           1x                                                                                                                                   ┃
+
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ❯  Search models…
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ↑/↓ to navigate · ←/→ routing profile · shift+tab group: recommended · ctrl+r rescan providers · enter to select · esc to cancel

@@ -47,6 +47,26 @@ FIRST_RUN_AUTH_STATUS_COMMANDS: dict[str, list[str]] = {
 }
 
 
+#: Why a provider answered "access_denied", per CLI, from its own probe: the
+#: line Copilot printed for a model catalog its account is refused (SYRD-634).
+ACCESS_DENIALS: dict[str, str] = {}
+
+
+def auth_blocker_text(cli: str, status: str, owner_user: str, login: str = "") -> str:
+    """What a not-ready provider tells the person, in its own terms."""
+    if status == "access_denied":
+        detail = ACCESS_DENIALS.get(cli) or "its model catalog was refused"
+        return (f"{cli} is signed in for {owner_user}, but Copilot did not give that account its models ({detail}); "
+                "if a Copilot policy refused them, sign in as an account whose policy allows the CLI"
+                + (f" ({login})" if login else "") + " or have its organization allow it, and otherwise check the "
+                "network and try again")
+    if status == "access_unconfirmed":
+        return (f"{cli} could not confirm that {owner_user} may use Copilot's models: its model picker did not open "
+                "before the probe gave up, so the account is not taken as ready; check that account's Copilot access "
+                "and the network, then try again")
+    return f"{cli} is not logged in for {owner_user}" + (f"; run: {login}" if login else "")
+
+
 def _owner_home_for_auth(owner_user: str, fallback: Path | None = None) -> Path:
     try:
         return Path(pwd.getpwnam(owner_user).pw_dir)
@@ -195,6 +215,18 @@ def _cli_auth_status(
     proc = _run_owner_cli_probe(owner_user=owner_user, owner_home=owner_home, command=command, runner=runner)
     if _cli_auth_probe_passed(cli, proc):
         return "authenticated"
+    if cli == "copilot":
+        # Signed in and refused its models: the screen also shows the ready
+        # input, and this is still not a usable account (SYRD-634 DAT).
+        try:
+            answer = json.loads(str(getattr(proc, "stdout", "") or "").strip().splitlines()[-1])
+        except (IndexError, json.JSONDecodeError):
+            answer = {}
+        if isinstance(answer, dict) and answer.get("state") == "model_access":
+            ACCESS_DENIALS[cli] = str(answer.get("detail") or "")
+            return "access_denied"
+        if isinstance(answer, dict) and answer.get("state") == "model_unconfirmed":
+            return "access_unconfirmed"
     if not _owner_cli_is_installed(
         cli,
         owner_user=owner_user,

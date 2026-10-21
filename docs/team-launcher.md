@@ -1852,7 +1852,17 @@ GitHub Copilot CLI (`copilot`, SYRD-634) has no sign-in status command, so its
 first-run probe starts it in a private tmux server, in an empty folder trusted
 for that run only (`COPILOT_ALLOW_ALL`), reads the screen, and ends it without
 typing a prompt: "Please use /login to sign in" is unauthenticated and its ready
-input is signed in (`scripts/copilot_runtime.py screen-status`). Sign-in is
+input is signed in (`scripts/copilot_runtime.py screen-status`). An account
+that signs in but is refused its models -- Copilot prints "Model catalog failed
+to load: ... access denied by Copilot policy" above an ordinary ready input,
+measured on 1.0.101 -- is not ready either. A drawn input is never taken as
+ready on its own: a refusal that arrives late is not drawn at startup at all, so
+once the input is up the probe opens Copilot's own model picker (`/model`, a
+local command that sends no prompt), again every few seconds until it answers.
+Only the open picker is ready; a refusal is `model_access` with Copilot's line,
+and no answer before the deadline is `model_unconfirmed`. A runtime switch and
+its dry run refuse either, and first run stops before any pane starts, naming
+the account and the reason. Sign-in is
 `copilot login`, run in the foreground for the person; folder trust is the
 CLI's own "Yes, and remember this folder", read back from `trustedFolders` in
 `~/.copilot/config.json`. A Copilot role's model is passed as `--model` and its

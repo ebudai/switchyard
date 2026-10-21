@@ -565,6 +565,36 @@ def test_the_sign_in_probe_reads_the_screen_as_the_owner() -> None:
               f"only the ready screen is signed in, whatever the exit status says: {answer}")
 
 
+def stand_in(path: Path, startup: str, *, on_model: str = "", answer_after: int = 0, later: str = "",
+             later_after: int = 0, seen: Path | None = None) -> Path:
+    """A stand-in copilot for the screen probe: draws a recorded screen, maybe a line later, and answers `/model`
+    with another recorded screen, only once `answer_after` seconds have passed (as a loading catalog does)."""
+    lines = ["#!/bin/sh"]
+    if seen is not None:
+        lines.append(f"printf '%s %s\\n' \"$COPILOT_ALLOW_ALL\" \"$PWD\" >> {seen}")
+    lines.append(f"cat {FIXTURES / 'screens' / startup}")
+    if later:
+        lines.append(f"( sleep {later_after}; printf '\\033[H%s' '{later}' ) &")
+    lines.append("start=$(date +%s)")
+    lines.append("while IFS= read -r line; do case \"$line\" in */model*)")
+    if on_model:
+        lines.append(f"  [ $(( $(date +%s) - start )) -ge {answer_after} ] && "
+                     f"{{ printf '\\033[2J\\033[H'; cat {FIXTURES / 'screens' / on_model}; }};;")
+    else:
+        lines.append("  :;;")
+    lines.append("esac; done")
+    lines.append("exec sleep 30")
+    path.write_text("\n".join(lines) + "\n")
+    path.chmod(0o755)
+    return path
+
+
+def probe(fake: Path) -> tuple[int, dict]:
+    done = subprocess.run([sys.executable, "-I", str(ROOT / "scripts/copilot_runtime.py"), "screen-status", "--", str(fake)],
+                          capture_output=True, text=True, timeout=180, env={**os.environ, "PATH": "/usr/bin:/bin"})
+    return done.returncode, json.loads(done.stdout)
+
+
 def test_the_screen_probe_against_a_stand_in_copilot() -> None:
     if shutil.which("tmux") is None:
         print("copilot_runtime_test: screen probe skipped, no tmux")
@@ -572,26 +602,19 @@ def test_the_screen_probe_against_a_stand_in_copilot() -> None:
     with tempfile.TemporaryDirectory(prefix="cp634-probe.", dir="/tmp") as tmp:
         root = Path(tmp)
         seen = root / "seen"
-        late = root / "copilot-late"
-        late.write_text(f"#!/bin/sh\nprintf '%s %s\\n' \"$COPILOT_ALLOW_ALL\" \"$PWD\" >> {seen}\n"
-                        f"cat {FIXTURES / 'screens' / 'ready.txt'}\nsleep 2\nprintf '\\033[HPlease use /login to sign in to use Copilot'\n"
-                        "exec sleep 30\n")
-        late.chmod(0o755)
-        for name in ("unauthenticated", "ready", "resume-unknown-id", "trust"):
-            fake = root / f"copilot-{name}"
-            fake.write_text(f"#!/bin/sh\nprintf '%s %s\\n' \"$COPILOT_ALLOW_ALL\" \"$PWD\" >> {seen}\n"
-                            f"cat {FIXTURES / 'screens' / (name + '.txt')}\nexec sleep 30\n")
-            fake.chmod(0o755)
+        stand_in(root / "copilot-late", "ready.txt", later="Please use /login to sign in to use Copilot", later_after=2, seen=seen)
+        stand_in(root / "copilot-unauthenticated", "unauthenticated.txt", seen=seen)
+        stand_in(root / "copilot-ready", "ready.txt", on_model="model-picker-allowed.txt", seen=seen)
+        stand_in(root / "copilot-resume-unknown-id", "resume-unknown-id.txt", seen=seen)
+        stand_in(root / "copilot-trust", "trust.txt", seen=seen)
         fake = root / "copilot-quits"
         fake.write_text("#!/bin/sh\necho 'something else'\n")
         fake.chmod(0o755)
         os.environ["TMUX_TMPDIR"] = tmp
         results = {}
         for name in ("unauthenticated", "ready", "resume-unknown-id", "trust", "quits", "late"):
-            done = subprocess.run([sys.executable, "-I", str(ROOT / "scripts/copilot_runtime.py"), "screen-status", "--",
-                                   str(root / f"copilot-{name}")], capture_output=True, text=True, timeout=120,
-                                  env={**os.environ, "PATH": "/usr/bin:/bin"})
-            results[name] = (done.returncode, json.loads(done.stdout)["state"])
+            code, answer = probe(root / f"copilot-{name}")
+            results[name] = (code, answer["state"])
         check(results == {"unauthenticated": (1, "login"), "ready": (0, "ready"), "resume-unknown-id": (1, "fatal"),
                           "trust": (1, "trust"), "quits": (1, "exited"), "late": (1, "login")}, results)
         lines = seen.read_text().splitlines()
@@ -974,6 +997,116 @@ def test_a_copilot_pane_prepares_its_own_root_before_it_starts() -> None:
                                                 copilot_homes=["/srv/root"])
         check(packet.count("--copilot-home '/srv/root'") == 2, "add-role's operator commands carry it")
         del types
+
+
+def test_an_account_refused_its_models_is_not_ready() -> None:
+    """SYRD-634 DAT: signed in, the input drawn, and every model refused by Copilot policy -- that is not ready."""
+    import types
+
+    denied = "Model catalog failed to load: Error: 403 access denied by Copilot policy"
+    for name, state in (("model-catalog-denied-auto", "model_access"), ("model-catalog-denied-auto-prompt", "model_access"),
+                        ("model-catalog-denied-model", "model_access"), ("model-catalog-allowed", "ready")):
+        check(copilot_runtime.classify_screen(screen(name)) == state, f"{name} reads as {state}")
+    check(copilot_runtime.classify_screen(screen("model-catalog-denied-model-prompt")) in {"model_access", "login"},
+          "a configured model's refused call is never ready either")
+    check(copilot_runtime.classify_screen(screen("model-catalog-denied-model-prompt").replace(
+              "Model catalog failed to load", "x")) == "login", "the refused call alone is a sign-in problem")
+    check(copilot_runtime.access_detail(screen("model-catalog-denied-model")) == denied
+          and copilot_runtime.access_detail(screen("model-catalog-allowed")) == "",
+          "the refusal is quoted as Copilot printed it, and only when there is one")
+    check("Copilot policy" in screen("model-catalog-allowed") and copilot_runtime.classify_screen(screen("model-catalog-allowed")) == "ready",
+          "an unrelated policy notice on a working account is not a refusal")
+
+    if shutil.which("tmux") is not None:
+        with tempfile.TemporaryDirectory(prefix="cp634-denied.", dir="/tmp") as tmp:
+            root = Path(tmp)
+            os.environ["TMUX_TMPDIR"] = tmp
+            fakes = {
+                # The refusal drawn at startup, before anything is asked.
+                "denied": stand_in(root / "c1", "model-catalog-denied-auto.txt"),
+                # The refusal drawn only after the input, past the old fixed settle window.
+                "late": stand_in(root / "c2", "model-catalog-allowed.txt", later=denied, later_after=9),
+                # Nothing at startup; `/model` answers with the refusal (the fast recording).
+                "asked": stand_in(root / "c3", "model-catalog-allowed.txt", on_model="model-picker-denied.txt"),
+                # A catalog that loads slowly: `/model` opens nothing until 6 s, then the picker.
+                "slow": stand_in(root / "c4", "model-catalog-allowed.txt", on_model="model-picker-allowed.txt",
+                                 answer_after=6),
+                "allowed": stand_in(root / "c5", "model-catalog-allowed.txt", on_model="model-picker-allowed.txt"),
+            }
+            answers = {name: probe(fake) for name, fake in fakes.items()}
+            check(answers == {"denied": (1, {"state": "model_access", "detail": denied}),
+                              "late": (1, {"state": "model_access", "detail": denied}),
+                              # The recording carries the startup line above the picker's answer; the first is quoted.
+                              "asked": (1, {"state": "model_access", "detail": denied}),
+                              "slow": (0, {"state": "ready"}),
+                              "allowed": (0, {"state": "ready"})},
+                  f"only the open model picker is ready; a refusal, early, late or asked for, is not: {answers}")
+            silent = stand_in(root / "c6", "model-catalog-allowed.txt")
+            state, _screen = copilot_runtime.screen_status([str(silent)], cwd=tmp, timeout=12)
+            check(state == "model_unconfirmed",
+                  f"an input whose picker never opens is never taken as ready, however long it stays quiet: {state}")
+
+    calls = []
+
+    def probed(answer: dict):
+        def run(args, **_kwargs):
+            calls.append(list(args))
+            return subprocess.CompletedProcess(args, 1, json.dumps(answer) + "\n", "")
+        return run
+
+    status = provider_auth_status._cli_auth_status("copilot", owner_user="o", owner_home=Path("/h"),
+                                                   runner=probed({"state": "model_access", "detail": denied}))
+    check(status == "access_denied" and len(calls) == 1, f"a refused account is access_denied, not missing: {status} {calls}")
+    unconfirmed = provider_auth_status._cli_auth_status("copilot", owner_user="o", owner_home=Path("/h"),
+                                                        runner=probed({"state": "model_unconfirmed"}))
+    check(unconfirmed == "access_unconfirmed"
+          and "could not confirm that o may use Copilot's models" in launcher.auth_blocker_text("copilot", unconfirmed, "o"),
+          f"a picker that never opened is its own not-ready status, said as such: {unconfirmed}")
+    text = launcher.auth_blocker_text("copilot", status, "syrd-agent", "copilot login")
+    check(denied in text and "signed in for syrd-agent" in text and "an account whose policy allows the CLI (copilot login)" in text
+          and launcher.auth_blocker_text("codex", "unauthenticated", "o", "codex login") == "codex is not logged in for o; run: codex login",
+          f"the blocker says what is wrong, and the other providers' words are unchanged: {text}")
+
+    from scripts import role_runtime
+
+    saved = launcher._cli_auth_status, launcher._owner_home_for_auth, launcher._workdir_is_trusted
+    launcher._cli_auth_status = lambda *_a, **_k: "access_denied"
+    launcher._owner_home_for_auth = lambda *_a, **_k: Path("/h")
+    launcher._workdir_is_trusted = lambda *_a, **_k: True
+    try:
+        blockers = role_runtime._readiness_blockers(types.SimpleNamespace(run_as_user=launcher.current_user_name()),
+                                                    role("copilot"), "copilot", runner=None)
+    finally:
+        launcher._cli_auth_status, launcher._owner_home_for_auth, launcher._workdir_is_trusted = saved
+    check(len(blockers) == 1 and denied in blockers[0], f"a runtime switch to a refused account is refused: {blockers}")
+
+    with tempfile.TemporaryDirectory(prefix="cp634-denied-run.") as tmp:
+        home = Path(tmp)
+        first_run = types.SimpleNamespace(roles=[role("copilot", workdir=tmp)], run_as_user="owner634", desktop_access=None)
+        (home / ".copilot").mkdir()
+        (home / ".copilot" / "config.json").write_text(json.dumps({"trustedFolders": [tmp]}))
+        ran = []
+
+        def signed_in_again(**kwargs):
+            ran.append(kwargs["command"])
+            return kwargs["is_complete"]()
+
+        saved_until = launcher._run_owner_cli_until
+        launcher._run_owner_cli_until = signed_in_again
+        try:
+            report = launcher.run_first_run_auth_phase(first_run, owner_user="owner634", owner_home=home,
+                                                       runner=probed({"state": "model_access", "detail": denied}),
+                                                       print_func=lambda _m: None)
+        finally:
+            launcher._run_owner_cli_until = saved_until
+        said = []
+        stopped = launcher.stop_before_launch_for_unauthenticated_providers(report, print_func=said.append)
+        warned = []
+        launcher.report_first_run_auth_warnings(report, print_func=warned.append)
+        check(ran == [["copilot", "login"]], f"the person is given Copilot's own sign-in, to choose another account: {ran}")
+        check(stopped and report.unauthenticated_roles == {"copilot": ["main"]} and denied in said[0]
+              and "sign-in not finished" not in said[0] and any(denied in line for line in warned),
+              f"and no role starts, with the refusal in the stop and the warning: {said} {warned}")
 
 
 def main() -> int:

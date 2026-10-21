@@ -1,0 +1,45 @@
+ [Current]  Sessions   Issues   Pull requests   Gists
+
+  ╭─╮╭─╮
+  ╰─╯╰─╯  Copilot v1.0.101 uses AI.
+  █ ▘▝ █  Check for mistakes.
+   ▔▔▔▔
+
+ ● Tip: /app
+   └ Prefer a visual workspace? Try out the GitHub Copilot desktop app
+      https://github.com/features/ai/github-app
+
+ ! Model catalog failed to load: Error: 403 access denied by Copilot policy
+
+ ! Third-party MCP servers are disabled by your organization's Copilot policy. Only built-in servers are available.
+
+ ! Failed to connect to MCP server "github-mcp-server": failed to initialize MCP client: transport failure during send initialize request: unexpected server
+   response: HTTP 404 Not Found: {"message": "Not Found (prob…. Execute '/mcp show github-mcp-server' to inspect or check the logs.
+
+ ❯ Say hello                                                                                                                                             05:35
+
+ ✗ Authorization error. Your credentials may be expired or invalid. Run /login to sign in again.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ~/work
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ← open sidebar · Interactive · Manual Approval · / commands · ? help · tab next tab                                                           claude-haiku-5.5

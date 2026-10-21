@@ -17,7 +17,7 @@ import ast
 from team_launcher_test_helpers import *
 
 
-CLIS = ("agy", "claude", "codex", "hermes")
+CLIS = ("agy", "claude", "codex", "hermes", "copilot")
 # The only functions allowed to touch the vendor command table. Both format
 # text; neither can execute anything. Adding a name here is a deliberate act.
 # Every function allowed to read the vendor install strings. The set is exact so

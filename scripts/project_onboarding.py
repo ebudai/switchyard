@@ -79,6 +79,9 @@ def install_generated_project_board_skill_args(
         raise ValueError("board skill install requires run_as_user")
     owner_home = launcher.home_dir_for_user(config.run_as_user) or Path("/home") / config.run_as_user
     args = [str(installer), "install", "--home", str(owner_home)]
+    from scripts import pane_hooks
+
+    args.extend(pane_hooks._copilot_home_args(config, config.run_as_user, owner_home))  # SYRD-634
     if source_commit and source_commit != "unknown":
         args.extend(["--source-commit", source_commit])
     if dry_run:

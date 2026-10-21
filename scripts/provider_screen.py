@@ -97,6 +97,10 @@ PROVIDER_PENDING_ANSWER_MARKERS: tuple[str, ...] = (
     # 0.15.2, offline, after choosing OpenRouter. A person who went to look the
     # key up came back to the next provider's sign-in (SYRD-544).
     "or enter to cancel",
+    # GitHub Copilot CLI 1.0.101 at its input box with no sign-in: the box is
+    # drawn as for a ready session, and this line under the banner says it is
+    # not one (tests/fixtures/copilot-1.0.101/screens/unauthenticated.txt).
+    "please use /login to sign in",
 )
 
 

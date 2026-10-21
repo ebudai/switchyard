@@ -328,7 +328,8 @@ def _readiness_blockers(
             + (f"; run: {login}" if login else "")
         )
     if runtime in team_launcher.FIRST_RUN_TRUST_CLIS and not owner_writes.holds_as_owner(  # as the owner (SYRD-612)
-        owner_user, lambda: team_launcher._workdir_is_trusted(runtime, owner_home=owner_home, workdir=Path(role.workdir))
+        owner_user, lambda: team_launcher._workdir_is_trusted(runtime, owner_home=owner_home, workdir=Path(role.workdir),
+                                                            **team_launcher._trust_kwargs(runtime, role))
     ):
         blockers.append(f"{runtime} does not trust {role.workdir} yet")
     return tuple(blockers)

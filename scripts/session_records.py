@@ -233,6 +233,12 @@ def _expects_launch_runtime_hook_probe(role: RoleConfig) -> bool:
     return cli_name == "codex"
 
 
+#: Runtimes whose interactive start reports nothing until the first prompt:
+#: Codex, and GitHub Copilot CLI, whose sessionStart waits for it too (measured
+#: on 1.0.101, tests/fixtures/copilot-1.0.101/hooks; SYRD-634).
+START_HOOK_DEFERRED_CLIS = frozenset({"codex", "copilot"})
+
+
 def _runtime_hook_deferred_until_activity(role: RoleConfig, status: "LaunchSessionRecordStatus") -> bool:
     """A pane whose launch is reported and whose hook cannot report until it is used.
 
@@ -243,8 +249,10 @@ def _runtime_hook_deferred_until_activity(role: RoleConfig, status: "LaunchSessi
     the same rule, so it no longer spends its whole timeout on a record that is
     not coming -- ten seconds of every fresh `switchyard new` (SYRD-248).
     """
+    from scripts import team_launcher as launcher
+
     return (
-        _expects_launch_runtime_hook_probe(role)
+        (launcher._command_name(role.cli[0]) if role.cli else "") in START_HOOK_DEFERRED_CLIS
         and status.pane_state_source.startswith("team_launcher.")
         and not status.runtime_hook_reported
         and not status.unverified_resume

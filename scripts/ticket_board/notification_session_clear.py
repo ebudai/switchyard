@@ -25,6 +25,9 @@ SESSION_CLEAR_COMMANDS = {
     "codex": "/clear",
     "agy": "/clear",
     "hermes": "/clear",
+    # Copilot 1.0.101 ends the old session and starts a new one at the next
+    # prompt (tests/fixtures/copilot-1.0.101/hooks/resume-then-clear.jsonl).
+    "copilot": "/clear",
 }
 #: The notification kinds that hand a ticket to a role as work to do now.
 #: Everything else a pane receives is about work it already has -- a comment on

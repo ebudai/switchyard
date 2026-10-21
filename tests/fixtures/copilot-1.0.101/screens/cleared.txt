@@ -1,0 +1,45 @@
+ [Current]  Sessions   Issues   Pull requests   Gists
+
+ ● No copilot-instructions.md found. Run /init to generate.
+
+ ● Started a fresh session. Execution mode carried forward: Interactive. Permission policy carried forward: Manual Approval for this session. Defaults for
+   future sessions: unchanged.
+
+ ! Model "fake-model" is not in the built-in catalog. Using defaults for: prompt tokens (COPILOT_PROVIDER_MAX_PROMPT_TOKENS), output tokens
+   (COPILOT_PROVIDER_MAX_OUTPUT_TOKENS). Run  copilot help providers  for configuration details.
+
+ ● MCP Servers reloaded: 0 servers connected
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ~/work [⎇ master]
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ← open sidebar · Interactive · Manual Approval · / commands · ? help · tab next tab                                                                 fake-model

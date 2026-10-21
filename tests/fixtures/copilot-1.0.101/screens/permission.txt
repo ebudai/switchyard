@@ -1,0 +1,45 @@
+ [Current]  Sessions   Issues   Pull requests   Gists
+
+  ╭─╮╭─╮
+  ╰─╯╰─╯  Copilot v1.0.101 uses AI.
+  █ ▘▝ █  Check for mistakes.
+   ▔▔▔▔
+
+ ● No copilot-instructions.md found. Run /init to generate.
+
+ ! Model "fake-model" is not in the built-in catalog. Using defaults for: prompt tokens (COPILOT_PROVIDER_MAX_PROMPT_TOKENS), output tokens
+   (COPILOT_PROVIDER_MAX_OUTPUT_TOKENS). Run  copilot help providers  for configuration details.
+
+ ● Tip: /plugin
+   └ Manage plugins and plugin marketplaces
+
+ ❯ Make the file                                                                                                                                         19:58
+
+ $ Shell make a file
+   touch probe-made-this
+
+
+
+
+
+
+
+
+
+
+
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ make a file                                                                                                                                                  │
+│ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
+│ ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮ │
+│ │ touch probe-made-this                                                                                                                                    │ │
+│ ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │
+│                                                                                                                                                              │
+│ Do you want to run this command?                                                                                                                             │
+│                                                                                                                                                              │
+│ ❯ 1. Yes                                                                                                                                                     │
+│   2. Yes, and don't ask again for `touch` in this repo (~/work)                                                                                              │
+│   3. No, and tell Copilot what to do differently (Esc to stop)                                                                                               │
+│                                                                                                                                                              │
+│ ↑/↓ to navigate · enter to select · esc to cancel                                                                                                            │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

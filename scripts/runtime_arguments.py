@@ -40,7 +40,7 @@ from scripts.role_command import DEFAULT_MODEL_ARG_BY_CLI, STARTUP_ARGS_BY_CLI, 
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*=")
 _CODEX_EFFORT_KEY = "model_reasoning_effort"
 #: The effort flag of each runtime that takes one as a flag of its own.
-_EFFORT_FLAG = {"claude": "--effort", "hermes": "--reasoning"}
+_EFFORT_FLAG = {"claude": "--effort", "hermes": "--reasoning", "copilot": "--reasoning-effort"}
 
 
 class ArgumentRefusal(ValueError):

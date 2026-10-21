@@ -1511,7 +1511,8 @@ Each role entry contains:
   they default to the shared `repository` checkout. Duplicate role workdirs are
   allowed only when the duplicate path is the shared checkout.
 - `cli`: argv array for the CLI binary. The only supported CLI names are
-  `claude`, `codex`, `agy`, and `hermes`; invalid names, including the retired
+  `claude`, `codex`, `agy`, `hermes`, and `copilot` (the standalone GitHub
+  Copilot CLI, not the `gh copilot` extension); invalid names, including the retired
   `gemini` launcher name, are rejected while parsing project artifacts or prompt
   answers, before provisioning or launch mutates the project. The configured
   CLI must be executable by the project's owner user, not just installed
@@ -1556,7 +1557,8 @@ Each role entry contains:
   bypass-permissions flag for the configured CLI: Agy and Claude use
   `--dangerously-skip-permissions`; Codex uses
   `--dangerously-bypass-approvals-and-sandbox` plus
-  `--dangerously-bypass-hook-trust`; Hermes uses `--yolo`.
+  `--dangerously-bypass-hook-trust`; Hermes uses `--yolo`; Copilot uses
+  `--allow-all`.
   Hermes panes also receive launcher startup flags `--accept-hooks` and
   `--pass-session-id` so the installed pane-state hooks can run non-interactively
   and the agent can see its own resumable session id.
@@ -1612,10 +1614,10 @@ Slug [otto_scheduler]:
 Agent user [otto_scheduler-agent]:
 Project path [/home/otto_scheduler-agent/Projects/otto_scheduler]:
 Include designer role [Y/n]:
-designer CLI (claude/codex/agy/hermes) [claude]:
-director CLI (claude/codex/agy/hermes) [claude]:
+designer CLI (claude/codex/agy/hermes/copilot) [claude]:
+director CLI (claude/codex/agy/hermes/copilot) [claude]:
 Include audit role [Y/n]:
-audit CLI (claude/codex/agy/hermes) [claude]:
+audit CLI (claude/codex/agy/hermes/copilot) [claude]:
 Conventional implementer roles:
   main: core/domain implementation and integration
   ops: environment, services, tooling, and infrastructure
@@ -1623,8 +1625,8 @@ Conventional implementer roles:
   research: investigation, design support, and unknowns
   perf: measurement and performance work
 Implementer roles (comma-separated) [main, ops]: app, code-review
-app CLI (claude/codex/agy/hermes) [codex]:
-code-review CLI (claude/codex/agy/hermes) [codex]:
+app CLI (claude/codex/agy/hermes/copilot) [codex]:
+code-review CLI (claude/codex/agy/hermes/copilot) [codex]:
 ```
 
 The default project path follows the project name, not the machine slug; editing
@@ -1817,6 +1819,34 @@ API key and opens its setup prompt. Env/config-resolved API keys are the
 runnable shape the launcher accepts. Agy failures include suggestions from
 `agy models` when that catalogue is available; Claude, Codex, and Hermes report
 that no model list is available and use only the one-shot validation result.
+
+GitHub Copilot CLI (`copilot`, SYRD-634) has no sign-in status command, so its
+first-run probe starts it in a private tmux server, in an empty folder trusted
+for that run only (`COPILOT_ALLOW_ALL`), reads the screen, and ends it without
+typing a prompt: "Please use /login to sign in" is unauthenticated and its ready
+input is signed in (`scripts/copilot_runtime.py screen-status`). Sign-in is
+`copilot login`, run in the foreground for the person; folder trust is the
+CLI's own "Yes, and remember this folder", read back from `trustedFolders` in
+`~/.copilot/config.json`. A Copilot role's model is passed as `--model` and its
+effort as `--reasoning-effort <level>` only when the installed binary's own
+`--help` lists that flag and level; otherwise the launcher says why and passes
+nothing. Copilot's recorded model list is its 1.0.101 built-in catalog and is
+shown as unverified. Pane-state hooks go in a file of their own,
+`~/.copilot/hooks/ticket-board-pane-state.json`, so the owner's hook files and
+settings are never rewritten; a sessionStart Copilot calls `new` after `/clear`
+is recorded as `clear`. Resume is `copilot --resume <id>`, checked first against
+`~/.copilot/session-state/<id>/events.jsonl` (or under `$COPILOT_HOME`). The
+board skills install under `~/.copilot/skills`. A Copilot role may set
+`COPILOT_HOME` in its `env`: Copilot 1.0.101 then reads hooks, personal skills,
+`trustedFolders` and sessions only there, taking the value literally (a relative
+one, `~/x` included, is under the role's worktree). Switchyard follows it: the
+hook installer and `switchyard board-skill install` take `--copilot-home` for
+each such root as well as `~/.copilot`, the first-run trust step runs Copilot
+with that `COPILOT_HOME` and reads its answer back from there, and resume is
+checked there. Sign-in is the account's (Copilot keeps the token in the system
+credential store), so it is probed once. No Copilot credential is copied
+into a role's own account. Promoting an npm install promotes the self-contained
+platform executable behind `npm-loader.js`, and refuses a Node script with none.
 
 By default every role, including Hermes roles, resumes from the recorded session
 id when one is available and passes that id through

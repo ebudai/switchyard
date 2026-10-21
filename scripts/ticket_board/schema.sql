@@ -7540,7 +7540,7 @@ CREATE TABLE IF NOT EXISTS ticket_board.workflow_roles (
 );
 CREATE TABLE IF NOT EXISTS ticket_board.role_runtime_assignments (
     role text PRIMARY KEY REFERENCES ticket_board.workflow_roles(name) ON DELETE CASCADE,
-    runtime text NOT NULL CHECK (runtime IN ('claude','codex','agy','hermes')),
+    runtime text NOT NULL CHECK (runtime IN ('claude','codex','agy','hermes','copilot')),
     actual_target text NOT NULL CHECK (actual_target ~ '^[a-zA-Z0-9_-]+:[0-9]+\.[0-9]+$'),
     worktree text NOT NULL CHECK (worktree LIKE '/%'),
     session_dir text NOT NULL CHECK (session_dir LIKE '/%'),
@@ -7808,7 +7808,7 @@ BEGIN
             RAISE EXCEPTION 'invalid role policy: %', r->>'name';
         END IF;
         IF (r->>'runtime' IS NULL) <> (r->>'target' IS NULL)
-           OR (r->>'runtime' IS NOT NULL AND (r->>'runtime' NOT IN ('claude','codex','agy','hermes')
+           OR (r->>'runtime' IS NOT NULL AND (r->>'runtime' NOT IN ('claude','codex','agy','hermes','copilot')
                OR r->>'target' !~ '^[a-zA-Z0-9_-]+:[0-9]+\.[0-9]+$')) THEN
             RAISE EXCEPTION 'invalid runtime/target'; END IF;
         -- SYRD-135: absent is false. Only a real boolean may say otherwise, so
@@ -9327,7 +9327,7 @@ BEGIN
         slot_value := binding.value->'slot';
         IF (runtime_value IS NULL) <> (target_value IS NULL) THEN
             RAISE EXCEPTION 'runtime and target are set together: %', binding.key; END IF;
-        IF runtime_value IS NOT NULL AND runtime_value NOT IN ('claude', 'codex', 'agy', 'hermes') THEN
+        IF runtime_value IS NOT NULL AND runtime_value NOT IN ('claude', 'codex', 'agy', 'hermes', 'copilot') THEN
             RAISE EXCEPTION 'unknown runtime % for %', runtime_value, binding.key; END IF;
         IF target_value IS NOT NULL AND (
             target_value !~ '^[a-zA-Z0-9_-]+:[0-9]+\.[0-9]+$'

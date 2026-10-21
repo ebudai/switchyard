@@ -24,11 +24,13 @@ DEFAULT_RESUME_MODE_BY_CLI = {
     "agy": "flag",
     "claude": "flag",
     "codex": "subcommand",
+    "copilot": "flag",
     "gemini": "flag",
 }
 DEFAULT_RESUME_FLAG_BY_CLI = {
     "agy": "--conversation",
     "claude": "--resume",
+    "copilot": "--resume",
     "gemini": "--conversation",
 }
 DEFAULT_RESUME_SUBCOMMAND_BY_CLI = {

@@ -76,7 +76,8 @@ SEAMS = {
     'role_accounts_command': {'directory_line': 1, 'repository_group_commands': 1, 'role_account_home': 1, 'shell_quote': 5},
     'role_runtime_command': {'SHARED_RELEASE_CURRENT': 1, 'role_account_home': 1, 'role_runtime_commands': 1, 'role_tooling_staging_commands': 1},
     'role_account_migration_name': {'ROLE_ACCOUNT_MIGRATION_SUFFIX': 1},
-    'role_runtime_commands': {'chown_tree_line': 1, 'directory_line': 2, 'install_line': 1, 'shell_quote': 9},
+    # SYRD-634: one more shell_quote, for each --copilot-home the role's installers are given.
+    'role_runtime_commands': {'chown_tree_line': 1, 'directory_line': 2, 'install_line': 1, 'shell_quote': 10},
     'role_account_home': {'role_account_name': 1},
     'role_account_commands': {'SHARED_RELEASE_CURRENT': 2, 'invoking_human': 1, 'render_role_control_sudoers': 1, 'repository_group_commands': 1, 'repository_group_name': 1, 'resolve_control_user': 1, 'role_account_name': 1, 'role_control_sudoers_install_commands': 1, 'role_runtime_commands': 1, 'role_tooling_staging_commands': 1, 'role_worktree_access_commands': 1, 'roles_group_name': 1, 'shell_quote': 6, 'tenant_control_commands': 1, 'tenant_paths_definition': 1},
     'role_control_sudoers': {'render_role_control_sudoers': 1},
@@ -373,7 +374,8 @@ CALL_TIME_IMPORT = ("try:\n    from . import project_provision as provision\n"
                     "except ImportError:\n    import project_provision as provision")
 #: The defaults, as the baseline wrote them.
 DEFAULTS = {"role_account_name": [], "roles_group_name": [], "role_account_table": [], "role_accounts_env": [], "role_accounts_command": [], "role_runtime_command": [],
-            "role_account_migration_name": [], "role_runtime_commands": ["''"], "role_account_home": [], "role_account_commands": ["''", "''", "''", "''", "''", "''"],
+            # SYRD-634 added `copilot_homes=()` to role_runtime_commands and role_account_commands.
+            "role_account_migration_name": [], "role_runtime_commands": ["''", "()"], "role_account_home": [], "role_account_commands": ["''", "''", "''", "''", "''", "''", "()"],
             "render_role_control_sudoers": [], "role_control_sudoers": [], "role_control_sudoers_install_commands": []}
 #: team_launcher's module-level imports of them, from project_provision (its role_account_name is its own wrapper).
 LAUNCHER_IMPORTS = ("NON_PROCESS_ROLES", "role_account_migration_name")

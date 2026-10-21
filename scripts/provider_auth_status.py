@@ -1,6 +1,6 @@
 """Whether a provider CLI is installed and signed in, asked as the project owner.
 
-A role's provider (Claude, Codex, Hermes, agy) has to be installed, and
+A role's provider (Claude, Codex, Hermes, agy, Copilot) has to be installed, and
 authenticated, for the account that owns the project. It is the owner's
 signed-in state that counts, not the operator's. This module covers:
 - **Probing as the owner.** Each provider's status command runs in the owner's
@@ -35,11 +35,15 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 
+
 FIRST_RUN_AUTH_STATUS_COMMANDS: dict[str, list[str]] = {
     "agy": ["agy", "models"],
     "claude": ["claude", "auth", "status", "--json"],
     "codex": ["codex", "login", "status"],
     "hermes": ["hermes", "config", "check"],
+    # Copilot has no sign-in check that asks nothing of a model: its screen is
+    # read instead (`copilot_runtime.py screen-status`, SYRD-634).
+    "copilot": ["copilot", "--no-auto-update"],
 }
 
 
@@ -142,6 +146,11 @@ def _cli_auth_probe_passed(cli: str, proc: subprocess.CompletedProcess[Any]) -> 
         return any(line.strip().startswith("\N{CHECK MARK} ") and "_API_KEY" in line for line in stdout.splitlines())
     if cli in {"agy", "codex"}:
         return "not logged" not in combined and "not authenticated" not in combined
+    if cli == "copilot":
+        try:
+            return json.loads(stdout.strip().splitlines()[-1]).get("state") == "ready"
+        except (IndexError, json.JSONDecodeError, AttributeError):
+            return False
     return True
 
 
@@ -179,6 +188,10 @@ def _cli_auth_status(
     command = launcher.FIRST_RUN_AUTH_STATUS_COMMANDS.get(cli)
     if command is None:
         return "authenticated"
+    if cli == "copilot":
+        from scripts import copilot_runtime
+
+        command = copilot_runtime.screen_status_command(command)
     proc = _run_owner_cli_probe(owner_user=owner_user, owner_home=owner_home, command=command, runner=runner)
     if _cli_auth_probe_passed(cli, proc):
         return "authenticated"

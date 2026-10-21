@@ -51,7 +51,12 @@ from typing import NoReturn
 PROGRAM = "switchyard-promote-agent-cli"
 
 #: The CLIs this may install. Its own copy on purpose -- see the module note.
-PROMOTABLE_CLIS = ("agy", "claude", "codex", "hermes")
+PROMOTABLE_CLIS = ("agy", "claude", "codex", "hermes", "copilot")
+
+#: What a CLI must say it is, where a different program could share its name:
+#: `copilot` is the standalone GitHub Copilot CLI (SYRD-634), whose 1.0.101
+#: answers "GitHub Copilot CLI 1.0.101.", never some other `copilot`.
+VERSION_PREFIXES = {"copilot": "GitHub Copilot CLI "}
 
 #: Not chosen by the caller, and deliberately one of the entries below: a
 #: promoted copy has to land somewhere every pane already looks. These two move
@@ -389,6 +394,8 @@ def main(argv: list[str]) -> int:
     # Proved BEFORE anything is replaced, and proved for the account that will
     # actually run it.
     version, problem = verify_unprivileged(staged, identity)
+    if not problem and not version.startswith(VERSION_PREFIXES.get(cli, "")):
+        problem = f"its --version says {version!r}, not {VERSION_PREFIXES[cli].strip()!r}"
     if problem:
         discard(staged)
         fail(

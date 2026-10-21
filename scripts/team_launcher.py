@@ -327,7 +327,7 @@ from scripts.pane_hooks import (
     ensure_generated_project_pane_hooks,
     _format_codex_hook_trust_report,
     install_generated_project_pane_hooks_args,
-    refresh_role_pane_hooks,
+    refresh_role_pane_hooks, role_copilot_homes,
     stale_codex_hook_trust_for_roles,
     tenant_hook_accounts,
 )
@@ -396,7 +396,7 @@ from scripts.first_run_setup import (
     _git_common_dir_for,
     print_first_run_setup_manifest,
     _role_names,
-    _workdir_is_trusted,
+    _trust_kwargs, _workdir_is_trusted,
 )
 # Provider auth-status probing (SYRD-297), moved out whole. Every name is kept
 # here: the suites patch several of them on the launcher, and the launcher's
@@ -1714,7 +1714,7 @@ LEGACY_USER_BIN_ENV = "PGU_TEAM_LAUNCHER_BIN_DIR"
 #: runtime directory, where no compositor is listening (SYRD-65).
 TENANT_CONTROL_CALLER_ENV = "SWITCHYARD_TENANT_CONTROL_CALLER"
 MAX_VISIBLE_PANES_PER_WINDOW = 6
-SUPPORTED_CONFIG_CLI_NAMES = ("agy", "claude", "codex", "hermes")
+SUPPORTED_CONFIG_CLI_NAMES = ("agy", "claude", "codex", "hermes", "copilot")
 
 
 def viewer_session_for_project(project: str) -> str:
@@ -2193,6 +2193,7 @@ FIRST_RUN_AUTH_LOGIN_COMMANDS: dict[str, list[str]] = {
     "claude": ["claude", "auth", "login"],
     "codex": ["codex", "login"],
     "hermes": ["hermes", "model"],
+    "copilot": ["copilot", "login"],
 }
 # Vendor install commands, as TEXT for a person to run themselves. Switchyard
 # never executes these. PGU-904 removed agent CLI installation deliberately --
@@ -2203,17 +2204,16 @@ FIRST_RUN_AUTH_LOGIN_COMMANDS: dict[str, list[str]] = {
 # These strings WILL drift as vendors change their installers, and that is the
 # accepted trade: a stale command in a message a person reads and can correct is
 # a far smaller failure than a stale command we run on their machine. Verified
-# on 2026-09-03 by fetching each URL without piping it -- every one served a
-# shell script for the expected CLI, and the interpreter matches each script's
-# shebang (claude, agy and hermes are bash; codex is sh).
-#
-# docs/fresh-machine-install.md carries the same four commands for a reader who
-# has not run anything yet. Update both together; a test asserts they agree.
+# by fetching each URL without piping it (copilot on 2026-10-20, the rest on
+# 2026-09-03): each served a shell script for the expected CLI, run by its
+# shebang's interpreter (codex is sh; the others bash). docs/fresh-machine-
+# install.md carries the same five commands; a test asserts they agree.
 AGENT_CLI_INSTALL_COMMANDS: dict[str, str] = {
     "agy": "curl -fsSL https://antigravity.google/cli/install.sh | bash",
     "claude": "curl -fsSL https://claude.ai/install.sh | bash",
     "codex": "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
     "hermes": "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
+    "copilot": "curl -fsSL https://gh.io/copilot-install | bash",
 }
 
 

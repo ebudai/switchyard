@@ -1,0 +1,45 @@
+ [Current]  Sessions   Issues   Pull requests   Gists
+
+  ╭─╮╭─╮
+  ╰─╯╰─╯  Copilot v1.0.101 uses AI.
+  █ ▘▝ █  Check for mistakes.
+   ▔▔▔▔
+
+ ● Folder /home/owner/work has been added to
+   trusted folders.
+
+ ● No copilot-instructions.md found. Run /init to generate.
+
+ ● Tip: /app
+   └ Prefer a visual workspace? Try out the GitHub Copilot desktop app
+      https://github.com/features/ai/github-app
+
+ ● MCP Servers reloaded: 0 servers connected
+
+ ✗ You must be logged in to send messages. Please run /login
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Please use /login to sign in to use Copilot
+ ~/work [⎇ master]
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ← open sidebar · Interactive · Manual Approval · / commands · ? help · tab next tab

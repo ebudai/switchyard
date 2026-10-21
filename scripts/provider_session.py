@@ -87,7 +87,7 @@ PROVIDER_READY_QUIET_SECONDS = 6.0
 #: Switchyard into the session it started, so the person never types it: being
 #: asked to exit once for the account and again for every worktree is the chore
 #: this whole phase exists to avoid.
-PROVIDER_SESSION_EXIT_INPUT: dict[str, str] = {"claude": "/exit\r"}
+PROVIDER_SESSION_EXIT_INPUT: dict[str, str] = {"claude": "/exit\r", "copilot": "/exit\r"}
 
 
 #: What the window is called while a temporary setup step owns the terminal,

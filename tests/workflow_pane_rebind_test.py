@@ -259,7 +259,9 @@ def run_command(board, plan, verified, config, *, apply=False, expect="", journa
 
 def test_the_migration_carries_the_schema_definition_exactly() -> None:
     schema = (ROOT / "scripts/ticket_board/schema.sql").read_text()
-    migration = (ROOT / "scripts/ticket_board/migrations/pgu958_syrd262_rebind_pane_roles.sql").read_text()
+    # The newest migration that defines it is the copy every board runs: pgu958 wrote it, and SYRD-634's
+    # pgu1003 replaced it to take the copilot runtime.
+    migration = (ROOT / "scripts/ticket_board/migrations/pgu1003_syrd634_copilot_runtime.sql").read_text()
     start = schema.index(f"CREATE OR REPLACE FUNCTION {FUNCTION}(")
     end_marker = f"REVOKE ALL ON FUNCTION {FUNCTION}(bigint, jsonb, jsonb, text) FROM PUBLIC;\n"
     block = schema[start:schema.index(end_marker, start) + len(end_marker)]

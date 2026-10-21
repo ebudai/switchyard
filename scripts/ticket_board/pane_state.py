@@ -75,6 +75,7 @@ TURN_START_EVENTS = frozenset({
     "UserPromptSubmit",   # claude, codex
     "PreInvocation",      # gemini / agy
     "pre_llm_call",       # hermes
+    "userPromptSubmitted",  # copilot
 })
 
 

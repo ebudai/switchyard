@@ -43,7 +43,13 @@ CONFIRM_SECONDS = 120.0
 #: How long a resume may wait for its SessionStart before the confirmation prompt is sent.
 RESUME_WAIT_SECONDS = 15.0
 #: Providers with a verified in-session resume that takes a session id.
-RESUME_COMMANDS = {"claude": "/resume {session_id}"}
+RESUME_COMMANDS = {
+    "claude": "/resume {session_id}",
+    # Copilot 1.0.101 switches to the named session and announces it with a
+    # sessionStart `resume` at the next prompt
+    # (tests/fixtures/copilot-1.0.101/hooks/session-id-resume-then-in-session-resume.jsonl).
+    "copilot": "/resume {session_id}",
+}
 #: Sent at most once per attempt, only to draw out a deferred SessionStart: no ticket, no work.
 CONFIRM_PROMPT = ("Board check, no action needed: reply with just \"ok\". Do not start, resume or continue any "
                   "work and do not run tools; the board sends your next instructions itself.")

@@ -301,6 +301,13 @@ ROLE_CREDENTIAL_ARTIFACTS: dict[str, tuple[RoleCredentialArtifact, ...]] = {
     # is not something this code can verify is provider-only, and an artifact
     # whose contents cannot be constrained must not cross the boundary.
     "hermes": (RoleCredentialArtifact("hermes", f"{HERMES_OWNER_CREDENTIAL_DIR}/.env"),),
+    # GitHub Copilot CLI keeps its token in the system credential store, or in a
+    # plain-text file under ~/.copilot only when there is none, and neither is a
+    # file whose contents this code can confine to the token (SYRD-634). So no
+    # Copilot credential crosses into a role's own account: the owner's sign-in
+    # serves roles that run as the owner, and a role with its own account signs
+    # in there itself.
+    "copilot": (),
 }
 
 

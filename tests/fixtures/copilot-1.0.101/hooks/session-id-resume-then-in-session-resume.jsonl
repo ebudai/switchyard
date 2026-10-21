@@ -1,0 +1,7 @@
+{"event": "sessionStart", "payload": {"cwd": "/home/owner/work", "initialPrompt": "Via session id", "sessionId": "46ffe999-8bcb-4d01-aaa1-60a34e9d0954", "source": "resume", "timestamp": 1792541727555}}
+{"event": "userPromptSubmitted", "payload": {"cwd": "/home/owner/work", "prompt": "Via session id", "sessionId": "46ffe999-8bcb-4d01-aaa1-60a34e9d0954", "timestamp": 1792541727577}}
+{"event": "agentStop", "payload": {"cwd": "/home/owner/work", "sessionId": "46ffe999-8bcb-4d01-aaa1-60a34e9d0954", "stopReason": "end_turn", "stop_hook_active": false, "timestamp": 1792541727622, "transcriptPath": "/home/owner/.copilot/session-state/46ffe999-8bcb-4d01-aaa1-60a34e9d0954/events.jsonl"}}
+{"event": "sessionStart", "payload": {"cwd": "/home/owner/work", "initialPrompt": "After in-session resume", "sessionId": "11111111-2222-4333-8444-555555555555", "source": "resume", "timestamp": 1792541741215}}
+{"event": "userPromptSubmitted", "payload": {"cwd": "/home/owner/work", "prompt": "After in-session resume", "sessionId": "11111111-2222-4333-8444-555555555555", "timestamp": 1792541741224}}
+{"event": "agentStop", "payload": {"cwd": "/home/owner/work", "sessionId": "11111111-2222-4333-8444-555555555555", "stopReason": "end_turn", "stop_hook_active": false, "timestamp": 1792541741256, "transcriptPath": "/home/owner/.copilot/session-state/11111111-2222-4333-8444-555555555555/events.jsonl"}}
+{"event": "sessionEnd", "payload": {"cwd": "/home/owner/work", "reason": "user_exit", "sessionId": "11111111-2222-4333-8444-555555555555", "timestamp": 1792541748043}}

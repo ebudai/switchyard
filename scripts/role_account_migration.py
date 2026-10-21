@@ -400,6 +400,7 @@ def render_role_account_migration(
                 # access away from a live implementer mid-task; ownership moves
                 # inside the cutover, after the workers are stopped (SYRD-45).
                 worktree="",
+                **({"copilot_homes": homes} if (homes := launcher.role_copilot_homes(role, account)) else {}),
             )
         )
     # Now that the accounts exist, put them in the repository group -- and only

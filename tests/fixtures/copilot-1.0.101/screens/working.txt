@@ -1,0 +1,45 @@
+ [Current]  Sessions   Issues   Pull requests   Gists
+
+  ╭─╮╭─╮
+  ╰─╯╰─╯  Copilot v1.0.101 uses AI.
+  █ ▘▝ █  Check for mistakes.
+   ▔▔▔▔
+
+ ● No copilot-instructions.md found. Run /init to generate.
+
+ ! Model "fake-model" is not in the built-in catalog. Using defaults for: prompt tokens (COPILOT_PROVIDER_MAX_PROMPT_TOKENS), output tokens
+   (COPILOT_PROVIDER_MAX_OUTPUT_TOKENS). Run  copilot help providers  for configuration details.
+
+ ● Tip: /remote
+   └ Share this session: remote control from GitHub web and mobile, or directly with another CLI
+
+ ❯ Do some work                                                                                                                                          19:59
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ~/work [⎇ master]
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ◎ Working esc esc edit prompt                                                                                                                       fake-model

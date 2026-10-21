@@ -283,7 +283,7 @@ def test_fresh_machine_docs_match_manual_agent_cli_policy() -> None:
     # The CLIs are the user's responsibility, and the docs must say so rather
     # than describe an installer that offers to do it.
     assert "Switchyard does not install, download, or upgrade the agent CLIs." in normalized_docs
-    assert "Switchyard supports four agent CLIs and installs none of them." in normalized_docs
+    assert "Switchyard supports five agent CLIs and installs none of them." in normalized_docs
     assert "Switchyard never runs the commands below." in normalized_docs
     assert "for the user that will own the project" in normalized_docs
     assert "`switchyard new` detects the CLIs that are present" in normalized_docs

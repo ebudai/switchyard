@@ -53,6 +53,10 @@ IDLE_TURN_END_SOURCES = frozenset(
         "hermes.post_llm_call",
         "hermes.on_session_end",
         "hermes.on_session_finalize",
+        # GitHub Copilot CLI (SYRD-634): a turn ends in agentStop, a session in
+        # sessionEnd (measured, tests/fixtures/copilot-1.0.101/hooks).
+        "copilot.agentStop",
+        "copilot.sessionEnd",
     }
 )
 TRUSTED_IDLE_SOURCES = IDLE_TURN_END_SOURCES | frozenset({"claude.Notification.idle_prompt", "listener.stale_codex_busy_recovery"})
@@ -95,6 +99,9 @@ ROLE_TO_TARGET = {
 PERMISSION_PROMPT_BLOCK_SOURCES = frozenset({
     "claude.Notification.permission_prompt",
     "codex.PermissionRequest",
+    # Copilot's notification hook, narrowed by the pane hook to its
+    # `permission_prompt` kind (SYRD-634).
+    "copilot.notification.permission_prompt",
 })
 
 

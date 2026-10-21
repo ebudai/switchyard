@@ -226,6 +226,12 @@ def _model_validation_command(role: RoleConfig, workspace: Path | None = None) -
     if not cli or not role.model:
         return None
     model_args = [role.model_arg, role.model] if role.model_arg else []
+    if cli == "copilot":
+        # Only a --model the installed copilot is known to take; with none there
+        # is no model to validate (SYRD-634).
+        model_args = role_command.model_args_for_role(role)
+        if not model_args:
+            return None
     # The flags a live pane uses for this CLI. A probe has nobody to approve a
     # tool call for it, so without these the reply is a permission prompt rather
     # than an answer -- and the question under test would go unasked (SYRD-111).
@@ -240,7 +246,7 @@ def _model_validation_command(role: RoleConfig, workspace: Path | None = None) -
             *role.cli, "exec", "--skip-git-repo-check", *model_args, *pane_args,
             *workspace_args, MODEL_VALIDATION_PROMPT,
         ]
-    if cli in {"agy", "claude"}:
+    if cli in {"agy", "claude", "copilot"}:
         return [*role.cli, *model_args, *pane_args, "-p", MODEL_VALIDATION_PROMPT]
     if cli == "hermes":
         return [*role.cli, *model_args, *pane_args, "-z", MODEL_VALIDATION_PROMPT]

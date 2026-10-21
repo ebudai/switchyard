@@ -75,10 +75,38 @@ def install_generated_project_pane_hooks_args(
         str(hook_source),
         "--bin-path",
         str(hook_bin),
+        *_copilot_home_args(config, config.run_as_user, owner_home),
     ]
     if launcher.current_user_name() == config.run_as_user:
         return env_args
     return ["sudo", "-u", config.run_as_user, "-H", *env_args]
+
+
+def _copilot_home_args(config: ProjectConfig, account: str, home: Path) -> list[str]:
+    """`--copilot-home` for every COPILOT_HOME this account's Copilot roles run with (SYRD-634).
+
+    Copilot 1.0.101 reads its hooks only from $COPILOT_HOME when that is set, so
+    a role configured with one would otherwise load none of Switchyard's.
+    """
+    from scripts import copilot_runtime
+    from scripts import team_launcher as launcher
+
+    roles = [(role.env, role.workdir) for role in getattr(config, "roles", ())
+             if launcher._role_cli_name(role) == "copilot" and launcher.role_run_as_user(config, role) == account]
+    return [arg for root in copilot_runtime.configured_homes(home, roles) for arg in ("--copilot-home", str(root))]
+
+
+def role_copilot_homes(role: RoleConfig, account: str) -> list[str]:
+    """The COPILOT_HOME one Copilot role runs with under `account`, when not the default: [] or [absolute root]."""
+    from scripts import copilot_runtime
+    from scripts import team_launcher as launcher
+
+    cli = getattr(role, "cli", None) or []
+    if not cli or launcher._command_name(cli[0]) != "copilot":
+        return []
+    home = launcher.home_dir_for_user(account) or Path("/home") / account
+    return [str(root) for root in copilot_runtime.configured_homes(
+        home, [(getattr(role, "env", None) or {}, getattr(role, "workdir", ""))])]
 
 
 def ensure_generated_project_pane_hooks(
@@ -245,6 +273,7 @@ def refresh_role_pane_hooks(
             str(hook_source),
             "--bin-path",
             str(home / ".local" / "bin" / "ticket-board-pane-idle-hook"),
+            *_copilot_home_args(config, account, home),
         ]
         # As the account, never as root: these files are the account's own, and
         # root writing them leaves what the account cannot rewrite afterwards.

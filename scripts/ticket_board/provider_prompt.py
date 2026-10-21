@@ -20,7 +20,8 @@ can answer it. Nothing here answers anything.
 
 Every rule below comes from real screens, recorded offline in throwaway homes
 (tests/fixtures/syrd566_provider_screens.json): Codex 0.162.0 and Claude Code
-2.1.294. A question is a list of options, one of them under the selection
+2.1.294, and GitHub Copilot CLI 1.0.101 (tests/fixtures/copilot-1.0.101), which
+draws its questions inside a box. A question is a list of options, one of them under the selection
 cursor, above a key-hint footer that tells you to press Enter -- "enter/esc
 confirm", "enter select · esc back", "enter continue · esc back", "Press enter
 to continue", "Enter to confirm · Esc to cancel". An ordinary prompt has no
@@ -38,6 +39,10 @@ CURSOR_GLYPHS = "›❯>▸❱"
 _OPTION = re.compile(rf"^\s*(?P<cursor>[{CURSOR_GLYPHS}])?\s*(?:(?P<number>\d{{1,2}})\.\s+)?(?P<text>\S.*)$")
 _ENTER = re.compile(r"\benter\b", re.IGNORECASE)
 _HINT = re.compile(r"\b(?:esc|confirm|select|continue)\b", re.IGNORECASE)
+#: The sides of a box a question is drawn in: GitHub Copilot CLI 1.0.101 draws
+#: its folder-trust and permission questions as "│ ❯ 1. Yes … │" (SYRD-634,
+#: tests/fixtures/copilot-1.0.101/screens).
+_BOX_SIDES = re.compile(r"^(\s*)│ ?|\s*│\s*$")
 #: How far above its footer a question's options may start.
 _OPTION_ROWS = 24
 
@@ -95,14 +100,15 @@ KINDS: dict[str, tuple[str, str]] = {
 _MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("model_retirement", ("try new model", "use existing model")),
     ("folder_trust", ("trust this folder", "do you trust", "i trust this folder")),
-    ("sign_in", ("sign in with chatgpt", "provide your own api key", "sign in with device code", "select login method")),
+    ("sign_in", ("sign in with chatgpt", "provide your own api key", "sign in with device code", "select login method",
+                 "what account do you want to log into")),
     ("new_conversation_location", ("where should the new conversation run", "create new git worktree")),
 )
 
 
 def open_prompt(lines: list[str]) -> ProviderPrompt | None:
     """The question this screen is stopped at, or None when it is not asking one."""
-    rows = [str(line).rstrip() for line in lines]
+    rows = [_BOX_SIDES.sub("", str(line)).rstrip() for line in lines]
     filled = [index for index, row in enumerate(rows) if row.strip()]
     footer = next((index for index in reversed(filled[-3:]) if _is_footer(rows[index])), None)
     if footer is None:

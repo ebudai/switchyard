@@ -1,0 +1,44 @@
+ [Current]  Sessions   Issues   Pull requests   Gists
+
+  ╭─╮╭─╮
+  ╰─╯╰─╯  Copilot v1.0.101 uses AI.
+  █ ▘▝ █  Check for mistakes.
+   ▔▔▔▔
+
+ ● No copilot-instructions.md found. Run /init to generate.
+
+ ● Tip: /context
+   └ Show context window token usage and visualization
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ What account do you want to log into?
+
+ ❯ 1. GitHub.com
+   2. GitHub Enterprise Cloud (*.ghe.com)
+
+ ↑/↓ to navigate · enter to select

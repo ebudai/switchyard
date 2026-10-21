@@ -53,6 +53,8 @@ def install(args: argparse.Namespace) -> int:
         force=args.force,
         dry_run=args.dry_run,
         error_func=_stderr,
+        copilot_homes=[Path(root) for root in args.copilot_home],
+        copilot_only=args.copilot_only,
     )
 
 
@@ -61,6 +63,7 @@ def verify(args: argparse.Namespace) -> int:
         home=Path(args.home).expanduser(),
         source_commit=args.source_commit,
         error_func=_stderr,
+        copilot_homes=[Path(root) for root in args.copilot_home],
     )
 
 
@@ -99,11 +102,17 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     )
     install_parser.add_argument("--force", action="store_true", help="also overwrite a copy with no Switchyard provenance footer")
     install_parser.add_argument("--dry-run", action="store_true", help="report what would change")
+    install_parser.add_argument("--copilot-home", action="append", default=[],
+                                help="a COPILOT_HOME a role runs with; Copilot's skills go there too (absolute)")
+    install_parser.add_argument("--copilot-only", action="store_true",
+                                help="write only the --copilot-home copies, nothing else of the account")
     install_parser.set_defaults(func=install)
 
     verify_parser = subparsers.add_parser("verify", help="report whether each CLI can discover the skill")
     verify_parser.add_argument("--home", default=home_default, help="home directory to check")
     verify_parser.add_argument("--source-commit", default="", help="require the installed copies to carry this provenance commit")
+    verify_parser.add_argument("--copilot-home", action="append", default=[],
+                               help="a COPILOT_HOME a role runs with, checked as well (absolute)")
     verify_parser.set_defaults(func=verify)
 
     source_parser = subparsers.add_parser("source-commit", help="print the provenance commit for the canonical source")

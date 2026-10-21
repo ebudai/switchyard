@@ -14,7 +14,7 @@ NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 ROLE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 KINDS = {"system", "draft", "implementer", "reviewer", "support", "user", "router"}  # router: SYRD-599
 PRIMITIVES = {"move", "approve", "return", "reopen"}
-RUNTIMES = {"claude", "codex", "agy", "hermes"}
+RUNTIMES = {"claude", "codex", "agy", "hermes", "copilot"}
 # The director is a structural role of this model, not a tenant-chosen name: a
 # document without it is rejected below. Anything needing to find the director role
 # derives it from here rather than repeating the literal.

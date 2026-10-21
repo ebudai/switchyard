@@ -194,6 +194,7 @@ def role_runtime_commands(
     home: str,
     worktree: str,
     owner_home: str = "",
+    copilot_homes: Sequence[str] = (),
 ) -> list[str]:
     """Everything one role needs to run as its own account.
 
@@ -247,6 +248,9 @@ def role_runtime_commands(
     skill_installer = provision.shell_quote(f"{staging}/switchyard-board-skill")
     hook_bin = provision.shell_quote(f"{home}/.local/bin/ticket-board-pane-idle-hook")
     session_dir = provision.shell_quote(f"{home}/.local/state/{runtime_directory}/pane-sessions")
+    # The role's own COPILOT_HOME, when it sets one: Copilot reads hooks and
+    # skills only there (SYRD-634). Absolute, resolved by the caller.
+    copilot_args = "".join(f" --copilot-home {provision.shell_quote(str(root))}" for root in copilot_homes)
     commands.extend(
         [
             provision.install_line(home, "0755", account, account, hook_source, f"{home}/.local/bin/ticket-board-pane-idle-hook"),
@@ -256,8 +260,8 @@ def role_runtime_commands(
             f"sudo -u {q_account} -H env TICKET_BOARD_PROJECT={provision.shell_quote(project)} "
             f"TICKET_BOARD_PANE_SESSION_DIR={session_dir} "
             f"{hook_installer} install "
-            f"--home {q_home} --hook-source {hook_source} --bin-path {hook_bin}",
-            f"sudo -u {q_account} -H {skill_installer} install --home {q_home}",
+            f"--home {q_home} --hook-source {hook_source} --bin-path {hook_bin}{copilot_args}",
+            f"sudo -u {q_account} -H {skill_installer} install --home {q_home}{copilot_args}",
         ]
     )
     return commands
@@ -287,6 +291,7 @@ def role_account_commands(
     owner_home: str = "",
     worktree_base: str = "",
     control_repository: str = "",
+    copilot_homes: Sequence[str] = (),
 ) -> str:
     """Operator commands to add ONE role's Unix account to an existing project.
 
@@ -331,6 +336,7 @@ def role_account_commands(
             home=f"/home/{account}",
             worktree=worktree,
             owner_home=owner_home or f"/home/{owner_user}",
+            copilot_homes=copilot_homes,
         )
     )
     resolved_owner_home = owner_home or f"/home/{owner_user}"

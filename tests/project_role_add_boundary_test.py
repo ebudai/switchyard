@@ -156,9 +156,10 @@ def test_the_seams_the_modules_own_names_and_the_launchers_file() -> None:
                 through_all[n.attr] = through_all.get(n.attr, 0) + 1
     # SYRD-608: the layout, unit and SQL writes go through the launcher's `write_owner_file` (74 + 3); the two config
     # and artifact reads that feed a rewrite are `read_owner_json` where they were `_load_json` (same count).
-    check(sum(through_all.values()) == 77 and through_all.get("__file__") == 1 and through_all.get("TEAM_LAUNCHER_NAME") == 1
+    # SYRD-634: add-role reads `role_copilot_homes` for the account commands of a Copilot role (78).
+    check(sum(through_all.values()) == 78 and through_all.get("__file__") == 1 and through_all.get("TEAM_LAUNCHER_NAME") == 1
           and through_all.get("write_owner_file") == 3 and through_all.get("read_owner_json") == 2,
-          f"77 call-time reads, the launcher's own file once: {sum(through_all.values())} {through_all.get('__file__')}")
+          f"78 call-time reads, the launcher's own file once: {sum(through_all.values())} {through_all.get('__file__')}")
     bare_file = [n for n in ast.walk(module) if isinstance(n, ast.Name) and n.id == "__file__"]
     check(not bare_file, "this module's own file is never used")
     default = functions["add_project_role_command"].args.kw_defaults[functions["add_project_role_command"].args.kwonlyargs.index(

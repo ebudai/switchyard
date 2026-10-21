@@ -191,12 +191,14 @@ def test_adapter_paths_are_the_runtime_discovery_locations() -> None:
         "codex": home / ".codex" / "skills" / "switchyard-board" / "SKILL.md",
         "agy": home / ".gemini" / "config" / "skills" / "switchyard-board" / "SKILL.md",
         "hermes": home / ".hermes" / "skills" / "switchyard-board" / "SKILL.md",
+        "copilot": home / ".copilot" / "skills" / "switchyard-board" / "SKILL.md",
     }
     assert dict(board_skill.adapter_paths(home, board_skill.DIRECTOR_SKILL)) == {
         "claude": home / ".claude" / "skills" / "switchyard-director" / "SKILL.md",
         "codex": home / ".codex" / "skills" / "switchyard-director" / "SKILL.md",
         "agy": home / ".gemini" / "config" / "skills" / "switchyard-director" / "SKILL.md",
         "hermes": home / ".hermes" / "skills" / "switchyard-director" / "SKILL.md",
+        "copilot": home / ".copilot" / "skills" / "switchyard-director" / "SKILL.md",
     }
 
 
@@ -254,9 +256,9 @@ def test_recovery_runs_through_the_public_switchyard_command() -> None:
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         assert public.returncode == 0, public.stderr
-        assert public.stdout.count(": installed ") == 4 * len(board_skill.CANONICAL_SKILLS)
+        assert public.stdout.count(": installed ") == 5 * len(board_skill.CANONICAL_SKILLS)
         for skill in board_skill.CANONICAL_SKILLS:
-            assert public.stdout.count(f"{skill.name} ") == 4
+            assert public.stdout.count(f"{skill.name} ") == 5
         verified = subprocess.run(
             [
                 sys.executable, str(PUBLIC_SWITCHYARD), "board-skill", "verify",
@@ -265,7 +267,7 @@ def test_recovery_runs_through_the_public_switchyard_command() -> None:
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         assert verified.returncode == 0, verified.stderr
-        assert verified.stdout.count(": present ") == 4 * len(board_skill.CANONICAL_SKILLS)
+        assert verified.stdout.count(": present ") == 5 * len(board_skill.CANONICAL_SKILLS)
 
 
 def test_a_checkout_only_claims_a_commit_that_carries_this_body() -> None:
@@ -317,7 +319,7 @@ def test_an_unprovenanced_copy_is_reported_rather_than_counted_as_installed() ->
 
         verified = _run_installer("verify", "--home", str(home))
         assert verified.returncode == 1
-        assert verified.stdout.count(": unprovenanced ") == 4 * len(board_skill.CANONICAL_SKILLS)
+        assert verified.stdout.count(": unprovenanced ") == 5 * len(board_skill.CANONICAL_SKILLS)
         assert board_skill.failed_runtimes(board_skill.verify_board_skill(home=home)) == [
             runtime for runtime, _root in board_skill.SKILL_ADAPTERS
         ]
@@ -329,7 +331,7 @@ def test_install_projects_one_identical_body_into_every_runtime() -> None:
         source = _release_source(home, "c0ffee")
         first = _run_installer("install", "--home", str(home), "--source", str(source))
         assert first.returncode == 0, first.stderr
-        assert first.stdout.count(": installed ") == 4
+        assert first.stdout.count(": installed ") == 5
 
         bodies = {path.read_text(encoding="utf-8") for _runtime, path in board_skill.adapter_paths(home)}
         assert len(bodies) == 1
@@ -344,7 +346,7 @@ def test_install_projects_one_identical_body_into_every_runtime() -> None:
 
         again = _run_installer("install", "--home", str(home), "--source", str(source))
         assert again.returncode == 0
-        assert again.stdout.count(": current ") == 4, again.stdout
+        assert again.stdout.count(": current ") == 5, again.stdout
 
 
 def test_upgrade_refreshes_managed_copies_and_reports_stale_ones() -> None:
@@ -355,10 +357,10 @@ def test_upgrade_refreshes_managed_copies_and_reports_stale_ones() -> None:
         assert _run_installer("install", "--home", str(home), "--source", str(old_source)).returncode == 0
         assert [result.action for result in board_skill.verify_board_skill(home=home, expected_commit="new")] == [
             "stale"
-        ] * 4
+        ] * 5
 
         planned = _run_installer("install", "--home", str(home), "--source", str(new_source), "--dry-run")
-        assert planned.stdout.count(": would refresh ") == 4
+        assert planned.stdout.count(": would refresh ") == 5
         assert board_skill.parse_provenance(
             dict(board_skill.adapter_paths(home))["claude"].read_text(encoding="utf-8")
         ) == ("old", str(board_skill.CANONICAL_RELATIVE_SOURCE))
@@ -366,7 +368,7 @@ def test_upgrade_refreshes_managed_copies_and_reports_stale_ones() -> None:
         assert _run_installer("install", "--home", str(home), "--source", str(new_source)).returncode == 0
         assert [result.action for result in board_skill.verify_board_skill(home=home, expected_commit="new")] == [
             "present"
-        ] * 4
+        ] * 5
 
 
 def test_a_skill_switchyard_did_not_write_is_never_overwritten() -> None:
@@ -538,7 +540,7 @@ def test_a_copy_from_the_first_release_is_still_ours_and_gets_refreshed() -> Non
         source = _release_source(home, "c0ffee")
         result = _run_installer("install", "--home", str(home), "--source", str(source))
         assert result.returncode == 0, result.stderr
-        assert result.stdout.count(": refreshed ") == 4, result.stdout
+        assert result.stdout.count(": refreshed ") == 5, result.stdout
         assert ": unmanaged " not in result.stdout
         for _runtime, path in board_skill.adapter_paths(home):
             assert board_skill.parse_provenance(path.read_text(encoding="utf-8")) == (

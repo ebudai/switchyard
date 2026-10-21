@@ -22,7 +22,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Sequence
 
 SKILLS_DIR_NAME = "skills"
 RELEASE_MARKER_NAME = ".switchyard-release.json"
@@ -71,6 +71,8 @@ SKILL_ADAPTERS: tuple[tuple[str, Path], ...] = (
     ("codex", Path(".codex") / "skills"),
     ("agy", Path(".gemini") / "config" / "skills"),
     ("hermes", Path(".hermes") / "skills"),
+    # GitHub Copilot CLI's personal skills (`copilot help skill`, 1.0.101).
+    ("copilot", Path(".copilot") / "skills"),
 )
 
 # "board skill" is the wording the first release shipped. Copies installed by
@@ -82,9 +84,21 @@ PROVENANCE_RE = re.compile(
 )
 
 
-def adapter_paths(home: Path, skill: CanonicalSkill = BOARD_SKILL) -> tuple[tuple[str, Path], ...]:
-    """The installed SKILL.md path for each supported runtime under ``home``."""
-    return tuple((runtime, skill.installed_path(home, root)) for runtime, root in SKILL_ADAPTERS)
+def adapter_paths(
+    home: Path, skill: CanonicalSkill = BOARD_SKILL, copilot_homes: Sequence[Path] = ()
+) -> tuple[tuple[str, Path], ...]:
+    """The installed SKILL.md path for each supported runtime under ``home``.
+
+    `copilot_homes` are COPILOT_HOME roots a role runs with: Copilot 1.0.101
+    reads personal skills only from `$COPILOT_HOME/skills` when that is set
+    (SYRD-634), so each one gets a copy as well as `~/.copilot/skills`.
+    """
+    paths = [(runtime, skill.installed_path(home, root)) for runtime, root in SKILL_ADAPTERS]
+    for copilot_home in copilot_homes:
+        path = skill.installed_path(home, Path(copilot_home) / "skills")
+        if ("copilot", path) not in paths:
+            paths.append(("copilot", path))
+    return tuple(paths)
 
 
 def stamp_skill(body: str, *, source_commit: str, source: str = str(BOARD_SKILL.relative_source)) -> str:
@@ -259,8 +273,14 @@ def install_board_skill(
     force: bool = False,
     dry_run: bool = False,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    copilot_homes: Sequence[Path] = (),
+    copilot_only: bool = False,
 ) -> list[AdapterResult]:
-    """Project one canonical skill into every supported runtime under ``home``."""
+    """Project one canonical skill into every supported runtime under ``home``.
+
+    `copilot_only` writes only the `copilot_homes` copies: what a Copilot pane
+    does for its own COPILOT_HOME before it starts (SYRD-634).
+    """
     source = Path(source).expanduser()
     skill = skill_for_source(source)
     body = source.read_text(encoding="utf-8")
@@ -268,16 +288,16 @@ def install_board_skill(
     desired = stamp_skill(body, source_commit=commit, source=str(skill.relative_source))
     return [
         _install_one(runtime=runtime, path=path, desired=desired, force=force, dry_run=dry_run)
-        for runtime, path in adapter_paths(home, skill)
+        for runtime, path in adapter_paths(home, skill, copilot_homes)[len(SKILL_ADAPTERS) if copilot_only else 0:]
     ]
 
 
 def verify_board_skill(
-    *, home: Path, expected_commit: str = "", skill: CanonicalSkill = BOARD_SKILL
+    *, home: Path, expected_commit: str = "", skill: CanonicalSkill = BOARD_SKILL, copilot_homes: Sequence[Path] = ()
 ) -> list[AdapterResult]:
     """Report, per runtime, whether a managed copy of the skill is discoverable."""
     results: list[AdapterResult] = []
-    for runtime, path in adapter_paths(home, skill):
+    for runtime, path in adapter_paths(home, skill, copilot_homes):
         try:
             text = path.read_text(encoding="utf-8")
         except OSError as exc:
@@ -375,6 +395,8 @@ def install_command(
     dry_run: bool = False,
     print_func: Callable[[str], None] = print,
     error_func: Callable[[str], None] = print,
+    copilot_homes: Sequence[Path] = (),
+    copilot_only: bool = False,
 ) -> int:
     """Install every canonical skill, or just the one named by ``source``."""
     selected = _sources_to_install(source, tree_root)
@@ -386,7 +408,8 @@ def install_command(
             continue
         commit = effective_source_commit(path, source_commit)
         results = install_board_skill(
-            home=home, source=path, source_commit=commit, force=force, dry_run=dry_run
+            home=home, source=path, source_commit=commit, force=force, dry_run=dry_run, copilot_homes=copilot_homes,
+            copilot_only=copilot_only,
         )
         for result in results:
             print_func(f"{skill.name} {result.describe()}")
@@ -413,10 +436,11 @@ def verify_command(
     source_commit: str = "",
     print_func: Callable[[str], None] = print,
     error_func: Callable[[str], None] = print,
+    copilot_homes: Sequence[Path] = (),
 ) -> int:
     exit_code = 0
     for skill in CANONICAL_SKILLS:
-        results = verify_board_skill(home=home, expected_commit=source_commit, skill=skill)
+        results = verify_board_skill(home=home, expected_commit=source_commit, skill=skill, copilot_homes=copilot_homes)
         for result in results:
             print_func(f"{skill.name} {result.describe()}")
         unusable = failed_runtimes(results)

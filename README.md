@@ -30,7 +30,7 @@ Arch-family ones, where `pacman -Sy` without `-u` would leave a partial
 upgrade: run `sudo pacman -Syu` yourself before `sudo ./install`.
 
 Switchyard does not install the agent CLIs. Installing `claude`, `codex`,
-`agy`, or `hermes` is yours to do, with that vendor's own installer, for the
+`agy`, `hermes`, or `copilot` is yours to do, with that vendor's own installer, for the
 user that will own the project. Switchyard detects which ones are present and
 walks their sign-in when you create a project, so the installer's final output
 points you at `switchyard new` rather than naming a CLI.

@@ -21,7 +21,7 @@ installer asks nothing of its own; on Arch-family hosts pacman shows its
 usual installation confirmation.
 
 Switchyard does not install, download, or upgrade agent CLIs. Installing
-claude, codex, agy, or hermes is yours to do with the vendor's own installer,
+claude, codex, agy, hermes, or copilot is yours to do with the vendor's own installer,
 for the user that will own the project. Switchyard detects which ones are
 present and walks their sign-in when you create a project.
 EOF
@@ -97,7 +97,7 @@ dry_run_install() {
 
 print_final_next_step() {
     printf '\nNEXT STEP\n'
-    printf 'Switchyard never fetches or runs a vendor'"'"'s installer. Install at least one of claude, codex, agy, or hermes yourself, with that vendor'"'"'s own installer -- you choose which version you run.\n'
+    printf 'Switchyard never fetches or runs a vendor'"'"'s installer. Install at least one of claude, codex, agy, hermes, or copilot yourself, with that vendor'"'"'s own installer -- you choose which version you run.\n'
     printf 'It does not have to be installed for each project owner. If a CLI is reachable only by your own account, `switchyard new` offers to promote that executable to a root-owned host-wide copy, reused by every later project; no credentials, config, trust or session travel with it.\n'
     printf 'Then run `switchyard new`: it classifies each selected CLI before creating anything, settles anything unusable with you, and walks you through signing in to each one before any pane starts.\n'
 }

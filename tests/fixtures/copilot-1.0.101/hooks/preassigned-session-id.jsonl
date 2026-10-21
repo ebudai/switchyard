@@ -1,0 +1,4 @@
+{"event": "sessionStart", "payload": {"cwd": "/home/owner/work", "initialPrompt": "Do some work", "sessionId": "11111111-2222-4333-8444-555555555555", "source": "new", "timestamp": 1792540766595}}
+{"event": "userPromptSubmitted", "payload": {"cwd": "/home/owner/work", "prompt": "Do some work", "sessionId": "11111111-2222-4333-8444-555555555555", "timestamp": 1792540766617}}
+{"event": "agentStop", "payload": {"cwd": "/home/owner/work", "sessionId": "11111111-2222-4333-8444-555555555555", "stopReason": "end_turn", "stop_hook_active": false, "timestamp": 1792540766644, "transcriptPath": "/home/owner/.copilot/session-state/11111111-2222-4333-8444-555555555555/events.jsonl"}}
+{"event": "sessionEnd", "payload": {"cwd": "/home/owner/work", "reason": "user_exit", "sessionId": "11111111-2222-4333-8444-555555555555", "timestamp": 1792540780670}}

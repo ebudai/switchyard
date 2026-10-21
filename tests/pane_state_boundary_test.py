@@ -83,7 +83,8 @@ READERS = {'scripts/role_pane_entry.py': {'import PaneHookStateStore': 1}, 'scri
 #: The constants and the defaults, as the baseline wrote them. Measured on the baseline, not typed.
 CONSTANT_TEXT = {
     'DEFAULT_PANE_STATE_DIR': (None, "Path(os.environ['TICKET_BOARD_PANE_STATE_DIR']).expanduser() if os.environ.get('TICKET_BOARD_PANE_STATE_DIR') else Path(os.environ['PGU_TICKET_BOARD_PANE_STATE_DIR']).expanduser() if os.environ.get('PGU_TICKET_BOARD_PANE_STATE_DIR') else Path(f'/run/user/{os.getuid()}/pgu-ticket-board/pane-state')"),
-    'TURN_START_EVENTS': (None, "frozenset({'UserPromptSubmit', 'PreInvocation', 'pre_llm_call'})"),
+    # SYRD-634 added Copilot's userPromptSubmitted to the moved set.
+    'TURN_START_EVENTS': (None, "frozenset({'UserPromptSubmit', 'PreInvocation', 'pre_llm_call', 'userPromptSubmitted'})"),
 }
 DEFAULTS = {
     'hook_turn_started_at': [],

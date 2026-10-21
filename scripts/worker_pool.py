@@ -745,7 +745,7 @@ def worker_readiness(
                 account=bool(pane_user) and launcher.local_account_exists(pane_user),
                 worktree=workdir is not None and Path(workdir).is_dir(),
                 trusted=workdir is None or not Path(workdir).is_dir() or launcher._workdir_is_trusted(
-                    runtime, owner_home=home, workdir=Path(workdir)
+                    runtime, owner_home=home, workdir=Path(workdir), **launcher._trust_kwargs(runtime, configured)
                 ),
                 session=session_alive,
                 stopped_at=worker_screen.live_question(configured, role_runner) if session_alive else "",

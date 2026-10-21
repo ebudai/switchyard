@@ -42,7 +42,7 @@ UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
 SESSION_START_ACTIVE_WORK_SOURCES = {"clear", "compact", "resume"}
-SESSION_START_HOOK_SOURCES = {"hermes.on_session_start"}
+SESSION_START_HOOK_SOURCES = {"hermes.on_session_start", "copilot.sessionStart"}
 #: Runtimes whose turn hooks are the first word of a conversation switch in the
 #: pane (SYRD-622). agy opens a conversation the User /resumes in the pane with
 #: no SessionStart -- only PreInvocation, PostInvocation and Stop follow, naming
@@ -51,7 +51,7 @@ SESSION_START_HOOK_SOURCES = {"hermes.on_session_start"}
 #: their turns with another id stay refused.
 PANE_SWITCH_TURN_SOURCE_PREFIXES = ("gemini.",)
 #: Must match notify_listener.TURN_START_EVENTS (SYRD-268).
-TURN_START_EVENTS = frozenset({"UserPromptSubmit", "PreInvocation", "pre_llm_call"})
+TURN_START_EVENTS = frozenset({"UserPromptSubmit", "PreInvocation", "pre_llm_call", "userPromptSubmitted"})
 #: Turn ends whose runtime says what is still running when the turn ends.
 #: Claude Code's Stop input carries `background_tasks`: "In-flight background
 #: work (running/pending + backgrounded) registered in this session ... Empty
@@ -69,6 +69,16 @@ HERMES_RUN_SOURCES = frozenset({"hermes.pre_llm_call", "hermes.post_llm_call", "
 HERMES_BACKGROUND_MAX_SECONDS = 1800.0
 #: Long enough for a whole conversation history on stdin; reading stops at EOF.
 HERMES_PAYLOAD_TIMEOUT_SECONDS = 2.0
+#: GitHub Copilot CLI's hook events (SYRD-634), measured on 1.0.101
+#: (tests/fixtures/copilot-1.0.101/hooks): camelCase names and a `sessionId`.
+#: Its stdout must be one JSON document, so every Copilot event prints `{}` when
+#: it has nothing else to say.
+COPILOT_SOURCE_PREFIX = "copilot."
+#: Only these notifications say the pane waits on the person; the rest are news.
+COPILOT_BLOCKING_NOTIFICATIONS = frozenset({"permission_prompt"})
+#: A recoverable model-call error is retried by Copilot itself behind its Working
+#: line; one naming a limit is reported as capacity (SYRD-594's sense).
+COPILOT_CAPACITY_WORDS = ("rate limit", "rate_limit", "quota", "429", "too many requests", "capacity")
 PROC_ROOT = Path("/proc")
 SESSION_START_FRESH_SOURCE = "startup"
 #: What runs between a provider and its hook, or between tmux and the provider,
@@ -793,6 +803,56 @@ def _hermes_pre_llm_context_output(
     return {"context": _active_work_full_context_for_ticket(ticket, board_url=board_url)}
 
 
+def _copilot_event(state_dir: str | Path, target: str, source: str, state: str,
+                   payload: object) -> tuple[str, str | None, object]:
+    """What one Copilot hook event says about the pane: (source, state or None, payload).
+
+    Copilot names a session it started `new`, whether the pane launched it or a
+    /clear replaced the previous one (measured, 1.0.101). The board binds a
+    cleared ticket's conversation only to a start that says `clear` (SYRD-540),
+    so a `new` session from the provider process that already announced another
+    one is that clear; any other `new` one is the launch's `startup`.
+    """
+    data = dict(payload) if isinstance(payload, dict) else {}
+    event = source[len(COPILOT_SOURCE_PREFIX):]
+    if event == "sessionStart":
+        if str(data.get("source") or "").lower() == "new":
+            data["copilot_source"] = "new"
+            data["source"] = "startup"
+            try:
+                previous = json.loads(_target_path(Path(state_dir).expanduser(), target).read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                previous = None
+            last = previous.get("last_session_start") if isinstance(previous, dict) else None
+            identity = _pane_root_identity(os.getpid())
+            if (isinstance(last, dict) and identity is not None
+                    and (last.get("pane_pid"), last.get("pane_start_time")) == identity
+                    and last.get("session_id") and last.get("session_id") != _extract_payload_session_id(data)):
+                data["source"] = "clear"
+        return source, state, data
+    if event == "notification":
+        kind = str(data.get("notification_type") or "")
+        if kind in COPILOT_BLOCKING_NOTIFICATIONS:
+            return f"{source}.{kind}", "blocked", data
+        return source, None, data
+    if event == "errorOccurred":
+        if data.get("recoverable") is True:
+            text = json.dumps(data.get("error"), sort_keys=True).lower()
+            kind = "capacity" if any(word in text for word in COPILOT_CAPACITY_WORDS) else "retrying"
+            return f"{source}.{kind}", "busy", data
+        return source, "idle", data
+    return source, state, data
+
+
+def _copilot_output(output: dict[str, object] | None) -> dict[str, object]:
+    """Copilot reads a sessionStart's context from a top-level `additionalContext`."""
+    if not output:
+        return {}
+    context = (output.get("hookSpecificOutput") or {}).get("additionalContext") if isinstance(
+        output.get("hookSpecificOutput"), dict) else None
+    return {"additionalContext": context} if context else {}
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Record a ticket-board pane idle/busy state for notification delivery when a pane target is given."
@@ -913,17 +973,28 @@ def _record_hermes_run(state_dir: str | Path, target: str, state: str, source: s
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     target = _resolve_target(args.target.strip(), os.environ)
-    if target is None:
-        return 0
-    state_dir = _resolve_pane_state_dir(args.state_dir, target, os.environ)
-    session_dir = _resolve_pane_session_dir(args.session_dir, target, os.environ)
-    if state_dir is None or session_dir is None:
+    state_dir = _resolve_pane_state_dir(args.state_dir, target, os.environ) if target is not None else None
+    session_dir = _resolve_pane_session_dir(args.session_dir, target, os.environ) if target is not None else None
+    if target is None or state_dir is None or session_dir is None:
+        if args.source.startswith(COPILOT_SOURCE_PREFIX):
+            print("{}")  # Copilot reads one JSON document from every hook
         return 0
     session_path = _target_path(session_dir, target)
     existing_session_id = _session_id_from_file(session_path)
     should_wait_for_session_payload = args.record_session or not existing_session_id
     foreground = True
-    if args.source in BACKGROUND_WORK_SOURCES:
+    source = args.source
+    if args.source.startswith(COPILOT_SOURCE_PREFIX):
+        payload = _read_stdin_json(timeout=max(args.stdin_timeout, 1.0))
+        source, state, payload = _copilot_event(state_dir, target, args.source, args.state, payload)
+        if state is None:
+            print("{}")
+            return 0
+        _write_state(state_dir, target, state, source=source,
+                     session_start=_session_start_record(payload) if source == "copilot.sessionStart" else None,
+                     checkout={**_checkout(payload), "at": time.time()} if source == "copilot.agentStop" else None)
+        args.state = state
+    elif args.source in BACKGROUND_WORK_SOURCES:
         # Read first: this turn end's input says whether the session is done or
         # paused on background work, and the state written must say which.
         payload = _read_stdin_json(timeout=args.stdin_timeout)
@@ -978,8 +1049,14 @@ def main(argv: list[str] | None = None) -> int:
             environ=os.environ,
             resume_session_id=resume_session_id,
         )
+        if args.source.startswith(COPILOT_SOURCE_PREFIX):
+            print(json.dumps(_copilot_output(output), sort_keys=True))
+            return 0
         if output is not None:
             print(json.dumps(output, sort_keys=True))
+    if args.source.startswith(COPILOT_SOURCE_PREFIX):
+        print("{}")
+        return 0
     if args.state == "busy" and args.source == "hermes.pre_llm_call" and foreground:
         output = _hermes_pre_llm_context_output(target=target, environ=os.environ)
         if output is not None:

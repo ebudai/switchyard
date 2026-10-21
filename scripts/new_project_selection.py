@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from scripts.ticket_board.prompt_schema import Choice, Field
 
 
-SUPPORTED_NEW_PROJECT_CLIS = ("claude", "codex", "agy", "hermes")
+SUPPORTED_NEW_PROJECT_CLIS = ("claude", "codex", "agy", "hermes", "copilot")
 NEW_PROJECT_ROLE_CLI_DEFAULTS = {
     "designer": "claude",
     "director": "claude",

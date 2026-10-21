@@ -82,6 +82,13 @@ def provider_state_generation(cli: str, *, owner_home: Path) -> str:
         settings = launcher._read_json_object(owner_home / ".gemini" / "antigravity-cli" / "settings.json")
         trusted = settings.get("trustedWorkspaces")
         facts["trusted"] = sorted(str(path) for path in trusted) if isinstance(trusted, list) else []
+    if cli == "copilot":
+        # Its token is in the system credential store, whose existence is not
+        # read here; its trust is a list in its own config.json (SYRD-634).
+        from scripts import copilot_runtime
+
+        trusted = copilot_runtime.read_config(owner_home).get("trustedFolders")
+        facts["trusted"] = sorted(str(path) for path in trusted) if isinstance(trusted, list) else []
     return hashlib.sha256(
         json.dumps(facts, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()

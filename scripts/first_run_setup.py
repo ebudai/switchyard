@@ -31,7 +31,8 @@ import shlex
 import subprocess
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
+
 
 if TYPE_CHECKING:
     from scripts.team_launcher import CodexHookTrustMismatch, OwnerShellIssue, ProjectConfig, RoleConfig
@@ -71,6 +72,9 @@ class FirstRunFolderTrustStep:
     #: action covers all of them and the manifest says so rather than listing
     #: the same directory once per role.
     roles: tuple[str, ...] = ()
+    #: The COPILOT_HOME the roles run with, when they set one: Copilot keeps its
+    #: trust there and nowhere else (SYRD-634).
+    copilot_home: str = ""
 
 
 @dataclass(frozen=True)
@@ -95,7 +99,7 @@ class FirstRunSetupManifest:
         )
 
 
-FIRST_RUN_TRUST_CLIS = frozenset({"agy", "claude", "codex"})
+FIRST_RUN_TRUST_CLIS = frozenset({"agy", "claude", "codex", "copilot"})
 
 
 def _owner_shell_issue(owner_user: str) -> OwnerShellIssue | None:
@@ -260,20 +264,44 @@ def _codex_workdir_is_trusted(owner_home: Path, workdir: Path) -> bool:
     return False
 
 
-def _workdir_is_trusted(cli: str, *, owner_home: Path, workdir: Path) -> bool:
+def _workdir_is_trusted(cli: str, *, owner_home: Path, workdir: Path, env: Mapping[str, str] | None = None) -> bool:
     if cli == "claude":
         return _claude_workdir_is_trusted(owner_home, workdir)
     if cli == "agy":
         return _agy_workdir_is_trusted(owner_home, workdir)
     if cli == "codex":
         return _codex_workdir_is_trusted(owner_home, workdir)
+    if cli == "copilot":
+        # "Yes, and remember this folder" adds it to trustedFolders (SYRD-634).
+        from scripts import copilot_runtime
+
+        return copilot_runtime.workdir_is_trusted(workdir, owner_home, env)
     return True
 
 
 def _first_run_trust_command(role: RoleConfig) -> list[str]:
     # Trust is directory-scoped, so the minimal interactive CLI is enough to collect it.
     # Detached roles do not have a visible pane where the prompt can appear.
-    return list(role.cli)
+    return [*_copilot_home_env(role), *role.cli]
+
+
+def _copilot_home_env(role: RoleConfig) -> list[str]:
+    """`env COPILOT_HOME=<value>` for a Copilot role that sets one, so its trust lands where its pane reads it."""
+    from scripts import team_launcher as launcher
+
+    value = str(role.env.get("COPILOT_HOME") or "").strip()
+    return ["env", f"COPILOT_HOME={value}"] if value and launcher._role_cli_name(role) == "copilot" else []
+
+
+def _trust_kwargs(cli: str, role: RoleConfig | None) -> dict[str, Any]:
+    """The role's environment, for the one runtime whose trust depends on it (SYRD-634); nothing otherwise.
+
+    Nothing at all for any other runtime or a Copilot role without COPILOT_HOME,
+    so every other trust check is called exactly as before.
+    """
+    if role is None or cli != "copilot" or not str(role.env.get("COPILOT_HOME") or "").strip():
+        return {}
+    return {"env": dict(role.env)}
 
 
 def build_first_run_setup_manifest(
@@ -338,9 +366,10 @@ def build_first_run_setup_manifest(
         if cli not in FIRST_RUN_TRUST_CLIS or cli in missing_cli_roles:
             continue
         workdir = Path(role.workdir)
-        if launcher._workdir_is_trusted(cli, owner_home=owner_home, workdir=workdir):
+        if launcher._workdir_is_trusted(cli, owner_home=owner_home, workdir=workdir, **_trust_kwargs(cli, role)):
             continue
-        key = (cli, str(workdir.expanduser().resolve(strict=False)))
+        copilot_home = _trust_kwargs(cli, role).get("env", {}).get("COPILOT_HOME", "")
+        key = (cli, str(workdir.expanduser().resolve(strict=False)), copilot_home)
         existing = trust_index.get(key)
         if existing is not None:
             shared = folder_trust_steps[existing]
@@ -354,6 +383,7 @@ def build_first_run_setup_manifest(
                 workdir=workdir,
                 command=tuple(_first_run_trust_command(role)),
                 roles=(role.role,),
+                copilot_home=copilot_home,
             )
         )
 

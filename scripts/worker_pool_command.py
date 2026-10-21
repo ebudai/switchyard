@@ -344,7 +344,8 @@ def worker_pool_preflight(
         member for member in already
         if member not in unprepared
         and not launcher._workdir_is_trusted(
-            pool.runtime, owner_home=home, workdir=Path(worker_pool_member_role(config, member).workdir)
+            pool.runtime, owner_home=home, workdir=Path(worker_pool_member_role(config, member).workdir),
+            **launcher._trust_kwargs(pool.runtime, worker_pool_member_role(config, member)),
         )
     ]
     if untrusted:

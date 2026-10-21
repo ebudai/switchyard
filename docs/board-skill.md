@@ -1,8 +1,8 @@
 # The portable board skills
 
-Every Switchyard pane runs one of four agent CLIs, and each of them reads skills
+Every Switchyard pane runs one of five agent CLIs, and each of them reads skills
 from a different directory. Switchyard keeps **one** canonical body per skill and
-projects it into all four, so a pane's instructions do not depend on which
+projects it into all five, so a pane's instructions do not depend on which
 runtime it happens to be.
 
 Two skills ship:
@@ -56,6 +56,7 @@ runtime's own discovery path under the project owner's home:
 | Codex | `~/.codex/skills/<skill>/SKILL.md` |
 | agy | `~/.gemini/config/skills/<skill>/SKILL.md` |
 | Hermes | `~/.hermes/skills/<skill>/SKILL.md` |
+| GitHub Copilot CLI | `~/.copilot/skills/<skill>/SKILL.md` (its personal skills, per `copilot help skill`) |
 
 These are per-user, not per-checkout, so a pane discovers the skill from any
 working directory — which matters because role panes run in worktrees, not in the
@@ -100,7 +101,7 @@ is never updated again.
 That footer is also the ownership marker:
 
 - a copy carrying it is Switchyard-managed and is refreshed in place on upgrade,
-  which is what keeps the four locations from drifting into four bodies;
+  which is what keeps the five locations from drifting into five bodies;
 - a file at the same path *without* it was written by someone else and is never
   touched. `--force` overrides that, and is the only way to overwrite it.
 

@@ -472,7 +472,9 @@ def run_first_run_auth_phase(
         # worktree the step can already be done. Telling somebody to answer a
         # trust prompt and then not showing one is how a step that is simply
         # finished reads as a stall (SYRD-245).
-        if launcher._workdir_is_trusted(step.cli, owner_home=effective_home, workdir=step.workdir):
+        # The roles' own COPILOT_HOME, when they set one: Copilot keeps its trust there (SYRD-634).
+        trust_env = {"env": {"COPILOT_HOME": step.copilot_home}} if getattr(step, "copilot_home", "") else {}
+        if launcher._workdir_is_trusted(step.cli, owner_home=effective_home, workdir=step.workdir, **trust_env):
             print_func(
                 f"switchyard: {step.cli} already trusts {step.workdir} for this account, "
                 "so that step is done; nothing to answer."
@@ -484,8 +486,8 @@ def run_first_run_auth_phase(
             owner_home=effective_home,
             cwd=step.workdir,
             command=list(step.command),
-            is_complete=lambda cli=step.cli, workdir=step.workdir: launcher._workdir_is_trusted(
-                cli, owner_home=effective_home, workdir=workdir
+            is_complete=lambda cli=step.cli, workdir=step.workdir, trust_env=trust_env: launcher._workdir_is_trusted(
+                cli, owner_home=effective_home, workdir=workdir, **trust_env
             ),
             watching=f"{step.cli} to record trust for {step.workdir}",
             purpose=SETUP_PURPOSE_FOLDER_TRUST,

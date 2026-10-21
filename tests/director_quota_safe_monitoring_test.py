@@ -234,7 +234,7 @@ def test_the_installer_puts_both_skills_in_every_cli_tree_as_their_sources() -> 
         assert result.returncode == 0 and result.stderr == "", result.stdout + result.stderr
         for skill in (board_skill.BOARD_SKILL, board_skill.DIRECTOR_SKILL):
             paths = board_skill.adapter_paths(home, skill)
-            assert {runtime for runtime, _ in paths} == {"claude", "codex", "agy", "hermes"}
+            assert {runtime for runtime, _ in paths} == {"claude", "codex", "agy", "hermes", "copilot"}
             for runtime, path in paths:
                 assert path.is_file(), f"{skill.name} was not installed for {runtime} at {path}"
                 assert path.read_text(encoding="utf-8") == _expected(skill, "c0ffee597"), (skill.name, runtime)
@@ -270,7 +270,7 @@ def test_an_upgrade_refreshes_skills_that_still_teach_unbounded_watching() -> No
                 assert f"{skill.name} {runtime}: refreshed {path}" in result.stdout, result.stdout
                 assert path.read_text(encoding="utf-8") == _expected(skill, "n3w597"), (skill.name, runtime)
         again = _installer(release, "install", home, "--source-commit", "n3w597")
-        assert again.returncode == 0 and again.stdout.count(": current ") == 8, again.stdout
+        assert again.returncode == 0 and again.stdout.count(": current ") == 10, again.stdout
 
 
 def _docs_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:

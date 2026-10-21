@@ -469,6 +469,8 @@ def add_project_role_command(
                     if updated_config.control_repository is not None
                     else ""
                 ),
+                # Only for a Copilot role with its own COPILOT_HOME (SYRD-634); every other call is as before.
+                **({"copilot_homes": homes} if (homes := launcher.role_copilot_homes(pane_role, pane_user)) else {}),
             )
         else:
             pane_script_path = updated_config.pane_launcher or script_path or Path(launcher.__file__).resolve().with_name(launcher.TEAM_LAUNCHER_NAME)

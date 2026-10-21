@@ -1,6 +1,6 @@
 """The command line a role's agent CLI is started with.
 
-Each supported runtime (Claude, Codex, Hermes, agy) spells the same intents
+Each supported runtime (Claude, Codex, Hermes, agy, Copilot) spells the same intents
 differently. This module holds those per-CLI adapter tables:
 - unattended/approval flags (`YOLO_ARGS_BY_CLI`);
 - startup arguments;
@@ -23,8 +23,11 @@ This module never imports `team_launcher` at its top. Launcher facilities
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
+
 
 if TYPE_CHECKING:
     from scripts.team_launcher import RoleConfig
@@ -35,6 +38,9 @@ YOLO_ARGS_BY_CLI = {
     "claude": ["--dangerously-skip-permissions"],
     "codex": ["--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust"],
     "hermes": ["--yolo"],
+    # Copilot 1.0.101: "--allow-all  Enable all permissions (equivalent to
+    # --allow-all-tools --allow-all-paths --allow-all-urls)".
+    "copilot": ["--allow-all"],
 }
 
 
@@ -50,6 +56,9 @@ EFFORT_STYLE_BY_CLI = {
     # Hermes has no effort flag; its effort is `agent.reasoning_effort` in the
     # role's own HERMES_HOME (`scripts/hermes_role_config.py`, SYRD-546).
     "hermes": "home",
+    # Copilot takes --reasoning-effort, with levels that vary by version: the
+    # installed binary's own --help decides (scripts/copilot_runtime.py).
+    "copilot": "installed",
 }
 
 
@@ -63,6 +72,7 @@ DEFAULT_RESUME_MODE_BY_CLI = {
     "claude": "flag",
     "codex": "subcommand",
     "hermes": "flag",
+    "copilot": "flag",
 }
 
 
@@ -70,6 +80,9 @@ DEFAULT_RESUME_FLAG_BY_CLI = {
     "agy": "--conversation",
     "claude": "--resume",
     "hermes": "--resume",
+    # `copilot --resume <id>` reopens that session and exits with "Error: No
+    # session, task, or name matched" when it has none (measured, 1.0.101).
+    "copilot": "--resume",
 }
 
 
@@ -98,13 +111,21 @@ def startup_args_for_role(role: RoleConfig) -> list[str]:
     return [flag for flag in flags if flag not in role.extra_args]
 
 
-def effort_args_for_role(role: RoleConfig) -> list[str]:
+def effort_args_for_role(role: RoleConfig, *, path: str | None = None) -> list[str]:
     from scripts import team_launcher as launcher
 
     if not role.effort:
         return []
     cli_name = launcher._command_name(role.cli[0])
     style = EFFORT_STYLE_BY_CLI.get(cli_name)
+    if style == "installed":
+        from scripts import copilot_runtime
+
+        args, why = copilot_runtime.effort_args(
+            role.effort, copilot_runtime.installed_capabilities(role.cli[0], env={"PATH": path or os.environ.get("PATH", "")}))
+        if why:
+            print(f"team-launcher: {role.role}: {why}", file=sys.stderr)
+        return args
     if style == "flag":
         return ["--effort", role.effort]
     if style == "config":
@@ -126,6 +147,23 @@ def effort_args_for_role(role: RoleConfig) -> list[str]:
     raise SystemExit(f"role {role.role} uses unsupported effort cli {cli_name!r}")
 
 
+def model_args_for_role(role: RoleConfig, *, path: str | None = None) -> list[str]:
+    """The role's model flag; for Copilot, only when its installed --help is read and lists --model."""
+    from scripts import team_launcher as launcher
+
+    if not role.model:
+        return []
+    if EFFORT_STYLE_BY_CLI.get(launcher._command_name(role.cli[0])) == "installed":
+        from scripts import copilot_runtime
+
+        args, why = copilot_runtime.model_args(role.model, role.model_arg, copilot_runtime.installed_capabilities(
+            role.cli[0], env={"PATH": path or os.environ.get("PATH", "")}))
+        if why:
+            print(f"team-launcher: {role.role}: {why}", file=sys.stderr)
+        return args
+    return [role.model_arg, role.model]
+
+
 def _resume_args_for_role(role: RoleConfig, session_id: str) -> list[str]:
     if not session_id:
         return []
@@ -142,6 +180,34 @@ def hermes_env_for_role(role: RoleConfig, *, session_dir: Path) -> dict[str, str
     if not launcher._uses_hermes(role):
         return {}
     return {"HERMES_HOME": str(launcher.hermes_home_for_role(role, session_dir=session_dir))}
+
+
+#: What a Copilot pane with its own COPILOT_HOME runs before Copilot itself, as
+#: the account the pane runs as. Copilot reads hooks and personal skills only
+#: from that root (measured on 1.0.101), and a role can be given one after its
+#: account was provisioned, so the pane puts Switchyard's Copilot hook file and
+#: the board skills there itself, from the tenant's staged tooling, writing
+#: nothing else. A failure is said and the pane still starts (SYRD-634).
+COPILOT_ROOT_PRESTART = (
+    '"$1" install-copilot --home "$HOME" --bin-path "$HOME/.local/bin/ticket-board-pane-idle-hook" '
+    '--copilot-home "$3" >/dev/null || echo "switchyard: could not put Copilot hooks in $3" >&2; '
+    '"$2" install --home "$HOME" --copilot-home "$3" --copilot-only >/dev/null '
+    '|| echo "switchyard: could not put the board skills in $3" >&2; shift 3; exec "$@"'
+)
+
+
+def copilot_root_prestart(role: RoleConfig, command: list[str], project: str) -> list[str]:
+    """`command`, preceded by preparing the role's own COPILOT_HOME when it sets one; otherwise `command` unchanged."""
+    from scripts import team_launcher as launcher
+
+    if not project or launcher._command_name(role.cli[0]) != "copilot" or not str(role.env.get("COPILOT_HOME") or "").strip():
+        return command
+    from scripts import copilot_runtime
+
+    staged = Path(launcher.role_tooling_staging_dir(project))
+    root = copilot_runtime.copilot_home(Path(role.workdir), role.env, role.workdir)
+    return ["sh", "-c", COPILOT_ROOT_PRESTART, "switchyard-copilot-root", str(staged / "ticket-board-install-pane-hooks"),
+            str(staged / "switchyard-board-skill"), str(root), *command]
 
 
 def role_registers_runtime(role: RoleConfig) -> bool:
@@ -170,13 +236,6 @@ def cli_command_for_role(
     session_id = launcher.session_id_for_role(role, session_dir) if resume else ""
     if session_id and launcher._uses_fresh_session_per_ticket(role):
         session_id = ""
-    command = [*role.cli, *_resume_args_for_role(role, session_id)]
-    if role.model:
-        command.extend([role.model_arg, role.model])
-    command.extend(effort_args_for_role(role))
-    command.extend(yolo_args_for_role(role))
-    command.extend(startup_args_for_role(role))
-    command.extend(role.extra_args)
     env = {
         **role.env,
         "TICKET_BOARD_PANE_TARGET": role.target,
@@ -212,6 +271,14 @@ def cli_command_for_role(
         pane_path_dirs.insert(0, str(directorctl_path.parent))
         runtime_registrar = str(directorctl_path.parent / "ticket-board-register-runtime")
     env["PATH"] = launcher._prepend_paths(env.get("PATH") or launcher.default_pane_base_path(bin_user), pane_path_dirs)
+    command = [*role.cli, *_resume_args_for_role(role, session_id)]
+    command.extend(model_args_for_role(role, path=env["PATH"]))
+    installed = EFFORT_STYLE_BY_CLI.get(launcher._command_name(role.cli[0])) == "installed"
+    command.extend(effort_args_for_role(role, path=env["PATH"]) if installed else effort_args_for_role(role))
+    command.extend(yolo_args_for_role(role))
+    command.extend(startup_args_for_role(role))
+    command.extend(role.extra_args)
+    command = copilot_root_prestart(role, command, str(env.get("TICKET_BOARD_PROJECT") or "").strip())
     env_prefix = [
         "env",
         *launcher._env_unset_prefix(

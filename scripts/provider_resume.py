@@ -35,6 +35,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+
 if TYPE_CHECKING:
     from scripts.team_launcher import RoleConfig
 
@@ -121,6 +122,13 @@ def _uses_codex_resume(role: RoleConfig) -> bool:
 
     cli_name = launcher._command_name(role.cli[0]) if role.cli else ""
     return cli_name == "codex" and role.resume_mode == "subcommand" and role.resume_subcommand == "resume"
+
+
+def _uses_copilot_resume(role: RoleConfig) -> bool:
+    from scripts import team_launcher as launcher
+
+    cli_name = launcher._command_name(role.cli[0]) if role.cli else ""
+    return cli_name == "copilot" and role.resume_mode == "flag" and role.resume_flag == "--resume"
 
 
 def _uses_hermes(role: RoleConfig) -> bool:
@@ -314,6 +322,21 @@ def _resume_preflight_allows_attempt(role: RoleConfig, session_id: str, *, sessi
         )
     if _uses_hermes(role):
         return _hermes_resume_preflight(role, session_id, session_dir=session_dir)
+    if _uses_copilot_resume(role):
+        from scripts import copilot_runtime
+
+        found, location = copilot_runtime.session_store_exists(_home_from_session_dir(session_dir), session_id,
+                                                               role.env, role.workdir)
+        if found:
+            return True, ""
+        return (
+            False,
+            (
+                f"team-launcher: recorded copilot session {session_id} for {role.role} "
+                f"is not present at {location}; starting fresh instead of passing copilot --resume, "
+                "which exits when the session is missing"
+            ),
+        )
     if not _uses_agy_conversation_resume(role):
         return True, ""
     if agy_conversation_store_exists(session_id, root=agy_conversation_root_for_session_dir(session_dir)):

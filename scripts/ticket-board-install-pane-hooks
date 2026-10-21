@@ -475,6 +475,66 @@ def _install_gemini_hooks(home: Path, hook_bin: Path) -> Path:
     return path
 
 
+#: GitHub Copilot CLI (SYRD-634) reads every `*.json` under `$COPILOT_HOME/hooks/`
+#: (default `~/.copilot`) and combines them, so Switchyard's hooks are a file of
+#: their own there: the owner's hook files and `settings.json` are never read
+#: into or rewritten. With COPILOT_HOME set, 1.0.101 reads only that root's
+#: hooks, so the file goes into every root a role of this account runs with.
+#: Events and payloads measured on 1.0.101 (tests/fixtures/copilot-1.0.101).
+COPILOT_HOOK_FILE = "ticket-board-pane-state.json"
+#: event -> the pane state the hook writes; the hook narrows notification and
+#: errorOccurred itself (only a permission prompt blocks; a retried error stays busy).
+COPILOT_HOOK_EVENTS = {
+    "sessionStart": "idle",
+    "userPromptSubmitted": "busy",
+    "postToolUse": "busy",
+    "notification": "blocked",
+    "errorOccurred": "idle",
+    "agentStop": "idle",
+    "sessionEnd": "idle",
+}
+
+
+def _copilot_roots(home: Path, extra: list[str] | None = None) -> list[Path]:
+    """The account default, this program's own $COPILOT_HOME, and every root a role was configured with."""
+    roots: list[Path] = []
+    for raw in [str(home / ".copilot"), os.environ.get("COPILOT_HOME", ""), *(extra or [])]:
+        raw = str(raw or "").strip()
+        if not raw:
+            continue
+        root = Path(raw)
+        if not root.is_absolute():
+            raise SystemExit(f"--copilot-home must be an absolute path: {raw}")
+        if root not in roots:
+            roots.append(root)
+    return roots
+
+
+def _install_copilot_hooks(home: Path, hook_bin: Path, extra_roots: list[str] | None = None) -> list[Path]:
+    return [_install_copilot_hooks_at(root, hook_bin) for root in _copilot_roots(home, extra_roots)]
+
+
+def _install_copilot_hooks_at(root: Path, hook_bin: Path) -> Path:
+    path = root / "hooks" / COPILOT_HOOK_FILE
+    hooks: dict[str, Any] = {}
+    for event, state in COPILOT_HOOK_EVENTS.items():
+        argv = [hook_bin, state, "--source", f"copilot.{event}", "--state-dir", DEFAULT_PANE_STATE_DIR,
+                "--session-dir", DEFAULT_PANE_SESSION_DIR]
+        if event == "sessionStart":
+            argv.append("--record-session")
+        hooks[event] = [{"type": "command", "bash": _shell_command(argv), "timeoutSec": 30}]
+    _write_json(path, {"version": 1, "hooks": hooks})
+    try:
+        settings = json.loads("\n".join(line for line in (root / "settings.json").read_text(
+            encoding="utf-8").splitlines() if not line.lstrip().startswith("//")))
+    except (OSError, json.JSONDecodeError):
+        settings = {}
+    if isinstance(settings, dict) and settings.get("disableAllHooks") is True:
+        print(f"warning: {root / 'settings.json'} sets disableAllHooks; Copilot will not run {path}, "
+              "and its panes will report no state until that is removed", file=sys.stderr)
+    return path
+
+
 def _install_hermes_hooks(home: Path, hook_bin: Path) -> Path:
     path = home / ".hermes" / "config.yaml"
     config = _load_yaml(path)
@@ -589,6 +649,7 @@ def install(args: argparse.Namespace) -> int:
         _install_codex_hooks(home, hook_bin),
         _install_gemini_hooks(home, hook_bin),
         _install_hermes_hooks(home, hook_bin),
+        *_install_copilot_hooks(home, hook_bin, args.copilot_home),
     ]
     codex_seed_result = ""
     if args.seed_codex_hook_trust_if_new:
@@ -603,6 +664,19 @@ def install(args: argparse.Namespace) -> int:
     if codex_seed_result:
         print(codex_seed_result)
     print("restart every pane CLI before restarting the ticket-board notify-listener service")
+    return 0
+
+
+def install_copilot(args: argparse.Namespace) -> int:
+    """Only Copilot's hook file, only in the roots named: what a Copilot pane writes into its own COPILOT_HOME
+    before it starts, as the account it runs as (SYRD-634). Nothing else of the account is touched."""
+    home = Path(args.home).expanduser()
+    roots = [str(root) for root in args.copilot_home]
+    if not roots:
+        raise SystemExit("install-copilot needs at least one --copilot-home")
+    for root in _copilot_roots(home, roots):
+        if str(root) in roots:
+            print(f"wrote {_install_copilot_hooks_at(root, Path(args.bin_path).expanduser())}")
     return 0
 
 
@@ -648,7 +722,20 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="seed Codex hook trust only when the owner has no existing hooks.json or hook trust records",
     )
+    install_parser.add_argument(
+        "--copilot-home",
+        action="append",
+        default=[],
+        help="a COPILOT_HOME a role of this account runs with; Copilot's hooks go there as well as ~/.copilot",
+    )
     install_parser.set_defaults(func=install)
+
+    copilot_parser = subparsers.add_parser("install-copilot", help="write only Copilot's hook file into the named roots")
+    copilot_parser.add_argument("--home", default=str(Path.home()), help="the account's home directory")
+    copilot_parser.add_argument("--bin-path", default=str(Path.home() / ".local" / "bin" / HOOK_BASENAME),
+                                help="the installed hook program the hooks run")
+    copilot_parser.add_argument("--copilot-home", action="append", default=[], help="an absolute COPILOT_HOME; repeatable")
+    copilot_parser.set_defaults(func=install_copilot)
 
     verify_parser = subparsers.add_parser("verify-state", help="verify all live panes have written hook state")
     verify_parser.add_argument(

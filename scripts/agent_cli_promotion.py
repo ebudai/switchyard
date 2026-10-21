@@ -904,6 +904,8 @@ def resolve_agent_cli_source(cli: str, source: str | Path) -> Path:
         raise AgentCliSourceRejected(f"switchyard: {offered} is not a regular file")
     if not os.access(resolved, os.X_OK):
         raise AgentCliSourceRejected(f"switchyard: {resolved} is not executable")
+    if cli == "copilot":
+        resolved = _copilot_native_source(resolved)
     # Before sudo, deliberately. `promote_agent_cli_through_sudo` resolves here
     # first precisely so an answerable mistake is a sentence rather than a
     # password prompt followed by one -- and an artifact that cannot serve a
@@ -912,6 +914,39 @@ def resolve_agent_cli_source(cli: str, source: str | Path) -> Path:
     if not_self_contained:
         raise AgentCliSourceRejected("\n".join(not_self_contained))
     return resolved
+
+
+def _copilot_native_source(resolved: Path) -> Path:
+    """The self-contained copilot behind npm's Node loader; a Node script with none is refused (SYRD-634).
+
+    npm's `copilot` is `npm-loader.js`, which needs Node and the platform package
+    beside it. A copy of the loader alone in the host-wide bin runs neither, so
+    the platform package's native executable is what a tenant can run.
+    """
+    from scripts import copilot_runtime
+
+    native = copilot_runtime.native_executable(resolved)
+    if native is not None:
+        return native
+    try:
+        head = resolved.open("rb").read(64)
+    except OSError:
+        return resolved
+    if head.startswith(b"#!") and b"node" in head.splitlines()[0]:
+        raise AgentCliSourceRejected(
+            f"switchyard: {resolved} is a Node script, not the self-contained copilot: a tenant would need "
+            "this account's Node installation and node_modules to run it, and no platform package "
+            "(@github/copilot-<platform>-<arch>) was found beside it. Reinstall with "
+            "`npm install -g @github/copilot`, or install the standalone binary "
+            "(curl -fsSL https://gh.io/copilot-install | bash). Nothing has been created."
+        )
+    return resolved
+
+
+def _copilot_version_prefix() -> str:
+    from scripts import copilot_runtime
+
+    return copilot_runtime.VERSION_PREFIX
 
 
 def promote_agent_cli_host_wide(
@@ -960,6 +995,11 @@ def promote_agent_cli_host_wide(
         # a staging file, an artifact that cannot run in a tenant's context
         # never becomes the one every tenant runs (SYRD-210).
         version = _agent_cli_version_in_tenant_context(staged, runner=runner)
+        if cli == "copilot" and not version.startswith(_copilot_version_prefix()):
+            raise AgentCliUnavailable(
+                f"switchyard: {resolved} says {version!r} for --version, not the standalone GitHub "
+                "Copilot CLI; nothing has been installed"
+            )
         os.replace(staged, destination)
     except AgentCliUnavailable:
         _unlink_quietly(staged)

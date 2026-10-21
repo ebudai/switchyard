@@ -158,8 +158,8 @@ def test_the_policy_reaches_every_supported_cli_skill_tree() -> None:
         # The runtimes are named rather than read back from the adapter table: the
         # claim is that this policy reaches every CLI a Director may be running,
         # which a table that quietly lost one would still satisfy.
-        assert {result.runtime for result in results} == {"claude", "codex", "agy", "hermes"}
-        assert [result.action for result in results] == ["installed"] * 4
+        assert {result.runtime for result in results} == {"claude", "codex", "agy", "hermes", "copilot"}
+        assert [result.action for result in results] == ["installed"] * 5
         for runtime, path in board_skill.adapter_paths(home, board_skill.DIRECTOR_SKILL):
             assert _missing(path.read_text(encoding="utf-8")) == [], runtime
 
@@ -184,7 +184,7 @@ def test_upgrade_refreshes_a_director_skill_that_predates_the_policy() -> None:
         )
         results = board_skill.install_board_skill(home=home, source=current)
 
-        assert [result.action for result in results] == ["refreshed"] * 4
+        assert [result.action for result in results] == ["refreshed"] * 5
         for runtime, path in board_skill.adapter_paths(home, board_skill.DIRECTOR_SKILL):
             text = path.read_text(encoding="utf-8")
             assert not re.search(RETIRED, _flat(text)), runtime

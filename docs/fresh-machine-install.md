@@ -17,7 +17,7 @@ host packages, creates the shared Python venv, and installs the public
 every command it would run and exits without changing the system.
 
 Switchyard does not install, download, or upgrade the agent CLIs. Installing
-`claude`, `codex`, `agy`, or `hermes` is yours to do, with that vendor's own
+`claude`, `codex`, `agy`, `hermes`, or `copilot` is yours to do, with that vendor's own
 installer, for the user that will own the project. Switchyard detects which
 ones are present and walks their sign-in when you create a project, so the
 final output of `sudo ./install` points you at `switchyard new` rather than
@@ -169,7 +169,7 @@ venv when it exists, `/usr/bin/python3` otherwise:
 
 ## Agent CLI
 
-Switchyard supports four agent CLIs and installs none of them. Install at
+Switchyard supports five agent CLIs and installs none of them. Install at
 least one yourself before creating a project, and install it **for the user
 that will own the project** -- a CLI installed only for the human who runs
 `switchyard` will not be found.
@@ -177,7 +177,7 @@ that will own the project** -- a CLI installed only for the human who runs
 Switchyard never runs the commands below. They are recorded here as the
 vendor-documented Linux methods observed when this file was written; check
 each against the vendor's own documentation, which is authoritative and moves
-without telling us. The same four commands are printed by Switchyard when a
+without telling us. The same five commands are printed by Switchyard when a
 project's role needs a CLI that is not installed, from
 `AGENT_CLI_INSTALL_COMMANDS` in `scripts/team_launcher.py` -- update both
 together. A test asserts this table and that one agree, so they cannot drift
@@ -191,11 +191,14 @@ first.
 | `codex` | `curl -fsSL https://chatgpt.com/codex/install.sh \| sh` | <https://learn.chatgpt.com/docs/codex/cli> |
 | `agy` | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | <https://antigravity.google/docs/cli/install/> |
 | `hermes` | `curl -fsSL https://hermes-agent.nousresearch.com/install.sh \| bash` | <https://hermes-agent.nousresearch.com/docs/getting-started/installation> |
+| `copilot` | `curl -fsSL https://gh.io/copilot-install \| bash`; GitHub also documents `npm install -g @github/copilot` (Node.js 22 or newer) and Homebrew. This is the standalone GitHub Copilot CLI, not the retired `gh copilot` extension. | <https://docs.github.com/copilot/how-tos/copilot-cli> |
 
 After installing, `switchyard new` detects the CLIs that are present and walks
 you through each one's sign-in before any pane starts; that is where you
-complete authentication. Hermes signs in with `hermes login`; the others
-authenticate on first run.
+complete authentication. Hermes signs in with `hermes login`, and Copilot with
+`copilot login` (a device code on a headless host); the others authenticate on
+first run. Copilot also asks, per folder, whether to trust it: answer "Yes, and
+remember this folder" so its role panes open without asking again.
 
 ## Notes
 

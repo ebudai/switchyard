@@ -94,6 +94,7 @@ RUNTIMES: tuple[Choice, ...] = (
     Choice("codex", "Codex", "takes model_reasoning_effort as config"),
     Choice("agy", "Antigravity", "can list its own models; takes no effort level"),
     Choice("hermes", "Hermes", "chooses its model in its own picker"),
+    Choice("copilot", "GitHub Copilot CLI", "takes --reasoning-effort where its installed --help lists the level"),
 )
 
 #: Models this repository has actually been configured with, per runtime.
@@ -105,6 +106,9 @@ RUNTIMES: tuple[Choice, ...] = (
 #:   agy -- `tests/team_launcher_test_helpers.py`'s agy catalog, the shape
 #:     `agy models` returns: gemini-3.7-flash-high, gemini-3.7-pro.
 #:   hermes -- nothing. See the module docstring.
+#:   copilot -- the built-in catalog `copilot help config` printed on 1.0.101
+#:     (tests/fixtures/copilot-1.0.101/help-config.txt), first entries only. It is
+#:     what that version knows, not what an account may use, and stays UNVERIFIED.
 #:
 #: This is a fallback. Where a runtime can enumerate its own models, that is
 #: asked first and this is what answers when it cannot be reached.
@@ -121,6 +125,13 @@ RECORDED_MODELS: dict[str, tuple[Choice, ...]] = {
         Choice("gemini-3.7-pro", "Gemini 3.7 Pro"),
     ),
     "hermes": (),
+    "copilot": (
+        Choice("claude-sonnet-5.5", "Claude Sonnet 5.5", "first in copilot 1.0.101's built-in catalog"),
+        Choice("claude-opus-5.5", "Claude Opus 5.5"),
+        Choice("gpt-5.6-sol", "GPT-5.6 Sol"),
+        Choice("gpt-5.5", "GPT-5.5"),
+        Choice("gemini-3.7-flash", "Gemini 3.7 Flash"),
+    ),
 }
 
 #: Effort levels, per runtime, and what rendering each runtime gives them.
@@ -147,6 +158,14 @@ RECORDED_EFFORT: dict[str, tuple[Choice, ...]] = {
     ),
     "hermes": (
         Choice("high", "high", "set as agent.reasoning_effort in its Hermes home"),
+        Choice("medium", "medium"),
+        Choice("low", "low"),
+    ),
+    # Copilot 1.0.101's --help lists none, minimal, low, medium, high, xhigh and
+    # max. The launcher passes a level only when the installed copilot lists it,
+    # and says so when it does not (scripts/copilot_runtime.effort_args).
+    "copilot": (
+        Choice("high", "high", "rendered as --reasoning-effort high when the installed copilot lists it"),
         Choice("medium", "medium"),
         Choice("low", "low"),
     ),

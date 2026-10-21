@@ -661,10 +661,17 @@ def candidate(after: dict) -> None:
     live = after["live_shape"]
     alerts = [(t, m) for t, kind, m, _i in live["told"] if kind in ("blocked_pane", "escalation")]
     held = [n for n, kind, _e in live["held"] if kind == "transition"]
-    check(len(alerts) == 1 and alerts[0][0] == "PGU-625" and "written by `claude.Notification.permission_prompt`" in alerts[0][1]
-          and "classified permission_prompt" in alerts[0][1] and "waits behind it: PGU-625 (notification " in alerts[0][1]
-          and [f[:2] for f in live["fate"][1:]] == [["PGU-625", "send"]],
-          f"a known prompt, beside a blocked ticket, is told once, on the held notice's ticket, and delivered: {live}")
+    # SYRD-631: app's "changed by director: blockers" notice about PGU-624 -- queued behind PGU-625, never handed
+    # over, then blocked -- is dropped as stale rather than sent, so app's pane is not made busy by it and
+    # PGU-625's repair prompt goes out before the prompt blocks the pane. Nothing waits when the alert is due,
+    # so it is said on the blocked ticket app owns, and still delivered.
+    stale = [s for s in live["story"] if s[2] == "ticket_update" and s[1] == "app"]
+    check([s[3:] for s in stale] == [["enqueue", ""], ["drop", "stale_notification"], ["ack", ""]],
+          f"app's notice about blocked, queued PGU-624 is dropped as stale, never sent: {stale}")
+    check(len(alerts) == 1 and alerts[0][0] == "PGU-624" and "written by `claude.Notification.permission_prompt`" in alerts[0][1]
+          and "classified permission_prompt" in alerts[0][1] and "No ticket notice is waiting for it." in alerts[0][1]
+          and [f[:2] for f in live["fate"][1:]] == [["PGU-624", "send"]],
+          f"a known prompt, beside a blocked ticket, is told once, on the ticket app owns, and delivered: {live}")
     record = live["defers"][0][1].get("blocked", {}) if live["defers"] else {}
     check(len(held) == 1 and live["sent"] == [] and live["to_app_while_blocked"] == []
           and live["defers"][0][0] == "hook_blocked" and record.get("classification") == "permission_prompt"

@@ -190,6 +190,61 @@ WHERE q.id = %s AND q.ticket_id = %s
             "superseded_kind": kind,
         }
 
+    def hold_for_delivery(self, conn: Any, connect: Callable[[], Any], ticket_id: str,
+                          target_role: str) -> "DeliveryHold | None":
+        """Hold the row that decides whether this notice is current, from its last read through its send (SYRD-631).
+
+        ticket_board.hold_for_delivery takes the ticket row FOR SHARE NOWAIT, in
+        a transaction on a connection of its own -- the listener's own stays in
+        autocommit, where a step that catches a failed statement and goes on
+        still can. Every write that could retire the notice locks that row
+        first (a blocker is set through the ticket; a role's serial slot moves
+        only when its holder's own row changes), so none can commit between the
+        last read and the send. None when a write holds it now, or no
+        connection could be made: the notice waits a pass. An empty hold on a
+        board without the function, which has nothing to hold."""
+        present = conn.execute(
+            "SELECT to_regprocedure('ticket_board.hold_for_delivery(text,text)') IS NOT NULL AS present").fetchone()
+        if present is None or not bool(present["present"] if isinstance(present, dict) else present[0]):
+            return DeliveryHold(None)
+        try:
+            held = connect()
+            held.execute("BEGIN")
+            row = held.execute("SELECT ticket_board.hold_for_delivery(%s, %s) AS held", (ticket_id, target_role)).fetchone()
+        except Exception as exc:  # no hold, no send: the next pass asks again
+            self.logger.warning("Could not hold %s for delivery: %s", ticket_id, exc)
+            return None
+        hold = DeliveryHold(held, conn)
+        if not bool(row["held"] if isinstance(row, dict) else row[0]):
+            hold.release()
+            return None
+        # Were a later step of the listener's own to need the held row, it would wait on itself where no
+        # deadlock check can see it: a bound turns that into an error instead of a listener that never returns.
+        conn.execute("SET lock_timeout = '10s'")
+        return hold
+
+    def drop_if_stale(self, conn: Any, *, notification_id: int, ticket_id: str, target_role: str, kind: str,
+                      payload: str, phase: str = "") -> bool:
+        """Acknowledge and trace a notification that is no longer current; True if it was dropped.
+
+        Asked when a notification is claimed and again immediately before its
+        send (`phase` "pre_send_recheck"), so a hold never outlives the facts
+        that made the notice deliverable (SYRD-631)."""
+        if self._notification_is_current(conn, ticket_id, target_role, payload):
+            return False
+        self.logger.info("Dropping stale notification %s for %s%s: %s", notification_id, ticket_id,
+                         f" at {phase}" if phase else "", payload)
+        safe = self.ledger.safe_json_payload(payload)
+        self.ledger.trace(conn, notification_id=notification_id, ticket_id=ticket_id, target_role=target_role,
+                          kind=kind, event="drop", busy_reason="stale_notification",
+                          detail={"payload": safe, **({"phase": phase} if phase else {})})
+        self.ledger.trace(conn, notification_id=notification_id, ticket_id=ticket_id, target_role=target_role,
+                          kind=kind, event="listener_ack",
+                          detail={"reason": "stale_notification", **({"phase": phase} if phase else {})})
+        self.ledger.ack(conn, notification_id)
+        self.ledger.forget(notification_id)
+        return True
+
     def _drop_superseded_notification(
         self,
         conn: Any,
@@ -382,20 +437,43 @@ WHERE id = %s
         # then refused to accept. Its activation hands it over once, and the
         # ticket it hands over carries every change. Asked of the board's
         # published order (serial_queue, which the listener may read), only in
-        # a declared implementation stage, and not of blocked work, whose owner
-        # still hears what changed, as before.
-        if (target_role == current_assignee and not has_unresolved_blockers and getattr(self, "workflow", None)
+        # a declared implementation stage.
+        #
+        # SYRD-631: and blocked work that waits behind ANOTHER active ticket of
+        # its owner's, unless the owner was already handed it. SYRD-614 waited
+        # behind Ops's active SYRD-613; the Director blocked it, and the
+        # "changed by director: blockers -- re-read it before continuing"
+        # notice waited an hour behind Ops's busy pane and was then delivered,
+        # telling Ops to continue a ticket that was neither its work nor
+        # workable. An owner whose only work this is (blocked, nothing else
+        # active) is told, as before (SYRD-148's operator wait). So is one that
+        # was handed the ticket in this visit to the stage -- a transition sent
+        # to it since the ticket entered the stage, the record the board shows
+        # as delivered active work: it was working on it. One that never was
+        # hears of it when the ticket is activated, once, with every change.
+        if (target_role == current_assignee and getattr(self, "workflow", None)
                 and any(stage["name"] == current_state and stage["kind"] == "implementation"
                         for stage in self.workflow["stages"])):
             present = conn.execute(
                 "SELECT to_regprocedure('ticket_board.serial_queue()') IS NOT NULL AS present").fetchone()
             if present is not None and bool(present["present"] if isinstance(present, dict) else present[0]):
                 queued = conn.execute(
-                    "SELECT coalesce(bool_or(NOT q.active), false) AS waiting FROM ticket_board.serial_queue() q "
-                    "WHERE q.ticket_id = %s AND q.implementer = %s",
-                    (ticket_id, current_assignee),
+                    """
+SELECT coalesce(bool_or(NOT q.active), false) AS waiting,
+       coalesce(bool_or(q.active_ticket <> '' AND q.active_ticket <> q.ticket_id), false) AS behind_other,
+       EXISTS (SELECT FROM ticket_board.notification_trace trace
+               JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = trace.ticket_id
+               WHERE trace.ticket_id = %s AND trace.target_role = %s AND trace.kind = 'transition'
+                 AND trace.event = 'send' AND trace.ts >= ns.entered_current_state_at) AS handed_over
+FROM ticket_board.serial_queue() q
+WHERE q.ticket_id = %s AND q.implementer = %s
+""",
+                    (ticket_id, current_assignee, ticket_id, current_assignee),
                 ).fetchone()
-                if queued is not None and bool(queued["waiting"] if isinstance(queued, dict) else queued[0]):
+                waiting, behind_other, handed_over = (
+                    ((queued["waiting"], queued["behind_other"], queued["handed_over"]) if isinstance(queued, dict)
+                     else (queued[0], queued[1], queued[2])) if queued is not None else (False, False, False))
+                if waiting and (not has_unresolved_blockers or (behind_other and not handed_over)):
                     return False
         # SYRD-517: a turn-end prompt or grace escalation queued before the
         # ticket was held (or blocked, or put in a wait) was still delivered
@@ -579,3 +657,31 @@ SELECT EXISTS (
         if isinstance(row, dict):
             return self.decode_text(row.get("id", ""))
         return self.decode_text(row[0])
+
+
+class DeliveryHold:
+    """A notice's ticket row, held FOR SHARE by a transaction of its own until release (SYRD-631)."""
+
+    def __init__(self, conn: Any, listener_conn: Any = None) -> None:
+        self.conn, self.listener_conn = conn, listener_conn
+
+    def wanted(self) -> bool:
+        """Whether a board write is already waiting on the held row: it was made after the last read and before
+        the send, so the notice yields to it rather than overtake it."""
+        if self.conn is None:
+            return False
+        row = self.conn.execute(
+            "SELECT EXISTS (SELECT FROM pg_locks l WHERE l.locktype = 'transactionid' AND NOT l.granted "
+            "AND l.transactionid::text = pg_current_xact_id_if_assigned()::text) AS wanted").fetchone()
+        return bool(row["wanted"] if isinstance(row, dict) else row[0])
+
+    def release(self) -> None:
+        if self.conn is None:
+            return
+        try:
+            self.conn.execute("ROLLBACK")
+        finally:
+            self.conn.close()
+            self.conn = None
+            if self.listener_conn is not None:
+                self.listener_conn.execute("RESET lock_timeout")

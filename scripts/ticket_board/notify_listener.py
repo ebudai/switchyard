@@ -120,6 +120,7 @@ DEFAULT_REQUEUE_MAX_SECONDS = 300.0
 # match schema.sql reset predicates.
 PANE_BUSY_REQUEUE_ERROR = "pane busy"
 FINISH_CURRENT_REQUEUE_ERROR = "finish current"
+DELIVERY_HOLD_REQUEUE_ERROR = "board write in flight"  # SYRD-631
 DEFAULT_IDLE_STALL_GRACE_SECONDS = 45.0
 DEFAULT_IDLE_STALL_NUDGE_CADENCE_SECONDS = 30 * 60.0
 DEFAULT_IDLE_STALL_ESCALATE_AFTER = 2
@@ -821,29 +822,8 @@ WHERE (r.definition->>'active')::boolean
                 continue
             if reminder_snooze.discard_if_snoozed(self.eligibility, conn, notification_id, ticket_id, target_role, kind, payload, "claim"):
                 continue
-            if not self.eligibility._notification_is_current(conn, ticket_id, target_role, payload):
-                self.logger.info("Dropping stale notification %s for %s: %s", notification_id, ticket_id, payload)
-                self.ledger.trace(
-                    conn,
-                    notification_id=notification_id,
-                    ticket_id=ticket_id,
-                    target_role=target_role,
-                    kind=kind,
-                    event="drop",
-                    busy_reason="stale_notification",
-                    detail={"payload": self.ledger.safe_json_payload(payload)},
-                )
-                self.ledger.trace(
-                    conn,
-                    notification_id=notification_id,
-                    ticket_id=ticket_id,
-                    target_role=target_role,
-                    kind=kind,
-                    event="listener_ack",
-                    detail={"reason": "stale_notification"},
-                )
-                self.ledger.ack(conn, notification_id)
-                self.ledger.forget(notification_id)
+            if self.eligibility.drop_if_stale(conn, notification_id=notification_id, ticket_id=ticket_id,
+                                              target_role=target_role, kind=kind, payload=payload):
                 continue
             superseded = self.eligibility._superseding_awaiting_role(conn, notification_id, ticket_id, kind)
             if superseded is not None:
@@ -1060,15 +1040,14 @@ WHERE (r.definition->>'active')::boolean
                 continue
             if reminder_snooze.discard_if_snoozed(self.eligibility, conn, notification_id, ticket_id, target_role, kind, payload, "pre_send_recheck"):
                 continue
-            # Recheck handoffs too, so a resolution during that probe suppresses
-            # this delivery.
-            if kind == "awaiting_role" and not self.eligibility._notification_is_current(conn, ticket_id, target_role, payload):
-                self.ledger.trace(
-                    conn, notification_id=notification_id, ticket_id=ticket_id,
-                    target_role=target_role, kind=kind, event="drop",
-                    busy_reason="stale_notification", detail={"phase": "pre_send_recheck"},
-                )
-                self.ledger.ack(conn, notification_id)
+            # Every notice is asked again whether it is current immediately
+            # before the send (SYRD-631; awaiting_role alone was rechecked
+            # before, SYRD-99) -- once here, before a session clear could be
+            # spent on it, and again holding its ticket row, so that no board
+            # write can commit between that last read and the send.
+            if self.eligibility.drop_if_stale(conn, notification_id=notification_id, ticket_id=ticket_id,
+                                              target_role=target_role, kind=kind, payload=payload,
+                                              phase="pre_send_recheck"):
                 continue
             # The owner can start background work while this waited (SYRD-538).
             if self._defer_for_background_work(conn, notification_id, attempts, kind, target_role, payload, "pre_send_recheck"):
@@ -1090,15 +1069,34 @@ WHERE (r.definition->>'active')::boolean
                     attempts=attempts,
                 ):
                     continue
-            if self.dispatch.send(
-                conn, notification_id=notification_id, ticket_id=ticket_id,
-                target_role=target_role, kind=kind, target=target,
-                message=self.session_clear.announced(conn, ticket_id, target_role, kind, message), payload=payload, attempts=attempts,
-                pane_busy=pane_busy, activity_trace=activity_trace,
-                composer_before=composer_before,
-            ):
-                self.delivered_count += 1
-                delivered += 1
+            # The hold comes after every step of the listener's own that locks the ticket (a context continuation
+            # does): from here to the send nothing of ours waits on it. A write in flight makes the notice wait a
+            # pass; one made after this read and waiting is let in first; any later waits for the send.
+            hold = self.eligibility.hold_for_delivery(
+                conn, lambda: self.connector(self.conninfo, **self._connector_kwargs()), ticket_id, target_role)
+            if hold is None:
+                self.ledger.requeue(conn, notification_id, attempts, DELIVERY_HOLD_REQUEUE_ERROR)
+                continue
+            try:
+                if self.eligibility.drop_if_stale(conn, notification_id=notification_id, ticket_id=ticket_id,
+                                                  target_role=target_role, kind=kind, payload=payload,
+                                                  phase="held_recheck"):
+                    continue
+                if hold.wanted():
+                    hold.release()
+                    self.ledger.requeue(conn, notification_id, attempts, DELIVERY_HOLD_REQUEUE_ERROR)
+                    continue
+                if self.dispatch.send(
+                    conn, notification_id=notification_id, ticket_id=ticket_id,
+                    target_role=target_role, kind=kind, target=target,
+                    message=self.session_clear.announced(conn, ticket_id, target_role, kind, message), payload=payload, attempts=attempts,
+                    pane_busy=pane_busy, activity_trace=activity_trace,
+                    composer_before=composer_before,
+                ):
+                    self.delivered_count += 1
+                    delivered += 1
+            finally:
+                hold.release()
         return delivered
 
     def _wait_for_notification(self, conn: Any) -> bool:

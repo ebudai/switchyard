@@ -406,4 +406,8 @@ GRANT EXECUTE ON FUNCTION ticket_board.publisher_step(bigint, text, text, jsonb,
 GRANT EXECUTE ON FUNCTION ticket_board.publisher_finish(bigint, text, text, jsonb, jsonb) TO ticket_board_listener;
 -- End of SYRD-625.
 
+-- SYRD-631: the listener holds the rows that decide a notice for its last read and its send.
+REVOKE ALL ON FUNCTION ticket_board.hold_for_delivery(text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ticket_board.hold_for_delivery(text, text) TO ticket_board_listener;
+
 COMMIT;

@@ -101,3 +101,10 @@ def context_recovery(app: Any, role: str) -> dict[str, Any]:
 
 def reminder_snoozes(app: Any) -> list[dict[str, Any]]:
     return reminder_snooze.batches(app)
+
+
+def board_stall_status(app: Any) -> dict[str, Any]:
+    """SYRD-637: the board stall alert's state, read-only."""
+    from . import board_stall
+
+    return board_stall.status(app)

@@ -966,6 +966,9 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/api/context-recovery/"):  # SYRD-626: what a launch of this role must resume
             self.send_json(extension_operations.context_recovery(self.app, urllib.parse.unquote(parsed.path.removeprefix("/api/context-recovery/"))))
             return
+        if parsed.path == "/api/board-stall":  # SYRD-637: why the stall alert did or did not fire
+            self.send_json(extension_operations.board_stall_status(self.app))
+            return
         if parsed.path == "/api/reminder-snoozes":  # SYRD-537
             self.send_json({"batches": extension_operations.reminder_snoozes(self.app)})
             return

@@ -5,7 +5,7 @@ import json
 from datetime import datetime
 from typing import Any, Callable
 
-from . import reminder_snooze, stall_episode
+from . import board_stall, reminder_snooze, stall_episode
 
 TERMINAL_STATES = {"done", "cancelled"}
 NUDGE_ELIGIBLE_STATES = {"in_progress", "inspection", "audit", "dat", "director_review", "analysis", "backlog"}
@@ -410,6 +410,9 @@ WHERE id = %s
         if kind in {"pull_idle_capacity", "ticket_context", "delivery_proof", "background_hold",
                     "composer_hold", "background_child", "blocked_pane", "uat_question"}:  # SYRD-539, 540, 565, 557, 570, 583, 633, 629
             return target_role == "director"
+        # SYRD-637: the board stall digest is the Director's, and only while its episode is still open.
+        if kind == board_stall.NOTICE_KIND:
+            return target_role == "director" and board_stall.notice_is_current(conn, payload)
         # SYRD-594: a capacity retry, or the Director's alert, only while its episode still wants it:
         # the ticket is in the round the episode was opened in, and a retry is the episode's latest.
         if kind in {"capacity_retry", "provider_capacity"}:

@@ -410,4 +410,27 @@ GRANT EXECUTE ON FUNCTION ticket_board.publisher_finish(bigint, text, text, json
 REVOKE ALL ON FUNCTION ticket_board.hold_for_delivery(text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION ticket_board.hold_for_delivery(text, text) TO ticket_board_listener;
 
+-- SYRD-637: the board stall alert's tables and functions.
+REVOKE ALL ON ticket_board.board_progress_events, ticket_board.board_stall_state, ticket_board.board_stall_episodes FROM PUBLIC;
+REVOKE ALL ON SEQUENCE ticket_board.board_progress_events_id_seq, ticket_board.board_stall_episodes_id_seq FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.board_stall_stage_counts(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.board_stall_note_progress(text, text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.board_stall_ticket_progress() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.board_stall_blocker_progress() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.board_stall_dependency_progress() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.board_stall_delivery_progress() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.board_stall_comment_progress() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.board_stall_runnable(timestamptz) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.board_stall_role_evidence(text, jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.board_stall_responsible(text, jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.note_board_stall(jsonb, integer, timestamptz) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.board_stall_notice_is_current(jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.board_stall_status(timestamptz) FROM PUBLIC;
+GRANT SELECT ON ticket_board.board_progress_events, ticket_board.board_stall_state, ticket_board.board_stall_episodes TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.note_board_stall(jsonb, integer, timestamptz) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.board_stall_runnable(timestamptz) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.board_stall_notice_is_current(jsonb) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.board_stall_status(timestamptz) TO ticket_board_service, ticket_board_listener;
+-- End of SYRD-637.
+
 COMMIT;

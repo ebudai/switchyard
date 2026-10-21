@@ -316,6 +316,31 @@ the one stall escalation per stall (below), a ticket's leftover background
 process, or a request from the user. Wait for those. `ticket-board-read
 director` is the one read that answers "what needs me now".
 
+The board also watches the whole board for you. When work that could
+run now has made no durable progress for 30 minutes, you get one "Board stall"
+digest for that episode. The digest gives:
+- the runnable tickets and who is responsible for each;
+- what the listener sees of each role: stopped, gone, blocked on a prompt,
+  working, or running background work;
+- the last durable event.
+
+Here "durable" means a transition, an assignment, a blocker or dependency
+change, a hand-over delivered, or an owner's own comment.
+
+A busy pane is evidence, not progress. So read the digest as "a long test or a
+hang?", and decide on the one ticket concerned.
+
+What is never counted:
+- Triage, Draft, Backlog, Done and Cancelled;
+- blocked, held, snoozed or dependency-waiting work;
+- work queued behind a role's current ticket;
+- your own and the User's stages;
+- tickets already in their own stall episode.
+
+`ticket-board-read stall` shows why the digest did or did not fire. No second
+digest comes until progress closes the episode and a fresh stall runs its full
+time.
+
 Your quota is shared operational capacity. Routing, integration and incident
 response all spend it, and every pane capture and ticket read lands in your
 context. Spending it on watching can stop coordination for the whole project

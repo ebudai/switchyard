@@ -313,7 +313,8 @@ get rid of a stale approval: that removes the review itself (SYRD-280, from MEFP
 **Silence after routing is normal.** When you have routed work, the next move is the
 worker's, then Audit's, and the board tells you when it is yours again. Workers and Audit
 report by transition; owners who need something raise a handoff or a dependency; the board
-escalates a stalled ticket to you once per stall and names a ticket's leftover background
+tells you once when runnable work across the board has made no progress for 30 minutes
+(`ticket-board-read stall` says why it did or did not), escalates a stalled ticket to you once per stall and names a ticket's leftover background
 processes; the user asks when they want to know. Trust that and wait. `ticket-board-read
 director` answers "what needs me now" in one read.
 

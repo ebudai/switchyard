@@ -37,6 +37,17 @@ in. A cursor inside a box is still inside a ruled composer.
 Codex does not rule its composer: a draft's first row is prompted and its
 further rows are indented under it. A cursor at home on an empty row of its
 own under such rows is on the draft's next line, as it is under prompted rows.
+
+Copilot can draw its input as a filled box: a top edge ``╻▄▄▄…``, every input
+row behind a heavy bar ``┃``, a bottom edge ``╹▀▀▀…``, and no prompt glyph.
+Live on syrd's Inspector (Copilot 1.0.101, signed in, Allow All) the empty box
+was the row ``┃`` with the cursor at x=2, and the bar read as draft text: every
+notice to the idle pane was held as "human_composing" (SYRD-640). The bar is
+the box's, not the draft's, on a row the corners prove is inside the box the
+cursor is in; whatever follows it is the draft, on the cursor's row too, right
+of the cursor as well as left: the empty box shows no placeholder. Its earlier
+prompts in the transcript are ``▄``/``▀`` blocks without those corners, and
+are output.
 """
 
 from __future__ import annotations
@@ -49,6 +60,10 @@ RULE_MIN = 40
 #: Box corners, square and rounded: Codex's update banner is a rounded box (SYRD-591).
 BOX_TOP_CORNERS = frozenset("╭┌╮┐")
 BOX_BOTTOM_CORNERS = frozenset("╰└╯┘")
+#: Copilot's filled input box (SYRD-640): its edges' corners and fill, and the bar in front of each input row.
+INPUT_BOX_TOP, INPUT_BOX_TOP_FILL = "╻", "▄"
+INPUT_BOX_BOTTOM, INPUT_BOX_BOTTOM_FILL = "╹", "▀"
+INPUT_BOX_BAR = "┃"
 
 
 def _is_rule(line: str) -> bool:
@@ -76,6 +91,35 @@ def _bounding_rules(lines: list[str], cursor_y: int) -> tuple[int | None, int | 
     if above is not None and _has_corner(lines[above], BOX_BOTTOM_CORNERS):
         above = None
     return above, below
+
+
+def _input_box_edge(line: str, corner: str, fill: str) -> bool:
+    stripped = line.strip()
+    return stripped[:1] == corner and stripped.count(fill) >= RULE_MIN
+
+
+def _input_box(lines: list[str], cursor_y: int) -> range | None:
+    """The input rows of the filled box the cursor is in, every one behind the bar; None when it is in none."""
+    def barred(row: int) -> bool:
+        return lines[row].lstrip().startswith(INPUT_BOX_BAR)
+
+    if not barred(cursor_y):
+        return None
+    top = next((row for row in range(cursor_y - 1, -1, -1) if not barred(row)), None)
+    bottom = next((row for row in range(cursor_y + 1, len(lines)) if not barred(row)), None)
+    if top is None or bottom is None or not _input_box_edge(lines[top], INPUT_BOX_TOP, INPUT_BOX_TOP_FILL) \
+            or not _input_box_edge(lines[bottom], INPUT_BOX_BOTTOM, INPUT_BOX_BOTTOM_FILL):
+        return None
+    return range(top + 1, bottom)
+
+
+def _input_box_texts(lines: list[str], rows: range) -> list[str]:
+    """Each input row's text, the bar in front of it set aside.
+
+    The whole row, the cursor's too: the empty box shows no placeholder right of the cursor, so text there is a
+    draft whose cursor was moved back into it.
+    """
+    return [_text(lines[row].lstrip()[len(INPUT_BOX_BAR):]) for row in rows]
 
 
 def _text(line: str) -> str:
@@ -126,6 +170,8 @@ def composing(lines: list[str], cursor_x: int, cursor_y: int, home_x: int = 2) -
     # below what it returned sits on one of those. An empty capture is all such
     # rows, which the column rule below then decides, as it always did.
     lines = list(lines) + [""] * (cursor_y + 1 - len(lines))
+    if (box := _input_box(lines, cursor_y)) is not None:
+        return any(_input_box_texts(lines, box))
     cursor_line = lines[cursor_y]
     # On the cursor's own line only what is left of it counts: right of a
     # cursor at home is where an empty box shows its placeholder, and right of
@@ -162,6 +208,8 @@ def composer_text(lines: list[str], cursor_x: int, cursor_y: int) -> str | None:
     if cursor_y < 0 or cursor_x < 0:
         return None
     lines = list(lines) + [""] * (cursor_y + 1 - len(lines))
+    if (box := _input_box(lines, cursor_y)) is not None:
+        return "\n".join(text for text in _input_box_texts(lines, box) if text)
     above, below = _bounding_rules(lines, cursor_y)
     ruled = above is not None and (below is not None or all(_composer_shaped(l) for l in lines[above + 1:cursor_y]))
     if ruled:

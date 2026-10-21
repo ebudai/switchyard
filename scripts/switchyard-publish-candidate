@@ -52,6 +52,8 @@ REF_SEGMENT = re.compile(r"[0-9A-Za-z._-]+")
 #: workflow responsibility and not something a candidate push should be able to
 #: reach by accident.
 PROTECTED_REFS = frozenset({"main", "master", "trunk", "release"})
+#: The role that publishes documentation commits, and only at its ticket's ref (SYRD-624).
+LIBRARIAN_ROLE = "librarian"
 
 
 def fail(message: str) -> NoReturn:
@@ -104,6 +106,48 @@ def ref_problem(ref: str, role: str) -> str | None:
     if len(segments) < 2 or segments[0] != role:
         return f"{name} is not in {role}'s namespace; try roles/{role}/{segments[-1]}"
     return None
+
+
+def librarian_ref(args: argparse.Namespace, commit: str, worktree: Path) -> str:
+    """The one ref a Librarian publishes a documentation commit at (SYRD-624).
+
+    A Librarian publishes a candidate and nothing else: its commit sits directly
+    on the ticket's submitted candidate, and the ref is that ticket's and that
+    candidate's, derived by the same `candidate_ref` the board checks its
+    sign-off against. So it names no ref, replaces nothing (a later round is a
+    new candidate, so a new ref) and pushes to the configured remote only. A
+    commit that cannot be published this way is a kick-back, not a reason to
+    widen what a Librarian may push. Like the rest of this program it is a guard
+    rail; the board's check of the sign-off is what decides the candidate.
+    """
+    from ticket_board.commit_cache import RAW_DIFF_ARGS, parse_raw_diff
+    from ticket_board.documentation_gate import candidate_ref, outside_documentation
+
+    if not args.ticket_id.strip():
+        fail("a Librarian publishes for one ticket: name it, as in "
+             f"`{PROGRAM} <ticket> --commit <your documentation commit>`")
+    if args.ref.strip() or args.replace or args.remote != "origin":
+        fail("a Librarian publishes its documentation commit at the ticket's documentation ref only: it chooses "
+             "no --ref or --remote and replaces nothing; if this commit cannot be published as it is, kick the "
+             "ticket back with documentation-kick-back")
+    parents = require(git(["rev-list", "--parents", "-n", "1", commit], cwd=worktree),
+                      f"could not read {commit[:12]}'s parents").split()[1:]
+    if len(parents) != 1:
+        fail(f"{commit[:12]} has {len(parents)} parents; a documentation commit has exactly one, the ticket's "
+             "submitted candidate -- commit on top of it, without merging")
+    changed = require(git([*RAW_DIFF_ARGS, parents[0], commit, "--"], cwd=worktree),
+                      f"could not read what {commit[:12]} changes")
+    entries = parse_raw_diff(changed)
+    if not entries:
+        fail(f"{commit[:12]} changes nothing against the candidate: an empty commit is not a documentation edit. "
+             "When nothing a person reads needs to change, use documentation-no-change with a reason. Nothing was "
+             "pushed")
+    outside = outside_documentation(entries)
+    if outside:
+        fail(f"{commit[:12]} changes more than documentation: {'; '.join(outside[:10])}"
+             f"{'; ...' if len(outside) > 10 else ''}. A documentation commit changes documents only; anything else "
+             "is the implementer's -- kick the ticket back with documentation-kick-back. Nothing was pushed")
+    return candidate_ref(LIBRARIAN_ROLE, args.ticket_id, parents[0])
 
 
 def remote_ref_commit(remote: str, ref: str, *, cwd: Path) -> str:
@@ -225,7 +269,10 @@ def main(argv: list[str]) -> int:
     if not COMMIT.fullmatch(commit):
         fail(f"{args.commit} did not resolve to a full commit id")
     branch = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=worktree).stdout.strip()
-    ref = args.ref.strip() or default_ref(role, branch)
+    if role == LIBRARIAN_ROLE:
+        ref = librarian_ref(args, commit, worktree)
+    else:
+        ref = args.ref.strip() or default_ref(role, branch)
     problem = ref_problem(ref, role)
     if problem is not None:
         fail(problem)
@@ -300,6 +347,8 @@ def main(argv: list[str]) -> int:
         return 1
 
     submit_hint = f" --commit {commit}" if not args.ticket_id else (
+        f"\n{PROGRAM}: sign off with: ticket-board-write documentation-sign-off "
+        f"{args.ticket_id.upper()} --commit {commit} --ref {ref}" if role == LIBRARIAN_ROLE else
         f"\n{PROGRAM}: submit with: ticket-board-write submit-to-audit "
         f"{args.ticket_id.upper()} --commit {commit}"
     )

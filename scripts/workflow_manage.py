@@ -161,6 +161,23 @@ def _document_with_router(current: dict, args: argparse.Namespace, parser: argpa
         parser.error(str(exc))
 
 
+def _document_with_documentation_gate(current: dict, args: argparse.Namespace, parser: argparse.ArgumentParser) -> dict:
+    """SYRD-624: the tenant's own document with the documentation gate on (Librarian or Director) or off."""
+    from scripts.ticket_board.documentation_gate import with_documentation_gate, without_documentation_gate
+
+    if not current.get("document"):
+        parser.error("no workflow configuration is active for this board")
+    try:
+        if args.operation == "disable-documentation-gate":
+            return without_documentation_gate(current["document"])
+        librarian = {"runtime": args.runtime, "template_role": args.template_role} if args.runtime else None
+        if args.template_role and not args.runtime:
+            parser.error("--template-role chooses the Librarian's model, so it needs --runtime for the Librarian")
+        return with_documentation_gate(current["document"], librarian=librarian)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+
 def _project_dir_for(config_path: Path, document: dict) -> Path | None:
     """Where this tenant's project lives, from the artifact the projection already knows."""
     project = document.get("project")
@@ -333,6 +350,7 @@ def _migrate_director_onboarding(config_path: Path, cfg: dict) -> dict:
 TENANT_WRITES = frozenset({
     "apply", "rollback", "set-role-prompt", "clear-role-prompt", "migrate-director-onboarding",
     "add-design-stage", "enable-router", "disable-router",
+    "enable-documentation-gate", "disable-documentation-gate",  # SYRD-624
 })
 
 
@@ -371,6 +389,8 @@ def main(argv=None):
             "add-design-stage",
             "enable-router",
             "disable-router",
+            "enable-documentation-gate",
+            "disable-documentation-gate",
         ],
     )
     parser.add_argument("--document", type=Path)
@@ -402,8 +422,10 @@ def main(argv=None):
         "--journal", type=Path, help="saved apply journal (required for rollback)"
     )
     parser.add_argument("--role")
-    parser.add_argument("--runtime", help="enable-router: the agent CLI Router runs on")
-    parser.add_argument("--template-role", help="enable-router: the role whose launcher model Router starts from")
+    parser.add_argument("--runtime", help="enable-router: the agent CLI Router runs on; enable-documentation-gate: "
+                                          "the agent CLI the Librarian runs on (without it the Director decides)")
+    parser.add_argument("--template-role", help="enable-router / enable-documentation-gate: the role whose launcher "
+                                                "model Router or the Librarian starts from")
     parser.add_argument("--prompt", help="onboarding prompt text for set-role-prompt")
     parser.add_argument(
         "--prompt-file",
@@ -556,6 +578,10 @@ def main(argv=None):
     elif args.operation in {"enable-router", "disable-router"}:
         # The same path again: a reviewed shape, applied as apply applies (SYRD-599).
         cfg = _document_with_router(current, args, parser)
+        files = projection_files(args.config, cfg)
+    elif args.operation in {"enable-documentation-gate", "disable-documentation-gate"}:
+        # And again for the documentation gate (SYRD-624).
+        cfg = _document_with_documentation_gate(current, args, parser)
         files = projection_files(args.config, cfg)
     else:
         if not args.document:

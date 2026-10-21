@@ -165,6 +165,19 @@ your correction. So judge it by its misroutes and corrections, which the board r
 against each decision, not by how much it routes, and run `scripts/router_canary.py`
 before trusting a new model (SYRD-599).
 
+**Ask for documentation review when people will read about the change.** A project may run
+an optional documentation gate, decided by a Librarian or by you, chosen at `switchyard new`
+(off by default) or later with `switchyard documentation-gate <project> enable`. Turn a
+ticket's gate on (`ticket-board-write require-documentation <id>`) when it adds, changes or
+retires a command, flag, default, stage, role or procedure, at triage or before the
+implementer submits. The ticket then waits after Implementation for one decision: no
+change, with a reason; a documentation commit on top of the exact candidate, which becomes
+the candidate and clears every later sign-off; or a return with findings. Because the
+stage is before Inspection and Audit, documentation is never amended after a review while
+its verdict stands. A Librarian holds nothing but those decisions: it does not route,
+publish beyond its own documentation ref, merge or accept. See
+`switchyard-librarian-guide.md` (SYRD-624).
+
 **Recover a stalled ticket rather than overriding it.** When an owner reports
 completion or a dependency and does not transition, `recover-stalled-ticket <id>
 --reason "..."` takes the one declared no-code transition that owner could have

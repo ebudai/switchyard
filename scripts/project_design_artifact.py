@@ -310,6 +310,11 @@ def load_project_design_artifact(path: Path, *, expected_project: str | None = N
     router = router_onboarding.artifact_router(
         project_raw.get("router"), path=artifact_path, implementer_roles=implementer_roles
     )
+    from scripts import documentation_onboarding
+
+    documentation = documentation_onboarding.artifact_documentation(
+        project_raw.get("documentation"), path=artifact_path, role_names=[role for role, _cli in role_clis]
+    )
     push_policy = launcher._artifact_string(project_raw, "push_policy", path=artifact_path, default="director-main-only")
     gates = launcher._artifact_bool_mapping(project_raw.get("gates"), path=artifact_path, field="project.gates", defaults=launcher.PROJECT_DESIGN_DEFAULT_GATES)
     capability_grants = launcher._artifact_capability_grants(project_raw.get("capability_grants"), path=artifact_path)
@@ -335,4 +340,5 @@ def load_project_design_artifact(path: Path, *, expected_project: str | None = N
         gates=gates,
         capability_grants=capability_grants,
         router=router,
+        documentation=documentation,
     )

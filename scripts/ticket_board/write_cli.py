@@ -16,10 +16,32 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from . import workflow_relays, write_client
+    from . import documentation_gate, read_client, workflow_relays, write_client
 except ImportError:  # pragma: no cover - `python write_client.py` runs outside the package
+    import documentation_gate
+    import read_client
     import workflow_relays
     import write_client
+
+#: SYRD-624: all a Librarian may write. The board refuses anything else regardless.
+LIBRARIAN_COMMANDS = frozenset({"documentation_sign_off", "documentation_no_change", "documentation_kick_back",
+                                "add_comment", "verify_caller"})
+
+
+def _documentation_decision(client: Any, args: argparse.Namespace, command: str) -> dict[str, Any]:
+    """SYRD-624: one documentation decision, as the declared transition it is."""
+    action = getattr(documentation_gate, {"documentation_sign_off": "SIGN_OFF", "documentation_no_change": "NO_CHANGE",
+                                          "documentation_kick_back": "KICK_BACK"}[command])
+    if command != "documentation_sign_off":
+        return client.workflow_action(args.ticket_id, action, {"reason": args.reason})
+    ref = (args.ref or "").strip()
+    if not ref:  # the ticket's documentation ref for this role, derived exactly as the board derives it
+        ticket = read_client.TicketBoardReadClient(args.board_url).get_ticket(args.ticket_id)
+        ref = documentation_gate.candidate_ref(args.caller_role, args.ticket_id, str(ticket.get("commit_hash") or ""))
+    payload = {"commit_hash": args.commit_hash, "ref": ref}
+    if args.note:
+        payload["text"] = args.note
+    return client.workflow_action(args.ticket_id, action, payload)
 
 
 def _add_user_acceptance_relay(client: Any, *, apply: bool, expected_revision: int | None) -> dict[str, Any]:
@@ -404,6 +426,30 @@ def _build_parser() -> argparse.ArgumentParser:
     add_free_text_argument(router_return, "--reason", required=True)
     router_return.add_argument("--revision", required=True)
 
+    # SYRD-624: the documentation stage's three decisions, and the Director's gate for it.
+    doc_sign = subparsers.add_parser(
+        "documentation-sign-off", help="sign off documentation with your commit on top of the submitted candidate")
+    doc_sign.add_argument("ticket_id")
+    doc_sign.add_argument("--commit", dest="commit_hash", required=True,
+                          help="the documentation commit; its sole parent is the submitted candidate")
+    doc_sign.add_argument("--ref", default=None,
+                          help="where it is published; defaults to the ticket's documentation ref, which is the only "
+                               "one the board accepts")
+    add_free_text_argument(doc_sign, "--note", default="", help="an optional note kept after the board's record")
+    doc_none = subparsers.add_parser(
+        "documentation-no-change", help="approve with no documentation change; the candidate stays as submitted")
+    doc_none.add_argument("ticket_id")
+    add_free_text_argument(doc_none, "--reason", required=True,
+                           help="why nothing a person reads needs to change")
+    doc_kick = subparsers.add_parser(
+        "documentation-kick-back", help="return the ticket to its implementer with concrete documentation findings")
+    doc_kick.add_argument("ticket_id")
+    add_free_text_argument(doc_kick, "--reason", required=True, help="the findings")
+    require_doc = subparsers.add_parser(
+        "require-documentation", help="Director: turn a ticket's documentation gate on (or off with --off)")
+    require_doc.add_argument("ticket_id")
+    require_doc.add_argument("--off", action="store_true", help="turn the gate off instead")
+
     request_publication = subparsers.add_parser("request-publication")
     request_publication.add_argument("ticket_id")
     request_publication.add_argument("--ref", required=True)
@@ -664,6 +710,11 @@ def main(argv: list[str] | None = None) -> int:
             raise write_client.TicketBoardWriteError(
                 "router may use only router-assign and router-return; leave everything else to the Director"
             )
+        if args.caller_role.strip().lower() == documentation_gate.LIBRARIAN_ROLE and command not in LIBRARIAN_COMMANDS:
+            raise write_client.TicketBoardWriteError(
+                "the Librarian may use only documentation-sign-off, documentation-no-change, "
+                "documentation-kick-back and add-comment; leave everything else to the Director"
+            )
         resolved_url, resolved_socket = write_client.resolve_endpoint(args.board_url, args.socket_path)
         args.board_url, args.socket_path = resolved_url, resolved_socket
         # The CLI knows what was SUPPLIED; the client cannot. Saying "no socket"
@@ -776,6 +827,10 @@ def main(argv: list[str] | None = None) -> int:
             response = _add_user_acceptance_relay(client, apply=args.apply, expected_revision=args.expected_revision)
         elif command == "set_workflow_flags":
             response = client.set_workflow_flags(args.ticket_id, json.loads(args.patch_json))
+        elif command in {"documentation_sign_off", "documentation_no_change", "documentation_kick_back"}:
+            response = _documentation_decision(client, args, command)
+        elif command == "require_documentation":
+            response = client.set_workflow_flags(args.ticket_id, {documentation_gate.GATE: not args.off})
         elif command == "submit_to_audit":
             response = client.submit_to_audit(args.ticket_id, commit_hash=args.commit_hash)
         elif command == "submit_to_audit_without_commit":

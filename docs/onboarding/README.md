@@ -19,6 +19,13 @@ any particular project.
    on**: the journal, core-dump, SysRq and post-crash disk and repository checks the
    Director ensures and escalates.
 
+4. **[switchyard-librarian-guide.md](switchyard-librarian-guide.md)** — *documentation
+   review*, for projects that run the optional documentation gate. The Librarian reads it
+   in full; Directors and implementers read its sections for them. It covers the surfaces
+   the Librarian owns, finding stale or contradictory instructions, the no-change approval,
+   what a documentation commit does to the exact candidate and its sign-offs, when to
+   return a ticket, and what is never the Librarian's.
+
 ## Start here if you are new
 
 Your board's address is already in your environment — you do not need to look it up:
@@ -56,7 +63,8 @@ and `perf` for measurement and performance work. Custom implementer role names
 are allowed when the project needs different vocabulary. With two or more
 implementers, `switchyard new` also offers the optional Router role, which assigns
 implementation work as one more low-cost model session. It is off unless you
-choose it.
+choose it. `switchyard new` then offers the optional documentation gate, off by default:
+decided by the Director at no extra cost, or by a Librarian as one more model session.
 
 ## Not onboarding, but nearby in the Switchyard source checkout
 

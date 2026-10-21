@@ -50,7 +50,8 @@ from scripts.ticket_board.workflow_config import validate  # noqa: E402
 SHIPPED = json.loads((ROOT / "examples/workflows/inspection.json").read_text())
 SECRET = "https://token@example.invalid/secret"
 WRITES = ("apply", "rollback", "set-role-prompt", "clear-role-prompt", "migrate-director-onboarding",
-          "add-design-stage", "enable-router", "disable-router")
+          "add-design-stage", "enable-router", "disable-router",
+          "enable-documentation-gate", "disable-documentation-gate")  # SYRD-624
 READS = ("show", "show-role-prompt", "validate", "prepare-role")
 CHECKS = 0
 

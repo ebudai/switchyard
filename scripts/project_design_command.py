@@ -67,6 +67,10 @@ def design_project_command(
     router_runtime: str | None = None,
     router_model: str | None = None,
     router_effort: str | None = None,
+    documentation_gate: str | None = None,
+    librarian_runtime: str | None = None,
+    librarian_model: str | None = None,
+    librarian_effort: str | None = None,
     input_func: Callable[[str], str] = input,
     print_func: Callable[[str], None] = print,
 ) -> int:
@@ -153,6 +157,23 @@ def design_project_command(
         if router_runtime else None,
         path=target_artifact, implementer_roles=resolved_implementer_roles,
     )
+    # The documentation gate likewise: off unless asked for by flag, checked by the
+    # rules a hand-written `project.documentation` is (SYRD-624).
+    if (librarian_runtime or librarian_model or librarian_effort) and (documentation_gate or "librarian") != "librarian":
+        raise SystemExit("team-launcher: --librarian-runtime, --librarian-model and --librarian-effort are for "
+                         "--documentation-gate librarian")
+    if (librarian_model or librarian_effort) and not librarian_runtime:
+        raise SystemExit("team-launcher: --librarian-model and --librarian-effort need --librarian-runtime")
+    from scripts import documentation_onboarding
+
+    chosen_gate = documentation_gate or ("librarian" if librarian_runtime else None)
+    documentation = documentation_onboarding.artifact_documentation(
+        ({"gate": "librarian", "runtime": librarian_runtime or "", "model": librarian_model or "",
+          "effort": librarian_effort or ""} if chosen_gate == "librarian" else {"gate": chosen_gate})
+        if chosen_gate else None,
+        path=target_artifact,
+        role_names=[*resolved_implementer_roles, *resolved_audit_roles, "director", "designer"],
+    )
     artifact = launcher.ProjectDesignArtifact(
         project=project_slug,
         project_name=resolved_project_name,
@@ -177,6 +198,7 @@ def design_project_command(
         gates=gates,
         capability_grants=grants,
         router=router,
+        documentation=documentation,
     )
     target_design_document.parent.mkdir(parents=True, exist_ok=True)
     target_design_document.write_text(launcher._project_design_markdown(project_slug, title=title, body=body), encoding="utf-8")

@@ -7,6 +7,7 @@ import json
 import re
 from typing import Any
 
+from .documentation_gate import validate_documentation_gate
 from .router_role import router_holds, validate_router
 
 SCHEMA = "switchyard.workflow.v1"
@@ -1088,6 +1089,7 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
         "invalid deliberate stage reassignment",
     )
     validate_router(cfg, need)
+    validate_documentation_gate(cfg, need)
     return cfg
 
 

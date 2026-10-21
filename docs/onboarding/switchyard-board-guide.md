@@ -69,6 +69,7 @@ available for the built-in `pgu` board.
 | `backlog` | Backlog | — |
 | `analysis` | Triage | director |
 | `in_progress` | Implementation | implementers |
+| `documentation` | Documentation | librarian or director (optional) |
 | `inspection` | Inspection | inspector |
 | `audit` | Audit | audit |
 | `dat` | DAT | director |
@@ -85,6 +86,7 @@ ticket there when the user needs to answer a question.
 
 | Stage | Entry gate | Skips to when unset |
 |---|---|---|
+| `documentation` | `needs_documentation` | `inspection` (or wherever submissions went) |
 | `inspection` | `needs_inspection` | `audit` |
 | `audit` | `needs_audit` | `dat` |
 | `dat` | `needs_user_signoff` | `director_review` |
@@ -129,6 +131,20 @@ system working, not a bug to route around.
 **Inspector**
 - `inspector-sign-off` — inspection → audit
 - `inspector-kick-back` — inspection → in_progress
+
+**Librarian** (or the Director, where the project's documentation gate has no Librarian)
+- The `documentation` stage exists only where the project runs the optional documentation
+  gate, and a ticket enters it only when the Director turned its `needs_documentation`
+  gate on (`require-documentation`, Director-only).
+- `documentation-no-change` — documentation → the next review, with a required `--reason`;
+  the candidate stays exactly as submitted
+- `documentation-sign-off` — documentation → the next review, with `--commit`: a
+  documentation commit whose sole parent is the submitted candidate, published at the
+  ticket's documentation ref. It becomes the ticket's candidate and clears every later
+  sign-off; the board records both SHAs and the ref
+- `documentation-kick-back` — documentation → in_progress, with concrete findings
+- The Librarian holds nothing else: no routing, publication beyond its documentation ref,
+  merge or acceptance. See `switchyard-librarian-guide.md`.
 
 **Director**
 - `route` — the general move, from almost anywhere to almost anywhere. Director-only.

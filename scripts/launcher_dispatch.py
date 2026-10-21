@@ -69,6 +69,10 @@ def main(argv: list[str] | None = None) -> int:
             router_runtime=args.router_runtime,
             router_model=args.router_model,
             router_effort=args.router_effort,
+            documentation_gate=args.documentation_gate,
+            librarian_runtime=args.librarian_runtime,
+            librarian_model=args.librarian_model,
+            librarian_effort=args.librarian_effort,
         )
     if args.command == "new":
         return launcher.new_project_command(

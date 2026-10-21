@@ -72,7 +72,7 @@ OUTPUTS = ("agy_source_origin", "artifact_path", "design_document", "director_on
            "include_audit", "include_designer", "owner_shell", "owner_user", "project_dir",
            "resolved_agy_credential_source", "resolved_project_name", "resolved_slug", "runner",
            "selected_audit_roles", "selected_desktop_policy", "selected_implementer_roles", "selected_role_clis",
-           "selected_role_efforts", "selected_role_models", "selected_router", "stages")  # SYRD-599 added selected_router
+           "selected_role_efforts", "selected_role_models", "selected_router", "selected_documentation", "stages")  # SYRD-599 added selected_router, SYRD-624 selected_documentation
 OWN = ("subprocess", "dataclass", "Path", "Any", "Callable", "Sequence")
 OWNER = "syrd369-agent"
 
@@ -218,7 +218,7 @@ def artifact(tmp: Path, **fields: object) -> SimpleNamespace:
     base = dict(project="art369", project_name="Art Three", owner_user="art-agent", repository=tmp / "repo",
                 capability_grants={"shell": "/bin/zsh", "agy_credential_source": "  hostuser  "},
                 role_clis=(("director", "claude"), ("main", "codex")), implementer_roles=("main",),
-                include_designer=False, include_audit=False, audit_roles=(), router=())
+                include_designer=False, include_audit=False, audit_roles=(), router=(), documentation=())
     base.update(fields)
     return SimpleNamespace(**base)
 
@@ -322,8 +322,11 @@ def test_the_seams_and_nothing_bound_read_through_the_launcher() -> None:
     decided = [i for i, s in enumerate(fn.body) if "launcher._resolve_desktop_policy(" in ast.unparse(s)]
     # SYRD-599: Router's summary is printed by its own module, imported right where it is used.
     summary = [i for i, s in enumerate(fn.body) if "router_onboarding.summary_line(" in ast.unparse(s)]
+    # SYRD-624: and the documentation gate's, by its own module, imported right where it is used.
+    gate_summary = [i for i, s in enumerate(fn.body) if "documentation_onboarding.summary_line(" in ast.unparse(s)]
     check(local == [(0, "from scripts import team_launcher as launcher"), (decided[0] + 1, "from scripts.desktop_access import validate_policy"),
-                    (summary[0] - 1, "from scripts import router_onboarding")]
+                    (summary[0] - 1, "from scripts import router_onboarding"),
+                    (gate_summary[0] - 1, "from scripts import documentation_onboarding")]
           and "validate_policy(" in ast.unparse(fn.body[decided[0] + 2]),
           f"the desktop validation is imported inside the phase, right after the policy is decided, then used: {local}")
 
@@ -445,6 +448,7 @@ def test_the_design_artifact_path() -> None:
         check(not {"plan", "dedupe", "require"} & set(world.names()), "no role plan at all")
         check(got.selected_role_models == {} and got.selected_role_efforts == {}, "no models or efforts")
         check(got.selected_router is design.router, "Router as the artifact records it (SYRD-599)")
+        check(got.selected_documentation is design.documentation, "and the documentation gate (SYRD-624)")
         agy = next(e[1] for e in world.log if e[0] == "agy")
         check(agy["artifact_value"] == "hostuser", f"the artifact's agy source, stripped: {agy['artifact_value']!r}")
         check(got.artifact_path == (tmp / "art.project.json").resolve(strict=False), "the artifact is the artifact path")

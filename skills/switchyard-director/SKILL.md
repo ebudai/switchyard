@@ -173,6 +173,35 @@ you. It is a usability tool, not a delegate: everything else stays yours.
 - `scripts/router_canary.py seed|report|finish` measures it on bounded
   fixtures, priced with your corrections and implementers' interruptions.
 
+## Documentation review, when the project runs the gate
+
+A project may run an optional **documentation gate**: a
+`documentation` stage directly after Implementation, entered only by tickets
+whose `needs_documentation` gate you turned on. The full guide is
+`docs/onboarding/switchyard-librarian-guide.md`.
+
+- `switchyard new` offers it, off by default: off, decided by you (no role, no
+  session, no cost), or decided by a Librarian (one more model session). For an
+  existing project, `switchyard documentation-gate <project> enable` gives the
+  decision to you, `... enable --runtime <cli>` to a Librarian, and `disable`
+  removes it once the stage is empty; the board refuses while it is not.
+- Require it per ticket, for work that adds, changes or retires something a user
+  or operator reads about: `ticket-board-write require-documentation <id>`
+  (`--off` to undo), at triage or before the implementer submits. A ticket past
+  Implementation does not go back for it.
+- Its three decisions, by the stage's owner: `documentation-no-change` with a
+  reason (the candidate stays as submitted); `documentation-sign-off` with a
+  documentation commit whose sole parent is the candidate, published at
+  `roles/<owner>/<id>-<first 12 of the candidate>`, which replaces the candidate
+  and clears every later sign-off so Inspection and Audit review it in full; or
+  `documentation-kick-back` with findings. The board checks the commit's parent
+  and ref before anything moves, and records both SHAs and the ref.
+- With a Librarian, it holds nothing but those decisions and `add-comment`: it
+  cannot route, publish beyond its documentation ref, merge or accept. When you
+  own the gate, the same three are your moves, and you hold no sign-off there.
+- Choose the Librarian's model with `switchyard set-role-runtime <project>
+  librarian`, like any role.
+
 ## Gate flags
 
 Gate flags decide which review stages a ticket passes through; the workflow

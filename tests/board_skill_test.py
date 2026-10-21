@@ -161,10 +161,12 @@ def test_the_director_overlay_is_a_role_scoped_pointer_not_a_second_body() -> No
     assert duplicated == [], f"the overlay repeats the shared body: {duplicated[:3]}"
 
     # Only the Director is told to load it.
-    assert board_skill.skills_for_role("director") == board_skill.CANONICAL_SKILLS
+    # (SYRD-624: and the Librarian's overlay is the Librarian's alone, not the Director's.)
+    director = (board_skill.BOARD_SKILL, board_skill.DIRECTOR_SKILL)
+    assert board_skill.skills_for_role("director") == director
     for role in ("app", "audit", "inspector", "user", "", "Director-ish"):
         assert board_skill.skills_for_role(role) == (board_skill.BOARD_SKILL,), role
-    assert board_skill.skills_for_role("DIRECTOR") == board_skill.CANONICAL_SKILLS
+    assert board_skill.skills_for_role("DIRECTOR") == director
 
 
 def test_the_overlay_hardcodes_no_tenant_detail_either() -> None:

@@ -4,11 +4,12 @@ Claude, Codex, agy and Hermes all read the same ``SKILL.md`` package shape, but
 each discovers it in a different directory.  One source file per skill is
 therefore installed into four locations rather than maintained as four bodies.
 
-Two skills ship: ``switchyard-board``, which every role needs, and
-``switchyard-director``, a Director-only overlay on it.  Role panes commonly
-share one Unix home, so both files land in the same trees; which skill a session
-is *told* to load is the role-scoped part, and the board's own authorization is
-what actually stops a non-Director acting like one.
+Three skills ship: ``switchyard-board``, which every role needs,
+``switchyard-director``, a Director-only overlay on it, and
+``switchyard-librarian``, the optional Librarian's overlay (SYRD-624).  Role
+panes commonly share one Unix home, so every file lands in the same trees; which
+skill a session is *told* to load is the role-scoped part, and the board's own
+authorization is what actually stops one role acting like another.
 
 Installed copies carry a provenance footer naming the Switchyard commit they
 came from.  That footer is what marks a copy as Switchyard-managed: a managed
@@ -36,6 +37,8 @@ class CanonicalSkill:
 
     name: str
     director_only: bool = False
+    #: The one role, besides none, that is told to load it (SYRD-624); empty means every role.
+    role_only: str = ""
 
     @property
     def relative_source(self) -> Path:
@@ -47,7 +50,8 @@ class CanonicalSkill:
 
 BOARD_SKILL = CanonicalSkill("switchyard-board")
 DIRECTOR_SKILL = CanonicalSkill("switchyard-director", director_only=True)
-CANONICAL_SKILLS: tuple[CanonicalSkill, ...] = (BOARD_SKILL, DIRECTOR_SKILL)
+LIBRARIAN_SKILL = CanonicalSkill("switchyard-librarian", role_only="librarian")
+CANONICAL_SKILLS: tuple[CanonicalSkill, ...] = (BOARD_SKILL, DIRECTOR_SKILL, LIBRARIAN_SKILL)
 
 SKILL_NAME = BOARD_SKILL.name
 CANONICAL_RELATIVE_SOURCE = BOARD_SKILL.relative_source
@@ -56,13 +60,16 @@ CANONICAL_RELATIVE_SOURCE = BOARD_SKILL.relative_source
 def skills_for_role(role: str) -> tuple[CanonicalSkill, ...]:
     """The skills a session in ``role`` should be told to load, in order.
 
-    Every role gets the shared body; only a Director is pointed at the overlay.
-    This is a usability boundary, not a security one -- the overlay is readable
-    in a shared home either way, and the board refuses privileged operations
-    from any other caller regardless of what a session has read.
+    Every role gets the shared body; only a Director is pointed at its overlay,
+    and only the Librarian at its own. This is a usability boundary, not a
+    security one -- an overlay is readable in a shared home either way, and the
+    board refuses privileged operations from any other caller regardless of what
+    a session has read.
     """
-    is_director = role.strip().lower() == DIRECTOR_ROLE
-    return tuple(skill for skill in CANONICAL_SKILLS if is_director or not skill.director_only)
+    name = role.strip().lower()
+    return tuple(skill for skill in CANONICAL_SKILLS
+                 if (name == DIRECTOR_ROLE or not skill.director_only)
+                 and (not skill.role_only or name == skill.role_only))
 
 #: One entry per supported agent CLI: the runtime name and the skills root it
 #: scans, relative to the runtime owner's home directory.

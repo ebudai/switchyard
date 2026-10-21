@@ -107,6 +107,7 @@ SWITCHYARD_COMMANDS = (
     "role-prompt",
     "design-stage",
     "router-role",
+    "documentation-gate",
     "onboarding-readiness",
     "stop",
     # The other half of `stop`: bring a suspended tenant back in dependency
@@ -166,7 +167,8 @@ SWITCHYARD_UNPRIVILEGED_COMMANDS = frozenset(
     # and proves who the caller is from the policy that owner installed.
     # Escalated, it would read root's clipboard, which does not exist (SYRD-247).
     {
-        "present", "attach", "board-skill", "role-prompt", "design-stage", "router-role", "set-role-runtime",
+        "present", "attach", "board-skill", "role-prompt", "design-stage", "router-role", "documentation-gate",
+        "set-role-runtime",
         "reconcile-role-models", "finish-upgrade", "worker-pool", "privileged-action", "status",
         "paste-image",
     }
@@ -210,6 +212,8 @@ Commands:
   role-prompt      show, set, or clear a role's onboarding prompt
   design-stage     add a designer-owned design stage and the Director's design review
   router-role      turn on or off the Router role that picks Implementation owners
+  documentation-gate
+                   turn on or off the documentation gate, decided by a Librarian or the Director
   onboarding-readiness
                    report whether every registered tenant has migrated director onboarding
   stop             suspend a project: window, sessions, listener and board, reversibly

@@ -102,8 +102,9 @@ def test_enter_on_router_off_is_reviewed_and_then_confirmed() -> None:
     questions = asked(result)
     check(any(q.startswith("Router (optional)") for q in questions), f"Router is offered: {questions}")
     router_at = next(i for i, q in enumerate(questions) if q.startswith("Router (optional)"))
-    check(questions[router_at + 1:] == [PROCEED],
-          f"Router is the last choice, and the only question after it is the confirmation: {questions[router_at:]}")
+    # SYRD-624: the documentation gate's menu follows Router; the confirmation is still the last question.
+    check(questions[router_at + 1:] == ["Documentation gate (optional) [off]: ", PROCEED],
+          f"Router, then the documentation gate, and the only question after them is the confirmation: {questions[router_at:]}")
     review = said_before(result, PROCEED)
     check("switchyard: roles to create:" in review, f"the roles are reviewed before the question: {review[-6:]}")
     roles_at = review.index("switchyard: roles to create:")
@@ -115,6 +116,8 @@ def test_enter_on_router_off_is_reviewed_and_then_confirmed() -> None:
           f"and Router's choice and the project itself: {review[-8:]}")
     router_review = [i for i, line in enumerate(review) if line.startswith("switchyard: Router: off")][0]
     check(router_review > roles_at, "Router's line belongs to the review, after the roles")
+    gate_review = [i for i, line in enumerate(review) if line.startswith("switchyard: Documentation gate: off")]
+    check(gate_review and gate_review[0] > router_review, f"and the documentation gate's, after Router's: {review[-8:]}")
     identity = [i for i, line in enumerate(review) if line.startswith("switchyard: project path: ")]
     check(len(identity) == 2 and identity[0] < roles_at < router_review < identity[1] == len(review) - 1,
           f"the project is said when resolved, and again as the last line of the review, right before the question: {identity}")

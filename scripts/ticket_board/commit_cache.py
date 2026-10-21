@@ -148,3 +148,50 @@ def refresh_commit_repos(commit_git_dirs: tuple[Path, ...]) -> bool:
             continue
         refreshed = refreshed or fetched.returncode == 0
     return refreshed
+
+
+def _first_answer(commit_git_dirs: tuple[Path, ...], args: list[str]) -> str | None:
+    """Stdout of `args` from the first configured repository that answers, else None."""
+    for commit_git_dir in commit_git_dirs:
+        try:
+            git_args = commit_repo_git_args(commit_git_dir)
+        except ValueError:
+            continue
+        answer = subprocess.run([*git_args, *args], capture_output=True, text=True, check=False)
+        if answer.returncode == 0:
+            return answer.stdout
+    return None
+
+
+def commit_parents(commit_git_dirs: tuple[Path, ...], commit: str) -> list[str] | None:
+    """The parents of a full commit id in the trusted cache, or None when no repository has it (SYRD-624)."""
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        return None
+    listed = _first_answer(commit_git_dirs, ["rev-list", "--parents", "-n", "1", "--end-of-options", commit])
+    words = (listed or "").split()
+    return [word.lower() for word in words[1:]] if words and words[0].lower() == commit else None
+
+
+def changed_entries(commit_git_dirs: tuple[Path, ...], old: str, new: str) -> list[tuple[str, str, str, str]] | None:
+    """Each change `new` makes against `old`, both full commit ids in the trusted cache, as (old mode, new mode,
+    status, path); a rename is its removal and its addition. None when no repository can say (SYRD-624)."""
+    if not (re.fullmatch(r"[0-9a-f]{40}", old) and re.fullmatch(r"[0-9a-f]{40}", new)):
+        return None
+    listed = _first_answer(commit_git_dirs, RAW_DIFF_ARGS + [old, new, "--"])
+    return None if listed is None else parse_raw_diff(listed)
+
+
+#: `git diff` arguments whose output parse_raw_diff reads.
+RAW_DIFF_ARGS = ["diff", "--raw", "--no-renames", "--no-abbrev", "-z"]
+
+
+def parse_raw_diff(listed: str) -> list[tuple[str, str, str, str]]:
+    """`git diff RAW_DIFF_ARGS` output as (old mode, new mode, status, path) entries."""
+    fields = listed.split("\0")
+    entries = []
+    for at in range(0, len(fields) - 1, 2):
+        if not fields[at]:
+            break
+        old_mode, new_mode, _old_blob, _new_blob, status = fields[at].lstrip(":").split()
+        entries.append((old_mode, new_mode, status, fields[at + 1]))
+    return entries

@@ -220,6 +220,15 @@ def _prompt_switchyard_role_plan(
     )
     if router is not None:
         plan.append(router)
+    # The documentation gate, likewise optional and off by default (SYRD-624).
+    from scripts import documentation_onboarding
+
+    documentation = documentation_onboarding.prompt_documentation(
+        implementers, runner=catalog_runner, owner_args=owner_args, unverified_because=unverified_because,
+        input_func=input_func, print_func=print_func,
+    )
+    if documentation is not None:
+        plan.append(documentation)
     return tuple(plan)
 
 
@@ -236,7 +245,7 @@ def _prompt_switchyard_role_choices(
         for selection in launcher._prompt_switchyard_role_plan(
             input_func=input_func, print_func=print_func
         )
-        if selection.role != "router"
+        if selection.role not in ("router", "librarian", "documentation-gate")
     )
 
 

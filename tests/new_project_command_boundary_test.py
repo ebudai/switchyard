@@ -294,8 +294,9 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
             art = spec["artifact"]
             if art == "refuse":
                 raise SystemExit("team-launcher: syrd426 artifact refused")
-            # The record's own default for a field the baseline's cases predate (SYRD-599: Router off).
-            return SimpleNamespace(**{"router": (), **{k: place(v) for k, v in art.items()}})
+            # The record's own defaults for fields the baseline's cases predate (SYRD-599: Router off;
+            # SYRD-624: the documentation gate off).
+            return SimpleNamespace(**{"router": (), "documentation": (), **{k: place(v) for k, v in art.items()}})
 
         def plan_for(**kwargs):
             note("build_plan", **kwargs)
@@ -556,9 +557,10 @@ def test_the_seams_read_through_the_launcher_and_nothing_bound() -> None:
         # SYRD-599 adds one: Router, when the design chose it, is declared by its own module.
         # SYRD-607 adds one: what root runs is its own copy, staged and recorded by its own module.
         # SYRD-608 adds one: the project directory it was handed is a root for root's writes for the owner.
+        # SYRD-624 adds one: the documentation gate, when the design chose it, is declared by its own module.
         nested = {"new_project_command": ["from scripts.desktop_access import validate_policy", "from scripts.workflow_launcher import assign_projection_owner",
                                           "from scripts import router_onboarding", "from scripts import root_packet",
-                                          "from scripts import owner_writes"]}
+                                          "from scripts import owner_writes", "from scripts import documentation_onboarding"]}
         check(imports[:1] == (["from scripts import team_launcher as launcher"] if expected else [])
               and sorted(imports[1:] if expected else imports) == sorted(nested.get(name, []))
               and (not expected or ast.unparse(node.body[first]) == imports[0]),

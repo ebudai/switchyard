@@ -417,7 +417,7 @@ def accounts_phase(host: Host) -> None:
             selected_audit_roles=("audit",), selected_desktop_policy={"mode": "headless"}, selected_implementer_roles=("app",),
             selected_role_efforts={}, selected_role_models={}, stages=SimpleNamespace(begin=lambda _name: None),
             effective_source_repo=host.source, precheck_plan=SimpleNamespace(service_user="svc"),
-            selected_role_clis=(("director", "claude"), ("app", "claude"), ("audit", "claude")), selected_router=(),
+            selected_role_clis=(("director", "claude"), ("app", "claude"), ("audit", "claude")), selected_router=(), selected_documentation=(),
             worktree_branch="main")
 
     for name, value in seams.items():

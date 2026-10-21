@@ -57,6 +57,9 @@ SWITCHYARD_ONBOARDING_DOC_NAMES = (
     "adversarial-collaborative-methodology.md",
     "switchyard-board-guide.md",
     "switchyard-director-guide.md",
+    # SYRD-624: the optional Librarian's onboarding, copied into every project so a
+    # project that later turns the documentation gate on already has it.
+    "switchyard-librarian-guide.md",
 )
 
 

@@ -223,8 +223,8 @@ def new_until_sign_in(h, tmp: Path, **kwargs) -> tuple[object, list[str]]:
         "include_audit", "include_designer", "owner_shell", "project_dir",
         "resolved_agy_credential_source", "resolved_project_name", "runner", "selected_audit_roles",
         "selected_desktop_policy", "selected_implementer_roles", "selected_role_clis", "selected_role_efforts",
-        "selected_role_models", "selected_router")}, resolved_slug="mefp", owner_user="mefp-agent", stages=SimpleNamespace(begin=lambda _name: None))
-    preflight = SimpleNamespace(effective_source_repo=None, precheck_plan=None, selected_role_clis=None, selected_router=(),
+        "selected_role_models", "selected_router", "selected_documentation")}, resolved_slug="mefp", owner_user="mefp-agent", stages=SimpleNamespace(begin=lambda _name: None))
+    preflight = SimpleNamespace(effective_source_repo=None, precheck_plan=None, selected_role_clis=None, selected_router=(), selected_documentation=(),
                                 worktree_branch=None)
 
     def sign_in(**sign_in_kwargs):

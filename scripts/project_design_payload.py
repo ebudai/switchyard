@@ -56,6 +56,10 @@ class ProjectDesignArtifact:
     #: Router's runtime, model and effort, when the project chose Router
     #: (SYRD-599); empty is off, which is what every earlier artifact means.
     router: tuple[tuple[str, str], ...] = ()
+    #: The documentation gate's record (SYRD-624): `(("gate", "director"),)`, or
+    #: the Librarian's gate, runtime, model and effort; empty is off, which is
+    #: what every earlier artifact means.
+    documentation: tuple[tuple[str, str], ...] = ()
 
 
 def _role_cli_map(role_clis: Sequence[tuple[str, str]]) -> dict[str, str]:
@@ -86,6 +90,7 @@ def project_design_artifact_payload(artifact: ProjectDesignArtifact) -> dict[str
             **({"role_efforts": dict(artifact.role_efforts)} if artifact.role_efforts else {}),
             **({"catalog_version": artifact.catalog_version} if artifact.catalog_version else {}),
             **({"router": {"enabled": True, **dict(artifact.router)}} if artifact.router else {}),
+            **({"documentation": dict(artifact.documentation)} if artifact.documentation else {}),
             "push_policy": artifact.push_policy,
             "gates": artifact.gates,
             "capability_grants": artifact.capability_grants,

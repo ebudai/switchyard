@@ -5,12 +5,13 @@ from a different directory. Switchyard keeps **one** canonical body per skill an
 projects it into all five, so a pane's instructions do not depend on which
 runtime it happens to be.
 
-Two skills ship:
+Three skills ship:
 
 | Skill | Who is told to load it |
 |---|---|
 | `switchyard-board` | every role |
 | `switchyard-director` | the Director, in addition to the shared one |
+| `switchyard-librarian` | the optional Librarian, in addition to the shared one (SYRD-624) |
 
 ## The canonical sources
 

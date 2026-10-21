@@ -109,6 +109,8 @@ class NewProjectChoices:
     selected_role_models: dict[str, str]
     #: Router's runtime, model and effort, or () for off (SYRD-599).
     selected_router: tuple[tuple[str, str], ...]
+    #: The documentation gate's record, or () for off (SYRD-624).
+    selected_documentation: tuple[tuple[str, str], ...]
     stages: ProvisioningStages
 
 
@@ -162,6 +164,7 @@ def _resolve_new_project_choices(
         include_audit = artifact.include_audit
         selected_audit_roles = artifact.audit_roles
         selected_router = artifact.router
+        selected_documentation = artifact.documentation
     else:
         resolved_project_name = (project_name or launcher._prompt_text("Project name", input_func=input_func)).strip()
         if not resolved_project_name:
@@ -186,6 +189,7 @@ def _resolve_new_project_choices(
         include_audit = True
         selected_audit_roles = ("audit",)
         selected_router = ()
+        selected_documentation = ()
     artifact_agy_source = ""
     if from_artifact is not None:
         artifact_agy_source = str(
@@ -259,6 +263,10 @@ def _resolve_new_project_choices(
 
             # Router is reviewed with the rest, and recorded on its own (SYRD-599).
             roles, selected_router = router_onboarding.split_role_plan(role_plan)
+            from scripts import documentation_onboarding
+
+            # And the documentation gate's, the same way (SYRD-624).
+            roles, selected_documentation = documentation_onboarding.split_role_plan(roles)
             chosen_pairs = [(entry.role, entry.cli) for entry in roles]
             selected_role_models = {
                 entry.role: entry.model for entry in roles if entry.model
@@ -266,7 +274,10 @@ def _resolve_new_project_choices(
             selected_role_efforts = {
                 entry.role: entry.effort for entry in roles if entry.effort
             }
-            launcher.print_role_plan_review(role_plan, print_func=print_func)
+            # The Director-owned gate is no role to review; it is summarised below like Router's choice.
+            reviewed = tuple(entry for entry in role_plan if entry.role != documentation_onboarding.GATE_MARKER)
+            launcher.print_role_plan_review(role_plan if len(reviewed) == len(role_plan) else reviewed,
+                                            print_func=print_func)
         selected_role_clis = launcher._dedupe_role_cli_pairs(chosen_pairs)
         launcher._require_new_project_roles(selected_role_clis)
         selected_implementer_roles = tuple(
@@ -280,6 +291,9 @@ def _resolve_new_project_choices(
     from scripts import router_onboarding
 
     print_func(router_onboarding.summary_line(selected_router))
+    from scripts import documentation_onboarding
+
+    print_func(documentation_onboarding.summary_line(selected_documentation))
     # The one confirmation, and it comes last: after every choice -- Router,
     # the final one, included -- and the whole review, and before P1, the
     # first step that can install or change anything. It used to come before
@@ -324,6 +338,7 @@ def _resolve_new_project_choices(
         selected_role_efforts=selected_role_efforts,
         selected_role_models=selected_role_models,
         selected_router=selected_router,
+        selected_documentation=selected_documentation,
         stages=stages,
     )
 
@@ -339,6 +354,8 @@ class NewProjectPreflight:
     selected_role_clis: Sequence[tuple[str, str]]
     #: Router's record after the same CLI settlement, which may switch its runtime (SYRD-599).
     selected_router: tuple[tuple[str, str], ...]
+    #: The documentation gate's record after it, which may switch a Librarian's runtime (SYRD-624).
+    selected_documentation: tuple[tuple[str, str], ...]
     worktree_branch: str
 
 
@@ -371,6 +388,7 @@ def _check_new_project_preflight(
     selected_implementer_roles: tuple[str, ...],
     selected_role_clis: tuple[tuple[str, str], ...],
     selected_router: tuple[tuple[str, str], ...],
+    selected_documentation: tuple[tuple[str, str], ...],
     stages: ProvisioningStages,
 ) -> NewProjectPreflight:
     from scripts import team_launcher as launcher
@@ -440,10 +458,11 @@ def _check_new_project_preflight(
     # Router's runtime is settled with every role's, so a runtime only Router
     # uses is found missing here too, before anything exists; it stays Router's,
     # never a role to create (SYRD-599).
-    from scripts import router_onboarding
+    from scripts import documentation_onboarding, router_onboarding
 
     selected_role_clis = launcher.require_agent_clis_for_new_tenant(
-        router_onboarding.with_router_cli(selected_role_clis, selected_router),
+        documentation_onboarding.with_librarian_cli(
+            router_onboarding.with_router_cli(selected_role_clis, selected_router), selected_documentation),
         owner_user=owner_user,
         policy=agent_cli_policy,
         sources=launcher._parse_agent_cli_sources(agent_cli_sources),
@@ -451,12 +470,15 @@ def _check_new_project_preflight(
         input_func=input_func,
         print_func=print_func,
     )
+    selected_role_clis, selected_documentation = documentation_onboarding.settled(
+        selected_role_clis, selected_documentation, print_func=print_func)
     selected_role_clis, selected_router = router_onboarding.settled(selected_role_clis, selected_router, print_func=print_func)
     return NewProjectPreflight(
         effective_source_repo=effective_source_repo,
         precheck_plan=precheck_plan,
         selected_role_clis=selected_role_clis,
         selected_router=selected_router,
+        selected_documentation=selected_documentation,
         worktree_branch=worktree_branch,
     )
 
@@ -499,6 +521,7 @@ def _prepare_new_project_accounts(
     precheck_plan: ProjectBoardProvision,
     selected_role_clis: Sequence[tuple[str, str]],
     selected_router: tuple[tuple[str, str], ...],
+    selected_documentation: tuple[tuple[str, str], ...],
     worktree_branch: str,
 ) -> NewProjectAccounts:
     from scripts import team_launcher as launcher
@@ -524,10 +547,11 @@ def _prepare_new_project_accounts(
     # they can differ -- the owner's own PATH is searched first, so an
     # owner-local copy would win at pane launch and nothing else would say so
     # (SYRD-210).
-    from scripts import router_onboarding
+    from scripts import documentation_onboarding, router_onboarding
 
     launcher.verify_agent_clis_for_owner(
-        router_onboarding.with_router_cli(selected_role_clis, selected_router),
+        documentation_onboarding.with_librarian_cli(
+            router_onboarding.with_router_cli(selected_role_clis, selected_router), selected_documentation),
         owner_user=owner_user,
         owner_home=home_base / owner_user,
         runner=runner,
@@ -598,6 +622,7 @@ def _prepare_new_project_accounts(
             agy_credential_source=resolved_agy_credential_source,
             agy_credential_source_origin=agy_source_origin,
             router=selected_router,
+            documentation=selected_documentation,
         )
         launcher._chown_switchyard_project_files(owner_user=owner_user, project_dir=project_dir, runner=runner)
         # Looked at by descriptor, never through a link at the name or above it, and handed over only as the
@@ -638,6 +663,10 @@ def _prepare_new_project_accounts(
             # The CLI gate switched Router's runtime: record it where the rest of
             # provisioning, and any retry, reads it (SYRD-599).
             router_onboarding.record_router_choice(artifact_path, selected_router, owner_user=owner_user)
+        if artifact.documentation != selected_documentation:
+            # Likewise a Librarian's runtime (SYRD-624).
+            documentation_onboarding.record_documentation_choice(
+                artifact_path, selected_documentation, owner_user=owner_user)
         launcher._write_switchyard_onboarding_files(
             project_name=resolved_project_name,
             slug=resolved_slug,

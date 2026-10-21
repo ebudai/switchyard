@@ -327,12 +327,13 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         from scripts import paste_image
 
         return paste_image.main(argv[1:])
-    # `design-stage` and `router-role` share this block: like role-prompt they write
-    # the tenant's own declared workflow through workflow_manage as the caller
-    # (SYRD-567, SYRD-599).
-    if argv[0].casefold() in ("role-prompt", "design-stage", "router-role"):
+    # `design-stage`, `router-role` and `documentation-gate` share this block: like
+    # role-prompt they write the tenant's own declared workflow through
+    # workflow_manage as the caller (SYRD-567, SYRD-599, SYRD-624).
+    if argv[0].casefold() in ("role-prompt", "design-stage", "router-role", "documentation-gate"):
         design_stage = argv[0].casefold() == "design-stage"
         router = argv[0].casefold() == "router-role"
+        gate = argv[0].casefold() == "documentation-gate"
         parser = argparse.ArgumentParser(
             prog=f"switchyard {argv[0].casefold()}",
             description=(
@@ -345,6 +346,13 @@ def switchyard_main(argv: list[str] | None = None) -> int:
                 "implementers get implementer_kick_back for a misroute. Choose its model with "
                 "switchyard set-role-runtime <project> router."
             ) if router else (
+                "Turn the optional documentation gate on or off. With it, the Director can require "
+                "documentation review of a ticket (ticket-board-write require-documentation), which then "
+                "waits after Implementation, before its reviews, for an approval with no change, a "
+                "documentation commit on top of the candidate, or a return with findings. --runtime gives "
+                "that decision to a Librarian role on that agent CLI; without it the Director decides, "
+                "and no role or session is created."
+            ) if gate else (
                 "Show, set, or clear the onboarding prompt a role receives when its next "
                 "conversation starts fresh. A running conversation is never interrupted or "
                 "rewritten: a changed prompt is used by the next fresh session or an "
@@ -355,7 +363,13 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             parser.add_argument("action", choices=("enable", "disable"))
             parser.add_argument("--runtime", help="enable: the agent CLI Router runs on")
             parser.add_argument("--template-role", help="enable: the role whose model Router starts from")
-        if design_stage or router:
+        if gate:
+            parser.add_argument("action", choices=("enable", "disable"))
+            parser.add_argument("--runtime", help="enable: the agent CLI a Librarian runs on; without it the "
+                                                  "Director decides and no role is created")
+            parser.add_argument("--template-role", help="enable --runtime: the role whose model the Librarian "
+                                                        "starts from")
+        if design_stage or router or gate:
             parser.add_argument(
                 "--dry-run", action="store_true",
                 help="print the document and projection it would apply, and change nothing",
@@ -368,14 +382,14 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             default=os.environ.get("TICKET_BOARD_PROJECT", ""),
             help="project name or slug; defaults to TICKET_BOARD_PROJECT in the caller's pane",
         )
-        if not (design_stage or router):
+        if not (design_stage or router or gate):
             parser.add_argument("--prompt", help="prompt text; use --prompt-file for anything long")
             parser.add_argument(
                 "--prompt-file",
                 type=Path,
                 help="read the prompt from a file, or from stdin when given as -",
             )
-        if router and len(argv) > 2 and argv[2] in ("enable", "disable") and not argv[1].startswith("-"):
+        if (router or gate) and len(argv) > 2 and argv[2] in ("enable", "disable") and not argv[1].startswith("-"):
             # `switchyard router-role <project> enable|disable`, as the docs and the
             # User write it, is the same command as `... enable --project <project>`.
             argv = [argv[0], argv[2], "--project", argv[1], *argv[3:]]
@@ -392,8 +406,8 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         if design_stage:
             forwarded = ["add-design-stage", "--board-url", config.board_url, "--config", str(entry.config_path)]
             return workflow_manage.main(forwarded + (["--dry-run"] if args.dry_run else []))
-        if router:
-            forwarded = [f"{args.action}-router", "--board-url", config.board_url, "--config", str(entry.config_path)]
+        if router or gate:
+            forwarded = [f"{args.action}-{'router' if router else 'documentation-gate'}", "--board-url", config.board_url, "--config", str(entry.config_path)]
             forwarded += ["--runtime", args.runtime] if args.runtime else []
             forwarded += ["--template-role", args.template_role] if args.template_role else []
             return workflow_manage.main(forwarded + (["--dry-run"] if args.dry_run else []))

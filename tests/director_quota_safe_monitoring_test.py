@@ -270,7 +270,9 @@ def test_an_upgrade_refreshes_skills_that_still_teach_unbounded_watching() -> No
                 assert f"{skill.name} {runtime}: refreshed {path}" in result.stdout, result.stdout
                 assert path.read_text(encoding="utf-8") == _expected(skill, "n3w597"), (skill.name, runtime)
         again = _installer(release, "install", home, "--source-commit", "n3w597")
-        assert again.returncode == 0 and again.stdout.count(": current ") == 10, again.stdout
+        # Every canonical skill for every CLI: five CLIs since SYRD-634's Copilot, three skills since SYRD-624's Librarian.
+        assert again.returncode == 0 and again.stdout.count(": current ") == (
+            len(board_skill.SKILL_ADAPTERS) * len(board_skill.CANONICAL_SKILLS)), again.stdout
 
 
 def _docs_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:

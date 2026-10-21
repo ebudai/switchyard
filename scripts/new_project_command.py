@@ -190,6 +190,15 @@ def new_project_command(
         plan = router_onboarding.plan_with_router(
             plan, router=router, role_clis=role_clis, repository=effective_repository, print_func=print_func
         )
+    # The documentation gate the same way, after Router so both are in one document (SYRD-624).
+    documentation = design_artifact.documentation if design_artifact is not None else ()
+    if documentation:
+        from scripts import documentation_onboarding
+
+        plan = documentation_onboarding.plan_with_documentation_gate(
+            plan, documentation=documentation, role_clis=role_clis, repository=effective_repository,
+            print_func=print_func,
+        )
     launcher.precheck_new_project(
         plan,
         source_repo=effective_source_repo,
@@ -286,6 +295,9 @@ def new_project_command(
     )
     if router:
         router_onboarding.record_router_runtime(config_path, from_artifact, router=router, owner_user=plan.owner_user)
+    if documentation:
+        documentation_onboarding.record_librarian_runtime(config_path, from_artifact, documentation=documentation,
+                                                          owner_user=plan.owner_user)
     commands_path = artifact_dir / "operator-commands.sh"
     # The complete role-isolation handoff -- accounts, ownership, runtime,
     # tooling AND credential seeding -- is written beside the other artifacts, so

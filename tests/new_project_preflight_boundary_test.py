@@ -53,8 +53,8 @@ PARAMETERS = ("from_artifact", "source_repo", "commit_git_dir", "port", "databas
               "agent_cli_sources")
 FROM_P0 = ("include_audit", "include_designer", "owner_user", "project_dir", "resolved_agy_credential_source",
            "resolved_project_name", "resolved_slug", "runner", "selected_audit_roles", "selected_implementer_roles",
-           "selected_role_clis", "selected_router", "stages")  # SYRD-599: + selected_router
-OUTPUTS = ("effective_source_repo", "precheck_plan", "selected_role_clis", "selected_router", "worktree_branch")  # SYRD-599: + selected_router
+           "selected_role_clis", "selected_router", "selected_documentation", "stages")  # SYRD-599: + selected_router; SYRD-624: + selected_documentation
+OUTPUTS = ("effective_source_repo", "precheck_plan", "selected_role_clis", "selected_router", "selected_documentation", "worktree_branch")  # SYRD-599: + selected_router; SYRD-624: + selected_documentation
 OWNER = "syrd370-agent"
 
 
@@ -153,7 +153,7 @@ def inputs(tmp: Path, world: World, **overrides: object) -> dict:
                   owner_user=OWNER, project_dir=tmp / "project", resolved_agy_credential_source="",
                   resolved_project_name="Syrd Three Seventy", resolved_slug="s370", runner=lambda *a, **k: None,
                   selected_audit_roles=("audit",), selected_implementer_roles=("main",),
-                  selected_role_clis=(("director", "claude"), ("main", "codex")), selected_router=(), stages=Stages(world.log))
+                  selected_role_clis=(("director", "claude"), ("main", "codex")), selected_router=(), selected_documentation=(), stages=Stages(world.log))
     values.update(overrides)
     return values
 
@@ -264,11 +264,13 @@ def test_the_seams_and_nothing_bound_read_through_the_launcher() -> None:
     check(not bound & set(through), f"nothing the phase binds is read through the launcher: {bound & set(through)}")
     check(ast.unparse(fn.body[1]) == "stages.begin('host and agent CLI checks')", "the stage begun first")
     # SYRD-599: the gate settles Router's runtime too, and its answer is split back into roles and Router's record.
-    gate = fn.body[-3]
-    check(ast.unparse(gate).startswith("selected_role_clis = launcher.require_agent_clis_for_new_tenant(router_onboarding.with_router_cli(selected_role_clis, selected_router)")
-          and ast.unparse(fn.body[-4]) == "from scripts import router_onboarding"
+    # SYRD-624: and a Librarian's runtime the same way, split back first into the documentation gate's record.
+    gate = fn.body[-4]
+    check(ast.unparse(gate).startswith("selected_role_clis = launcher.require_agent_clis_for_new_tenant(documentation_onboarding.with_librarian_cli(router_onboarding.with_router_cli(selected_role_clis, selected_router), selected_documentation)")
+          and ast.unparse(fn.body[-5]) == "from scripts import documentation_onboarding, router_onboarding"
+          and ast.unparse(fn.body[-3]) == "selected_role_clis, selected_documentation = documentation_onboarding.settled(selected_role_clis, selected_documentation, print_func=print_func)"
           and ast.unparse(fn.body[-2]) == "selected_role_clis, selected_router = router_onboarding.settled(selected_role_clis, selected_router, print_func=print_func)",
-          "and the CLI gate last, Router's runtime among the rest, then split back, right before the answer")
+          "and the CLI gate last, Router's and a Librarian's runtimes among the rest, then split back, right before the answer")
 
 
 def test_the_interface_and_the_result() -> None:
@@ -461,7 +463,7 @@ def choices(tmp: Path, log: list) -> object:
     return dataclasses.replace(answer, stages=Stages(log), owner_user=OWNER, project_dir=tmp / "project",
                                resolved_slug="s370", resolved_project_name="N", resolved_agy_credential_source="",
                                selected_implementer_roles=("main",), include_designer=False, include_audit=True,
-                               selected_audit_roles=("audit",), selected_role_clis=(("main", "codex"),), selected_router=(),
+                               selected_audit_roles=("audit",), selected_role_clis=(("main", "codex"),), selected_router=(), selected_documentation=(),
                                runner=lambda *a, **k: None)
 
 
@@ -479,7 +481,8 @@ def test_the_command_hands_p1_its_values_and_reads_back_each_field() -> None:
         log: list = []
         p0 = choices(tmp, log)
         answer = m.NewProjectPreflight(effective_source_repo=object(), precheck_plan=SimpleNamespace(service_user="svc"),
-                                       selected_role_clis=object(), selected_router=object(), worktree_branch=object())
+                                       selected_role_clis=object(), selected_router=object(), selected_documentation=object(),
+                                       worktree_branch=object())
         handed: list = []
         seen: list = []
         given = {name: object() for name in PARAMETERS}

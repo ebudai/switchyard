@@ -17,6 +17,13 @@ yours.** Router's whole remit is its onboarding prompt - one read of the ticket
 it was told about, then `router-assign` or `router-return` - and nothing below
 applies to it.
 
+**If `TICKET_BOARD_CALLER_ROLE` is `librarian`, load `switchyard-librarian`
+too, and let it narrow this one:** the Librarian reads only the ticket it was
+given and makes one of three documentation decisions; nothing below gives it
+more. An implementer's ticket may pass through the Librarian's Documentation
+stage after submission; if the Librarian signs off with a documentation commit,
+that commit, with yours as its parent, is the ticket's candidate from then on.
+
 ## What the environment already tells you
 
 Every Switchyard pane is launched with its board address and identity:

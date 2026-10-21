@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import (context_continuation, pull_queue, reminder_snooze, report_intake, router_role, size_review, ui_delegation,
-               uat_instructions)
+from . import (context_continuation, documentation_candidate, pull_queue, reminder_snooze, report_intake, router_role,
+               size_review, uat_instructions, ui_delegation)
 
 OPERATIONS = (reminder_snooze.OPERATIONS | size_review.OPERATIONS | report_intake.OPERATIONS
               | router_role.OPERATIONS | ui_delegation.OPERATIONS | context_continuation.OPERATIONS
@@ -38,7 +38,8 @@ def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: s
 
 
 def before_transition(app: Any, ticket_id: str, action: str, payload: dict[str, Any], *, caller_role: str) -> None:
-    """What the board measures before a declared transition is attempted."""
+    """What the board measures, and a documentation decision checks (SYRD-624), before a declared transition."""
+    documentation_candidate.before_transition(app, ticket_id, action, payload, caller_role=caller_role)
     size_review.scan_for_transition(app, ticket_id, action, payload, caller_role=caller_role)
 
 

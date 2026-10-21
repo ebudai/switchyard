@@ -87,8 +87,10 @@ def test_the_guided_plan_offers_router_off_by_default() -> None:
     plan, prompts, out = guided({"Include designer role": "n", "Include audit role": "n"})
     check([p.role for p in plan] == ["director", "main", "ops"],
           f"Enter at the Router menu creates no Router: {[p.role for p in plan]}")
-    check(prompts[-1] == "Router (optional) [off]: " and sum(p.startswith("Router (optional)") for p in prompts) == 1,
-          f"asked once, last, and off is the default: {prompts[-3:]}")
+    # SYRD-624: the documentation gate's menu now follows it, as the role plan's last question.
+    check(prompts[-2:] == ["Router (optional) [off]: ", "Documentation gate (optional) [off]: "]
+          and sum(p.startswith("Router (optional)") for p in prompts) == 1,
+          f"asked once, after every role and right before the documentation gate, and off is the default: {prompts[-3:]}")
     check("additional cost" in out and "low-cost model" in out and "1) off -- the Director assigns implementation work"
           in out and "2) on -- Router assigns implementation work" in out,
           f"the menu says what Router does and what it costs, in the selectable style: {out[-700:]}")
@@ -100,9 +102,10 @@ def test_turning_router_on_walks_its_runtime_model_and_effort() -> None:
     router = plan[-1]
     check((router.role, router.cli, router.model, router.effort) == ("router", "codex", "gpt-5.5", "low"),
           f"Router is chosen like any role, effort offered low first: {router}")
-    check([p.split(" [")[0] for p in prompts[-4:]] == ["Router (optional)", "router runtime", "router model",
-                                                     "router effort"],
-          f"runtime, then model, then effort, after the choice: {prompts[-4:]}")
+    # SYRD-624: then the documentation gate's menu, the role plan's last question.
+    check([p.split(" [")[0] for p in prompts[-5:]] == ["Router (optional)", "router runtime", "router model",
+                                                     "router effort", "Documentation gate (optional)"],
+          f"runtime, then model, then effort, after the choice: {prompts[-5:]}")
     roles, record = launcher_split(plan)
     check([p.role for p in roles] == ["director", "main", "ops"] and record == (("runtime", "codex"),
           ("model", "gpt-5.5"), ("effort", "low")), f"Router is not a role to create, it is the record: {record}")

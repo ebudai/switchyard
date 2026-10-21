@@ -215,57 +215,67 @@ def plan_with_router(
     print_func: Callable[[str], None] = print,
 ) -> Any:
     """`plan` declaring Router: its own workflow, or the one its rows describe, plus `with_router`."""
-    from scripts import team_launcher as launcher
-    from scripts.ticket_board import legacy_workflow
-    from scripts.ticket_board.project_provision import project_workflow_stages, project_workflow_transitions
     from scripts.ticket_board.router_setup import with_router
     from scripts.ticket_board.workflow_config import validate
 
     chosen = dict(router)
-    document = plan.workflow
-    if document is None:
-        role_defs: list[tuple[str, str]] = []
-        for role, cli in role_clis:  # each role once, as the launcher config lists them
-            if role not in dict(role_defs):
-                role_defs.append((role, cli))
-        # Exactly what each pane will register as: the launcher config's runtime,
-        # target and slot for these roles, so the board serves them (SYRD-262).
-        panes = {
-            role: {
-                "runtime": launcher._command_name(cli),
-                "target": f"{plan.project}-{role}:0.0",
-                "slot": index if index < launcher.MAX_VISIBLE_PANES_PER_WINDOW else None,
-            }
-            for index, (role, cli) in enumerate(role_defs)
-        }
-        canonical = legacy_workflow.load_canonical(Path(__file__).resolve().parents[1])
-        try:
-            composed = legacy_workflow.compose_legacy_workflow(
-                plan,
-                canonical=canonical,
-                stage_seeds=project_workflow_stages(plan),
-                transition_seeds=project_workflow_transitions(plan),
-                panes=panes,
-            )
-        except legacy_workflow.LegacyWorkflowRefused as exc:
-            raise SystemExit(f"switchyard: Router needs a declared workflow, and this project's could not be composed: {exc}") from None
-        document = composed.document
-        # A fresh board's schema seeds the shipped stage set. The default seed
-        # replaces it wholesale; a declared document must name each stage it
-        # drops, or the board refuses it as omitting one.
-        document["remove_stages"] = sorted(
-            {stage["name"] for stage in canonical["stages"]} - {stage["name"] for stage in document["stages"]}
-        )
-        print_func(f"switchyard: Router: {plan.project} starts with a declared workflow, the one its plan describes plus Router.")
-        for difference in composed.differences:
-            print_func(f"switchyard:   unlike an undeclared board: {difference}")
-        document = launcher.seed_director_onboarding(document, repository)[0]
+    document = plan.workflow if plan.workflow is not None else plan_document(
+        plan, role_clis=role_clis, repository=repository, label="Router", print_func=print_func)
     template = plan.implementer_roles[0]
     try:
         document = with_router(document, runtime=chosen["runtime"], template_role=template)
     except ValueError as exc:
         raise SystemExit(f"switchyard: {exc}") from None
     return dataclasses.replace(plan, workflow=validate(document, project=plan.project))
+
+
+def plan_document(plan: Any, *, role_clis: Sequence[tuple[str, str]], repository: Path, label: str,
+                  print_func: Callable[[str], None] = print) -> dict[str, Any]:
+    """The declared workflow `plan`'s rows describe, for an option that needs one (Router; SYRD-624's gate).
+
+    Composed as `migrate-workflow` composes it, naming in `remove_stages` the
+    seeded stages it does not use, and seeded with director onboarding.
+    """
+    from scripts import team_launcher as launcher
+    from scripts.ticket_board import legacy_workflow
+    from scripts.ticket_board.project_provision import project_workflow_stages, project_workflow_transitions
+
+    role_defs: list[tuple[str, str]] = []
+    for role, cli in role_clis:  # each role once, as the launcher config lists them
+        if role not in dict(role_defs):
+            role_defs.append((role, cli))
+    # Exactly what each pane will register as: the launcher config's runtime,
+    # target and slot for these roles, so the board serves them (SYRD-262).
+    panes = {
+        role: {
+            "runtime": launcher._command_name(cli),
+            "target": f"{plan.project}-{role}:0.0",
+            "slot": index if index < launcher.MAX_VISIBLE_PANES_PER_WINDOW else None,
+        }
+        for index, (role, cli) in enumerate(role_defs)
+    }
+    canonical = legacy_workflow.load_canonical(Path(__file__).resolve().parents[1])
+    try:
+        composed = legacy_workflow.compose_legacy_workflow(
+            plan,
+            canonical=canonical,
+            stage_seeds=project_workflow_stages(plan),
+            transition_seeds=project_workflow_transitions(plan),
+            panes=panes,
+        )
+    except legacy_workflow.LegacyWorkflowRefused as exc:
+        raise SystemExit(f"switchyard: {label} needs a declared workflow, and this project's could not be composed: {exc}") from None
+    document = composed.document
+    # A fresh board's schema seeds the shipped stage set. The default seed
+    # replaces it wholesale; a declared document must name each stage it
+    # drops, or the board refuses it as omitting one.
+    document["remove_stages"] = sorted(
+        {stage["name"] for stage in canonical["stages"]} - {stage["name"] for stage in document["stages"]}
+    )
+    print_func(f"switchyard: {label}: {plan.project} starts with a declared workflow, the one its plan describes plus {label}.")
+    for difference in composed.differences:
+        print_func(f"switchyard:   unlike an undeclared board: {difference}")
+    return launcher.seed_director_onboarding(document, repository)[0]
 
 
 def record_router_runtime(config_path: Path, artifact_path: Path | None, *, router: Sequence[tuple[str, str]],

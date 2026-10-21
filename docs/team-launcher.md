@@ -1711,6 +1711,34 @@ run had one, and `switchyard resume-provision` reuse the recorded choice, and
 `switchyard upgrade` never turns Router on.
 Existing projects use `switchyard router-role <project> enable|disable`.
 
+**The documentation gate is a choice here too, off by default (SYRD-624).** After
+Router, `new` asks:
+
+```text
+Documentation gate (optional):
+  Lets the Director require documentation review of a ticket before Audit: ...
+  1) off -- no gate; the Director covers documentation in its own review  [default]
+  2) director -- the gate, decided by the Director; no extra session or cost
+  3) librarian -- the gate, decided by a Librarian, as one more model session
+Documentation gate (optional) [off]:
+```
+
+`director` creates no role and no session. `librarian` asks the Librarian's
+runtime, model and effort the way every role's are asked. Before anything is
+created, `new` prints the choice (`switchyard: Documentation gate: off`, `...: on,
+decided by the Director`, or `...: on, decided by a Librarian (...)`). It is
+recorded in the design artifact as `project.documentation = {"gate": "director"}`
+or `{"gate": "librarian", "runtime": ..., "model": ..., "effort": ...}`; no field,
+or `{"gate": "off"}`, means off. Noninteractively, `team-launcher <project> design
+--documentation-gate director` or `--librarian-runtime <cli> [--librarian-model M]
+[--librarian-effort E]` records it. A project with the gate starts with a declared
+workflow, as with Router (both, when both are chosen), with the gate added by the
+same `with_documentation_gate` that `switchyard documentation-gate <project>
+enable` uses; a Librarian starts detached with the other roles, and its runtime
+goes through the same agent CLI checks. Off is provisioned exactly as before, and
+`switchyard upgrade` never turns it on. See
+`docs/onboarding/switchyard-librarian-guide.md` and `docs/syrd-624-documentation-gate.md`.
+
 `switchyard add-role <project> <role> --cli <cli>` adds another implementer role
 after provisioning. `switchyard add-role <project> <role> --audit --cli <cli>`
 adds an auditor role instead. Auditor additions widen the Audit stage owners,

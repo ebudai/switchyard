@@ -60,6 +60,8 @@ import copy
 from pathlib import PurePosixPath
 from typing import Any, Callable, Iterable
 
+from .publisher_stage import canonical_publisher_returns
+
 LIBRARIAN_ROLE = "librarian"
 LIBRARIAN_KIND = "reviewer"
 DOCUMENTATION_STAGE = "documentation"
@@ -277,7 +279,9 @@ def with_documentation_gate(document: dict[str, Any], *, librarian: dict[str, An
         raise ValueError(f"documentation gate: the Director cannot defer work out of {after}, so the new stage "
                          "would have no way to put work down; add the stage by hand instead")
     cfg["transitions"] += _gate_transitions(cfg, impl["name"], after, owner) + exits
-    return validate(cfg)
+    # Turned off earlier: the stage is declared again, so its removal no longer stands.
+    cfg["remove_stages"] = [name for name in cfg.get("remove_stages") or [] if name != DOCUMENTATION_STAGE]
+    return validate(canonical_publisher_returns(cfg))
 
 
 def without_documentation_gate(document: dict[str, Any]) -> dict[str, Any]:

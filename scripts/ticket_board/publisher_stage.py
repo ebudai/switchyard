@@ -142,6 +142,23 @@ def _stages() -> list[dict[str, Any]]:
     ]
 
 
+def canonical_publisher_returns(cfg: dict[str, Any]) -> dict[str, Any]:
+    """`cfg` with the Publisher's two returns clearing every sign-off it now declares, in place (SYRD-641).
+
+    A return clears every sign-off, so the next candidate goes through every gate
+    again; validate_publisher holds that exactly. A composition that adds or
+    removes a sign-off flag -- the documentation gate's -- calls this before it
+    validates, so the gate and the Publisher can be turned on and off in either
+    order. Without a publication stage it changes nothing.
+    """
+    if publication_stage(cfg) is not None:
+        every = _signoffs(cfg)
+        for t in cfg["transitions"]:
+            if (t["from"], t["action"]) in ((PUBLICATION_STAGE, RETURN), (FAILED_STAGE, KICK_BACK)):
+                t["clear_signoffs"] = list(every)
+    return cfg
+
+
 def with_publisher(document: dict[str, Any]) -> dict[str, Any]:
     """`document` with the Publisher between Audit and what Audit approved into. Raises ValueError, changing nothing."""
     from scripts.ticket_board.workflow_config import DIRECTOR_ROLE, parking_stage_names, validate

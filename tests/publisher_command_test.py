@@ -245,6 +245,58 @@ def test_the_schema_carries_the_migration_exactly() -> None:
     check(all(line in rbac for line in grants), "and rbac.sql grants what the migration grants")
 
 
+def normal(doc: dict) -> tuple:
+    """A document as a set of declarations: what it says, whatever order composition appended it in."""
+    return ({st["name"]: st for st in doc["stages"]},
+            sorted(json.dumps(tr, sort_keys=True) for tr in doc["transitions"]),
+            doc["flags"], {r["name"]: r for r in doc["roles"]}, sorted(doc.get("remove_stages") or []))
+
+
+def test_the_documentation_gate_and_the_publisher_commute() -> None:
+    """SYRD-641: either may be turned on first, and each off and on again, and the document is the same."""
+    from scripts.ticket_board.documentation_gate import with_documentation_gate, without_documentation_gate
+
+    def attempt(fn):
+        try:
+            return fn()
+        except ValueError as exc:
+            return f"refused: {exc}"
+
+    for owner, librarian in (("director", None), ("librarian", {"runtime": "claude", "template_role": "main"})):
+        gate_first = attempt(lambda: with_publisher(with_documentation_gate(SHIPPED, librarian=librarian)))
+        publisher_first = attempt(lambda: with_documentation_gate(with_publisher(SHIPPED), librarian=librarian))
+        check(isinstance(publisher_first, dict),
+              f"{owner}: the gate can be turned on where the Publisher already runs: {publisher_first}")
+        check(isinstance(gate_first, dict) and normal(gate_first) == normal(publisher_first),
+              f"{owner}: either order composes the same document")
+        returns = [tr for tr in publisher_first["transitions"]
+                   if tr["action"] in (ps.RETURN, ps.KICK_BACK)]
+        check(len(returns) == 2 and all(tr["clear_signoffs"] == sorted(
+                  n for n, f in publisher_first["flags"].items() if f["kind"] == "signoff")
+                  and "documentation_signoff" in tr["clear_signoffs"] for tr in returns),
+              f"{owner}: the Publisher's returns clear the gate's sign-off too: {returns}")
+        doc = publisher_first
+        for cycle in range(3):  # each off and on again, alternately, three times
+            off = attempt(lambda: without_documentation_gate(doc))
+            check(isinstance(off, dict) and all("documentation_signoff" not in tr["clear_signoffs"]
+                                               for tr in off["transitions"]),
+                  f"{owner} cycle {cycle}: the gate off leaves no return clearing a sign-off it no longer has: {off}")
+            doc = attempt(lambda: with_documentation_gate(off, librarian=librarian))
+            check(isinstance(doc, dict) and normal(doc) == normal(publisher_first),
+                  f"{owner} cycle {cycle}: the gate on again gives back the same document")
+            off = attempt(lambda: without_publisher(doc))
+            check(isinstance(off, dict), f"{owner} cycle {cycle}: the Publisher off: {off}")
+            doc = attempt(lambda: with_publisher(off))
+            check(isinstance(doc, dict) and normal(doc) == normal(publisher_first),
+                  f"{owner} cycle {cycle}: the Publisher on again gives back the same document")
+        # Fail closed, still: a return that does not clear every sign-off is refused, never repaired by validation.
+        stale = json.loads(json.dumps(publisher_first))
+        next(tr for tr in stale["transitions"] if tr["action"] == ps.RETURN)["clear_signoffs"].remove(
+            "documentation_signoff")
+        check("exactly as composed" in str(refusal(lambda: validate(stale))),
+              f"{owner}: a stale sign-off clearing is still refused")
+
+
 def test_the_engine_reads_git_as_it_answers() -> None:
     """The Publisher's small judgements, each on git's own words and git's own formats."""
     import subprocess
@@ -322,11 +374,11 @@ def exercise_command(cluster, board: Board) -> None:
     previous = launcher.DEFAULT_CONFIG_DIR
     launcher.DEFAULT_CONFIG_DIR = launcher_dir
     try:
-        def run(*args: str) -> tuple[object, str, str]:
+        def run(*args: str, command: str = "publisher") -> tuple[object, str, str]:
             out, err = io.StringIO(), io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 try:
-                    code = launcher.switchyard_main(["publisher", *args])
+                    code = launcher.switchyard_main([command, *args])
                 except SystemExit as exc:
                     code = exc.code
                 except Exception as exc:  # a fault in the command is a failed check, not a crash
@@ -355,6 +407,25 @@ def exercise_command(cluster, board: Board) -> None:
         check(code == 0 and "publication" not in [s["name"] for s in stored["stages"]]
               and moves(stored)[("audit", "audit_sign_off")]["to"] == "dat" and not role(stored, "publisher")["active"],
               f"disable puts Audit's approvals back and turns the Publisher off: {code} {err[-300:]}")
+        # SYRD-641: the documentation gate and the Publisher, by their real commands, in both orders and cycles.
+        sequence = [("publisher", "enable"), ("documentation-gate", "enable"), ("documentation-gate", "disable"),
+                    ("documentation-gate", "enable"), ("publisher", "disable"), ("publisher", "enable")]
+        documents = {}
+        for command, action in sequence:
+            code, _, err = run("cerulean", action, command=command)
+            check(code == 0, f"switchyard {command} cerulean {action}, with the other as it stands: {code} {err[-400:]}")
+            documents[(command, action, len(documents))] = board.document()
+        both = [doc for key, doc in documents.items() if key[2] in (1, 3, 5)]
+        check(all(normal(doc) == normal(both[0]) for doc in both)
+              and stage(both[0], "documentation")["owners"] == ["director"]
+              and stage(both[0], "publication")["owners"] == ["publisher"],
+              "the board holds the same document whichever was turned on last")
+        gate_alone = documents[("documentation-gate", "disable", 2)]
+        check("documentation" not in [st["name"] for st in gate_alone["stages"]]
+              and all("documentation_signoff" not in tr["clear_signoffs"] for tr in gate_alone["transitions"]),
+              "the gate turned off on the Publisher's board leaves its returns clearing only what remains")
+        for command in ("publisher", "documentation-gate"):
+            check(run("cerulean", "disable", command=command)[0] == 0, f"{command} off again")
     finally:
         launcher.DEFAULT_CONFIG_DIR = previous
 

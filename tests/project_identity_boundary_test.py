@@ -394,7 +394,7 @@ def test_the_seams_read_through_the_launcher_and_nothing_bound() -> None:
     # The class defaults are literals: defining the classes reads nothing.
     defaults = {n.name: [ast.unparse(s.value) for s in n.body if isinstance(s, ast.AnnAssign) and s.value is not None]
                 for n in tree.body if isinstance(n, ast.ClassDef)}
-    check(defaults == {"RoleConfig": ["''", "()", "False", "''"], "ProjectConfig": ["None", "False", "None"], "SwitchyardProjectEntry": []},
+    check(defaults == {"RoleConfig": ["''", "()", "False", "''", "()"], "ProjectConfig": ["None", "False", "None"], "SwitchyardProjectEntry": []},
           f"every field default a literal, as before: {defaults}")
     top = [ast.unparse(n) for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
     tc = [ast.unparse(n) for n in tree.body if isinstance(n, ast.If)]

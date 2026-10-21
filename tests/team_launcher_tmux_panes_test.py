@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from team_launcher_test_helpers import *
+from provider_store_fixture import owned_record, transcript_for  # SYRD-638: a session as its provider files it
 
 def test_konsole_log_is_readable_by_sudo_invoking_user() -> None:
     original_chown = team_launcher.os.chown
@@ -295,8 +296,8 @@ def test_pane_start_from_another_pane_uses_target_session_and_clears_caller_tmux
             session_dir.mkdir()
             session_id = "research-session-id"
             transcript = tmp_path / "research.jsonl"
-            transcript.write_text("{}\n", encoding="utf-8")
-            (session_dir / session_file_name(role.target)).write_text(
+            transcript.write_text(transcript_for(role), encoding="utf-8")
+            owned_record(session_dir, role).write_text(
                 json.dumps({"target": role.target, "session_id": session_id, "payload": {"transcript_path": str(transcript)}})
                 + "\n",
                 encoding="utf-8",

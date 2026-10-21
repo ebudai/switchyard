@@ -88,6 +88,7 @@ def scenario(root: Path, work: Path) -> dict:
     raw = json.loads((root / "config" / "team-launcher" / "pgu.json").read_text(encoding="utf-8"))
     raw["run_as_user"] = getpass.getuser()
     for role in raw["roles"]:
+        role["workdir"] = str(work / "worktrees" / role["role"])  # each in its own worktree, as tenants are (SYRD-638)
         if PROVIDERS.get(role["role"]) == "agy":  # as an agy role is configured: it resumes with --conversation
             role.update(cli=["agy"], resume_mode="flag", resume_flag="--conversation")
             role.pop("model", None)
@@ -135,16 +136,18 @@ def scenario(root: Path, work: Path) -> dict:
     launcher.RESUME_STARTUP_POLL_SECONDS = 0.05
 
     def converse(role, session_id: str) -> None:
-        """The provider's store holds this conversation."""
+        """The provider's store holds this conversation, run in the role's worktree (SYRD-638: as the provider files it)."""
+        from provider_store_fixture import agy_conversation, write_session
+
         cli = PROVIDERS[role.role]
         if cli == "claude":
             path = launcher._claude_project_dir_for_workdir(role.workdir, home=home) / f"{session_id}.jsonl"
         elif cli == "codex":
             path = home / ".codex" / "sessions" / "2026" / "10" / "18" / f"rollout-2026-10-18T09-03-05-{session_id}.jsonl"
         else:
-            path = agy_root / "conversations" / f"{session_id}.db"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("{}\n", encoding="utf-8")
+            agy_conversation(agy_root, session_id, role.workdir)
+            return
+        write_session(path, cli, session_id, role.workdir)
 
     def own_dir(role) -> Path:
         return launcher.role_session_dir(config, role)

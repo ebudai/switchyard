@@ -381,6 +381,11 @@ def attach_role_to_slot(
             _decided(role, session_dir, "team_launcher.attach_role", "no_record",
                      f"team-launcher: cannot attach {role.role}; no live session or recorded resume id")
             return 1
+        # SYRD-638: another role's conversation is set aside with its reason, never resumed.
+        from scripts.session_provenance import refuse_foreign
+
+        if refuse_foreign(role, session_id, session_dir, "team_launcher.attach_role"):
+            return 1
         preflight_ok, preflight_message = _resume_preflight_allows_attempt(role, session_id, session_dir=session_dir)
         if not preflight_ok:
             _decided(role, session_dir, "team_launcher.attach_role", "preflight_refused", preflight_message, session_id)

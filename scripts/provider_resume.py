@@ -294,9 +294,14 @@ def codex_session_store_exists(
 
 
 def _resume_preflight_allows_attempt(role: RoleConfig, session_id: str, *, session_dir: Path) -> tuple[bool, str]:
+    from scripts import session_provenance
     from scripts import team_launcher as launcher
 
     record = launcher._session_record_for_role(role, session_dir)
+    # SYRD-638: only a conversation the provider files as this role's.
+    verdict = session_provenance.judge(role, session_id, record, session_dir=session_dir)
+    if not verdict.ok:
+        return False, session_provenance.refusal(role, session_id, verdict)
     if _uses_claude_resume(role):
         found, location = claude_session_store_exists(role, session_id, session_dir=session_dir, record=record)
         if found:

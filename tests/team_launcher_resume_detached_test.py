@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from team_launcher_test_helpers import *
+from provider_store_fixture import owned_record, transcript_for  # SYRD-638: a session as its provider files it
 
 def test_visible_start_fails_before_attach_when_cli_exits_immediately() -> None:
     config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
@@ -132,8 +133,8 @@ def test_start_resumes_recorded_session_when_recreating_missing_pane() -> None:
         session_dir = Path(tmp)
         session_id = "12345678-1234-5678-9abc-def012345678"
         transcript = Path(tmp) / "codex-session.jsonl"
-        transcript.write_text("{}\n", encoding="utf-8")
-        (session_dir / session_file_name(role.target)).write_text(
+        transcript.write_text(transcript_for(role), encoding="utf-8")
+        owned_record(session_dir, role).write_text(
             json.dumps({"target": role.target, "session_id": session_id, "payload": {"transcript_path": str(transcript)}})
             + "\n",
             encoding="utf-8",
@@ -215,8 +216,8 @@ def test_start_resumes_from_durable_session_dir_after_runtime_tmpfs_is_cleared()
         runtime_tmpfs.mkdir(parents=True)
         session_id = "32345678-1234-5678-9abc-def012345678"
         transcript = tmp_path / "codex-session.jsonl"
-        transcript.write_text("{}\n", encoding="utf-8")
-        (durable / session_file_name(role.target)).write_text(
+        transcript.write_text(transcript_for(role), encoding="utf-8")
+        owned_record(durable, role).write_text(
             json.dumps({"target": role.target, "session_id": session_id, "payload": {"transcript_path": str(transcript)}})
             + "\n",
             encoding="utf-8",

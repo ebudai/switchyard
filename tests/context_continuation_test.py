@@ -747,9 +747,10 @@ class LaunchKit:
 
     def converse(self, session_id: str) -> None:
         """The provider's own store holds this conversation, as a resumable one does."""
+        from provider_store_fixture import write_session
+
         path = self.launcher._claude_project_dir_for_workdir(self.role.workdir, home=self.home) / f"{session_id}.jsonl"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("{}\n", encoding="utf-8")
+        write_session(path, "claude", session_id, self.role.workdir)  # as Claude files it (SYRD-638)
 
     def record(self, session_id: str | None) -> None:
         path = self.session_dir / self.launcher.session_file_name(self.role.target)

@@ -83,6 +83,11 @@ def adopt_stranded_session_record(role: RoleConfig, session_dir: Path) -> None:
            if (record := _read(role, path)) is not None]
     if any(_recorded_at(stranded, shared / name) <= _recorded_at(record, path) for record, path in own):
         return
+    # SYRD-638: nor a conversation already refused as another role's.
+    for path in session_dir.glob(f"{name}.foreign-*"):
+        refused = _read(role, path)
+        if refused is not None and str(refused["session_id"]).strip() == session_id:
+            return
     launcher.clear_session_record_for_role(role, session_dir)
     launcher._write_private_json_atomic(session_dir / name, stranded)
     from scripts.role_sessions import _decided

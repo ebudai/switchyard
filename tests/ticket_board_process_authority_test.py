@@ -472,7 +472,8 @@ def test_claude_director_context_is_repatriated_before_binding_is_removed() -> N
             / f"{session_id}.jsonl"
         )
         transcript.parent.mkdir(parents=True)
-        transcript.write_text('{"type":"summary"}\n')
+        # SYRD-638: as Claude files it, run in the worktree.
+        transcript.write_text('{"type":"summary"}\n' + json.dumps({"type": "user", "cwd": str(worktree)}) + "\n")
         record_path = legacy_sessions / team_launcher.session_file_name("demo-director:0.0")
         record_path.write_text(json.dumps({
             "target": "demo-director:0.0", "session_id": session_id,
@@ -537,7 +538,8 @@ def test_codex_director_context_is_repatriated_before_binding_is_removed() -> No
             f"rollout-{session_id}.jsonl"
         )
         transcript.parent.mkdir(parents=True)
-        transcript.write_text('{"type":"session_meta"}\n')
+        # SYRD-638: as Codex files it, run in the worktree.
+        transcript.write_text(json.dumps({"type": "session_meta", "payload": {"cwd": str(worktree)}}) + "\n")
         record_path = legacy_sessions / team_launcher.session_file_name("demo-director:0.0")
         record_path.write_text(json.dumps({
             "target": "demo-director:0.0", "session_id": session_id,

@@ -13,6 +13,7 @@ import json
 import os
 import re
 import select
+import stat
 import sys
 import time
 from pathlib import Path
@@ -553,6 +554,55 @@ def _write_session(
     return path
 
 
+#: What a SessionStart's payload calls a conversation it has just opened, as Claude Code, Codex and Copilot
+#: report it; a `/resume` says `resume`, a compaction `compact` (SYRD-638).
+NEW_CONVERSATION_SOURCES = frozenset({"startup", "clear", "new"})
+CONVERSATION_OWNERS_DIR = "conversation-owners"
+
+
+def _opens_new_conversation(source: str, payload: object) -> bool:
+    """Whether this SessionStart is its provider opening a new conversation in this pane, as the provider says."""
+    if not _is_session_start_hook_source(source):
+        return False
+    started = _session_start_source(payload)
+    if source.startswith("gemini."):
+        # agy sends no SessionStart for a /resume (SYRD-622); a payload that names one is still believed.
+        return started in ("", *NEW_CONVERSATION_SOURCES)
+    if source.startswith(COPILOT_SOURCE_PREFIX):
+        return started in NEW_CONVERSATION_SOURCES and _payload_string(payload, "copilot_source") in ("", "new")
+    return started in NEW_CONVERSATION_SOURCES
+
+
+def _claim_new_conversation(session_dir: Path, target: str, session_id: str, source: str,
+                            environ: dict[str, str]) -> None:
+    """Record a conversation this pane's provider just opened as the pane's role's own (SYRD-638).
+
+    The launcher resumes, in a worktree several roles share, only a conversation some record shows to be the
+    role's; this is that record, made at the one moment it is certain. The first claim stands. Never fatal.
+    """
+    role = session_dir.name if session_dir.parent.name == "roles" else ""
+    declared = _env_first(environ, "TICKET_BOARD_CALLER_ROLE")
+    role = role or declared
+    if not role or (declared and declared != role) or not session_id or "/" in session_id or session_id in (".", ".."):
+        return
+    owners = (session_dir.parent.parent if session_dir.parent.name == "roles" else session_dir) / CONVERSATION_OWNERS_DIR
+    try:
+        os.mkdir(owners, 0o700)
+    except FileExistsError:
+        pass
+    except OSError:
+        return
+    try:
+        if not stat.S_ISDIR(owners.lstat().st_mode):
+            return
+        fd = os.open(owners / session_id, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except OSError:
+        return
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps({"role": role, "target": target, "session_id": session_id, "how": f"hook:{source}",
+                                 "at": time.time()}, sort_keys=True) + "\n")
+
+
 def _session_id_from_file(path: Path) -> str:
     try:
         parsed = json.loads(path.read_text(encoding="utf-8"))
@@ -1034,6 +1084,8 @@ def main(argv: list[str] | None = None) -> int:
         pane_provider_switch=bool(provider),
     ):
         _write_session(session_dir, target, session_id, source=args.source, payload=payload)
+        if session_id != existing_session_id and _opens_new_conversation(source, payload):
+            _claim_new_conversation(session_dir, target, session_id, source, os.environ)
         if session_id != existing_session_id:
             _append_resume_history(session_dir, target, {
                 "event": "recorded", "session_id": session_id, "previous": existing_session_id,

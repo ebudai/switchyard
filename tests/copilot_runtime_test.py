@@ -52,6 +52,7 @@ from scripts.ticket_board import board_skill, notification_session_clear, provid
 from scripts.ticket_board import runtime_catalog, session_context, workflow_config  # noqa: E402
 from scripts.ticket_board import pane_activity_gate, pane_state  # noqa: E402
 from scripts import provider_screen  # noqa: E402
+from provider_store_fixture import transcript_for  # SYRD-638: a session as its provider files it
 
 FIXTURES = ROOT / "tests" / "fixtures" / "copilot-1.0.101"
 HOOK = ROOT / "scripts" / "ticket-board-pane-idle-hook"
@@ -259,7 +260,7 @@ def test_resume_argv_and_the_preflight() -> None:
               f"a session Copilot does not hold is reported, not passed: {why}")
         transcript = home / ".copilot" / "session-state" / sid / "events.jsonl"
         transcript.parent.mkdir(parents=True)
-        transcript.write_text("{}\n")
+        transcript.write_text(transcript_for(copilot_role))  # SYRD-638: as Copilot files it
         ok, why = launcher._resume_preflight_allows_attempt(copilot_role, sid, session_dir=sessions)
         check(ok and not why, f"Copilot's own transcript lets the resume go ahead: {why}")
         moved = replace(copilot_role, env={**copilot_role.env, "COPILOT_HOME": str(home / "elsewhere")})
@@ -884,7 +885,7 @@ def test_a_role_with_its_own_copilot_home_is_served_there() -> None:
         sid = "46ffe999-8bcb-4d01-aaa1-60a34e9d0954"
         transcript = custom / "session-state" / sid / "events.jsonl"
         transcript.parent.mkdir(parents=True)
-        transcript.write_text("{}\n")
+        transcript.write_text(transcript_for(copilot_role))  # SYRD-638: as Copilot files it
         sessions = home / ".local" / "state" / "pgu-ticket-board" / "pane-sessions"
         sessions.mkdir(parents=True)
         ok, why = launcher._resume_preflight_allows_attempt(copilot_role, sid, session_dir=sessions)
@@ -892,7 +893,7 @@ def test_a_role_with_its_own_copilot_home_is_served_there() -> None:
         relative = role("copilot", workdir=str(work), env={"COPILOT_HOME": "rel-root"})
         moved = work / "rel-root" / "session-state" / sid / "events.jsonl"
         moved.parent.mkdir(parents=True)
-        moved.write_text("{}\n")
+        moved.write_text(transcript_for(relative))
         ok, why = launcher._resume_preflight_allows_attempt(relative, sid, session_dir=sessions)
         check(ok and not why, f"a relative COPILOT_HOME is the worktree's, as Copilot reads it: {why}")
 

@@ -706,6 +706,7 @@ def _verify_copy(role, session_dir: Path, owner_ids: tuple[int, int] | None) -> 
     The checks read the owner's provider stores by path, as the launcher does when it resumes; done by root that
     would look through any link the tenant left there, so a child that has become the owner does it (SYRD-612).
     """
+    from scripts import session_provenance  # noqa: F401 -- loaded before the child drops: it may not read this release (SYRD-638)
     from scripts import team_launcher as launcher
 
     def answer() -> tuple[str, bool, str]:

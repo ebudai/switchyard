@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from team_launcher_test_helpers import *
+from provider_store_fixture import agy_conversation, owned_record, transcript_for  # SYRD-638: a session as its provider files it
 
 def test_detach_visible_role_updates_config_and_leaves_session_running() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-surface-detach.") as tmp:
@@ -248,8 +249,8 @@ def test_reload_uses_recorded_resume_uuid_when_recreating_session() -> None:
         session_dir = Path(tmp)
         session_id = "12345678-1234-5678-9abc-def012345678"
         transcript = Path(tmp) / "codex-session.jsonl"
-        transcript.write_text("{}\n", encoding="utf-8")
-        (session_dir / session_file_name(role.target)).write_text(
+        transcript.write_text(transcript_for(role), encoding="utf-8")
+        owned_record(session_dir, role).write_text(
             json.dumps({"target": role.target, "session_id": session_id, "payload": {"transcript_path": str(transcript)}})
             + "\n",
             encoding="utf-8",
@@ -503,9 +504,9 @@ def test_claude_reload_uses_recorded_id_when_local_transcript_exists() -> None:
         session_dir = tmp_path / "sessions"
         session_dir.mkdir()
         transcript = tmp_path / "claude-session.jsonl"
-        transcript.write_text("{}\n", encoding="utf-8")
+        transcript.write_text(transcript_for(role), encoding="utf-8")
         session_id = "12345678-1234-5678-9abc-def012345678"
-        (session_dir / session_file_name(role.target)).write_text(
+        owned_record(session_dir, role).write_text(
             json.dumps(
                 {
                     "target": role.target,
@@ -546,8 +547,8 @@ def test_claude_no_transcript_path_record_uses_project_key_fallback() -> None:
         session_dir.mkdir(parents=True)
         claude_project_dir = home / ".claude" / "projects" / "-home-agent-Projects-pgu"
         claude_project_dir.mkdir(parents=True)
-        (claude_project_dir / f"{session_id}.jsonl").write_text("{}\n", encoding="utf-8")
-        (session_dir / session_file_name(role.target)).write_text(
+        (claude_project_dir / f"{session_id}.jsonl").write_text(transcript_for(role), encoding="utf-8")
+        owned_record(session_dir, role).write_text(
             json.dumps({"target": role.target, "session_id": session_id}) + "\n",
             encoding="utf-8",
         )
@@ -573,7 +574,7 @@ def test_claude_no_transcript_path_record_uses_project_key_fallback() -> None:
         home = tmp_path / "home"
         session_dir = home / ".local" / "state" / "pgu-ticket-board" / "pane-sessions"
         session_dir.mkdir(parents=True)
-        (session_dir / session_file_name(role.target)).write_text(
+        owned_record(session_dir, role).write_text(
             json.dumps({"target": role.target, "session_id": session_id}) + "\n",
             encoding="utf-8",
         )
@@ -657,9 +658,9 @@ def test_claude_start_falls_back_fresh_when_resume_attempt_exits_immediately() -
         session_dir = tmp_path / "sessions"
         session_dir.mkdir()
         transcript = tmp_path / "claude-session.jsonl"
-        transcript.write_text("{}\n", encoding="utf-8")
+        transcript.write_text(transcript_for(role), encoding="utf-8")
         session_id = "12345678-1234-5678-9abc-def012345678"
-        (session_dir / session_file_name(role.target)).write_text(
+        owned_record(session_dir, role).write_text(
             json.dumps(
                 {
                     "target": role.target,
@@ -708,8 +709,8 @@ def test_reload_preserves_session_record_when_resume_cli_is_slow_to_exec() -> No
             session_dir = Path(tmp)
             session_id = "12345678-1234-5678-9abc-def012345678"
             transcript = Path(tmp) / "codex-session.jsonl"
-            transcript.write_text("{}\n", encoding="utf-8")
-            (session_dir / session_file_name(role.target)).write_text(
+            transcript.write_text(transcript_for(role), encoding="utf-8")
+            owned_record(session_dir, role).write_text(
                 json.dumps(
                     {"target": role.target, "session_id": session_id, "payload": {"transcript_path": str(transcript)}}
                 )
@@ -818,13 +819,12 @@ def test_agy_reload_uses_recorded_id_when_local_conversation_store_exists() -> N
         session_dir = tmp_path / "sessions"
         session_id = "12345678-1234-5678-9abc-def012345678"
         (session_dir / session_file_name(role.target)).parent.mkdir(parents=True, exist_ok=True)
-        (session_dir / session_file_name(role.target)).write_text(
+        owned_record(session_dir, role).write_text(
             json.dumps({"target": role.target, "session_id": session_id}) + "\n",
             encoding="utf-8",
         )
         agy_root = tmp_path / "agy-store"
-        (agy_root / "conversations").mkdir(parents=True)
-        (agy_root / "conversations" / f"{session_id}.db").write_text("sqlite placeholder\n", encoding="utf-8")
+        agy_conversation(agy_root, session_id, role.workdir)  # SYRD-638: as agy files it
         team_launcher.AGY_CONVERSATION_ROOT = agy_root
         try:
             assert (

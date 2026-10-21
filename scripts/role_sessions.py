@@ -146,6 +146,11 @@ def _start_role_session(
                  "starting a fresh session instead of inheriting the previous ticket context", session_id)
         prefer_resume = False
     if prefer_resume:
+        # SYRD-638: another role's conversation is set aside with its reason, never resumed.
+        from scripts.session_provenance import refuse_foreign
+
+        prefer_resume = not refuse_foreign(role, session_id, session_dir, seed_source)
+    if prefer_resume:
         preflight_ok, preflight_message = launcher._resume_preflight_allows_attempt(role, session_id, session_dir=session_dir)
         if not preflight_ok:
             _decided(role, session_dir, seed_source, "preflight_refused", preflight_message, session_id)

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from team_launcher_test_helpers import *
+from provider_store_fixture import owned_record, transcript_for  # SYRD-638: the role's own conversation
 
 def test_dry_run_reports_shared_checkout_without_syncing_it() -> None:
     config_path = ROOT / "config" / "team-launcher" / "pgu.json"
@@ -439,8 +440,8 @@ def test_attach_role_config_write_failure_does_not_start_or_attach_session() -> 
         research = next(role for role in config.roles if role.role == "research")
         session_id = "12345678-1234-5678-9abc-def012345678"
         transcript = tmp_path / "codex-session.jsonl"
-        transcript.write_text("{}\n", encoding="utf-8")
-        (session_dir / session_file_name(research.target)).write_text(
+        transcript.write_text(transcript_for(research), encoding="utf-8")
+        owned_record(session_dir, research).write_text(
             _session_payload(research.target, session_id, {"transcript_path": str(transcript)}),
             encoding="utf-8",
         )
@@ -522,9 +523,9 @@ def test_attach_headless_role_to_free_slot_resumes_without_touching_neighbours()
         worker = next(role for role in config.roles if role.role == "worker7")
         session_id = "12345678-1234-5678-9abc-def012345678"
         transcript = tmp_path / "codex-session.jsonl"
-        transcript.write_text("{}\n", encoding="utf-8")
+        transcript.write_text(transcript_for(worker), encoding="utf-8")
         config.session_dir.mkdir(parents=True)
-        (config.session_dir / session_file_name(worker.target)).write_text(
+        owned_record(config.session_dir, worker).write_text(
             _session_payload(worker.target, session_id, {"transcript_path": str(transcript)}),
             encoding="utf-8",
         )
@@ -747,9 +748,9 @@ def test_attach_headless_role_failed_start_rolls_config_back_to_detached() -> No
         worker = next(role for role in config.roles if role.role == "worker7")
         session_id = "12345678-1234-5678-9abc-def012345678"
         transcript = tmp_path / "codex-session.jsonl"
-        transcript.write_text("{}\n", encoding="utf-8")
+        transcript.write_text(transcript_for(worker), encoding="utf-8")
         config.session_dir.mkdir(parents=True)
-        (config.session_dir / session_file_name(worker.target)).write_text(
+        owned_record(config.session_dir, worker).write_text(
             _session_payload(worker.target, session_id, {"transcript_path": str(transcript)}),
             encoding="utf-8",
         )
@@ -828,9 +829,9 @@ def test_attach_headless_role_unverified_resume_does_not_mutate_config() -> None
         worker = next(role for role in config.roles if role.role == "worker7")
         session_id = "12345678-1234-5678-9abc-def012345678"
         transcript = tmp_path / "codex-session.jsonl"
-        transcript.write_text("{}\n", encoding="utf-8")
+        transcript.write_text(transcript_for(worker), encoding="utf-8")
         config.session_dir.mkdir(parents=True)
-        (config.session_dir / session_file_name(worker.target)).write_text(
+        owned_record(config.session_dir, worker).write_text(
             _session_payload(worker.target, session_id, {"transcript_path": str(transcript)}),
             encoding="utf-8",
         )

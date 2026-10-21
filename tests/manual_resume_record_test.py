@@ -106,6 +106,7 @@ def scenario(root: Path, work: Path) -> dict:
     raw = json.loads((root / "config" / "team-launcher" / "pgu.json").read_text(encoding="utf-8"))
     raw["run_as_user"] = getpass.getuser()
     for role in raw["roles"]:
+        role["workdir"] = str(work / "worktrees" / role["role"])  # each in its own worktree, as tenants are (SYRD-638)
         if role["role"] == "audit":
             role["cli"] = ["agy"]
             role.pop("model", None)
@@ -165,10 +166,14 @@ def scenario(root: Path, work: Path) -> dict:
         return home / ".gemini" / "antigravity-cli" / "conversations" / f"{session_id}.db"
 
     def converse(role, session_id: str) -> None:
-        """The provider's store holds this conversation: something was said in it."""
+        """The provider's store holds this conversation: something was said in it, in the role's worktree (SYRD-638)."""
+        from provider_store_fixture import agy_conversation, write_session
+
         path = transcript(role, session_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("{}\n", encoding="utf-8")
+        if PROVIDERS[role.role] == "agy":
+            agy_conversation(path.parent.parent, session_id, role.workdir)
+        else:
+            write_session(path, PROVIDERS[role.role], session_id, role.workdir)
 
     def own_dir(role) -> Path:
         return launcher.role_session_dir(config, role)

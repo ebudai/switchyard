@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 import live_boundary; live_boundary.isolate()  # noqa: E402,E702 - SYRD-627 (live-home pane stores), within the line budget
-from team_launcher_test_helpers import *
+from team_launcher_test_helpers import *; from provider_store_fixture import owned_record, transcript_for  # noqa: E702 - SYRD-638 (a session as its provider files it), within the line budget
 
 def test_viewer_session_argument_is_required_and_has_no_global_default() -> None:
     signature = inspect.signature(team_launcher.launch_tmux_viewer_session)
@@ -580,8 +580,8 @@ def test_detached_research_resume_falls_back_when_failed_session_is_already_gone
             session_dir.mkdir()
             session_id = "12345678-1234-5678-9abc-def012345678"
             transcript = tmp_path / "claude-session.jsonl"
-            transcript.write_text("{}\n", encoding="utf-8")
-            (session_dir / session_file_name(role.target)).write_text(
+            transcript.write_text(transcript_for(role), encoding="utf-8")
+            owned_record(session_dir, role).write_text(
                 json.dumps(
                     {"target": role.target, "session_id": session_id, "payload": {"transcript_path": str(transcript)}}
                 )
@@ -1224,7 +1224,7 @@ def test_reload_syncs_live_cli_and_model_from_process_argv_before_relaunch() -> 
         research = next(role for role in config.roles if role.role == "research")
         config.session_dir.mkdir(parents=True, exist_ok=True)
         transcript = tmp_path / "claude-research-session.jsonl"
-        transcript.write_text("{}\n", encoding="utf-8")
+        transcript.write_text(transcript_for(research), encoding="utf-8")
         (config.session_dir / session_file_name(research.target)).write_text(
             _session_payload(
                 research.target,

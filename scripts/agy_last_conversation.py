@@ -94,7 +94,8 @@ def _skip(role: RoleConfig, session_dir: Path, why: str, session_id: str = "") -
 def adopt_agy_last_conversation(role: RoleConfig, session_dir: Path) -> None:
     """With no record, take the conversation agy last opened in the role's worktree as the role's record."""
     from scripts import team_launcher as launcher
-    from scripts.provider_resume import _uses_agy_conversation_resume, agy_conversation_root_for_session_dir
+    from scripts.provider_resume import (_uses_agy_conversation_resume, agy_conversation_root_for_session_dir,
+                                         agy_conversation_store_exists)
 
     if not _uses_agy_conversation_resume(role) or launcher._uses_fresh_session_per_ticket(role):
         return
@@ -131,6 +132,17 @@ def adopt_agy_last_conversation(role: RoleConfig, session_dir: Path) -> None:
                                      f"last came from {source or 'an unnamed source'}, not agy; a role new to "
                                      "agy does not inherit an older agy conversation", session_id)
             return
+    from scripts.session_provenance import agy_workspaces
+
+    # SYRD-638: one agy still holds must be filed under the role's worktree; one it lost is the preflight's to refuse.
+    held = agy_conversation_store_exists(session_id, root=path.parent.parent)
+    workspaces = agy_workspaces(path.parent.parent, session_id) if held else None
+    own = Path(role.workdir).expanduser().resolve(strict=False)
+    if held and not any(Path(w).resolve(strict=False) == own for w in workspaces or ()):
+        _skip(role, session_dir, f"agy's map names {session_id} for {role.workdir}, but agy files that conversation "
+                                 f"under {', '.join(workspaces) if workspaces else 'no workspace'}; it is not "
+                                 f"{role.role}'s to resume", session_id)
+        return
     launcher._write_private_json_atomic(session_dir / name, {
         "target": role.target, "session_id": session_id, "updated_at": time.time(), "source": SOURCE,
         "payload": {"workdir": role.workdir, "map": str(path), "map_written_at": written_at},

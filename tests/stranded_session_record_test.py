@@ -73,6 +73,7 @@ def scenario(root: Path, work: Path) -> dict:
     raw = json.loads((root / "config" / "team-launcher" / "pgu.json").read_text(encoding="utf-8"))
     raw["run_as_user"] = me
     for role in raw["roles"]:
+        role["workdir"] = str(work / "worktrees" / role["role"])  # each in its own worktree, as tenants are (SYRD-638)
         if role["role"] == "audit":  # SYRD's Audit runs agy; Main and the Director run Claude, ops Codex
             role["cli"] = ["agy"]
             role.pop("model", None)
@@ -125,9 +126,13 @@ def scenario(root: Path, work: Path) -> dict:
         elif cli == "codex":
             path = home / ".codex" / "sessions" / "2026" / "10" / "10" / f"rollout-x-{session_id}.jsonl"
         else:
-            path = home / ".gemini" / "antigravity-cli" / "conversations" / f"{session_id}.db"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("{}\n", encoding="utf-8")
+            from provider_store_fixture import agy_conversation
+
+            agy_conversation(home / ".gemini" / "antigravity-cli", session_id, role.workdir)
+            return
+        from provider_store_fixture import write_session
+
+        write_session(path, cli, session_id, role.workdir)  # as the provider files it (SYRD-638)
 
     def record(directory: Path, role, session_id: str, at: float, suffix: str = "", target: str | None = None) -> Path:
         path = directory / f"{launcher.session_file_name(role.target)}{suffix}"

@@ -109,7 +109,8 @@ def build():
         transcript.parent.mkdir(parents=True, exist_ok=True)
         effort = "medium" if role.role == "director" else "high"
         transcript.write_text(
-            line(type="user", message={"role": "user", "content": "hi"}, timestamp="2026-10-10T10:00:00.000Z")
+            line(type="user", cwd=role.workdir, message={"role": "user", "content": "hi"},  # SYRD-638: where it ran
+                 timestamp="2026-10-10T10:00:00.000Z")
             + turn(OLD, "high", "2026-10-10T10:00:05.000Z")
             + line(type="system", subtype="local_command", content="Set model to Opus 5.5 and saved as your default for new sessions",
                    timestamp="2026-10-10T10:20:00.000Z")

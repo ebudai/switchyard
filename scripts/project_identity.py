@@ -68,6 +68,9 @@ class RoleConfig:
     # override are decided; empty here means a config generated before that
     # existed, and the role's own name is the answer it had then.
     presentation_label: str = ""
+    # SYRD-638: the other roles configured in this same worktree. Where there are any, a conversation's workspace
+    # cannot say whose it is, so a resume needs proof the conversation is this role's own.
+    workdir_peers: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

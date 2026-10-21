@@ -141,6 +141,11 @@ def load_project_config(
             duplicate_non_shared.append(f"{previous_role}/{role.role}:{normalized_workdir}")
     if duplicate_non_shared:
         raise SystemExit(f"{path} contains duplicate non-shared role workdir assignments: {', '.join(duplicate_non_shared)}")
+    # SYRD-638: the roles sharing each worktree, whose conversations a workspace cannot tell apart.
+    places = {role.role: Path(role.workdir).expanduser().resolve(strict=False) for role in roles}
+    roles = [replace(role, workdir_peers=tuple(other.role for other in roles
+                                                if other.role != role.role and places[other.role] == places[role.role]))
+             for role in roles]
     parsed_config = launcher.ProjectConfig(
         project=config_project,
         project_name=project_name,

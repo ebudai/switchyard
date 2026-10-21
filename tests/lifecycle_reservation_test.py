@@ -36,6 +36,7 @@ from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
 isolate_tmux_bus()
 
 import ticket_board_write_api_test as t  # noqa: E402
+from scripts.ticket_board import uat_instructions  # noqa: E402
 from scripts.ticket_board.workflow_config import validate  # noqa: E402
 from temporary_cluster import temporary_cluster  # noqa: E402
 from workflow_document_eras import before_relaying  # noqa: E402
@@ -144,6 +145,11 @@ END $$;
     def through_uat(self, ticket: str, owner: str) -> None:
         self.act(ticket, "submit_to_audit", {"commit_hash": COMMIT}, owner)
         self.act(ticket, "audit_sign_off", {"text": "approved"}, "audit")
+        # SYRD-629: the User's UAT steps come before User Review, on a board that has them.
+        if t.psql(self.admin, "SELECT to_regprocedure('ticket_board.set_uat_instructions(text,text,text,text,boolean)') "
+                              "IS NOT NULL;").strip() == "t":
+            uat_instructions.perform(self.app, "set_uat_instructions", {"do_this": "Open the ticket's change.",
+                                                        "you_should_see": "It works."}, caller_role="director", ticket_id=ticket)
         uat = self.act(ticket, "director_dat_sign_off", {"text": "ready for UAT"}, "director")
         check((uat["state"], uat["assignee"]) == ("user_review", "user"), f"{ticket} is in User UAT: {uat['state']}")
 

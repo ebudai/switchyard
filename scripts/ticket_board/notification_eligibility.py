@@ -353,7 +353,7 @@ WHERE id = %s
         # for the Director: current while its ticket still waits there, which
         # the state and assignee checks above already establish (SYRD-539).
         if kind in {"pull_idle_capacity", "ticket_context", "delivery_proof", "background_hold",
-                    "composer_hold", "background_child", "blocked_pane"}:  # SYRD-539, 540, 565, 557, 570, 583, 633
+                    "composer_hold", "background_child", "blocked_pane", "uat_question"}:  # SYRD-539, 540, 565, 557, 570, 583, 633, 629
             return target_role == "director"
         # SYRD-594: a capacity retry, or the Director's alert, only while its episode still wants it:
         # the ticket is in the round the episode was opened in, and a retry is the episode's latest.

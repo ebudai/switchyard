@@ -983,7 +983,7 @@ FROM ticket_board.tickets t WHERE id = 'PGU-600';
         service_conn,
         """
 SELECT set_config('ticket_board.caller_role', 'director', false);
-SELECT ticket_board.route('PGU-602', 'user_review', 'user');
+SELECT ticket_board.set_uat_instructions('PGU-602', 'Read the question.', 'Two options.', 'Answer, then Accept.', false); SELECT ticket_board.route('PGU-602', 'user_review', 'user');
 """,
     )
     user_request = json.loads(

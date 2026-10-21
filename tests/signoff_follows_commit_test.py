@@ -35,6 +35,7 @@ from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
 isolate_tmux_bus()
 
 import ticket_board_write_api_test as t  # noqa: E402
+from scripts.ticket_board import uat_instructions  # noqa: E402
 from temporary_cluster import temporary_cluster  # noqa: E402
 from workflow_document_eras import before_relaying  # noqa: E402
 from schema_function_drift import rbac_before, schema_before  # noqa: E402
@@ -211,6 +212,8 @@ def run_after(cluster) -> None:
     check((seeded["state"], seeded["assignee"]) == ("in_progress", "main"), f"PGU-7 is Main's: {seeded['state']}")
     board.act("PGU-7", "submit_to_audit", {"commit_hash": AUDITED}, "main")
     board.act("PGU-7", "audit_sign_off", {"text": "approved"}, "audit")
+    uat_instructions.perform(board.app, "set_uat_instructions", {"do_this": "Open the ticket's change.",
+                                                    "you_should_see": "It works."}, caller_role="director", ticket_id="PGU-7")  # SYRD-629
     board.act("PGU-7", "director_dat_sign_off", {"text": "fine"}, "director")
     accepted = board.act("PGU-7", "user_sign_off", {"text": "accepted"}, "user")
     check((accepted["state"], accepted["user_signoff"], accepted["audit_signoff"]) == ("director_review", True, True),

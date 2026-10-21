@@ -34,6 +34,7 @@ from schema_function_drift import assert_no_drift
 from scripts.ticket_board.migration_order import key as migration_key, ordered_files
 from scripts.ticket_board.workflow_config import available_transitions, validate
 from temporary_cluster import temporary_cluster
+from workflow_document_eras import before_user_feedback as before_syrd629  # noqa: E402
 
 MIGRATION_PATH = ROOT / "scripts/ticket_board/migrations/pgu952_syrd214_relay_user_rejection.sql"
 MIGRATION = MIGRATION_PATH.read_text()
@@ -158,9 +159,14 @@ def main() -> int:
                 "SELECT document FROM ticket_board.workflow_configuration WHERE singleton;"))
 
         def configure(doc: dict) -> None:
+            # A stage this document drops is removed explicitly, as the board requires: going back to the
+            # earlier shape after the upgrade drops SYRD-629's decision stage.
+            dropped = sorted({s["name"] for s in document()["stages"]} - {s["name"] for s in doc["stages"]}) \
+                if revision() else []
             t.post_json(
                 base, "/api/tickets/actions/configure_workflow",
-                {"document": doc, "expected_revision": revision()}, caller="director",
+                {"document": doc | ({"remove_stages": dropped} if dropped else {}), "expected_revision": revision()},
+                caller="director",
             )
 
         def relay_once(phase: str, attempt: int) -> dict:
@@ -192,6 +198,8 @@ def main() -> int:
             act("PGU-1", "submit_to_audit_without_commit", owner, reason=f"fix {tag}")
             assert ticket()["state"] == "audit", ticket()
             act("PGU-1", "audit_sign_off", "audit")
+            # SYRD-629: the User's steps for this round, before it reaches them.
+            act("PGU-1", "set_uat_instructions", "director", do_this="Try the fix.", you_should_see="It works.")
             act("PGU-1", "director_dat_sign_off", "director")
             assert ticket()["state"] == "user_review", ticket()
             assert ticket()["user_signoff"] is False, "a relay never signs off for the User"
@@ -286,8 +294,12 @@ def main() -> int:
             # The refusals changed nothing.
             assert document() == live, phase
 
-        shipped = validate(json.loads((ROOT / "examples/workflows/inspection.json").read_text()))
-        assert len(relays(shipped)) == 1, "the shipped document carries the action"
+        current = validate(json.loads((ROOT / "examples/workflows/inspection.json").read_text()))
+        # SYRD-629: the shipped User sends their message to the Director, who has nothing to relay; a board
+        # whose User still returns work keeps this relay, so it is tested on that shape.
+        assert not relays(current) and any(tr["action"] == "user_send_to_director" for tr in current["transitions"])
+        shipped = validate(before_syrd629(current))
+        assert len(relays(shipped)) == 1, "the earlier shipped shape carries the action"
 
         # Fresh provisioning installs schema.sql's copy of these functions and
         # an upgrade installs a migration's, which is how every migration in
@@ -329,9 +341,6 @@ def main() -> int:
             # state no real board is ever left in.
             granted = revision()
             assert granted == before + 1, (before, granted)
-            for later in LATER_MIGRATIONS:
-                t.psql(admin, later)
-            after_all = revision()
             added = relays(document())
             assert len(added) == 1, added
             model = next(tr for tr in document()["transitions"] if tr["action"] == "user_kick_back")
@@ -340,16 +349,26 @@ def main() -> int:
             assert added[0]["actors"] == ["director"], added
             assert added[0]["primitive"] == "return" and added[0]["require_reason"] is True
             assert added[0]["owner_scoped"] is False and added[0]["relays_decision_of"] == "user"
+            for later in LATER_MIGRATIONS:
+                t.psql(admin, later)
+            after_all = revision()
             assert sql(
                 "SELECT document->'migrations'->>'relay_user_rejection' "
                 "FROM ticket_board.workflow_configuration WHERE singleton;"
             ) == "true"
+            # pgu1002 (SYRD-629), later in the same upgrade, gives this shipped-shape User Send to Director in
+            # place of the return the relay mirrored, and takes the relay with it.
+            assert not relays(document()) and any(
+                tr["action"] == "user_send_to_director" for tr in document()["transitions"]), document()["transitions"]
             # Idempotent: a second run of the whole sequence grants nothing
             # twice and writes no revision nobody asked for.
             t.psql(admin, MIGRATION)
             for later in LATER_MIGRATIONS:
                 t.psql(admin, later)
             assert revision() == after_all, (after_all, revision())
+            assert not relays(document()), document()["transitions"]
+            # A board that keeps the User's return keeps the relay, now on the migrations' bodies.
+            configure(before_syrd629(document()))
             assert len(relays(document())) == 1, document()["transitions"]
 
             # -- The same behaviour, now on the migration's bodies. -------------

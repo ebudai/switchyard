@@ -115,96 +115,10 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         }
       };
 
-      if (ticketIsUserReview(ticket)) {
-        const signoffRecorded = !!ticket.user_signoff;
-        const userBanner = document.createElement('div');
-        userBanner.className = signoffRecorded ? 'user-banner user-banner-confirmed' : 'user-banner';
-        const userBannerSubtitle = document.createElement('div');
-        userBannerSubtitle.className = 'user-banner-subtitle';
-        userBannerSubtitle.textContent = signoffRecorded ? 'Signed Off ✓' : 'Awaiting UAT sign-off';
-        const userBannerTitle = document.createElement('div');
-        userBannerTitle.className = 'user-banner-title';
-        userBannerTitle.textContent = ticket.title;
-        const userBannerNote = document.createElement('div');
-        userBannerNote.className = 'user-banner-note';
-        userBannerNote.textContent = signoffRecorded
-          ? 'UAT sign-off recorded. Waiting for director completion.'
-          : userReviewCheckText(ticket);
-        const userSummary = document.createElement('div');
-        userSummary.className = 'user-summary';
-        const userSummaryHead = document.createElement('div');
-        userSummaryHead.className = 'user-summary-head';
-        userSummaryHead.textContent = signoffRecorded ? 'Signed-off UAT Snapshot' : 'UAT Check Before Sign-off';
-        const userSummaryStatuses = document.createElement('div');
-        userSummaryStatuses.className = 'user-summary-statuses';
-        userReviewStatusItems(ticket).forEach((item) => {
-          const row = document.createElement('div');
-          row.className = 'user-summary-status';
-          const strong = document.createElement('strong');
-          strong.textContent = item.label;
-          const value = document.createElement('span');
-          value.className = item.ok ? 'user-summary-status-ok' : 'user-summary-status-missing';
-          value.textContent = item.ok ? (item.okText || 'ready') : (item.missingText || 'missing');
-          row.append(strong, value);
-          userSummaryStatuses.appendChild(row);
-        });
-        const userSummarySections = document.createElement('div');
-        userSummarySections.className = 'user-summary-sections';
-        userReviewSummarySections(ticket).forEach((section) => {
-          const sectionEl = document.createElement('div');
-          sectionEl.className = 'user-summary-section';
-          const label = document.createElement('div');
-          label.className = 'user-summary-label';
-          label.textContent = section.label;
-          sectionEl.appendChild(label);
-          if (section.checklist) {
-            const list = document.createElement('ul');
-            list.className = 'user-summary-list';
-            section.checklist.forEach((item) => {
-              const entry = document.createElement('li');
-              entry.textContent = item;
-              list.appendChild(entry);
-            });
-            sectionEl.appendChild(list);
-          } else if (section.summary) {
-            const text = document.createElement('div');
-            text.className = 'user-summary-text';
-            text.textContent = section.summary;
-            sectionEl.appendChild(text);
-          }
-          userSummarySections.appendChild(sectionEl);
-        });
-        userSummary.append(userSummaryHead, userSummaryStatuses, userSummarySections);
-        if (signoffRecorded) {
-          const confirmation = document.createElement('div');
-          confirmation.className = 'user-signoff-confirmation';
-          confirmation.textContent = 'Signed off ✓ Waiting for director completion.';
-          userSummary.appendChild(confirmation);
-        }
-        const userBannerActions = document.createElement('div');
-        userBannerActions.className = 'inline-actions';
-        if (signoffRecorded) {
-          const signedOffState = document.createElement('div');
-          signedOffState.className = 'signoff-state-chip';
-          signedOffState.textContent = 'Signed Off ✓';
-          userBannerActions.appendChild(signedOffState);
-        } else {
-          const userBannerSignoffButton = document.createElement('button');
-          userBannerSignoffButton.className = 'primary';
-          userBannerSignoffButton.type = 'button';
-          userBannerSignoffButton.textContent = 'Sign Off';
-          userBannerSignoffButton.addEventListener('click', async () => {
-            try {
-              await submitUserSignoff(ticket.id, commentWho.value, commentText.value);
-            } catch (error) {
-              setCreateStatus(error.message, true);
-              await requestBoardReload();
-            }
-          });
-          userBannerActions.appendChild(userBannerSignoffButton);
-        }
-        userBanner.append(userBannerSubtitle, userBannerTitle, userBannerNote, userSummary, userBannerActions);
-        box.appendChild(userBanner);
+      // SYRD-629: what the User needs to do, before anything else on the ticket.
+      const uatPanel = renderUatPanel(ticket, draftFields);
+      if (uatPanel) {
+        box.appendChild(uatPanel);
       }
 
       const detailAlerts = renderAlertStack(ticket, { detail: true });
@@ -729,18 +643,6 @@ SCRIPT_DETAIL = """    function selectedTicket() {
           }
         });
         commentActions.appendChild(releaseButton);
-      } else if (ticketIsUserReview(ticket)) {
-        const kickbackButton = document.createElement('button');
-        kickbackButton.textContent = 'Return for Rework';
-        kickbackButton.addEventListener('click', async () => {
-          try {
-            await submitComment(ticket.id, commentWho.value, commentText.value, 'analysis');
-          } catch (error) {
-            setCreateStatus(error.message, true);
-            await requestBoardReload();
-          }
-        });
-        commentActions.appendChild(kickbackButton);
       }
       }
       commentComposer.append(commentAuthor, commentText, commentUrgentLabel, commentActions);

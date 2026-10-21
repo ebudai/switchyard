@@ -620,83 +620,14 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-
       });
     }
 
+    // Where the User reviews: on a declared board a review stage the User owns, as ticket_board.uat_stage
+    // decides it for the UAT steps; on a legacy one, user_review (SYRD-629).
     function ticketIsUserReview(ticket) {
+      if (state.workflow) {
+        const stage = (state.workflow.stages || []).find((candidate) => candidate.name === ticket.state);
+        return !!stage && stage.kind === 'review' && (stage.owners || []).includes('user');
+      }
       return ticket.state === 'user_review';
-    }
-
-    function firstNonEmptyLine(text) {
-      if (!text) {
-        return '';
-      }
-      return text
-        .split(/\\r?\\n/)
-        .map((line) => line.trim())
-        .find((line) => line.length > 0) || '';
-    }
-
-    function userReviewCheckText(ticket) {
-      return firstNonEmptyLine(ticket.implementation)
-        || firstNonEmptyLine(ticket.body)
-        || 'Review this ticket during UAT, then sign off when it looks right.';
-    }
-
-    function checklistItemsFromText(text) {
-      if (!text) {
-        return [];
-      }
-      return text
-        .split(/\\r?\\n/)
-        .map((line) => {
-          const match = line.match(/^\\s*[-*]\\s+\\[(?: |x|X)\\]\\s+(.+)$/);
-          return match ? match[1].trim() : '';
-        })
-        .filter((item) => item.length > 0);
-    }
-
-    function summarizeTextBlock(text, maxLines = 3) {
-      if (!text) {
-        return '';
-      }
-      const lines = text
-        .split(/\\r?\\n/)
-        .map((line) => line.trim())
-        .filter((line) => line.length > 0 && !/^[-*]\\s+\\[(?: |x|X)\\]\\s+/.test(line));
-      return lines.slice(0, maxLines).join('\\n');
-    }
-
-    function userReviewSummarySections(ticket) {
-      const fields = [
-        ['Implementation', ticket.implementation],
-        ['Body', ticket.body],
-        ['Audit Prompt', ticket.audit_prompt],
-      ];
-      return fields
-        .map(([label, text]) => {
-          const checklist = checklistItemsFromText(text);
-          if (checklist.length) {
-            return { label, checklist };
-          }
-          const summary = summarizeTextBlock(text);
-          if (summary) {
-            return { label, summary };
-          }
-          return null;
-        })
-        .filter((section) => !!section);
-    }
-
-    function userReviewStatusItems(ticket) {
-      return [
-        { label: 'Audit sign-off', ok: ticket.needs_audit === false || !!ticket.audit_signoff },
-        { label: 'Inspector sign-off', ok: !ticket.needs_inspection || !!ticket.inspector_signoff },
-        { label: 'UAT sign-off', ok: !ticket.needs_user_signoff || !!ticket.user_signoff },
-        {
-          label: 'Commit evidence',
-          ok: !!ticket.commit_exempt || !!(ticket.commit_hash || '').trim(),
-          okText: ticket.commit_exempt ? 'exempt' : 'ready',
-          missingText: 'missing',
-        },
-      ];
     }
 
     function formatBlockedByList(blockedBy) {

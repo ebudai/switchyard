@@ -46,12 +46,14 @@ def select_ticket_rows(conn: Any, ticket_id: str | None = None) -> list[dict[str
         "to_regprocedure('ticket_board.serial_queue()') IS NOT NULL AS serial_queue, "
         "to_regprocedure('ticket_board.ticket_privileged_jobs(text)') IS NOT NULL AS privileged_jobs, "
         "to_regprocedure('ticket_board.ticket_routing(text)') IS NOT NULL AS routing, "
-        "to_regprocedure('ticket_board.ticket_context_continuation(text)') IS NOT NULL AS continuation"
+        "to_regprocedure('ticket_board.ticket_context_continuation(text)') IS NOT NULL AS continuation, "
+        "to_regprocedure('ticket_board.ticket_uat(text)') IS NOT NULL AS uat"
     ).fetchone()
     present = (dict(probe) if isinstance(probe, dict)
                else {"snooze": probe[0], "size_review": probe[1], "serial_queue": probe[2],
                      "privileged_jobs": probe[3], "routing": probe[4],
-                     "continuation": len(probe) > 5 and probe[5]} if probe is not None else {})
+                     "continuation": len(probe) > 5 and probe[5], "uat": len(probe) > 6 and probe[6]}
+               if probe is not None else {})
     snooze_sql = (
         "ticket_board.ticket_reminder_snooze(t.id, clock_timestamp())" if present.get("snooze") else "NULL::jsonb"
     )
@@ -61,6 +63,8 @@ def select_ticket_rows(conn: Any, ticket_id: str | None = None) -> list[dict[str
     # SYRD-626: whether its first hand-off continued a conversation, and why; none on an older board.
     continuation_sql = ("ticket_board.ticket_context_continuation(t.id)" if present.get("continuation")
                         else "NULL::jsonb")
+    # SYRD-629: the User's UAT instructions and questions; none on an older board.
+    uat_sql = "ticket_board.ticket_uat(t.id)" if present.get("uat") else "NULL::jsonb"
     # SYRD-599: what Router classifies against, and the record of its decisions. Asked only of a
     # ticket Router holds or has decided, so a board read does not read the workflow once per ticket.
     routing_sql = ("CASE WHEN t.assignee = 'router' OR EXISTS (SELECT 1 FROM ticket_board.router_decisions d "
@@ -262,6 +266,7 @@ SELECT
     {jobs_sql} AS privileged_jobs,
     {routing_sql} AS routing,
     {continuation_sql} AS context_continuation,
+    {uat_sql} AS uat,
     COALESCE(
         (SELECT array_agg(b.blocker_ticket_id ORDER BY b.position)
          FROM ticket_board.ticket_blockers b

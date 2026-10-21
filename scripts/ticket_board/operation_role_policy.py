@@ -89,6 +89,8 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
     "withdraw_signoff": {"director"},
     # SYRD-626: a package boundary -- start this ticket in a fresh conversation.
     "force_fresh_context": {"director"},
+    "set_uat_instructions": {"director"},
+    "ask_director": {"user"},
 }
 
 #: The two operations that exist to move a ticket the declared workflow will
@@ -137,6 +139,10 @@ COMPOSED_OPERATION_CAPABILITIES = {
     # How the next ticket's conversation starts is the Director's edit of that
     # ticket; the database checks director_edit itself (SYRD-626).
     "force_fresh_context": frozenset({"director_edit"}),
+    # SYRD-629: preparing the User's UAT steps is a Director edit of the ticket;
+    # the User's question is a comment that also tells the Director.
+    "set_uat_instructions": frozenset({"director_edit"}),
+    "ask_director": frozenset({"add_comment"}),
     # Withdrawing an approval is the control role's: the capabilities that define it (SYRD-49). The
     # database checks role_controls_project itself (SYRD-598).
     "withdraw_signoff": frozenset({"set_manually_controlled", "merge"}),

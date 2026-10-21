@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Regression test: user_review tickets expose a top-level User sign-off banner."""
+"""Regression test: user_review tickets open on the User's UAT panel, at the top of the detail (SYRD-629).
+
+The panel replaced the earlier User sign-off banner, whose text was derived from the
+ticket's body and implementation; uat_panel_browser_test drives the panel itself."""
 
 from __future__ import annotations
 
@@ -14,22 +17,19 @@ from scripts.ticket_board.frontend import HTML
 
 
 def main() -> int:
-    assert ".user-banner" in HTML
-    assert "Awaiting UAT sign-off" in HTML
-    assert "Signed Off ✓" in HTML
-    assert "Review this ticket during UAT, then sign off when it looks right." in HTML
-    assert "UAT sign-off recorded. Waiting for director completion." in HTML
-    assert "function userReviewCheckText(ticket)" in HTML
-    assert "firstNonEmptyLine(ticket.implementation)" in HTML
-    assert "firstNonEmptyLine(ticket.body)" in HTML
-    assert "userBannerNote.textContent = signoffRecorded" in HTML
-    assert ".user-summary" in HTML
-    assert ".user-banner-confirmed" in HTML
-    assert ".user-signoff-confirmation" in HTML
-    assert "userBannerSignoffButton.type = 'button';" in HTML
-    assert "userBannerSignoffButton.textContent = 'Sign Off';" in HTML
-    assert "await submitUserSignoff(ticket.id, commentWho.value, commentText.value);" in HTML
-    assert "Signed-off UAT Snapshot" in HTML
+    assert "function renderUatPanel(ticket, draftFields = null)" in HTML
+    assert ".uat-panel {" in HTML
+    assert "'UAT: What you need to do'" in HTML
+    assert "[['do_this', 'Do this'], ['you_should_see', 'You should see'], ['then_choose', 'Then choose']]" in HTML
+    assert "`Prepared by ${roleLabel(instructions.prepared_by)} · last updated ${instructions.prepared_at}`" in HTML
+    assert "'Director must prepare UAT steps'" in HTML
+    assert "'UAT: Accepted ✓'" in HTML
+    assert "'Questions or observations'" in HTML
+    # The banner it replaced is gone: its steps were reconstructed from the body and implementation.
+    for gone in (".user-banner", "Awaiting UAT sign-off", "Review this ticket during UAT, then sign off when it looks right.",
+                 "function userReviewCheckText(ticket)", "firstNonEmptyLine(ticket.body)",
+                 "userBannerSignoffButton", ".user-signoff-confirmation", "Signed-off UAT Snapshot"):
+        assert gone not in HTML, gone
     print("user_review_banner_test: ok")
     return 0
 

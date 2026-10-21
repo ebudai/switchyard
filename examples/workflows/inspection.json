@@ -365,6 +365,22 @@
       }
     },
     {
+      "name": "user_feedback",
+      "label": "Director reviewing the User's message",
+      "owners": [
+        "director"
+      ],
+      "kind": "system",
+      "gate": null,
+      "skip_to": null,
+      "signoff": null,
+      "terminal": false,
+      "notify": {
+        "kind": "assignee",
+        "role": null
+      }
+    },
+    {
       "name": "director_review",
       "label": "Director review",
       "owners": [
@@ -758,43 +774,6 @@
     {
       "from": "user_review",
       "to": "in_progress",
-      "action": "user_kick_back",
-      "label": "User kick back",
-      "actors": [
-        "user"
-      ],
-      "primitive": "return",
-      "owner_scoped": true,
-      "require_commit": false,
-      "require_reason": true,
-      "clear_signoffs": [
-        "audit_signoff",
-        "user_signoff"
-      ],
-      "allow_no_code": false
-    },
-    {
-      "from": "user_review",
-      "to": "in_progress",
-      "action": "relay_user_kick_back",
-      "label": "Record the User's rejection (relayed)",
-      "actors": [
-        "director"
-      ],
-      "primitive": "return",
-      "owner_scoped": false,
-      "require_commit": false,
-      "require_reason": true,
-      "clear_signoffs": [
-        "audit_signoff",
-        "user_signoff"
-      ],
-      "allow_no_code": false,
-      "relays_decision_of": "user"
-    },
-    {
-      "from": "user_review",
-      "to": "in_progress",
       "action": "director_withdraw",
       "label": "Withdraw the candidate (Director found a defect)",
       "actors": [
@@ -963,6 +942,103 @@
     },
     {
       "from": "user_review",
+      "to": "cancelled",
+      "action": "cancel",
+      "label": "Cancel",
+      "actors": [
+        "director"
+      ],
+      "primitive": "move",
+      "owner_scoped": false,
+      "require_commit": false,
+      "require_reason": false,
+      "clear_signoffs": [
+        "inspector_signoff",
+        "audit_signoff",
+        "user_signoff"
+      ],
+      "allow_no_code": false
+    },
+    {
+      "from": "user_review",
+      "to": "user_feedback",
+      "action": "user_send_to_director",
+      "label": "Send to Director",
+      "actors": [
+        "user"
+      ],
+      "primitive": "move",
+      "owner_scoped": true,
+      "require_commit": false,
+      "require_reason": true,
+      "clear_signoffs": [],
+      "allow_no_code": false
+    },
+    {
+      "from": "user_feedback",
+      "to": "user_review",
+      "action": "director_return_to_uat",
+      "label": "Return to the User for UAT",
+      "actors": [
+        "director"
+      ],
+      "primitive": "move",
+      "owner_scoped": false,
+      "require_commit": false,
+      "require_reason": false,
+      "clear_signoffs": [],
+      "allow_no_code": false
+    },
+    {
+      "from": "user_feedback",
+      "to": "in_progress",
+      "action": "director_send_to_implementer",
+      "label": "Send to the implementer",
+      "actors": [
+        "director"
+      ],
+      "primitive": "return",
+      "owner_scoped": false,
+      "require_commit": false,
+      "require_reason": true,
+      "clear_signoffs": [
+        "audit_signoff",
+        "user_signoff"
+      ],
+      "allow_no_code": false
+    },
+    {
+      "from": "user_feedback",
+      "to": "analysis",
+      "action": "director_route_feedback",
+      "label": "Route elsewhere (to Analysis)",
+      "actors": [
+        "director"
+      ],
+      "primitive": "move",
+      "owner_scoped": false,
+      "require_commit": false,
+      "require_reason": true,
+      "clear_signoffs": [],
+      "allow_no_code": false
+    },
+    {
+      "from": "user_feedback",
+      "to": "backlog",
+      "action": "defer",
+      "label": "Defer",
+      "actors": [
+        "director"
+      ],
+      "primitive": "move",
+      "owner_scoped": false,
+      "require_commit": false,
+      "require_reason": false,
+      "clear_signoffs": [],
+      "allow_no_code": false
+    },
+    {
+      "from": "user_feedback",
       "to": "cancelled",
       "action": "cancel",
       "label": "Cancel",

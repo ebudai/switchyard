@@ -210,21 +210,29 @@ def with_forward_move(document: dict) -> dict:
     return document
 
 
-SYRD263_EXEMPTION = """    ELSIF source_stage->>'signoff' IS NOT NULL AND tr->>'primitive' NOT IN ('return','reopen')
-       AND NOT ticket_board.declared_parking_stage(tr->>'to')
-       AND NOT ticket_board.workflow_flag(doc,source_stage->>'signoff',cfg) THEN RAISE EXCEPTION 'stage signoff required'; END IF;"""
+#: The sign-off branch of enforce_declared_ticket_update, whatever else a later ticket exempts in it (SYRD-629 adds
+#: the Director's hold): what this fix needs is the parking clause among its conditions.
+SIGNOFF_BRANCH = re.compile(
+    r"    ELSIF source_stage->>'signoff' IS NOT NULL AND tr->>'primitive' NOT IN \('return','reopen'\)\n"
+    r"(?P<conditions>(?:       .*\n)*?)"
+    r"       AND NOT ticket_board\.workflow_flag\(doc,source_stage->>'signoff',cfg\) THEN RAISE EXCEPTION 'stage signoff required'; END IF;")
+
+
+def exempts_parking(text: str) -> bool:
+    branch = SIGNOFF_BRANCH.search(text)
+    return branch is not None and "       AND NOT ticket_board.declared_parking_stage(tr->>'to')\n" in branch["conditions"]
 
 
 def test_the_migration_is_the_copy_an_upgraded_board_runs() -> None:
     assert_no_drift("enforce_declared_ticket_update")
-    check(SYRD263_EXEMPTION in MIGRATION.read_text(), f"{MIGRATION.name} ships the exemption")
+    check(exempts_parking(MIGRATION.read_text()), f"{MIGRATION.name} ships the exemption")
     # What an upgraded board runs is the LAST migration defining the function,
     # which a later ticket may legitimately be (SYRD-271 is). What matters is
     # that the copy it runs -- and schema.sql's -- still carries this fix.
     owner = owning_migration("enforce_declared_ticket_update")
-    check(SYRD263_EXEMPTION in owner.read_text(),
+    check(exempts_parking(owner.read_text()),
           f"the copy an upgraded board runs ({owner.name}) still exempts parking from the sign-off")
-    check(SYRD263_EXEMPTION in definition("enforce_declared_ticket_update"),
+    check(exempts_parking(definition("enforce_declared_ticket_update")),
           "and so does the copy a fresh board installs")
 
 def main() -> int:

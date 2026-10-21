@@ -191,7 +191,6 @@ SCRIPT_APP = """    function ticketBoardWriteToken() {
     async function loadBoard() {
       const loadSequence = state.loadSequence + 1;
       state.loadSequence = loadSequence;
-      rememberDetailDraft();
       const response = await fetch('/api/board', { cache: 'no-store' });
       if (!response.ok) {
         throw new Error(await response.text());
@@ -200,6 +199,9 @@ SCRIPT_APP = """    function ticketBoardWriteToken() {
       if (loadSequence !== state.loadSequence) {
         return;
       }
+      // What is open is redrawn below: keep what was typed into it, including while this load was in flight
+      // (SYRD-629: a message typed into the UAT panel during a refresh was lost).
+      rememberDetailDraft();
       updateRefreshRequired(payload.build_id);
       state.tickets = payload.tickets;
       state.screenshots = payload.screenshots;

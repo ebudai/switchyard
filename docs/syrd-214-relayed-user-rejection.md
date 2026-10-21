@@ -1,5 +1,14 @@
 # Recording a User rejection the User cannot record
 
+> **Superseded for the shipped workflow by SYRD-629.** The shipped document no
+> longer has `user_kick_back`: the User's way out of User Review is now Send to
+> Director, a move with a message to the Director's own decision stage
+> (`user_feedback`), and the Director decides from there. With no User return
+> left to mirror, `relay_user_kick_back` went with it, and pgu1002 makes the same
+> change on boards of the shipped shape. A board whose User still returns work
+> keeps both, and everything below still describes them. See
+> `docs/syrd-629-uat-instructions.md`.
+
 The User does not operate a board pane. UAT is run and reported in conversation
 with the Director, and the board learns the outcome only because the Director
 puts it there. For a passed UAT that is fine -- nothing on the board is waiting

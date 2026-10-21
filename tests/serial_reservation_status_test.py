@@ -48,7 +48,7 @@ import lifecycle_reservation_test as lr  # noqa: E402
 import ticket_board_write_api_test as t  # noqa: E402
 import worker_pool_lifecycle_test as lifecycle  # noqa: E402
 from scripts import team_launcher, worker_pool  # noqa: E402
-from scripts.ticket_board import board_skill  # noqa: E402
+from scripts.ticket_board import board_skill, uat_instructions  # noqa: E402
 from temporary_cluster import temporary_cluster  # noqa: E402
 
 CHECKS = 0
@@ -136,6 +136,11 @@ class Board:
     def to_uat(self) -> None:
         self.act(UAT, "submit_to_audit", {"commit_hash": lr.COMMIT}, WORKER)
         self.act(UAT, "audit_sign_off", {"text": "approved"}, "audit")
+        # SYRD-629: the User's UAT steps come before User Review, on a board that has them.
+        if t.psql(self.admin, "SELECT to_regprocedure('ticket_board.set_uat_instructions(text,text,text,text,boolean)') "
+                              "IS NOT NULL;").strip() == "t":
+            uat_instructions.perform(self.app, "set_uat_instructions", {"do_this": "Open the ticket's change.",
+                                                        "you_should_see": "It works."}, caller_role="director", ticket_id=UAT)
         uat = self.act(UAT, "director_dat_sign_off", {"text": "ready for UAT"}, "director")
         check((uat["state"], uat["assignee"]) == ("user_review", "user"), f"{UAT} is at User UAT: {uat}")
 

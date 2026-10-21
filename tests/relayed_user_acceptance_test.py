@@ -37,6 +37,7 @@ from schema_function_drift import assert_no_drift
 from scripts.ticket_board.migration_order import number as migration_number, ordered_files
 from scripts.ticket_board.workflow_config import available_transitions, validate
 from temporary_cluster import temporary_cluster
+from workflow_document_eras import before_user_feedback as before_syrd629  # noqa: E402
 
 MIGRATIONS = ROOT / "scripts/ticket_board/migrations"
 #: Every migration from the one that introduced relaying onward. An upgraded
@@ -152,9 +153,14 @@ def main() -> int:
                 "SELECT document FROM ticket_board.workflow_configuration WHERE singleton;"))
 
         def configure(doc: dict) -> None:
+            # A stage this document drops is removed explicitly, as the board requires: going back to an
+            # earlier shape after the upgrade drops SYRD-629's decision stage.
+            dropped = sorted({s["name"] for s in document()["stages"]} - {s["name"] for s in doc["stages"]}) \
+                if revision() else []
             t.post_json(
                 base, "/api/tickets/actions/configure_workflow",
-                {"document": doc, "expected_revision": revision()}, caller="director",
+                {"document": doc | ({"remove_stages": dropped} if dropped else {}), "expected_revision": revision()},
+                caller="director",
             )
 
         def reset(ticket_id: str, **fields) -> None:
@@ -388,7 +394,12 @@ def main() -> int:
             # as the moves they stand in for; listing them the other way round
             # is the same document and has to be accepted as one.
             permuted = json.loads(json.dumps(live))
-            model = next(tr for tr in permuted["transitions"] if tr["action"] == "user_kick_back")
+            model = next((tr for tr in permuted["transitions"] if tr["action"] == "user_kick_back"), None)
+            if model is None:
+                # Upgraded through pgu1002 (SYRD-629): the User sends their message to the Director, and there
+                # is no rejection relay to compare.
+                assert any(tr["action"] == "user_send_to_director" for tr in live["transitions"]), phase
+                return
             assert len(model["clear_signoffs"]) > 1, "nothing to permute"
             for tr in permuted["transitions"]:
                 if tr["action"] == KICK_BACK_RELAY:
@@ -403,7 +414,8 @@ def main() -> int:
             literal = json.dumps(permuted).replace("'", "''")
             sql(f"SELECT ticket_board.validate_declared_workflow('{literal}'::jsonb);")
 
-        shipped = validate(json.loads((ROOT / "examples/workflows/inspection.json").read_text()))
+        # SYRD-629: on the earlier shipped shape, whose User still returns work (workflow_document_eras.before_user_feedback).
+        shipped = validate(before_syrd629(json.loads((ROOT / "examples/workflows/inspection.json").read_text())))
         assert len(relays(shipped)) == 1, "the shipped document carries the action"
         assert_no_drift(*SHARED_FUNCTIONS)
 
@@ -472,8 +484,12 @@ def main() -> int:
             assert added[0]["primitive"] == "approve", added
             assert added[0]["require_commit"] is True and added[0]["require_reason"] is True
             assert added[0]["owner_scoped"] is False and added[0]["relays_decision_of"] == "user"
-            # The rejection relay came along too: one upgrade, both halves.
-            assert any(tr["action"] == KICK_BACK_RELAY for tr in document()["transitions"])
+            # The rejection relay came along too (pgu952): one upgrade, both halves. A later step of the same
+            # upgrade (pgu1002, SYRD-629) then gives the User Send to Director in place of the return the relay
+            # mirrored, so the board ends with the acceptance relay and no rejection relay.
+            assert sql("SELECT count(*) FROM ticket_board.workflow_revisions WHERE actor = 'pgu952';") == "1"
+            assert not any(tr["action"] == KICK_BACK_RELAY for tr in document()["transitions"])
+            assert any(tr["action"] == "user_send_to_director" for tr in document()["transitions"])
             assert sql(
                 "SELECT document->'migrations'->>'relay_user_acceptance' "
                 "FROM ticket_board.workflow_configuration WHERE singleton;"

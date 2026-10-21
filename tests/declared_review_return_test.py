@@ -89,7 +89,10 @@ def scenario(root: Path, prefix: str) -> dict:
     import ticket_board_write_api_test as t
     from scripts.ticket_board import workflow_config
     from temporary_cluster import temporary_cluster
+    import workflow_document_eras
     from workflow_document_eras import before_relaying
+    # SYRD-629's earlier shape; main's replay, from a tree before it, has no such era to remove.
+    before_user_feedback = getattr(workflow_document_eras, "before_user_feedback", lambda document=None: document)
 
     seen: dict = {}
 
@@ -125,7 +128,7 @@ END $$;
         admin = build(cluster, "board", migrate=True)
         app = t.TicketBoardApp(cluster.root / "frames", cluster.root / "assets", project="cerulean", ticket_prefix="PGU",
                                database_url=t.conninfo(cluster.socket_dir, cluster.port, "board", t.SERVICE_ROLE))
-        doc = mefp_review(before_relaying())
+        doc = mefp_review(before_relaying(before_user_feedback()))
         doc["project"] = "cerulean"
         doc.setdefault("reassign", {})
         doc.setdefault("remove_stages", [])

@@ -86,8 +86,11 @@ def before_later_releases(document: dict) -> dict:
 
 
 def degraded(document: dict) -> dict:
-    """A revision-22 shaped tenant: no parking stage, cancel as the only exit."""
-    document = copy.deepcopy(document)
+    """A revision-22 shaped tenant: no parking stage, cancel as the only exit -- and, long before SYRD-629, no
+    Director decision stage for the User's message."""
+    from workflow_document_eras import before_user_feedback
+
+    document = before_user_feedback(copy.deepcopy(document))
     document["stages"] = [s for s in document["stages"] if s["name"] != "backlog"]
     document["transitions"] = [x for x in document["transitions"] if "backlog" not in (x["from"], x["to"])]
     document["queue"] = {"stage": "analysis", "assignee": "director"}
@@ -316,7 +319,7 @@ def seed_stored_document(admin: str, document: dict) -> None:
     stages = "".join(
         "INSERT INTO ticket_board.workflow_stages"
         "(name,display_label,rank,owner_roles,entry_gate_field,gate_skip_to,exit_signoff_field,is_terminal) VALUES ("
-        f"'{stage['name']}','{stage['label']}',{rank},"
+        f"'{stage['name']}','{stage['label'].replace(chr(39), chr(39) * 2)}',{rank},"  # SYRD-629: "the User's message"
         "ARRAY[" + ",".join(f"'{owner}'" for owner in stage["owners"]) + "]::text[],"
         + (f"'{stage['gate']}'" if stage["gate"] else "NULL") + ","
         + (f"'{stage['skip_to']}'" if stage["skip_to"] else "NULL") + ","
@@ -389,8 +392,9 @@ def run_database_checks(cluster) -> None:
     # Nothing else moved: sign-offs, stages and unrelated tickets are untouched.
     assert ticket_row(admin, "PGU-9")["audit_signoff"] is True, ticket_row(admin, "PGU-9")
     assert ticket_row(admin, "PGU-9")["state"] == "audit"
+    # (A later migration in the same tail, pgu1002, adds the Director's decision stage for the User's message.)
     assert [s["name"] for s in before["stages"]] == [
-        s["name"] for s in after["stages"] if s["name"] != "backlog"
+        s["name"] for s in after["stages"] if s["name"] not in ("backlog", "user_feedback")
     ]
 
     revision = app.workflow_document()["revision"]

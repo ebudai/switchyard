@@ -143,7 +143,8 @@ SCRIPT_DELEGATION = r"""
         const showConfirmation = async (payload) => {
           dialog.innerHTML = '';
           const title = document.createElement('h3');
-          title.textContent = `Confirm: ${op.label}`;
+          // SYRD-629: an action can ask its own question and say where the ticket goes next.
+          title.textContent = op.question || `Confirm: ${op.label}`;
           dialog.appendChild(title);
           let prepared;
           try {
@@ -176,6 +177,13 @@ SCRIPT_DELEGATION = r"""
             line(`Merging ${prepared.ticket_id} (${prepared.title}) into ${prepared.target.ticket_id} (${prepared.target.title})`);
           }
           dialog.appendChild(summary);
+          if (op.next) {
+            const next = document.createElement('div');
+            next.className = 'board-ui-next';
+            next.setAttribute('data-board-ui-next', '');
+            next.textContent = op.next;
+            dialog.appendChild(next);
+          }
           const authority = document.createElement('div');
           authority.className = 'board-ui-authority';
           authority.textContent = op.mode === 'delegated'

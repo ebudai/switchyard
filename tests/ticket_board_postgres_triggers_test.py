@@ -1260,7 +1260,7 @@ WHERE id IN ('PGU-75901', 'PGU-75902', 'PGU-75903', 'PGU-75904');
                     "user_signoff": False,
                 }, after_audit_signoff
             if needs_user_signoff:
-                service_call(conninfo, "director", f"SELECT ticket_board.director_dat_sign_off('{ticket_id}', 'DAT accepted.');")
+                service_call(conninfo, "director", f"SELECT ticket_board.set_uat_instructions('{ticket_id}', 'Open it.', 'It works.', 'Accept.', false); SELECT ticket_board.director_dat_sign_off('{ticket_id}', 'DAT accepted.');")
                 uat_status = ticket_status(
                     conninfo,
                     ticket_id,
@@ -1481,7 +1481,7 @@ LIMIT 1;
             "message": "PGU-8 -- Auto User ready for Director Acceptance Testing",
             "new_state": "dat",
         }, auto_eric_notice
-        service_call(conninfo, "director", "SELECT ticket_board.director_dat_sign_off('PGU-8', 'DAT accepted.');")
+        service_call(conninfo, "director", "SELECT ticket_board.set_uat_instructions('PGU-8', 'Open it.', 'It works.', 'Accept.', false); SELECT ticket_board.director_dat_sign_off('PGU-8', 'DAT accepted.');")
         auto_uat = json.loads(
             psql(
                 conninfo,
@@ -1570,7 +1570,7 @@ WHERE id = 'PGU-80';
         service_call(conninfo, "ops", "SELECT ticket_board.submit_to_audit('PGU-84', 'abcdef4');")
         service_call(conninfo, "inspector", "SELECT ticket_board.inspector_sign_off('PGU-84');")
         service_call(conninfo, "audit", "SELECT ticket_board.audit_sign_off('PGU-84', 'Audit verified.');")
-        service_call(conninfo, "director", "SELECT ticket_board.route('PGU-84', 'user_review', 'user');")
+        service_call(conninfo, "director", "SELECT ticket_board.set_uat_instructions('PGU-84', 'Open it.', 'It works.', 'Accept.', false); SELECT ticket_board.route('PGU-84', 'user_review', 'user');")
         user_review_releases_ops = json.loads(
             psql(
                 conninfo,
@@ -1858,7 +1858,7 @@ SELECT ticket_board.complete_task('PGU-84', 'Trying to skip audit.');
             "complete_task requires a backlog or analysis ticket",
         )
         service_call(conninfo, "audit", "SELECT ticket_board.audit_sign_off('PGU-84', 'Audit verified after reinspection.');")
-        service_call(conninfo, "director", "SELECT ticket_board.director_dat_sign_off('PGU-84', 'DAT accepted after reinspection.');")
+        service_call(conninfo, "director", "SELECT ticket_board.set_uat_instructions('PGU-84', 'Open it.', 'It works.', 'Accept.', false); SELECT ticket_board.director_dat_sign_off('PGU-84', 'DAT accepted after reinspection.');")
         psql(conninfo, "UPDATE ticket_board.tickets SET user_signoff = true, state = 'director_review' WHERE id = 'PGU-84';")
         psql(conninfo, "UPDATE ticket_board.tickets SET state = 'done' WHERE id = 'PGU-84';")
 

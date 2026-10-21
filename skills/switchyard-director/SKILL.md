@@ -400,10 +400,54 @@ Then close with the workflow's completion action, which requires the commit hash
 ## Preparing user UAT
 
 The user's review stage is entered through its gate flag, and the user's pane is
-deliberately not notified by the board. Prepare it: state on the ticket what to
-try, what correct looks like, and what to do if it is wrong. One question, with
-the context needed to answer it. A UAT ticket the user cannot act on without
-asking you a question was not prepared.
+deliberately not notified by the board. Prepare it first: the board refuses to
+move a ticket into User Review without current UAT steps, and shows them at the
+top of the ticket, above everything else, beside Accept and Send to Director.
+
+```bash
+ticket-board-write uat-instructions <id> \
+  --do-this "Run \`switchyard status\` in a terminal." \
+  --you-should-see "A line for each project, each saying running."
+# --then-choose defaults to: Accept if that happened; if not, Send to Director with a short message.
+# Long or command-heavy text: --do-this-file PATH (and so on), so the shell leaves it alone.
+ticket-board-write uat-instructions <id> --reconfirm   # same steps, for the ticket as it is now
+```
+
+Write them for the User, not for a reviewer: plain words, the exact command or
+UI action and any real prerequisite (a restart, a reload, where to click), and
+the concrete result that means it worked. Commands go in backticks or a fenced
+block, so the panel shows them copyable. Background, history and how it works
+stay in the ticket body; the steps say only what to do now. A UAT ticket the
+user cannot act on without asking you a question was not prepared.
+
+The steps belong to one round. They are superseded when the ticket leaves User
+Review unaccepted or goes back to implementation, and are not current if the
+ticket's commit changed since you wrote them -- the board then refuses the move
+into User Review again until you prepare new steps or `--reconfirm` the old
+ones, so a resubmission never shows the User last round's instructions.
+
+### Questions and Send to Director
+
+From the panel the User can **Ask Director**: the question is an attributed
+comment, the ticket stays in User Review, and you get one notice
+(`uat_question`). Answer with an ordinary comment on the ticket -- the panel shows
+your replies beneath the question.
+
+Where the workflow declares it (the shipped one does, and pgu1002 moved boards
+of the shipped shape to it), the User's **Send to Director** takes a short
+message and moves the ticket to `user_feedback`, "Director reviewing the User's
+message", owned by you. Nothing goes to an implementer and the commit and Audit's
+sign-off stay. You decide from there, through `workflow-action`:
+
+```bash
+ticket-board-write workflow-action <id> director_return_to_uat        # back to the User (prepare or --reconfirm steps first)
+ticket-board-write workflow-action <id> director_send_to_implementer \
+  --payload-json '{"reason": "<what to fix, from the User's message>"}'   # back to implementation; Audit runs again
+ticket-board-write workflow-action <id> director_route_feedback \
+  --payload-json '{"reason": "<why it needs triage>"}'                  # to analysis
+```
+
+Defer and cancel are available from it too.
 
 ### Recording what the user reports
 
@@ -421,7 +465,7 @@ ticket-board-write workflow-action <id> relay_user_sign_off \
 # an empty "commit_hash" is refused
 ticket-board-write workflow-action <id> relay_user_sign_off \
   --payload-json '{"reason": "<what the user reported>"}'
-# rejection, only where relay_user_kick_back is listed
+# rejection, only where relay_user_kick_back is listed (a board whose User still returns work)
 ticket-board-write workflow-action <id> relay_user_kick_back \
   --payload-json '{"reason": "<what the user reported>"}'
 ```
@@ -432,7 +476,9 @@ the one transition that would add it -- copied from the user's own sign-off,
 nothing else changed -- with the revision, both digests and the board's dry run;
 review that, then apply it with `--apply --expected-revision <revision>`. It is
 a workflow change: say on a ticket that you made it. A rejection relay exists
-only where the user rejects by returning the work; where the user rejects by
+only where the user rejects by returning the work -- on a board where the User
+sends it to you instead, there is nothing to relay: record what the User said on
+the ticket and take the decision stage's own action; where the user rejects by
 reopening, there is none to add -- record what the user said on the ticket, and
 giving the user a return move is a workflow decision to raise, not one to take.
 

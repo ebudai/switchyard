@@ -40,6 +40,7 @@ from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
 isolate_tmux_bus()
 
 import ticket_board_write_api_test as t  # noqa: E402
+from scripts.ticket_board import uat_instructions  # noqa: E402
 from scripts.ticket_board.app import TicketBoardApp  # noqa: E402
 from scripts.ticket_board.migration_order import key as migration_key, ordered_files  # noqa: E402
 from scripts.ticket_board.notify_listener import TicketBoardNotifyListener  # noqa: E402
@@ -367,6 +368,9 @@ SELECT coalesce(ticket_board.unassigned_stage_owner('analysis', 'director'), '')
     # gap: user_review is owned and announces nothing on purpose.
     quiet = board.create("Awaiting the user")
     assert len(board.triage_notices(quiet)) == 1, board.queued(quiet)
+    # SYRD-629: what the User is asked to do comes before User Review.
+    uat_instructions.perform(board.app, "set_uat_instructions", {"do_this": "Read the ticket.", "you_should_see": "A question."},
+                             caller_role="director", ticket_id=quiet)
     board.force_move(quiet, "user_review", "unassigned")
     assert board.triage_notices(quiet) == [], board.queued(quiet)
 

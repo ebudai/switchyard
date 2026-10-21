@@ -33,6 +33,8 @@ from scripts.ticket_board.write_client import TicketBoardWriteClient
 
 CLIENT_PARITY_EXCEPTIONS = {
     "crop_attachment": "UI-only crop payload: it depends on browser drag geometry and has no sensible CLI shape.",
+    "ask_director": "The User's question from the UAT panel (SYRD-629): it refuses every caller but the User, "
+                    "who has no pane, so no role's client could make it.",
 }
 
 

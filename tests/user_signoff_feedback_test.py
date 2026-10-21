@@ -22,10 +22,9 @@ def main() -> int:
     assert "Signed off ✓ ${ticketId} moved to Final Sign-Off." in HTML
     assert "UAT signed off. In Final Sign-Off." in HTML
     assert "UAT signed off. Waiting for Final Sign-Off." in HTML
-    assert "Signed off ✓ Waiting for director completion." in HTML
-    assert "UAT sign-off recorded. Waiting for director completion." in HTML
-    assert "userBannerSubtitle.textContent = signoffRecorded ? 'Signed Off ✓' : 'Awaiting UAT sign-off';" in HTML
-    assert "userSummaryHead.textContent = signoffRecorded ? 'Signed-off UAT Snapshot' : 'UAT Check Before Sign-off';" in HTML
+    # SYRD-629: the detail's UAT panel says the ticket is accepted and who acts next.
+    assert "done.appendChild(uatSection('uat-note', 'UAT: Accepted ✓', 'The Director completes it next.'));" in HTML
+    assert "userBannerSubtitle" not in HTML and "userSummaryHead" not in HTML
     print("user_signoff_feedback_test: ok")
     return 0
 

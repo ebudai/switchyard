@@ -168,6 +168,15 @@ LEGACY_ASSIGNEE_SCOPED_OPERATIONS = frozenset({
 })
 
 
+def director_hold_stage_names(cfg: dict[str, Any]) -> set[str]:
+    """Stages the Director alone holds work in to decide it: not a review, not terminal (SYRD-629).
+
+    Handing work to the Director is not a verdict, so a review may move work there without its sign-off, and the
+    review's record -- sign-offs, commit -- rides along. ticket_board.declared_director_hold is the same rule."""
+    return {stage["name"] for stage in cfg["stages"]
+            if not stage["terminal"] and stage["kind"] != "review" and stage["owners"] == [DIRECTOR_ROLE]}
+
+
 def parking_stage_names(cfg: dict[str, Any]) -> set[str]:
     """Stages that hold work nobody is doing.
 
@@ -1171,7 +1180,9 @@ def advertised_transitions(cfg: dict[str, Any], ticket: dict[str, Any], actor: s
     signoff = source.get("signoff")
     if not signoff or _ticket_flag(cfg, ticket, signoff):
         return available_transitions(cfg, ticket, actor)
-    parking = set(parking_stage_names(cfg))
+    # SYRD-629: the User may hand their review to the Director; no other review's work goes to a hold unsigned.
+    handoff = director_hold_stage_names(cfg) if source.get("kind") == "review" and "user" in source.get("owners", []) else set()
+    parking = set(parking_stage_names(cfg)) | handoff
     return [
         tr for tr in available_transitions(cfg, ticket, actor)
         if tr["primitive"] in ("approve", "return", "reopen")

@@ -10,6 +10,7 @@ from .frontend_script_app import SCRIPT_APP
 from .frontend_script_core import SCRIPT_CORE
 from .frontend_script_delegation import SCRIPT_DELEGATION
 from .frontend_script_detail import SCRIPT_DETAIL
+from .frontend_script_uat import SCRIPT_UAT, STYLE_UAT
 from .frontend_style import STYLE
 
 
@@ -42,6 +43,7 @@ def render_html(*, project: str = "pgu", project_name: str = "PGU", ticket_prefi
         "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
         "  <style>\n"
         + STYLE
+        + STYLE_UAT
         + "  </style>\n"
         + "</head>\n"
         + "<body>\n"
@@ -51,6 +53,7 @@ def render_html(*, project: str = "pgu", project_name: str = "PGU", ticket_prefi
         + SCRIPT_CORE
         + SCRIPT_DETAIL
         + SCRIPT_DELEGATION
+        + SCRIPT_UAT
         + SCRIPT_APP
         + "  </script>\n"
         + "</body>\n"

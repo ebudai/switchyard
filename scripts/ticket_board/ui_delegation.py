@@ -231,6 +231,27 @@ def _rows(app: Any, statement: str, params: tuple) -> list:
                 for row in conn.execute(statement, params).fetchall()]
 
 
+def _uat_decision(cfg: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    """The User's own decision out of a User Review stage, placed in the UAT panel with what it does: the question
+    its confirmation asks, and where the ticket goes and who acts next (SYRD-629). Nothing for any other action."""
+    stages = {s["name"]: s for s in cfg["stages"]}
+    source, destination = stages.get(action["from"]) or {}, stages.get(action["to"]) or {}
+    if source.get("kind") != "review" or "user" not in (source.get("owners") or []):
+        return {}
+    labels = {r["name"]: r.get("label") or r["name"] for r in cfg["roles"]}
+    owners = " or ".join(labels.get(o, o) for o in destination.get("owners") or []) or "nobody"
+    where = destination.get("label") or action["to"]
+    if action["primitive"] == "approve":
+        return {"placement": "uat_panel", "uat_decision": "accept", "question": "Accept this ticket?",
+                "next": f"It moves to {where}, and the {owners} acts next."}
+    if destination.get("owners") == ["director"] and destination.get("kind") != "review":
+        return {"placement": "uat_panel", "uat_decision": "send",
+                "question": "Send this ticket and your message to the Director?",
+                "next": f"It moves to {where}. The Director reviews your message and decides what happens next; "
+                        "nothing goes back to the implementer unless the Director sends it."}
+    return {"next": f"It moves to {where}, and the {owners} acts next."}
+
+
 def describe(handler: Any, ticket_id: str) -> dict[str, Any]:
     """What the board UI may offer for one ticket now, and each operation's payload: the User's own declared
     actions, done directly, and what the control role may do that the board lends, done under a confirmation.
@@ -272,7 +293,8 @@ def describe(handler: Any, ticket_id: str) -> dict[str, Any]:
             why = [_field("text", "text", "Why", required=True)] if action.get("require_reason") else []
             mine = "user" in action["actors"] and (not action.get("owner_scoped") or ticket.get("assignee") == "user")
             if mine and not action.get("require_commit"):
-                offer(action["action"], action["label"], "direct", fields + why, to=action["to"])
+                offer(action["action"], action["label"], "direct", fields + why, to=action["to"],
+                      **_uat_decision(cfg, action))
                 continue
             if authority not in action["actors"] or not lendable(action["action"]):
                 continue

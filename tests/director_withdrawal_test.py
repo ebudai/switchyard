@@ -40,6 +40,7 @@ import ticket_board_write_api_test as t  # noqa: E402
 from scripts.ticket_board.migration_order import key as migration_key, ordered_files  # noqa: E402
 from scripts.ticket_board.workflow_config import available_transitions, validate  # noqa: E402
 from temporary_cluster import temporary_cluster  # noqa: E402
+from workflow_document_eras import before_user_feedback as before_syrd629  # noqa: E402
 
 MIGRATION_PATH = ROOT / "scripts/ticket_board/migrations/pgu955_syrd237_director_withdrawal.sql"
 MIGRATION = MIGRATION_PATH.read_text()
@@ -69,6 +70,15 @@ def without_withdrawal(cfg: dict) -> dict:
     ]
     (stripped.get("migrations") or {}).pop("director_withdrawal", None)
     return stripped
+
+
+def earlier(document: dict) -> dict:
+    """`document` in the shape before SYRD-629, whose User returns work -- the shape pgu955 models its
+    withdrawal on -- asking for the decision stage's removal where it has one."""
+    old = before_syrd629(document)
+    if any(s["name"] == "user_feedback" for s in document["stages"]):
+        old["remove_stages"] = ["user_feedback"]
+    return old
 
 
 def withdrawals(document: dict) -> list[dict]:
@@ -213,7 +223,11 @@ def main() -> int:
             check(ticket()["state"] == "user_review", f"{phase}: still waiting on the User")
 
         try:
-            shipped = validate(json.loads(json.dumps(SHIPPED)))
+            # SYRD-629: the shipped User now sends their message to the Director; the withdrawal is the
+            # Director's own and stays, distinct from the User's return on the earlier shape tested here.
+            check(any(tr["action"] == WITHDRAW for tr in validate(json.loads(json.dumps(SHIPPED)))["transitions"]),
+                  "the shipped document still carries the withdrawal")
+            shipped = validate(before_syrd629(SHIPPED))
 
             # -- the three outcomes are distinct in the document ---------------
             doc_withdraw = next(tr for tr in shipped["transitions"] if tr["action"] == WITHDRAW)
@@ -351,11 +365,12 @@ def main() -> int:
             t.psql(admin, MIGRATION)
             granted = revision()
             check(granted == before + 1, f"one revision, not more: {before} -> {granted}")
+            # The User's own return, as this migration found it: a later one (pgu1002, SYRD-629) replaces it.
+            model = next(tr for tr in document()["transitions"] if tr["action"] == "user_kick_back")
             for later in LATER_MIGRATIONS:
                 t.psql(admin, later)
             added = withdrawals(document())
             check(len(added) == 1, f"exactly one withdrawal was added: {added}")
-            model = next(tr for tr in document()["transitions"] if tr["action"] == "user_kick_back")
             check(added[0]["to"] == model["to"], f"modelled on the User's own: {added[0]}")
             check(added[0]["clear_signoffs"] == model["clear_signoffs"], f"{added[0]}")
             check(added[0]["actors"] == ["director"], f"{added[0]}")
@@ -390,7 +405,7 @@ def main() -> int:
             # action name, so a tenant that spells it differently keeps what it
             # has instead of growing a second way to do the same thing.
             sql("DELETE FROM ticket_board.tickets;")
-            named = without_withdrawal(document())
+            named = without_withdrawal(earlier(document()))
             own = dict(next(tr for tr in named["transitions"] if tr["action"] == "user_kick_back"))
             own.update({
                 "action": "take_it_back",
@@ -416,7 +431,7 @@ def main() -> int:
             # role is worse than leaving a tenant to grant it deliberately, and
             # picking whichever sorts first is exactly that mistake with a tidier
             # shape.
-            two_controllers = without_withdrawal(document())
+            two_controllers = without_withdrawal(earlier(document()))
             two_controllers["transitions"] = [
                 tr for tr in two_controllers["transitions"] if tr["action"] != "take_it_back"
             ]

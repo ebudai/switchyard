@@ -502,6 +502,16 @@ def _build_parser() -> argparse.ArgumentParser:
     clear_snooze.add_argument("--ticket", action="append", default=[], dest="tickets", help="only this ticket; repeat")
     add_free_text_argument(clear_snooze, "--reason", required=True, help="why ordinary reminders resume now")
     clear_snooze.add_argument("--apply", action="store_true", help="clear it; without it nothing is written")
+    uat = subparsers.add_parser(
+        "uat-instructions", aliases=["set-uat-instructions"],
+        help="Director: the User's UAT steps for a ticket -- what to do, what they should see, what to choose (SYRD-629)",
+    )
+    uat.add_argument("ticket_id")
+    add_free_text_argument(uat, "--do-this", help="the exact command or UI action the User performs")
+    add_free_text_argument(uat, "--you-should-see", help="the concrete result that means it worked")
+    add_free_text_argument(uat, "--then-choose", help="what to choose then (default: Accept, or Send to Director)")
+    uat.add_argument("--reconfirm", action="store_true",
+                     help="restamp the current steps, unchanged, for the ticket as it is now")
     fresh_context = subparsers.add_parser(
         "force-fresh-context",
         help="Director: start a ticket in a fresh conversation at a package boundary, before its hand-off (SYRD-626)",
@@ -800,6 +810,12 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif command == "force_fresh_context":
             response = client.force_fresh_context(args.ticket_id, reason=args.reason)
+        elif command in {"uat_instructions", "set_uat_instructions"}:
+            if args.reconfirm and any((args.do_this, args.you_should_see, args.then_choose)):
+                parser.error("uat-instructions: --reconfirm keeps the current steps; give either --reconfirm or new steps")
+            response = client.set_uat_instructions(args.ticket_id, do_this=args.do_this or "",
+                                                   you_should_see=args.you_should_see or "",
+                                                   then_choose=args.then_choose or "", reconfirm=args.reconfirm)
         elif command == "withdraw_signoff":
             response = client.withdraw_signoff(args.ticket_id, signoff=args.signoff, reason=args.reason)
         elif command == "measure_size":
@@ -864,7 +880,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if command in {"merge", "dismiss_notification", "verify_caller", "add_user_acceptance_relay",
                    "snooze_reminders", "clear_reminder_snooze", "claim_next", "approve_size_exception",
-                   "enable_size_review", "measure_size", "set_report_intake", "force_fresh_context"}:
+                   "enable_size_review", "measure_size", "set_report_intake", "force_fresh_context",
+                   "uat_instructions"}:
         print(json.dumps(response))
     else:
         print(json.dumps(_ticket_from_response(response)))

@@ -107,6 +107,13 @@ class Board:
         self.sent: list[tuple[str, str]] = []
         self.listener = self.new_listener()
 
+    @property
+    def uat(self) -> bool:
+        """Whether this board has the User's UAT steps and Send to Director (SYRD-629): main's replay and the
+        board built before the upgrade do not."""
+        return self.sql("SELECT to_regprocedure('ticket_board.set_uat_instructions(text,text,text,text,boolean)') "
+                        "IS NOT NULL;") == "t"
+
     def close(self) -> None:
         self.server.shutdown()
         self.server.server_close()
@@ -158,11 +165,22 @@ def about(batch: list[tuple[str, str]], role: str, ticket: str) -> list[str]:
     return [m for target, m in batch if target == f"pgu-{role}:0.0" and ticket in m]
 
 
+def to_user(board: Board, ticket: str) -> dict:
+    """The Director's acceptance to the User, with the User's UAT steps prepared first where the board has
+    them (SYRD-629); main's replay runs on a tree from before."""
+    if board.uat:
+        prepared = board.act(ticket, "set_uat_instructions", "director", do_this="Open the schedule.",
+                             you_should_see="This week's entries.")
+        if "refused" in prepared:
+            return prepared
+    return board.act(ticket, "director_dat_sign_off", "director")
+
+
 def to_user_review(board: Board, ticket: str, author: str) -> list[dict]:
     """Implementation through Audit and Director acceptance to the User, as Otto's tickets went."""
     return [board.act(ticket, "submit_to_audit_without_commit", author, reason="finished"),
             board.act(ticket, "audit_sign_off", "audit", text="Audited."),
-            board.act(ticket, "director_dat_sign_off", "director")]
+            to_user(board, ticket)]
 
 
 def scenario(root: Path, prefix: str) -> dict:
@@ -205,7 +223,7 @@ def scenario(root: Path, prefix: str) -> dict:
             f"'{B}' AND kind = 'ticket_update') + (SELECT count(*) FROM ticket_board.notification_trace "
             f"WHERE ticket_id = '{B}' AND kind = 'ticket_update');")
         # A reaches the User: app is free, and B is handed over, once.
-        seen["a_to_user"] = board.act(A, "director_dat_sign_off", "director")
+        seen["a_to_user"] = to_user(board, A)
         first = board.one_pass()
         again = board.one_pass(board.new_listener()) + board.one_pass()
         seen["a_with_user"] = board.where(A)
@@ -215,8 +233,14 @@ def scenario(root: Path, prefix: str) -> dict:
             f"AND ticket_id = '{B}' AND target_role = 'app' AND kind = 'transition';")
         seen["b_queue"] = board.ticket_json(B).get("serial_queue")
         seen["a_queue"] = board.ticket_json(A).get("serial_queue")
-        # The User sends A back: the rework queues behind B and does not interrupt it.
-        seen["a_rework"] = board.act(A, "user_kick_back", "user", reason="UAT: the schedule is wrong")
+        # The User sends A back -- to the Director, who sends it to app (SYRD-629): the rework queues behind B
+        # and does not interrupt it.
+        if board.uat:
+            sent = board.act(A, "user_send_to_director", "user", reason="UAT: the schedule is wrong")
+            seen["a_rework"] = sent if "refused" in sent else board.act(
+                A, "director_send_to_implementer", "director", reason="The User found the schedule wrong.")
+        else:
+            seen["a_rework"] = board.act(A, "user_kick_back", "user", reason="UAT: the schedule is wrong")
         seen["a_rework_waits"] = [board.where(A), board.waiting(A), board.waiting(B), board.reservation("app"),
                                   about(board.one_pass(), "app", A)]
         seen["a_rework_submit"] = board.act(A, "submit_to_audit_without_commit", "app", reason="fixed")
@@ -225,7 +249,7 @@ def scenario(root: Path, prefix: str) -> dict:
                             board.act(B, "audit_sign_off", "audit", text="Audited.")]
         seen["b_audit_holds"] = [board.reservation("app"), board.waiting(A), about(board.one_pass(), "app", A)]
         # B reaches the User: the rework is app's active ticket again, handed over once.
-        seen["b_to_user"] = board.act(B, "director_dat_sign_off", "director")
+        seen["b_to_user"] = to_user(board, B)
         rework = board.one_pass() + board.one_pass(board.new_listener())
         seen["a_reactivated"] = [about(rework, "app", A), board.reservation("app"), board.waiting(A)]
         # The rework is new work for Audit: it holds app there again, until it is with the User.

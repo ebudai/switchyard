@@ -1187,6 +1187,13 @@ class TicketBoardWriteClient:
         """Start this ticket in a fresh conversation, not its author's previous one (SYRD-626). Before its hand-off only."""
         return self._ticket_action(ticket_id, "force_fresh_context", {"reason": reason}, caller_role=caller_role)
 
+    def set_uat_instructions(self, ticket_id: str, *, do_this: str = "", you_should_see: str = "", then_choose: str = "",
+                             reconfirm: bool = False, caller_role: str | None = None) -> dict[str, Any]:
+        """The User's UAT steps for a ticket, or a reconfirmation of the current ones (SYRD-629). The Director's."""
+        payload = {"do_this": do_this, "you_should_see": you_should_see, "then_choose": then_choose,
+                   "reconfirm": reconfirm}
+        return self._ticket_action(ticket_id, "set_uat_instructions", payload, caller_role=caller_role)
+
     def withdraw_signoff(self, ticket_id: str, *, signoff: str, reason: str, caller_role: str | None = None) -> dict[str, Any]:
         """Lower one named sign-off that is given, with why (SYRD-598). The control role's; never raises one."""
         return self._ticket_action(ticket_id, "withdraw_signoff", {"signoff": signoff, "reason": reason}, caller_role=caller_role)

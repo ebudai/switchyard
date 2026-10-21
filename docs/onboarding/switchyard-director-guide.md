@@ -177,6 +177,29 @@ identity instead: the role holding `merge`, `set-blockers` and
 `set-manually-controlled` is the controller and may use them (SYRD-49, SYRD-78,
 SYRD-180).
 
+**Prepare the User's UAT steps before User Review.** The board refuses to move a
+ticket into User Review without current steps (SYRD-629), and shows them at the
+top of the ticket in three parts -- Do this, You should see, Then choose --
+beside the User's Accept and Send to Director:
+
+```bash
+ticket-board-write uat-instructions <id> --do-this "<the exact command or UI action>" \
+  --you-should-see "<the concrete result that means it worked>"
+ticket-board-write uat-instructions <id> --reconfirm   # the same steps, for the ticket as it is now
+```
+
+Plain words, real prerequisites, commands in backticks; background stays in the
+body. Steps are superseded when the ticket leaves User Review unaccepted or goes
+back to implementation, and are not current once its commit changes, so each
+round needs its own. The User's **Ask Director** leaves the ticket where it is
+and sends you one `uat_question` notice; answer with a comment and the panel
+shows it under the question. Where the workflow declares it, **Send to
+Director** moves the ticket, with the User's message, to `user_feedback` --
+yours, nothing reassigned, commit and Audit sign-off kept -- and you take
+`director_return_to_uat`, `director_send_to_implementer` (reason; Audit runs
+again), `director_route_feedback` (reason; to analysis), defer or cancel from
+there.
+
 **Relay the User's UAT result, do not override it.** The User reports UAT in
 conversation and has no pane to act from, and the User's own sign-off and
 rejection refuse you, as sign-off decisions should. A relay enters the User's
@@ -193,7 +216,8 @@ ticket-board-write workflow-action <id> relay_user_sign_off \
 # an empty "commit_hash" is refused as an invalid commit
 ticket-board-write workflow-action <id> relay_user_sign_off \
   --payload-json '{"reason": "User accepted the recommendation in conversation"}'
-# rejection, where relay_user_kick_back is listed
+# rejection, where relay_user_kick_back is listed: a board whose User still returns work,
+# not one where Send to Director hands the ticket to you
 ticket-board-write workflow-action <id> relay_user_kick_back \
   --payload-json '{"reason": "User reports <what failed>"}'
 ```

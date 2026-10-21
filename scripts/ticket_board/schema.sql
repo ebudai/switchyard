@@ -8408,6 +8408,8 @@ BEGIN
     -- something other than `backlog` gets this for free.
     IF tr->>'primitive' NOT IN ('return','reopen')
        AND NOT ticket_board.declared_parking_stage(tr->>'to')
+       -- SYRD-629: the User handing their review to the Director promotes nothing.
+       AND NOT ticket_board.declared_user_handoff(previous.state, tr->>'to')
        AND NOT ticket_board.declared_review_return(cfg, previous.state, tr->>'to')
        -- SYRD-599: Router handing work back to triage promotes nothing.
        AND tr->>'action'<>'router_return'
@@ -8447,6 +8449,12 @@ BEGIN
     -- the destination's shape, like the blocker exemption above (SYRD-192).
     ELSIF source_stage->>'signoff' IS NOT NULL AND tr->>'primitive' NOT IN ('return','reopen')
        AND NOT ticket_board.declared_parking_stage(tr->>'to')
+       -- SYRD-629: nor is the User handing it to the Director, in a stage they
+       -- alone hold to decide it: the User's message about a candidate keeps the
+       -- candidate, its commit and Audit's sign-off, for the Director to return
+       -- to the User or send on. Only from User Review: a move into Analysis
+       -- from any other review still needs that review's sign-off.
+       AND NOT ticket_board.declared_user_handoff(previous.state, tr->>'to')
        AND NOT ticket_board.workflow_flag(doc,source_stage->>'signoff',cfg) THEN RAISE EXCEPTION 'stage signoff required'; END IF;
     FOR reset IN SELECT jsonb_array_elements_text(tr->'clear_signoffs') LOOP
         doc:=ticket_board.set_workflow_flag(doc,reset,false);
@@ -17877,4 +17885,300 @@ BEGIN
     END LOOP;
     RETURN alerted;
 END;
+$$;
+
+-- SYRD-629: UAT instructions and questions (identical to migrations/pgu1002_syrd629_uat_instructions.sql).
+-- The User's instructions for a ticket in User Review, as current data (SYRD-629).
+--
+-- A ticket reaches the User with three short parts the Director prepared for
+-- it: what to do, what they should see, and what to choose then. The board
+-- shows them at the top of the ticket; without them the User had to rebuild
+-- the steps from comments or ask the Director to restate them.
+--
+--  * Only the Director writes them (the director_edit capability), and only
+--    whole: three non-blank parts, each short. A reconfirmation restamps the
+--    same text for the ticket as it is now.
+--  * They are written for the ticket's commit at that moment ('' for no code)
+--    and stop being current when the ticket leaves User Review without the
+--    User's acceptance, or goes back to implementation. A ticket returned or
+--    resubmitted therefore reaches the User again only with instructions
+--    replaced or reconfirmed for what it now is.
+--  * Entering a User Review stage by any path -- a declared transition, a
+--    legacy one, a Director edit or a forced move -- is refused without
+--    current instructions.
+--  * The User's question while reviewing (ask_director) is an attributed
+--    comment, leaves the ticket where it is, and tells the Director once.
+CREATE TABLE IF NOT EXISTS ticket_board.ticket_uat_instructions (
+    ticket_id text PRIMARY KEY REFERENCES ticket_board.tickets(id) ON DELETE CASCADE,
+    do_this text NOT NULL CHECK (btrim(do_this) <> ''),
+    you_should_see text NOT NULL CHECK (btrim(you_should_see) <> ''),
+    then_choose text NOT NULL CHECK (btrim(then_choose) <> ''),
+    prepared_by text NOT NULL,
+    prepared_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    for_commit text NOT NULL DEFAULT '',
+    superseded_at timestamptz,
+    superseded_reason text
+);
+
+-- Every version the Director wrote or reconfirmed, newest last.
+CREATE TABLE IF NOT EXISTS ticket_board.ticket_uat_instruction_history (
+    id bigserial PRIMARY KEY,
+    ticket_id text NOT NULL REFERENCES ticket_board.tickets(id) ON DELETE CASCADE,
+    do_this text NOT NULL,
+    you_should_see text NOT NULL,
+    then_choose text NOT NULL,
+    prepared_by text NOT NULL,
+    prepared_at timestamptz NOT NULL,
+    for_commit text NOT NULL,
+    reconfirmed boolean NOT NULL DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS ticket_uat_instruction_history_ticket_idx
+    ON ticket_board.ticket_uat_instruction_history (ticket_id, id);
+
+CREATE TABLE IF NOT EXISTS ticket_board.ticket_uat_questions (
+    id bigserial PRIMARY KEY,
+    ticket_id text NOT NULL REFERENCES ticket_board.tickets(id) ON DELETE CASCADE,
+    asked_by text NOT NULL,
+    asked_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    question text NOT NULL CHECK (btrim(question) <> ''),
+    comment_id bigint REFERENCES ticket_board.ticket_comments(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS ticket_uat_questions_ticket_idx ON ticket_board.ticket_uat_questions (ticket_id, id);
+
+-- Whether a stage is one where the User reviews: a declared review stage the
+-- User owns, or the legacy board's user_review.
+CREATE OR REPLACE FUNCTION ticket_board.uat_stage(p_stage text)
+RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+    SELECT CASE WHEN ticket_board.declared_workflow() IS NULL THEN p_stage = 'user_review'
+                ELSE coalesce((SELECT x->'owners' ? 'user' AND x->>'kind' = 'review'
+                                 FROM jsonb_array_elements(ticket_board.declared_workflow()->'stages') x
+                                WHERE x->>'name' = p_stage), false) END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.uat_implementation_stage(p_stage text)
+RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+    SELECT CASE WHEN ticket_board.declared_workflow() IS NULL THEN p_stage = 'in_progress'
+                ELSE coalesce((SELECT x->>'kind' = 'implementation'
+                                 FROM jsonb_array_elements(ticket_board.declared_workflow()->'stages') x
+                                WHERE x->>'name' = p_stage), false) END;
+$$;
+
+-- Why a ticket's instructions are not current for p_commit, or NULL when they are.
+CREATE OR REPLACE FUNCTION ticket_board.uat_instructions_gap(p_ticket text, p_commit text)
+RETURNS text LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+DECLARE saved ticket_board.ticket_uat_instructions;
+BEGIN
+    SELECT * INTO saved FROM ticket_board.ticket_uat_instructions WHERE ticket_id = p_ticket;
+    IF NOT FOUND THEN
+        RETURN 'none were prepared';
+    ELSIF saved.superseded_at IS NOT NULL THEN
+        RETURN format('the last ones (%s, %s) stopped being current: %s', saved.prepared_by,
+                      ticket_board.utc_text(saved.prepared_at), saved.superseded_reason);
+    ELSIF saved.for_commit <> coalesce(p_commit, '') THEN
+        RETURN format('the last ones were written for %s, and the ticket now carries %s',
+                      coalesce(nullif(saved.for_commit, ''), 'no commit'),
+                      coalesce(nullif(p_commit, ''), 'no commit'));
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.require_uat_instructions()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+DECLARE gap text;
+BEGIN
+    IF OLD.state IS DISTINCT FROM NEW.state AND ticket_board.uat_stage(NEW.state) THEN
+        gap := ticket_board.uat_instructions_gap(NEW.id, NEW.commit_hash);
+        IF gap IS NOT NULL THEN
+            RAISE EXCEPTION 'UAT instructions required before % enters %: %. The Director prepares them with: ticket-board-write uat-instructions % --do-this ... --you-should-see ... (or --reconfirm)',
+                NEW.id, NEW.state, gap, NEW.id;
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tickets_zzzzzz_uat_instructions_required ON ticket_board.tickets;
+-- An update only: no ticket is created in a review (create_ticket starts one in
+-- draft, analysis or backlog), so the way into User Review is a state change.
+-- Named to run after every other BEFORE trigger, on the state they settled.
+CREATE TRIGGER tickets_zzzzzz_uat_instructions_required BEFORE UPDATE ON ticket_board.tickets
+    FOR EACH ROW EXECUTE FUNCTION ticket_board.require_uat_instructions();
+
+CREATE OR REPLACE FUNCTION ticket_board.supersede_uat_instructions()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+DECLARE why text;
+BEGIN
+    IF OLD.state IS NOT DISTINCT FROM NEW.state THEN
+        RETURN NULL;
+    END IF;
+    IF ticket_board.uat_stage(OLD.state) AND NOT ticket_board.uat_stage(NEW.state) AND NOT NEW.user_signoff THEN
+        why := format('the ticket left %s for %s without the User''s acceptance', OLD.state, NEW.state);
+    ELSIF ticket_board.uat_implementation_stage(NEW.state) THEN
+        why := format('the ticket went back to %s', NEW.state);
+    END IF;
+    IF why IS NOT NULL THEN
+        UPDATE ticket_board.ticket_uat_instructions
+           SET superseded_at = clock_timestamp(), superseded_reason = why
+         WHERE ticket_id = NEW.id AND superseded_at IS NULL;
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tickets_zz_uat_instructions_supersede ON ticket_board.tickets;
+CREATE TRIGGER tickets_zz_uat_instructions_supersede AFTER UPDATE ON ticket_board.tickets
+    FOR EACH ROW EXECUTE FUNCTION ticket_board.supersede_uat_instructions();
+
+-- The Director writes a ticket's instructions, or reconfirms the ones it has
+-- for the ticket as it is now.
+CREATE OR REPLACE FUNCTION ticket_board.set_uat_instructions(
+    p_ticket text, p_do_this text, p_you_should_see text, p_then_choose text, p_reconfirm boolean DEFAULT false)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+DECLARE
+    who text;
+    ticket ticket_board.tickets;
+    saved ticket_board.ticket_uat_instructions;
+    parts text[];
+    labels text[] := ARRAY['Do this', 'You should see', 'Then choose'];
+BEGIN
+    PERFORM ticket_board.require_actor(ARRAY['director'], 'director_edit');
+    who := ticket_board.current_app_actor();
+    SELECT * INTO ticket FROM ticket_board.tickets WHERE id = p_ticket FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket % does not exist', p_ticket;
+    END IF;
+    IF ticket.state IN ('done', 'cancelled') OR coalesce((SELECT (x->>'terminal')::boolean
+            FROM jsonb_array_elements(ticket_board.declared_workflow()->'stages') x WHERE x->>'name' = ticket.state), false) THEN
+        RAISE EXCEPTION '% is %: there is no UAT to prepare', p_ticket, ticket.state;
+    END IF;
+    IF p_reconfirm THEN
+        SELECT * INTO saved FROM ticket_board.ticket_uat_instructions WHERE ticket_id = p_ticket;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION '% has no UAT instructions to reconfirm: write them with --do-this and --you-should-see', p_ticket;
+        END IF;
+        parts := ARRAY[saved.do_this, saved.you_should_see, saved.then_choose];
+    ELSE
+        parts := ARRAY[btrim(coalesce(p_do_this, '')), btrim(coalesce(p_you_should_see, '')),
+                       btrim(coalesce(p_then_choose, ''))];
+        FOR i IN 1..3 LOOP
+            IF parts[i] = '' THEN
+                RAISE EXCEPTION 'UAT instructions need all three parts: "%" is blank', labels[i];
+            END IF;
+            IF length(parts[i]) > 1500 THEN
+                RAISE EXCEPTION '"%" is % characters; keep each part short (1500 at most) and link to details instead',
+                    labels[i], length(parts[i]);
+            END IF;
+        END LOOP;
+    END IF;
+    INSERT INTO ticket_board.ticket_uat_instructions AS u
+        (ticket_id, do_this, you_should_see, then_choose, prepared_by, prepared_at, for_commit)
+    VALUES (p_ticket, parts[1], parts[2], parts[3], who, clock_timestamp(), coalesce(ticket.commit_hash, ''))
+    ON CONFLICT (ticket_id) DO UPDATE
+       SET do_this = EXCLUDED.do_this, you_should_see = EXCLUDED.you_should_see, then_choose = EXCLUDED.then_choose,
+           prepared_by = EXCLUDED.prepared_by, prepared_at = EXCLUDED.prepared_at, for_commit = EXCLUDED.for_commit,
+           superseded_at = NULL, superseded_reason = NULL
+    RETURNING * INTO saved;
+    INSERT INTO ticket_board.ticket_uat_instruction_history
+        (ticket_id, do_this, you_should_see, then_choose, prepared_by, prepared_at, for_commit, reconfirmed)
+    VALUES (p_ticket, saved.do_this, saved.you_should_see, saved.then_choose, saved.prepared_by, saved.prepared_at,
+            saved.for_commit, coalesce(p_reconfirm, false));
+    RETURN ticket_board.ticket_uat(p_ticket);
+END;
+$$;
+
+-- The User asks the Director something while reviewing: an attributed
+-- comment, the ticket stays where it is, and the Director is told once.
+CREATE OR REPLACE FUNCTION ticket_board.ask_director(p_ticket text, p_question text)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+DECLARE
+    who text;
+    ticket ticket_board.tickets;
+    question text := btrim(coalesce(p_question, ''));
+    comment_id bigint;
+    asked ticket_board.ticket_uat_questions;
+BEGIN
+    -- add_comment's own roles, as every require_actor for an action must name
+    -- the same ones; the question is then the User's alone below.
+    PERFORM ticket_board.require_actor(ARRAY['director', 'user', 'main', 'app', 'ops', 'audit', 'inspector', 'perf', 'research'], 'add_comment');
+    who := ticket_board.current_app_actor();
+    -- The User's alone: add_comment is every role's, and a question from anyone
+    -- else would reach the Director as the User's.
+    IF who IS DISTINCT FROM 'user' THEN
+        RAISE EXCEPTION '% cannot call ask_director: it is the User''s question from User Review', who USING ERRCODE = '42501';
+    END IF;
+    SELECT * INTO ticket FROM ticket_board.tickets WHERE id = p_ticket FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket % does not exist', p_ticket;
+    END IF;
+    IF NOT ticket_board.uat_stage(ticket.state) THEN
+        RAISE EXCEPTION 'Ask Director is for a ticket in User Review; % is %', p_ticket, ticket.state;
+    END IF;
+    IF question = '' THEN
+        RAISE EXCEPTION 'a question for the Director must say something';
+    END IF;
+    IF length(question) > 4000 THEN
+        RAISE EXCEPTION 'the question is % characters; 4000 at most', length(question);
+    END IF;
+    PERFORM ticket_board.append_ticket_comment(p_ticket, who, 'Question for the Director: ' || question, false);
+    SELECT c.id INTO comment_id FROM ticket_board.ticket_comments c
+     WHERE c.ticket_id = p_ticket ORDER BY c.position DESC LIMIT 1;
+    PERFORM set_config('ticket_board.awaiting_role_comment_touch', 'on', true);
+    PERFORM ticket_board.touch_ticket(p_ticket);
+    PERFORM set_config('ticket_board.awaiting_role_comment_touch', '', true);
+    INSERT INTO ticket_board.ticket_uat_questions (ticket_id, asked_by, question, comment_id)
+    VALUES (p_ticket, who, question, comment_id)
+    RETURNING * INTO asked;
+    PERFORM ticket_board.enqueue_notification(
+        p_ticket, 'ticket_update', 'director',
+        format('%s has a question about %s, which stays in User Review: "%s". Answer with a comment on the ticket; '
+               'it shows beside the question at the top of their UAT panel.', who, p_ticket, left(question, 600)),
+        jsonb_build_object('kind', 'uat_question', 'id', p_ticket, 'target_role', 'director',
+                           'question_id', asked.id, 'asked_by', who, 'question', question),
+        'uat_question:' || asked.id);
+    RETURN ticket_board.ticket_uat(p_ticket);
+END;
+$$;
+
+-- A ticket's UAT data for its JSON: NULL when it has none.
+CREATE OR REPLACE FUNCTION ticket_board.ticket_uat(p_ticket text)
+RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+    SELECT CASE WHEN u.ticket_id IS NULL AND q.questions IS NULL THEN NULL ELSE jsonb_build_object(
+        'instructions', CASE WHEN u.ticket_id IS NULL THEN NULL ELSE jsonb_build_object(
+            'do_this', u.do_this, 'you_should_see', u.you_should_see, 'then_choose', u.then_choose,
+            'prepared_by', u.prepared_by, 'prepared_at', ticket_board.utc_text(u.prepared_at),
+            'for_commit', u.for_commit, 'superseded_at', ticket_board.utc_text(u.superseded_at),
+            'superseded_reason', u.superseded_reason,
+            'current', ticket_board.uat_instructions_gap(t.id, t.commit_hash) IS NULL,
+            'gap', ticket_board.uat_instructions_gap(t.id, t.commit_hash)) END,
+        'questions', coalesce(q.questions, '[]'::jsonb)) END
+      FROM ticket_board.tickets t
+      LEFT JOIN ticket_board.ticket_uat_instructions u ON u.ticket_id = t.id
+      LEFT JOIN LATERAL (
+          SELECT jsonb_agg(jsonb_build_object('id', x.id, 'asked_by', x.asked_by, 'asked_at', ticket_board.utc_text(x.asked_at),
+                                              'question', x.question, 'comment_id', x.comment_id) ORDER BY x.id) AS questions
+            FROM (SELECT * FROM ticket_board.ticket_uat_questions WHERE ticket_id = t.id ORDER BY id DESC LIMIT 10) x) q ON true
+     WHERE t.id = p_ticket;
+$$;
+
+-- A stage the Director alone holds work in to decide it: not a review, not
+-- terminal, owned by the Director and nobody else. A review may hand work there
+-- without its sign-off, and its record rides along (SYRD-629). The same rule
+-- as workflow_config.director_hold_stage_names.
+CREATE OR REPLACE FUNCTION ticket_board.declared_director_hold(stage text)
+RETURNS boolean LANGUAGE sql STABLE AS $$
+ SELECT coalesce((SELECT NOT (x->>'terminal')::boolean
+   AND x->>'kind' <> 'review'
+   AND coalesce(x->'owners','[]'::jsonb) = '["director"]'::jsonb
+  FROM jsonb_array_elements(ticket_board.declared_workflow()->'stages') x
+  WHERE x->>'name'=stage), false);
+$$;
+
+-- The User handing their review to the Director: out of a User Review stage
+-- into a Director hold. Only this move keeps the review's record without its
+-- sign-off; a move into Analysis from anywhere else is no such hand-off.
+CREATE OR REPLACE FUNCTION ticket_board.declared_user_handoff(from_stage text, to_stage text)
+RETURNS boolean LANGUAGE sql STABLE AS $$
+ SELECT ticket_board.declared_workflow() IS NOT NULL AND ticket_board.uat_stage(from_stage)
+   AND ticket_board.declared_director_hold(to_stage);
 $$;

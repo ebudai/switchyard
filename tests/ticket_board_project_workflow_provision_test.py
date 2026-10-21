@@ -713,7 +713,7 @@ WHERE id = '{matrix_id}';
                     "user_signoff": False,
                 }, after_audit_signoff
             if needs_user_signoff:
-                service_call(service_conn, "director", f"SELECT ticket_board.director_dat_sign_off('{matrix_id}', 'DAT accepted.');")
+                service_call(service_conn, "director", f"SELECT ticket_board.set_uat_instructions('{matrix_id}', 'Open the change.', 'It works.', 'Accept.', false); SELECT ticket_board.director_dat_sign_off('{matrix_id}', 'DAT accepted.');")
                 uat_status = json.loads(
                     psql(
                         admin_conn,

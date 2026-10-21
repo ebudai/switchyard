@@ -24,8 +24,11 @@ def main() -> int:
     assert "commentAuthor.textContent = 'Commenting as User';" in HTML
     assert "commentWho.type = 'text';" not in HTML
     assert "commentWho.placeholder = 'who';" not in HTML
-    assert "userBannerSignoffButton.type = 'button';" in HTML
-    assert "userBannerSignoffButton.textContent = 'Sign Off';" in HTML
+    # SYRD-629: the User decides from the UAT panel -- Accept or Send to Director -- or asks the Director.
+    assert "userBannerSignoffButton" not in HTML
+    assert "uatButton('Accept', 'primary uat-accept'" in HTML
+    assert "uatButton('Send to Director', 'uat-send'" in HTML
+    assert "uatButton('Ask Director', 'uat-ask'" in HTML
     assert "const patch = { user_signoff: true };" in HTML
     assert "const patch = { user_signoff: true, state: 'done' };" not in HTML
     assert "setCreateStatus(`Signed off ✓ ${ticketId} moved to Final Sign-Off.`);" in HTML
@@ -39,14 +42,15 @@ def main() -> int:
     assert "if (ticket.needs_user_signoff) {\n        toggles.appendChild(toggleControl('UAT sign-off'" not in HTML
     assert "toggleControl('UAT sign-off', ticket.needs_user_signoff" not in HTML
     assert "toggleControl('Needs UAT', ticket.needs_user_signoff" not in HTML
-    assert "if (signoffRecorded) {" in HTML
-    assert "signedOffState.textContent = 'Signed Off ✓';" in HTML
+    assert "signedOffState" not in HTML
     assert "setCreateStatus(error.message, true);" in HTML
     assert "throw new Error('comment requires an author');" in HTML
     assert "throw new Error('comment requires non-empty text');" in HTML
     assert "if (!trimmedText && !nextState) {" in HTML
     assert "setCreateStatus(nextState ? `Moved ${ticketId} to ${stateLabel(nextState)}.`" in HTML
-    assert "kickbackButton.textContent = 'Return for Rework';" in HTML
+    # SYRD-629: the User's return is Send to Director, to the Director, never straight to rework.
+    assert "kickbackButton.textContent = 'Return for Rework';" not in HTML
+    assert "question: 'Send this ticket and your message to the Director?'" in HTML
     # SYRD-598: an Inspector's or Audit's kick-back is that role's, from its own pane.
     assert "kickbackButton.textContent = 'Comment + Return to Implementation';" not in HTML
     assert "await submitComment(ticket.id, 'inspector', commentText.value, 'in_progress');" not in HTML

@@ -76,7 +76,10 @@ def scenario(root: Path, prefix: str) -> dict:
     import ticket_board_write_api_test as t
     from scripts.ticket_board import write_cli
     from temporary_cluster import temporary_cluster
+    import workflow_document_eras
     from workflow_document_eras import before_relaying
+    # SYRD-629's earlier shape; main's replay, from a tree before it, has no such era to remove.
+    before_user_feedback = getattr(workflow_document_eras, "before_user_feedback", lambda document=None: document)
 
     seen: dict = {}
     with temporary_cluster(prefix=prefix, shutdown="immediate") as cluster:
@@ -107,7 +110,7 @@ END $$;
                                database_url=t.conninfo(cluster.socket_dir, cluster.port, db, t.SERVICE_ROLE))
         app._resolve_known_commit = lambda value: (COMMIT if value == COMMIT else OTHER, [])
         # Declared AFTER the migrations ran, as MEFP's was: pgu953 never saw it.
-        doc = mefp_shaped(before_relaying())
+        doc = mefp_shaped(before_relaying(before_user_feedback()))
         doc["project"] = "cerulean"
         doc.setdefault("reassign", {})
         doc.setdefault("remove_stages", [])
@@ -289,9 +292,12 @@ def main() -> int:
     # declines is a reason this declines, and nothing is added.
     from scripts.ticket_board import workflow_relays as relays
     sys.path.insert(0, str(ROOT / "tests"))
+    import workflow_document_eras
     from workflow_document_eras import before_relaying
+    # SYRD-629's earlier shape; main's replay, from a tree before it, has no such era to remove.
+    before_user_feedback = getattr(workflow_document_eras, "before_user_feedback", lambda document=None: document)
 
-    base = mefp_shaped(before_relaying())
+    base = mefp_shaped(before_relaying(before_user_feedback()))
     granted, _, _ = relays.with_user_acceptance_relay(base)
     variants = {
         "two control roles": lambda d: d["roles"].append({**next(r for r in d["roles"] if r["name"] == "director"),
@@ -311,7 +317,7 @@ def main() -> int:
         change(doc)
         updated, relay, reason = relays.with_user_acceptance_relay(doc)
         check(updated is None and relay is None and because[label] in reason, f"{label}: declined, for that reason: {reason}")
-    returning = copy.deepcopy(before_relaying())
+    returning = copy.deepcopy(before_relaying(before_user_feedback()))
     check("could mirror that move" in relays.rejection_relay_finding(returning)
           and "only return or approve" in relays.rejection_relay_finding(base),
           "a User who returns work could have a rejection relay; one who reopens cannot")

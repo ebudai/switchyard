@@ -368,4 +368,21 @@ REVOKE EXECUTE ON FUNCTION ticket_board.close_blocked_pane(bigint, text) FROM PU
 REVOKE EXECUTE ON FUNCTION ticket_board.note_blocked_panes(jsonb, interval) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION ticket_board.note_blocked_panes(jsonb, interval) TO ticket_board_listener;
 
+-- SYRD-629: UAT instructions and questions.
+REVOKE ALL ON ticket_board.ticket_uat_instructions, ticket_board.ticket_uat_instruction_history,
+    ticket_board.ticket_uat_questions FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.uat_stage(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.uat_implementation_stage(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.uat_instructions_gap(text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.require_uat_instructions() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.supersede_uat_instructions() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.set_uat_instructions(text, text, text, text, boolean) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.ask_director(text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.ticket_uat(text) FROM PUBLIC;
+GRANT SELECT ON ticket_board.ticket_uat_instructions, ticket_board.ticket_uat_instruction_history,
+    ticket_board.ticket_uat_questions TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.set_uat_instructions(text, text, text, text, boolean) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.ask_director(text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.ticket_uat(text) TO ticket_board_service, ticket_board_listener;
+
 COMMIT;

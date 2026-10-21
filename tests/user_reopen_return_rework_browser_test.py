@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Regression test: UAT Return for Rework uses User's reopen action, not route."""
+"""Regression test: on a legacy board the User's Send to Director uses the User's reopen action, not route.
+
+SYRD-629 replaced the comment box's Return for Rework button with the UAT panel's
+Send to Director, which takes a short message and says where the ticket goes.
+"""
 
 from __future__ import annotations
 
@@ -16,7 +20,10 @@ from tests.ticket_board_ui_harness import BoardHarness, load_playwright, ticket_
 
 
 def run_browser_check(playwright: Any, harness: BoardHarness) -> None:
-    browser = playwright.chromium.launch(headless=True)
+    launch: dict = {"headless": True}
+    if Path("/opt/google/chrome/chrome").is_file():
+        launch["executable_path"] = "/opt/google/chrome/chrome"
+    browser = playwright.chromium.launch(**launch)
     try:
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         page_errors: list[str] = []
@@ -31,12 +38,22 @@ def run_browser_check(playwright: Any, harness: BoardHarness) -> None:
         # SYRD-598: the board page acts as the User; there is no author to pick.
         assert modal.locator("[data-comment-author='user']").count() == 1
         assert modal.get_by_placeholder("Add a comment or bounce-back note").input_value() == ""
-        modal.get_by_role("button", name="Return for Rework").click()
+        assert modal.get_by_role("button", name="Return for Rework").count() == 0
+        panel = modal.locator("[data-uat-panel='PGU-512']")
+        panel.locator("[data-uat-message]").fill("The schedule shows last week.")
+        panel.locator("[data-uat-decision='send']").click()
+        dialog = page.locator("[data-board-ui-dialog='user_reopen']")
+        dialog.wait_for(timeout=5000)
+        assert "Send this ticket and your message to the Director?" in dialog.text_content()
+        assert "back to the Director" in dialog.locator("[data-board-ui-next]").text_content()
+        dialog.locator("[data-board-ui-confirm]").click()
 
-        wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.state === 'analysis' && ticket.comments.length === 0")
+        wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.state === 'analysis'")
         page.locator(".column-title", has_text="Triage").wait_for(timeout=5000)
         assert page_errors == []
-        assert harness.app.action_log == [("PGU-512", "user", {"state": "analysis"})]
+        # One reopen, by the User, carrying the User's message to the Director.
+        assert harness.app.action_log == [("PGU-512", "user", {
+            "state": "analysis", "comment": {"who": "user", "text": "The schedule shows last week."}})], harness.app.action_log
     finally:
         browser.close()
 

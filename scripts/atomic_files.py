@@ -81,14 +81,22 @@ def _ensure_private_dir(path: Path) -> None:
         pass
 
 
-def _write_private_json_atomic(path: Path, payload: dict[str, Any], *, owner_user: str | None = None) -> None:
+# The file 0600, its parent made 0700 if missing; and, unless `private_parent` is False, the parent set to 0700.
+# `private_parent=False` is for a file in a directory another policy governs: the project state directory holds the
+# control repository too, and `repair-boundary` gives the board service a named ACL traverse there. A chmod to 0700
+# sets the ACL mask to nothing, so that traverse stopped working at the next write (SYRD-656).
+def _write_private_json_atomic(path: Path, payload: dict[str, Any], *, owner_user: str | None = None,
+                               private_parent: bool = True) -> None:
     from scripts import team_launcher as launcher
 
     if owner_user and launcher.root_writes_for(owner_user):
         launcher.write_owner_file(owner_user, path, json.dumps(payload, indent=2, sort_keys=True) + "\n",
-                                  mode=0o600, parents_mode=0o700, parent_mode=0o700)
+                                  mode=0o600, parents_mode=0o700, parent_mode=0o700 if private_parent else None)
         return
-    launcher._ensure_private_dir(path.parent)
+    if private_parent:
+        launcher._ensure_private_dir(path.parent)
+    else:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         "w",
         encoding="utf-8",

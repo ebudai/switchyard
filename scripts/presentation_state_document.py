@@ -271,5 +271,6 @@ def _write_state(
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
 ) -> None:
-    team_launcher._write_private_json_atomic(state_path, state, owner_user=config.run_as_user)
+    # The project state directory is shared with the control repository: its mode and ACL are repair-boundary's.
+    team_launcher._write_private_json_atomic(state_path, state, owner_user=config.run_as_user, private_parent=False)
     team_launcher.ensure_owner_file(config, state_path, runner=runner)

@@ -153,7 +153,8 @@ class RuntimeJournal:
         payload = asdict(self)
         payload["slots"] = list(self.slots)
         # As root, the owner's journal by descriptor from its root, never owned off a by-path stat (SYRD-612).
-        team_launcher._write_private_json_atomic(path, payload, owner_user=self.owner_user or None)
+        team_launcher._write_private_json_atomic(path, payload, owner_user=self.owner_user or None,
+                                                 private_parent=False)  # the shared project state directory (SYRD-656)
         if not team_launcher.root_writes_for(self.owner_user):
             stopped_project_model_repair.keep_owner(path, Path(self.config_path))
 

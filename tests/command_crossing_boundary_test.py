@@ -70,7 +70,8 @@ SEAMS = {
     '_switchyard_cross_account': {'_switchyard_exec_through_tenant_control': 1, '_switchyard_exec_with_root': 1, '_tenant_control_grant': 1, '_tenant_control_operation': 1, 'offer_host_wide_promotion_before_launch': 1},
     '_require_switchyard_owner_hint_or_root': {'_project_config_path_owner_user': 1, '_switchyard_command_is_unprivileged': 1, '_switchyard_cross_account': 1, 'current_user_name': 1},
     '_require_switchyard_project_owner_or_root': {'_configured_role_account_caller': 1, '_switchyard_command_is_unprivileged': 1, '_switchyard_cross_account': 1, 'current_user_name': 1},
-    '_load_switchyard_project_config_for_command': {'_require_switchyard_owner_hint_or_root': 1, '_require_switchyard_project_owner_or_root': 1, '_switchyard_exec_with_root': 1, 'load_project_config': 1},
+    # SYRD-663: and, as root, the owner root's own records name, before the configuration is read.
+    '_load_switchyard_project_config_for_command': {'_require_switchyard_owner_hint_or_root': 1, '_require_switchyard_project_owner_or_root': 1, '_switchyard_exec_with_root': 1, 'load_project_config': 1, 'root_recorded_owner': 1},
 }
 #: Measured on the baseline launcher: every launcher function outside the eleven that calls one of them, and by what name.
 DISPATCH = {'switchyard_main': {'_load_switchyard_project_config_for_command': 16}}
@@ -310,6 +311,12 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
         "close_desktop_presentation": record("close_desktop_presentation", lambda project, **k: spec.get("close", 0)),
         "complete_desktop_presentation": record("complete_desktop_presentation", lambda project, **k: spec.get("complete", 0)),
         "offer_host_wide_promotion_before_launch": record("offer_host_wide_promotion_before_launch", lambda project, **k: None),
+        # SYRD-663's read, after the baseline: answered here without a record in `calls`, so every measured case is the
+        # baseline's unchanged; what the crossing does with its answer is asserted on its own below.
+        "root_recorded_owner": lambda project, config_path=None: (
+            reached.add("root_recorded_owner")
+            or ("owner_asked" in spec and spec["owner_asked"].append([project, norm(config_path)]))
+            or spec.get("recorded_owner", ("syrd414-owner", ""))),
         "TENANT_CONTROL_ROOT": Path("/nonexistent/syrd414/tenant-control"),
         "_switchyard_exec_with_root": sibling("_switchyard_exec_with_root", {"runner": runner, "exec_func": exec_func}),
         "_switchyard_cross_account": sibling("_switchyard_cross_account", {**effects, "which": lambda *a, **k: None, "input_func": lambda prompt: "n",
@@ -568,6 +575,25 @@ def test_the_boundaries_hold_in_the_measured_record() -> None:
     root = [c[0] for c in GOLDEN["load: the configuration refused to root"]["calls"]]
     check("_switchyard_exec_with_root" not in root and GOLDEN["load: the configuration refused to root"]["answer"]["raised"] == "PermissionError",
           f"root is never re-executed through sudo on a refused read: {root}")
+
+
+def test_root_acts_only_for_a_project_its_own_records_name_an_owner_for() -> None:
+    """SYRD-663: as root, the owner root's records name is asked before the configuration is read, and only as root."""
+    spec = {**CASES["load: root"], "owner_asked": []}
+    got = run(spec)
+    check(got == GOLDEN["load: root"] and spec["owner_asked"] == [["p414", "PATH /nonexistent/syrd414/p414.json"]],
+          f"root: asked once, for the slug and the registered path, and otherwise the baseline: {spec['owner_asked']}")
+    spec = {**CASES["load: the owner, a privileged command"], "owner_asked": []}
+    run(spec)
+    check(spec["owner_asked"] == [], f"the owner itself is not asked: {spec['owner_asked']}")
+    for recorded, why in (((None, ""), "root holds no record of p414 that says whose project it is"),
+                          (("", "root's registry entry for p414 cannot say whose project it is: X"),
+                           "root's registry entry for p414 cannot say whose project it is: X")):
+        got = run({**CASES["load: root"], "recorded_owner": recorded})
+        check(got["answer"] == {"raised": "SystemExit", "message": f"switchyard: {why}; run the command as the project's owner. "
+                                "Nothing was changed."}
+              and "load_project_config" not in [c[0] for c in got["calls"]],
+              f"{recorded}: refused before the configuration is read: {got}")
 
 
 def test_every_launcher_seam_is_reached() -> None:

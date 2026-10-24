@@ -343,6 +343,13 @@ def _load_switchyard_project_config_for_command(entry: SwitchyardProjectEntry, a
     from scripts import team_launcher as launcher
 
     launcher._require_switchyard_owner_hint_or_root(entry, argv)
+    if os.geteuid() == 0:
+        # Before the configuration is read: root acts only for a project its own records name an owner for, and only
+        # as that owner -- the loader holds every read of the configuration to the same records (SYRD-663).
+        recorded, problem = launcher.root_recorded_owner(entry.slug, entry.config_path)
+        if recorded is None or problem:
+            raise SystemExit(f"switchyard: {problem or f'root holds no record of {entry.slug} that says whose project it is'}"
+                             "; run the command as the project's owner. Nothing was changed.")
     try:
         # Root's read of this path is the no-follow one, inside the loader.
         config = launcher.load_project_config(entry.slug, entry.config_path)

@@ -644,7 +644,7 @@ def test_the_privileged_run_leaves_this_host_alone() -> None:
         "/etc/switchyard/provision/porter",
         "/etc/switchyard/projects/porter.json",
         "/opt/switchyard/bootstrap",
-        "/srv/porter",
+        "/home/porter-agent",
     )
 
     def state() -> dict[str, object]:

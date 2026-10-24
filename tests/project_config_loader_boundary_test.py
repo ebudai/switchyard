@@ -62,7 +62,8 @@ CHECKS = 0
 MOVED = ('load_project_config',)
 #: Measured on the baseline launcher: the moved body's call-time reads of launcher globals.
 SEAMS = {
-    'load_project_config': {'DEFAULT_CONFIG_DIR': 1, 'ProjectConfig': 1, '_control_repository_boundary_error': 1, '_default_board_socket': 1, '_default_board_url': 1, '_expand_path': 6, '_load_json': 1, '_normalized_path': 2, '_role_from_json': 1, '_validate_project_slug': 2, '_with_project_board_env': 1, 'default_session_dir_for_user': 1, 'parse_worker_pool': 1, 'read_tenant_document_no_follow': 1, 'validate_ticket_prefix': 1},
+    # SYRD-663: and, as root, whether the owner the configuration names is the one root's records name.
+    'load_project_config': {'DEFAULT_CONFIG_DIR': 1, 'ProjectConfig': 1, '_control_repository_boundary_error': 1, '_default_board_socket': 1, '_default_board_url': 1, '_expand_path': 6, '_load_json': 1, '_normalized_path': 2, '_role_from_json': 1, '_validate_project_slug': 2, '_with_project_board_env': 1, 'default_session_dir_for_user': 1, 'parse_worker_pool': 1, 'read_tenant_document_no_follow': 1, 'root_owner_refusal': 1, 'validate_ticket_prefix': 1},
 }
 #: Measured on the baseline launcher: every launcher definition outside it that names it, and how often.
 DISPATCH = {'_usable_switchyard_entry_for_project': {'load_project_config': 1}, 'switchyard_validate_models_command': {'load_project_config': 1}, 'main': {'load_project_config': 2}}
@@ -236,7 +237,7 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
     passed = ("_validate_project_slug", "validate_ticket_prefix", "_expand_path", "_normalized_path", "_load_json", "_role_from_json",
               "parse_worker_pool", "_default_board_socket", "ProjectConfig")
     stood = ("read_tenant_document_no_follow", "default_session_dir_for_user", "_default_board_url", "_with_project_board_env",
-             "_control_repository_boundary_error", "DEFAULT_CONFIG_DIR")
+             "_control_repository_boundary_error", "DEFAULT_CONFIG_DIR", "root_owner_refusal")
     saved = {n: getattr(t, n) for n in (*FUNCTIONS, *passed, *stood)}
     saved_env = {k: os.environ.get(k) for k in ("HOME", "SYRD450_DIR")}
     saved_euid = os.geteuid
@@ -265,6 +266,12 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
         t.default_session_dir_for_user = lambda user: note("default_session_dir_for_user", user) or tmp / "sessions" / (user or "nobody")
         t._default_board_url = lambda project: note("_default_board_url", project) or f"http://127.0.0.1:syrd450-{project}"
         t._with_project_board_env = lambda config, roles: note("_with_project_board_env", [r.role for r in roles]) or list(roles)
+        # SYRD-663's read, after the baseline: answered here without a record in `calls`, so every measured case is the
+        # baseline's unchanged; what the loader does with its answer is asserted on its own below.
+        t.root_owner_refusal = lambda project, run_as_user, path: (
+            reached.add("root_owner_refusal")
+            or ("owner_asked" in spec and spec["owner_asked"].append([project, run_as_user, norm(path)]))
+            or spec.get("owner_refusal", ""))
         t._control_repository_boundary_error = lambda config, *, require_existing_user: note(
             "_control_repository_boundary_error", config.project, require_existing_user=require_existing_user) or spec.get("boundary")
         if spec.get("root"):
@@ -582,6 +589,25 @@ def test_the_rules_hold_in_the_measured_record() -> None:
     check(result("a config that is not JSON")["raised"] == "JSONDecodeError" and result("a missing config")["raised"] == "FileNotFoundError"
           and refusal("a config that is not an object") == f"{C} must contain a JSON object",
           "a non-root caller's unreadable file raises as it always did (the baseline's behaviour, kept)")
+
+
+def test_root_is_refused_when_the_owner_is_not_roots_recorded_one() -> None:
+    """SYRD-663: every load asks whether the owner the configuration names is root's own, and a refusal ends it."""
+    from scripts import project_config_loader as m
+
+    for label in ("a minimal config", "root: the no-follow reader answers"):
+        spec = {**CASES[label], "owner_asked": []}
+        run_case(t, m, spec, REACHED)
+        check(spec.get("owner_asked") == [["p450", GOLDEN[label]["result"]["run_as_user"], "PATH TMP/configs/p450.json"]],
+              f"{label}: asked once, with the slug, the run_as_user it read and the path: {spec.get('owner_asked')}")
+    spec = {**CASES["root: the no-follow reader answers"], "owner_refusal": "p450's configuration names 'x' as its owner",
+            "owner_asked": []}
+    got = run_case(t, m, spec, REACHED)
+    check(got["result"] == {"raised": "SystemExit", "message": "switchyard: p450's configuration names 'x' as its owner. Nothing was changed."},
+          f"a refusal is the loader's answer, before any role is read: {got['result']}")
+    check([c[0] for c in got["calls"]] == [c[0] for c in GOLDEN["root: the no-follow reader answers"]["calls"]][:len(got["calls"])]
+          and "_role_from_json" not in [c[0] for c in got["calls"]],
+          f"and nothing past the owner is read: {[c[0] for c in got['calls']]}")
 
 
 def test_every_launcher_seam_is_reached() -> None:

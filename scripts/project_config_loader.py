@@ -65,6 +65,11 @@ def load_project_config(
     base = path.parent
     layout = launcher._expand_path(str(config.get("layout") or f"{config_project}-konsole-layout.json"), base=base)
     run_as_user = str(config.get("run_as_user") or "").strip()
+    # Every root branch that writes as or for the owner is chosen by this value, and the tenant wrote it; asked at
+    # every load root makes, so a value changed between one phase and the next is refused at the next (SYRD-663).
+    refusal = launcher.root_owner_refusal(project_slug, run_as_user, path)
+    if refusal:
+        raise SystemExit(f"switchyard: {refusal}. Nothing was changed.")
     session_dir = launcher._expand_path(str(config.get("session_dir") or str(launcher.default_session_dir_for_user(run_as_user))), base=base)
     ticket_prefix = launcher.validate_ticket_prefix(str(config.get("ticket_prefix") or config_project))
     board_url = str(config.get("board_url") or launcher._default_board_url(config_project)).strip()

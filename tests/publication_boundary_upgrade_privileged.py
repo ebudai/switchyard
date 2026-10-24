@@ -18,6 +18,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+#: The tenant's own account and uid, mapped in the namespace (SYRD-663).
+TENANT_OWNER, TENANT_UID = "porter-agent", 1600
+
 import live_boundary  # noqa: E402
 
 live_boundary.isolate()  # SYRD-627: no live home, pane store or runtime directory, here or in a child
@@ -61,8 +64,12 @@ def enter(root: Path, repo: Path) -> None:
     )
     shim.chmod(0o755)
     # `install -o root` reads these; without them it cannot resolve the name.
-    (root / "etc/passwd").write_text("root:x:0:0:root:/root:/bin/sh\n", encoding="utf-8")
-    (root / "etc/group").write_text("root:x:0:\n", encoding="utf-8")
+    # And the tenant's own account: since SYRD-663 root acts for a tenant only as the owner its records name, never as
+    # root itself, so the tenant this models has one, with its home.
+    (root / "etc/passwd").write_text("root:x:0:0:root:/root:/bin/sh\n"
+                                     f"{TENANT_OWNER}:x:{TENANT_UID}:{TENANT_UID}::/home/{TENANT_OWNER}:/bin/sh\n",
+                                     encoding="utf-8")
+    (root / "etc/group").write_text(f"root:x:0:\n{TENANT_OWNER}:x:{TENANT_UID}:\n", encoding="utf-8")
     for name in ("bin", "lib", "lib64"):
         link = root / name
         if not link.exists() and Path("/" + name).is_symlink():
@@ -547,7 +554,8 @@ def main() -> int:
     # trampoline, the CLI parser and the project registry rather than through an
     # internal call. Its roles share the project account, which is the live shape
     # (SYRD-69), so there is no identity cutover to run and nothing is restarted.
-    tenant_dir = Path("/srv/porter")
+    tenant_home = Path("/home") / TENANT_OWNER
+    tenant_dir = tenant_home / "porter"
     (tenant_dir / "worktrees").mkdir(parents=True, exist_ok=True)
     tenant_layout = tenant_dir / "layout.json"
     tenant_layout.write_text(
@@ -556,17 +564,21 @@ def main() -> int:
         ]}]}),
         encoding="utf-8",
     )
-    tenant_config_path = tenant_dir / "porter.json"
+    # Where `switchyard new` generates it, which is how root's registry names the project directory it is in.
+    tenant_config_path = tenant_dir / ".switchyard" / "provision" / "porter.json"
+    tenant_config_path.parent.mkdir(parents=True, exist_ok=True)
     tenant_config_path.write_text(
         json.dumps({
             "desktop_access": {"mode": "headless"},
             "project": "porter", "project_name": "porter", "ticket_prefix": "P",
-            "layout": str(tenant_layout), "repository": "/src", "run_as_user": "root",
+            "layout": str(tenant_layout), "repository": "/src", "run_as_user": TENANT_OWNER,
             "worktree_base": str(tenant_dir / "worktrees"),
             "roles": [{"role": "app", "slot": 0, "target": "porter-app:0.0", "cli": ["codex"]}],
         }),
         encoding="utf-8",
     )
+    for path in (tenant_home, *tenant_home.rglob("*")):
+        os.chown(path, TENANT_UID, TENANT_UID)
     registry_dir = Path("/etc/switchyard/projects")
     registry_dir.mkdir(parents=True, exist_ok=True)
     (registry_dir / "porter.json").write_text(
@@ -990,7 +1002,8 @@ def _hand_back_ownership() -> None:
     """Files left owned by another uid cannot be removed by the unprivileged
     process that made the directory, so a failure here would otherwise leave an
     undeletable tree behind every run."""
-    for path in [Path("/src"), *Path("/src").rglob("*")]:
+    homes = Path("/home") / TENANT_OWNER  # the tenant's own, since SYRD-663
+    for path in [Path("/src"), *Path("/src").rglob("*"), *([homes, *homes.rglob("*")] if homes.is_dir() else [])]:
         try:
             os.chown(path, 0, 0, follow_symlinks=False)
         except OSError:

@@ -1178,10 +1178,8 @@ from scripts.tenant_release_root import (
     prepare_tenant_release_root,
     release_root_repair_record_path,
 )
-from scripts.trusted_owner_identity import (
-    TrustedOwnerIdentity,
-    trusted_owner_identity,
-)
+from scripts.trusted_owner_identity import TrustedOwnerIdentity, trusted_owner_identity
+from scripts.root_recorded_owner import root_owner_refusal, root_recorded_owner
 from scripts.no_follow_records import (
     _directory_owner_no_follow,
     _walk_no_follow,

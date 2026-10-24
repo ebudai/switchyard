@@ -338,14 +338,20 @@ def identity_reported_as(authenticated: bool, *, fingerprint: str = "SHA256:exam
 
 
 @contextmanager
-def trusted_owner(home: Path, *, owner: str = "porter-owner", uid: int | None = None):
+def trusted_owner(home: Path, *, owner: str | None = None, uid: int | None = None):
     """Root's baseline plan, and the host facts it must agree with.
 
     The owner and the home now come from root's own plan cross-checked against
     the host, never from the tenant's config or plan, so a fixture has to supply
     both sides. `home_dir_for_user` and `uid_for_user` are the codebase's own
     kernel lookups and are where a test stands in for passwd.
+
+    The owner is, by default, the account the fixture's tenant was provisioned
+    for (`run_as_user`, the current user): since SYRD-663 root refuses a
+    configuration naming any other owner than its record does, so a record
+    naming somebody else is no longer a tenant root acts for.
     """
+    owner = owner or team_launcher.current_user_name()
     root_plan = team_launcher.privileged_baseline_plan_path("porter")
     root_plan.parent.mkdir(parents=True, exist_ok=True)
     root_plan.write_text(

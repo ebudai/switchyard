@@ -64,6 +64,10 @@ TENANT = 2607
 _GETPWNAM = pwd.getpwnam
 pwd.getpwnam = lambda name: (pwd.struct_passwd((OWNER, "x", TENANT, TENANT, "", f"/home/{OWNER}", "/bin/sh"))
                              if name == OWNER else _GETPWNAM(name))
+#: And by uid, as a real account answers both: SYRD-663 names a registered project's owner from the uid owning it.
+_GETPWUID = pwd.getpwuid
+pwd.getpwuid = lambda uid: (pwd.struct_passwd((OWNER, "x", TENANT, TENANT, "", f"/home/{OWNER}", "/bin/sh"))
+                            if uid == TENANT else _GETPWUID(uid))
 CALLER = 2700
 UNIT = f"{PROJECT}-ticket-board.service"
 PACKET = "operator-commands.sh"

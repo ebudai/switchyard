@@ -27,6 +27,12 @@ data -- and it moves it only forward:
 Afterwards the ref is read back from the remote and the tenant's trusted commit
 cache is refreshed from the root-owned mirror, as the project account, so the
 board can verify commits against an integration branch that actually moved.
+
+A run can push and then fail at the cache. The same command, run again once the
+cause is fixed, finds the remote already at the commit, with the stated tip its
+ancestor. It pushes nothing, and completes the cache and the publication record.
+So does `--expected` and `--commit` both naming that commit. Every other rule
+above still holds (SYRD-618).
 """
 
 from __future__ import annotations
@@ -142,14 +148,81 @@ def refresh_integration_cache(
     return None
 
 
+def fetch_remote(staging: Path, remote_url: str, ref: str, ssh_command: str) -> str:
+    """Fetch the integration branch as the remote has it now into the mirror's candidate namespace; its commit."""
+    pulled = git(
+        ["-C", str(staging), "fetch", remote_url, f"+refs/heads/{ref}:{CANDIDATE_NAMESPACE}/remote"],
+        ssh_command=ssh_command,
+    )
+    if pulled.returncode != 0:
+        sys.stderr.write(pulled.stderr)
+        fail(f"cannot fetch {ref} from the configured remote")
+    resolved = git(["-C", str(staging), "rev-parse", "--verify", "--quiet", f"{CANDIDATE_NAMESPACE}/remote^{{commit}}"])
+    return resolved.stdout.strip() if resolved.returncode == 0 else ""
+
+
+def require_fetched_at(fetched: str, ref: str, commit: str) -> None:
+    """A run that pushes nothing converges on what it fetched, after deciding to, and on nothing else (SYRD-618).
+
+    The first read only decides; the remote can move after it. Refused before the mirror, the cache or the record
+    is touched.
+    """
+    if fetched != commit:
+        fail(f"{ref} moved while this ran: the remote now has {fetched or 'nothing'}, not {commit}. The trusted "
+             "cache and the publication record were left as they were; prepare against the current tip")
+
+
 def not_integrated(ref: str, commit: str, problem: str) -> int:
     sys.stderr.write(
         f"switchyard-integrate-main: {ref} was moved to {commit}, but {problem}.\n"
         "switchyard-integrate-main: the integration landed on the remote and the trusted cache "
-        "does NOT reflect it, so the board would refuse commits that depend on it. Re-run this "
-        "once the cause is resolved; integrating the same commit again is safe.\n"
+        "does NOT reflect it, so the board would refuse commits that depend on it. Re-run this same "
+        "command, unchanged, once the cause is resolved: finding the remote already at this commit, "
+        "it pushes nothing and completes the cache and the publication record.\n"
     )
     return 1
+
+
+def converge(
+    project: str,
+    *,
+    unit: dict,
+    grant: dict,
+    staging: Path,
+    remote_url: str,
+    ref: str,
+    commit: str,
+    owner_uid: int,
+    owner_gid: int,
+) -> tuple[Path | None, int]:
+    """Everything after the remote reads `commit`: the mirror, the trusted cache, the record (SYRD-618).
+
+    The same steps whether this run pushed, a run before it pushed and stopped short of the cache, or the
+    remote was already there: each is idempotent, and none touches the remote.
+    """
+    # The mirror records what the remote now says, and the cache follows it.
+    git(["-C", str(staging), "update-ref", f"refs/heads/{ref}", commit])
+    cache = Path(unit["commit_cache"])
+    try:
+        info = cache.lstat()
+    except OSError as exc:
+        return None, not_integrated(ref, commit, f"cannot inspect the trusted cache {cache}: {exc.strerror}")
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        return None, not_integrated(ref, commit, f"the trusted cache {cache} is not a real directory")
+    if info.st_uid != owner_uid or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return None, not_integrated(ref, commit, f"the trusted cache {cache} is not the project account's own")
+    problem = refresh_integration_cache(
+        cache, staging, ref, commit, owner_uid=owner_uid, owner_gid=owner_gid
+    )
+    if problem is not None:
+        return None, not_integrated(ref, commit, problem)
+    record_publication_success(
+        project,
+        grant=grant,
+        remote=remote_url,
+        detail=f"integrated {ref} at {commit[:12]}",
+    )
+    return cache, 0
 
 
 def main(argv: list[str]) -> int:
@@ -202,39 +275,57 @@ def main(argv: list[str]) -> int:
     if not bundle_contains(staging, commit):
         fail(f"bundle {bundle} does not contain {commit}")
 
+    settle = dict(unit=unit, grant=grant, staging=staging, remote_url=remote_url, ref=ref, commit=commit,
+                  owner_uid=owner_uid, owner_gid=owner_gid)
     # The tip the caller prepared against has to still be the tip. Read first,
     # so a stale lease is refused before anything is sent.
     current = remote_ref_commit(remote_url, ref, ssh_command)
     if current is None:
         fail(f"cannot read {ref} from the configured remote")
-    if current != expected:
+    if commit == expected:
+        if current != commit:
+            fail(f"{ref} is {current or 'absent'}, not {commit}; nothing was integrated or changed")
+        # Already there (SYRD-618): nothing is pushed, but the cache and the record are made to agree, with
+        # what the remote has once fetched.
+        require_fetched_at(fetch_remote(staging, remote_url, ref, ssh_command), ref, commit)
+        cache, status = converge(project, **settle)
+        if status:
+            return status
+        print(json.dumps({
+            "integrated": False, "reason": "already at this commit", "project": project,
+            "ref": ref, "commit": commit, "control_role": control_role, "cache": str(cache),
+        }, sort_keys=True))
+        return 0
+    # A run of this same command already moved the remote to exactly this commit and stopped before the
+    # cache (SYRD-618): the stated tip must be the commit's ancestor in the remote's own history, and then
+    # the run completes what that one left, pushing nothing. Any other tip is still refused.
+    recovering = current == commit
+    if current != expected and not recovering:
         fail(
             f"{ref} has moved: it is {current or 'absent'}, not the {expected} this commit was "
             "prepared against. Re-prepare against the current tip and run this again"
         )
-    if commit == expected:
-        print(json.dumps({
-            "integrated": False, "reason": "already at this commit", "project": project,
-            "ref": ref, "commit": commit, "control_role": control_role,
-        }, sort_keys=True))
-        return 0
 
     # Forward only. The remote would refuse a non-fast-forward anyway; refusing
     # here means the refusal names what was wrong instead of surfacing as a
     # rejected push, and means a forced update is never attempted.
-    pulled = git(
-        ["-C", str(staging), "fetch", remote_url, f"+refs/heads/{ref}:{CANDIDATE_NAMESPACE}/remote"],
-        ssh_command=ssh_command,
-    )
-    if pulled.returncode != 0:
-        sys.stderr.write(pulled.stderr)
-        fail(f"cannot fetch {ref} from the configured remote")
+    fetched = fetch_remote(staging, remote_url, ref, ssh_command)
     ancestry = git(["-C", str(staging), "merge-base", "--is-ancestor", expected, commit])
     if ancestry.returncode != 0:
         fail(
             f"{commit} is not a descendant of {expected}; this integrates by fast-forward only, "
             "so rebase or merge the current tip into the candidate and try again"
         )
+    if recovering:
+        require_fetched_at(fetched, ref, commit)
+        cache, status = converge(project, **settle)
+        if status:
+            return status
+        print(json.dumps({
+            "integrated": True, "recovered": True, "pushed": False, "project": project, "ref": ref,
+            "from": expected, "commit": commit, "control_role": control_role, "cache": str(cache),
+        }, sort_keys=True))
+        return 0
 
     # The lease goes to the server too: between the read above and this push,
     # another integration could land, and only the remote can settle that.
@@ -267,29 +358,9 @@ def main(argv: list[str]) -> int:
     if landed != commit:
         return not_integrated(ref, commit, f"the remote reads {landed or 'nothing'} rather than {commit}")
 
-    # The mirror records what the remote now says, and the cache follows it.
-    git(["-C", str(staging), "update-ref", f"refs/heads/{ref}", commit])
-    cache = Path(unit["commit_cache"])
-    try:
-        info = cache.lstat()
-    except OSError as exc:
-        return not_integrated(ref, commit, f"cannot inspect the trusted cache {cache}: {exc.strerror}")
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-        return not_integrated(ref, commit, f"the trusted cache {cache} is not a real directory")
-    if info.st_uid != owner_uid or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-        return not_integrated(ref, commit, f"the trusted cache {cache} is not the project account's own")
-    problem = refresh_integration_cache(
-        cache, staging, ref, commit, owner_uid=owner_uid, owner_gid=owner_gid
-    )
-    if problem is not None:
-        return not_integrated(ref, commit, problem)
-
-    record_publication_success(
-        project,
-        grant=grant,
-        remote=remote_url,
-        detail=f"integrated {ref} at {commit[:12]}",
-    )
+    cache, status = converge(project, **settle)
+    if status:
+        return status
     print(json.dumps({
         "integrated": True,
         "project": project,

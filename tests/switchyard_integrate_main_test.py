@@ -93,6 +93,8 @@ class IntegrationHost(Host):
         git("branch", "-f", "candidate", self.prepared, cwd=self.work)
         git("bundle", "create", str(self.integration_bundle), "candidate", cwd=self.work)
         self.write_grant(integration_ref=integration_ref)
+        #: A PATH for every run; None keeps the caller's.
+        self.path: str | None = None
 
     def write_grant(self, **overrides) -> None:
         overrides.setdefault("integration_ref", getattr(self, "integration", "main"))
@@ -131,7 +133,7 @@ class IntegrationHost(Host):
             env={
                 **os.environ,
                 **self.environment(),
-                **({"PATH": path} if path else {}),
+                **({"PATH": path or self.path} if path or self.path else {}),
             },
         )
 
@@ -475,6 +477,239 @@ def test_the_control_role_runs_one_command_and_the_branch_moves() -> None:
             assert host.remote_integration() == host.prepared
         finally:
             host.close()
+
+
+def recording(host: IntegrationHost) -> None:
+    """Let the publication record really be written here.
+
+    It is written with `install -o root -g root`, which an unprivileged suite cannot do; this `install`,
+    first on PATH, is the real one without the two ownership options.
+    """
+    real = subprocess.run(["which", "install"], text=True, capture_output=True).stdout.strip()
+    stubs = host.root / "recording-bin"
+    stubs.mkdir()
+    (stubs / "install").write_text(
+        "#!/bin/sh\n"
+        "skip=\n"
+        "for arg; do\n"
+        "  shift\n"
+        "  if [ -n \"$skip\" ]; then skip=; continue; fi\n"
+        "  case \"$arg\" in -o|-g) skip=1; continue;; esac\n"
+        "  set -- \"$@\" \"$arg\"\n"
+        "done\n"
+        f"exec {real} \"$@\"\n",
+        encoding="utf-8",
+    )
+    (stubs / "install").chmod(0o755)
+    host.path = f"{stubs}:{os.environ.get('PATH', '')}"
+
+
+def count_pushes(host: IntegrationHost) -> Path:
+    """Every update the remote receives is written down, so "nothing was pushed" is measured, not assumed."""
+    log = host.root / "remote-updates.log"
+    hook = host.remote / "hooks" / "pre-receive"
+    hook.write_text(f"#!/bin/sh\ncat >> {log}\n", encoding="utf-8")
+    hook.chmod(0o755)
+    log.write_text("", encoding="utf-8")
+    return log
+
+
+def pushes(log: Path) -> int:
+    return len(log.read_text(encoding="utf-8").splitlines())
+
+
+def cache_commits(host: IntegrationHost) -> list[str]:
+    return [
+        git("--git-dir", str(host.cache), "rev-parse", "--verify", "--quiet", f"{name}^{{commit}}", check=False)
+        for name in (f"refs/heads/{host.integration}", f"refs/remotes/origin/{host.integration}")
+    ]
+
+
+def journal(host: IntegrationHost) -> dict:
+    """The publication record: what a later upgrade reads as proof this key could write."""
+    path = host.grants / f"{host.project}-cutover.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+def landed_without_cache(host: IntegrationHost, mode: int) -> Path:
+    """SYRD-607's failure: the leased push lands, then the trusted cache is refused."""
+    recording(host)
+    log = count_pushes(host)
+    host.cache.chmod(mode)
+    first = host.integrate()
+    assert first.returncode != 0, first.stdout
+    assert "Re-run this same command, unchanged" in first.stderr, first.stderr
+    assert host.remote_integration() == host.prepared, "the push itself landed"
+    assert pushes(log) == 1, pushes(log)
+    assert host.prepared not in cache_commits(host), cache_commits(host)
+    assert journal(host).get("publication_write") != "verified", journal(host)
+    return log
+
+
+def test_the_printed_command_completes_a_landed_integration_without_pushing_again() -> None:
+    """SYRD-618: repeat the printed command unchanged once the cache is repaired."""
+    # A group-writable cache (SYRD-607's 0770) is refused before git; a read-only one fails inside git's fetch.
+    for mode in (0o770, 0o555):
+        with tempfile.TemporaryDirectory() as raw:
+            host = IntegrationHost(Path(raw))
+            try:
+                log = landed_without_cache(host, mode)
+                host.cache.chmod(0o755)
+                for _ in range(2):  # and again: completing it is itself idempotent
+                    again = host.integrate()
+                    assert again.returncode == 0, (oct(mode), again.stderr)
+                    report = json.loads(again.stdout.strip().splitlines()[-1])
+                    assert report == {
+                        "integrated": True, "recovered": True, "pushed": False, "project": host.project,
+                        "ref": "main", "from": host.base, "commit": host.prepared,
+                        "control_role": "director", "cache": str(host.cache),
+                    }, report
+                    assert pushes(log) == 1, ("the remote was updated again", pushes(log))
+                    assert host.remote_integration() == host.prepared
+                    assert cache_commits(host) == [host.prepared, host.prepared], cache_commits(host)
+                    recorded = journal(host)
+                    assert recorded.get("publication_write") == "verified", recorded
+                    assert recorded.get("publication_write_detail") == f"integrated main at {host.prepared[:12]}", recorded
+            finally:
+                host.cache.chmod(0o755)
+                host.close()
+
+
+def test_the_already_current_invocation_completes_the_cache_and_the_record() -> None:
+    """`--expected <landed> --commit <landed>` used to return before the cache and the record."""
+    with tempfile.TemporaryDirectory() as raw:
+        host = IntegrationHost(Path(raw))
+        try:
+            log = landed_without_cache(host, 0o770)
+            host.cache.chmod(0o755)
+            current = host.integrate(expected=host.prepared)
+            assert current.returncode == 0, current.stderr
+            report = json.loads(current.stdout.strip().splitlines()[-1])
+            assert report["integrated"] is False and report["reason"] == "already at this commit", report
+            assert report["cache"] == str(host.cache), report
+            assert pushes(log) == 1, pushes(log)
+            assert cache_commits(host) == [host.prepared, host.prepared], cache_commits(host)
+            assert journal(host).get("publication_write") == "verified", journal(host)
+        finally:
+            host.cache.chmod(0o755)
+            host.close()
+    # Already at a commit the remote is not at: refused, nothing done.
+    with tempfile.TemporaryDirectory() as raw:
+        host = IntegrationHost(Path(raw))
+        try:
+            recording(host)
+            log = count_pushes(host)
+            refusal(host.integrate(expected=host.prepared), "nothing was integrated or changed")
+            assert host.remote_integration() == host.base and pushes(log) == 0
+            assert host.prepared not in cache_commits(host), cache_commits(host)
+            assert journal(host) == {}, journal(host)
+        finally:
+            host.close()
+
+
+def test_completing_a_landed_integration_refuses_what_integrating_would() -> None:
+    """Recovery is not a way around a single rule of the first run."""
+    with tempfile.TemporaryDirectory() as raw:
+        host = IntegrationHost(Path(raw))
+        try:
+            log = landed_without_cache(host, 0o770)
+
+            def untouched() -> None:
+                assert pushes(log) == 1, pushes(log)
+                assert host.prepared not in cache_commits(host), cache_commits(host)
+                assert journal(host).get("publication_write") != "verified", journal(host)
+
+            # The cache is still not the project account's own: refused again, nothing recorded.
+            again = host.integrate()
+            assert again.returncode != 0 and "not the project account's own" in again.stderr, again.stderr
+            untouched()
+            host.cache.chmod(0o755)
+
+            # Another role's process, though the command is the Director's.
+            refusal(host.integrate(under=OTHER_PANE_PID), "only director's registered process may publish")
+            untouched()
+
+            # A bundle that does not verify, and one another account could have rewritten.
+            broken = host.root / "outbox" / "broken.bundle"
+            broken.write_text("not a bundle\n", encoding="utf-8")
+            refusal(host.integrate(bundle=broken), "bundle did not verify")
+            untouched()
+            loose = host.root / "outbox" / "loose.bundle"
+            loose.write_bytes(host.integration_bundle.read_bytes())
+            loose.chmod(0o666)
+            refusal(host.integrate(bundle=loose), "writable by an account outside the project")
+            untouched()
+
+            # A stated tip that is not the landed commit's ancestor: a sibling of it, and a commit nobody has.
+            git("checkout", "-q", "-b", "side", host.base, cwd=host.work)
+            git("commit", "--allow-empty", "-q", "-m", "a sibling of the landed commit", cwd=host.work)
+            sibling = git("rev-parse", "HEAD", cwd=host.work)
+            git("branch", "-f", "candidate", host.prepared, cwd=host.work)
+            both = host.root / "outbox" / "both.bundle"
+            git("bundle", "create", str(both), "candidate", "side", cwd=host.work)
+            refusal(host.integrate(expected=sibling, bundle=both), "is not a descendant of")
+            untouched()
+            refusal(host.integrate(expected="e" * 40), "is not a descendant of")
+            untouched()
+
+            # The remote moved on past the landed commit: neither the old tip nor the commit is current.
+            git("commit", "--allow-empty", "-q", "-m", "a later integration", cwd=host.work)
+            later = git("rev-parse", "HEAD", cwd=host.work)
+            git("push", "-q", str(host.remote), f"{later}:refs/heads/other", cwd=host.work)
+            git("--git-dir", str(host.remote), "update-ref", "refs/heads/main", later)
+            refusal(host.integrate(), "has moved")
+            refusal(host.integrate(expected=host.prepared), "nothing was integrated or changed")
+            assert host.remote_integration() == later
+            assert pushes(log) == 2, pushes(log)  # the hook saw only the test's own push of `other`
+            assert host.prepared not in cache_commits(host), cache_commits(host)
+            assert journal(host).get("publication_write") != "verified", journal(host)
+        finally:
+            host.cache.chmod(0o755)
+            host.close()
+
+
+def test_a_remote_that_moves_during_recovery_is_refused_before_anything_is_written() -> None:
+    """Audit's race (SYRD-618): the first read decides; what converges is what is fetched after deciding."""
+    for already_current in (False, True):
+        with tempfile.TemporaryDirectory() as raw:
+            host = IntegrationHost(Path(raw))
+            try:
+                log = landed_without_cache(host, 0o770)
+                host.cache.chmod(0o755)
+                git("commit", "--allow-empty", "-q", "-m", "the integration that lands meanwhile", cwd=host.work)
+                later = git("rev-parse", "HEAD", cwd=host.work)
+                git("push", "-q", str(host.remote), f"{later}:refs/heads/other", cwd=host.work)
+                real_git = subprocess.run(["which", "git"], text=True, capture_output=True).stdout.strip()
+                shim_dir = Path(raw) / "racing-bin"
+                shim_dir.mkdir()
+                # Moves main the moment the run's first read of the remote has answered: the decision is made on
+                # the old tip, and everything after it meets the new one.
+                (shim_dir / "git").write_text(
+                    "#!/bin/sh\n"
+                    "case \" $* \" in\n"
+                    f"  *\" ls-remote {host.remote} \"*) {real_git} \"$@\"; rc=$?\n"
+                    f"    {real_git} --git-dir {host.remote} update-ref refs/heads/{host.integration} {later} || exit 1\n"
+                    "    exit $rc;;\n"
+                    "esac\n"
+                    f"exec {real_git} \"$@\"\n",
+                    encoding="utf-8",
+                )
+                (shim_dir / "git").chmod(0o755)
+                pushes_before = pushes(log)  # the test's own push of `other` is counted too
+                result = host.integrate(expected=host.prepared if already_current else None,
+                                        path=f"{shim_dir}:{host.path}")
+                form = "already-current" if already_current else "unchanged command"
+                assert result.returncode != 0, (form, result.stdout)
+                assert f"main moved while this ran: the remote now has {later}, not {host.prepared}" in result.stderr, (
+                    form, result.stderr)
+                assert host.remote_integration() == later, form
+                assert pushes(log) == pushes_before, (form, "nothing was pushed")
+                assert host.prepared not in cache_commits(host) and later not in cache_commits(host), (
+                    form, cache_commits(host))
+                assert journal(host).get("publication_write") != "verified", (form, journal(host))
+            finally:
+                host.cache.chmod(0o755)
+                host.close()
 
 
 def main() -> int:

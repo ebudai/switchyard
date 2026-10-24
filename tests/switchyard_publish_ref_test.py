@@ -242,6 +242,9 @@ class Host:
             publisher.REGISTRY_TEST_ROOT_ENV: str(self.registry),
             publisher.BOARD_UNIT_TEST_DIR_ENV: str(self.units),
             publisher.PUBLISH_GRANT_TEST_DIR_ENV: str(self.grants),
+            # Where a successful publication is recorded (the cutover evidence beside the grant), or the
+            # program writes the host's own /etc/switchyard/publish (SYRD-618).
+            "SWITCHYARD_PUBLISH_ROOT": str(self.grants),
             publisher.STAGING_TEST_ROOT_ENV: str(self.staging),
             publisher.PROC_ROOT_ENV: str(self.proc),
             publisher.OWNER_TEST_HOME_ENV: str(self.owner_home),

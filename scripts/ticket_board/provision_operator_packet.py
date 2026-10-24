@@ -228,6 +228,9 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
     q_pane_session_dir = provision.shell_quote(
         f"{plan.owner_home}/.local/state/{plan.runtime_directory}/pane-sessions"
     )
+    # After rbac.sql: a declared workflow is seeded as ticket_board_service, which reaches the schema only through
+    # the grants rbac.sql makes; seeded before them it failed with "permission denied for schema ticket_board"
+    # (SYRD-654). The default seed is the owner's DML and constraints, and either order serves it.
     workflow_seed_command = ""
     if plan.workflow_seed != "pgu-full":
         workflow_seed_command = provision.postgres_sql_file_command(
@@ -487,8 +490,8 @@ sudo systemd-tmpfiles --create {q_tmpfiles}
 {provision.postgres_sql_file_command(plan.project + '-database.sql', companion=True)}
 {provision.postgres_sql_file_command(plan.board_current + '/scripts/ticket_board/schema.sql', database_url=plan.admin_database_url)}
 sudo env TICKET_BOARD_ADMIN_DATABASE_URL={provision.shell_quote(plan.admin_database_url)} {provision.shell_quote(plan.board_current + '/scripts/ticket-board-migrate')}
-{workflow_seed_command.rstrip()}
 {provision.postgres_sql_file_command(plan.board_current + '/scripts/ticket_board/rbac.sql', database_url=plan.admin_database_url)}
+{workflow_seed_command.rstrip()}
 sudo systemctl daemon-reload
 sudo systemctl enable --now {plan.board_unit}
 {install_listener_unit_parent}

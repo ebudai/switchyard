@@ -139,7 +139,8 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "sudo cat \"$provision_dir\"/'stellaris-workflow.sql' | sudo -u postgres psql -X -v ON_ERROR_STOP=1 'postgresql:///stellaris_ticket_board?host=/var/run/postgresql' -f -" in combined
     assert combined.index("ticket_board/schema.sql") < combined.index("scripts/ticket-board-migrate")
     assert combined.index("scripts/ticket-board-migrate") < combined.index("sudo cat \"$provision_dir\"/'stellaris-workflow.sql'")
-    assert combined.index("sudo cat \"$provision_dir\"/'stellaris-workflow.sql'") < combined.index("ticket_board/rbac.sql")
+    # The seed runs as ticket_board_service once rbac.sql has granted it the schema (SYRD-654).
+    assert combined.index("ticket_board/rbac.sql") < combined.index("sudo cat \"$provision_dir\"/'stellaris-workflow.sql'")
     assert "Seed the default project workflow for stellaris" in combined
     assert "('draft', 'Draft', 0, ARRAY['designer']::text[]" in combined
     assert "('analysis', 'Triage', 1, ARRAY['director']::text[]" in combined

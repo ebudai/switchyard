@@ -165,7 +165,7 @@ def render_workflow_sql(plan: ProjectBoardProvision, *, schema_sql: str | None =
         )
     )
     return f"""-- Seed the default project workflow for {plan.project}.
--- Run after schema.sql/migrations and before rbac.sql on a newly provisioned board.
+-- Run after schema.sql, migrations and rbac.sql on a newly provisioned board.
 --
 -- This phase is the INITIAL seed, and it is the one phase of the operator
 -- packet that is not a repair. It deletes the stages and transitions the board

@@ -579,7 +579,10 @@ production board: database `pgu`, HTTP port `8770`, and frame inbox
 `/tmp/pgu-frames` with a root-owned `1777` tmpfiles entry. It also keeps the
 full workflow seeded by `schema.sql`. New projects keep their frame inboxes
 under the owner user's home directory and apply `<project>-workflow.sql` after
-migrations and before `rbac.sql`.
+migrations and `rbac.sql`. A declared workflow is seeded as
+`ticket_board_service`, which reaches the `ticket_board` schema only through
+the grants `rbac.sql` makes; seeded before them it fails with "permission
+denied for schema ticket_board" (SYRD-654).
 
 ## Current Schema Constraint
 

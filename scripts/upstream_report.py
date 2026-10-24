@@ -148,6 +148,8 @@ def record_upstream_report_link(
     dry_run: bool = False,
     home_for_user: Callable[[str], Path | None] = home_dir_for_user,
     print_func: Callable[[str], None] = print,
+    document: dict | None = None,
+    written: dict | None = None,
 ) -> tuple[ProjectConfig, list[str]]:
     """Record where this tenant files reports, once, in its own configuration.
 
@@ -188,7 +190,9 @@ def record_upstream_report_link(
         )
         return config, []
     try:
-        raw = launcher.read_owner_json(config.run_as_user or "", config_path)
+        # The configuration root holds, when it holds one: after a repatriation the tenant's file may have been
+        # rewritten since root wrote it, and this writes the whole document back (SYRD-665).
+        raw = dict(document) if document is not None else launcher.read_owner_json(config.run_as_user or "", config_path)
     except (OSError, json.JSONDecodeError, SystemExit) as exc:
         return config, [f"{config_path} could not be read ({exc})"]
     raw["upstream_report_url"] = wanted_url
@@ -198,6 +202,8 @@ def record_upstream_report_link(
     raw.pop("tenant_report_token", None)
     raw.pop("upstream_report_token", None)
     launcher._write_json_atomic(config_path, raw, owner_user=config.run_as_user or "")
+    if written is not None:
+        written["document"] = raw
     print_func(
         f"switchyard: recorded {config.project}'s upstream report board {wanted_url} and "
         f"credential {token_file}, so its next launch carries both"

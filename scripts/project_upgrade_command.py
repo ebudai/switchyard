@@ -140,6 +140,7 @@ def upgrade_project_command(
         upstream_report_token_file=upstream_report_token_file,
         upstream_report_url=upstream_report_url,
         board_ui_users=board_ui_users,
+        **({"document": state_ready.document} if state_ready.document is not None else {}),
     )
     tooling_staged = launcher._stage_upgrade_tooling(
         config,

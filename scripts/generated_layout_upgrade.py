@@ -53,6 +53,8 @@ def upgrade_generated_project_config(
     config_path: Path,
     dry_run: bool = False,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    document: dict | None = None,
+    written: dict | None = None,
 ) -> LauncherUpgradeResult:
     from scripts import team_launcher as launcher
 
@@ -161,8 +163,9 @@ def upgrade_generated_project_config(
         )
     if session_dir_upgrade is not None or pane_launcher_upgrade is not None or roles_need_directorctl_upgrade:
         # Root rewrites this document, so it must be the tenant's own and not a
-        # link to somebody else's file (SYRD-228).
-        raw_config, config_problem = launcher.read_tenant_document_no_follow(
+        # link to somebody else's file (SYRD-228) -- or the one root itself wrote and holds, which the tenant may
+        # have rewritten on disk since (SYRD-665).
+        raw_config, config_problem = (dict(document), "") if document is not None else launcher.read_tenant_document_no_follow(
             config_path, what=f"{config.project}'s generated configuration"
         )
         if config_problem:
@@ -188,6 +191,8 @@ def upgrade_generated_project_config(
         if not dry_run:
             launcher._write_json_atomic(config_path, raw_config, owner_user=config.run_as_user)
             launcher.ensure_owner_file(config, config_path, runner=runner)
+            if written is not None:
+                written["document"] = raw_config
     return launcher.LauncherUpgradeResult(
         changed=not dry_run,
         message=f"switchyard: upgraded generated project config for {config.project}: {'; '.join(changed_messages)}",
@@ -200,7 +205,11 @@ def upgrade_generated_project_layout(
     config_path: Path,
     dry_run: bool = False,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    document: dict | None = None,
+    written: dict | None = None,
 ) -> LauncherUpgradeResult:
     from scripts import team_launcher as launcher
 
-    return launcher.upgrade_generated_project_config(config, config_path=config_path, dry_run=dry_run, runner=runner)
+    trusted = {} if document is None and written is None else {"document": document, "written": written}
+    return launcher.upgrade_generated_project_config(config, config_path=config_path, dry_run=dry_run, runner=runner,
+                                                     **trusted)

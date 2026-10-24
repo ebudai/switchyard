@@ -1358,12 +1358,20 @@ def test_the_upgrade_keeps_the_report_config_from_before_u3() -> None:
     asked: list[tuple] = []
     namespace = {"Path": Path, "_refresh_upgrade_artifacts": lambda config, **k: asked.append((config, k)) or new}
     namespace["board_ui_users"] = ["syrd598-user"]  # SYRD-598: the operator's --board-ui-user, handed on to U3
+    namespace["state_ready"] = SimpleNamespace(document=None)  # SYRD-665: U2's continuation, no repatriation
     exec(compile(ast.fix_missing_locations(code), "upgrade_project_command", "exec"), namespace)
     incoming = SimpleNamespace(name="incoming")
     result = namespace["wiring"](incoming, "c", CONFIG_PATH, False, SOURCE, print, None, refusing_runner, None, "t", "u")
     check(result == (new, incoming, None, "") and result[1] is incoming and asked[0][0] is incoming
-          and asked[0][1]["upstream_report_url"] == "u" and asked[0][1]["board_ui_users"] == ["syrd598-user"],
+          and asked[0][1]["upstream_report_url"] == "u" and asked[0][1]["board_ui_users"] == ["syrd598-user"]
+          and "document" not in asked[0][1],
           f"U3's config goes on, while the report config stays the one from before U3: {result}")
+    # SYRD-665: after a repatriation, U2's document is what U3 is handed.
+    written = {"syrd665": "the configuration root wrote"}
+    namespace["state_ready"] = SimpleNamespace(document=written)
+    asked.clear()
+    namespace["wiring"](incoming, "c", CONFIG_PATH, False, SOURCE, print, None, refusing_runner, None, "t", "u")
+    check(asked[0][1].get("document") is written, f"the document repatriation wrote is handed to U3: {asked}")
 
 
 # --- U2: manager, desktop and repatriation (SYRD-350) --------------------------------------------------------------
@@ -1392,6 +1400,10 @@ class U2Config:
     name: str = "incoming"
 
 
+#: What a real repatriation leaves in the `written` dict U2 hands it: the document root wrote (SYRD-665).
+U2_WRITTEN = {"syrd665": "the configuration root wrote"}
+
+
 class Recovery:
     """U2's launcher facilities and the desktop policy validator, from objects this test owns, into one log."""
 
@@ -1415,9 +1427,11 @@ class Recovery:
         reloads, cutovers = iter(self.reloads), iter(self.cutovers)
 
         def repatriate(config, **kw):
-            L.append(("repatriate", config, kw))
+            L.append(("repatriate", config, dict(kw)))
             if self.error:
                 raise self.error
+            if self.repatriated and isinstance(kw.get("written"), dict):
+                kw["written"]["document"] = U2_WRITTEN
             return self.repatriated, list(self.repatriation_problems)
 
         return dict(
@@ -1441,7 +1455,8 @@ class Recovery:
             _privileged_upgrade_check_command=lambda project, ref: L.append(("root-check", project, ref)) or "ROOTCHECK",
             restore_interrupted_role_state=lambda config, **kw: L.append(("restore", config, kw)) or self.restored,
             repatriate_role_runtime_state=repatriate,
-            load_project_config=lambda project, path: L.append(("reload", project, path)) or next(reloads),
+            load_project_config=lambda project, path, document=None: L.append(("reload", project, path, document))
+                or next(reloads),
             role_account_cutover=lambda config, *, runner: L.append(("cutover", config, runner)) or next(cutovers),
             running_role_identities=lambda config, *, runner: L.append(("serving", config)) or set(self.live),
             revert_incomplete_role_account_cutover=lambda config, **kw: L.append(("revert", config, kw))
@@ -1487,8 +1502,10 @@ def test_u2_reads_its_lookups_through_the_launcher_and_keeps_its_own_names() -> 
     from scripts import upgrade_phases
     check(upgrade_phases.replace is dataclasses.replace, "replace is dataclasses' own, the module's import")
     fields = dataclasses.fields(upgrade_phases.UpgradeStateReady)
-    check([f.name for f in fields] == ["source_repo", "effective_source_repo", "config", "cutover"]
-          and upgrade_phases.UpgradeStateReady.__dataclass_params__.frozen, f"a frozen four-field continuation: {fields}")
+    # SYRD-665: and, fifth, the document repatriation wrote, None unless there was one.
+    check([f.name for f in fields] == ["source_repo", "effective_source_repo", "config", "cutover", "document"]
+          and fields[-1].default is None
+          and upgrade_phases.UpgradeStateReady.__dataclass_params__.frozen, f"a frozen five-field continuation: {fields}")
     launcher, upgrade, _ = upgrade_command()
     at = next((i for i, n in enumerate(upgrade.body) if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
                and ast.unparse(n.value.func).endswith("_recover_upgrade_state")), None)
@@ -1512,7 +1529,7 @@ def test_u2_a_bare_upgrade_resolves_the_source_and_reads_the_cutover() -> None:
           f"the resolved source, its effective path, the caller's own config, the fresh cutover: {result}")
     check(rec.log[1][2] == dict(runner=refusing_runner, config_path=CONFIG_PATH)
           and rec.log[2][2] == dict(dry_run=False, runner=refusing_runner, print_func=said.append)
-          and rec.log[3][2] == dict(config_path=CONFIG_PATH, dry_run=False, runner=refusing_runner),
+          and rec.log[3][2] == dict(config_path=CONFIG_PATH, dry_run=False, runner=refusing_runner, written={}),
           f"each step's exact arguments: {rec.log[1:4]}")
     rec = Recovery()
     result, _, _ = u2(rec, source_repo=None)
@@ -1613,6 +1630,8 @@ def test_u2_restore_then_repatriate() -> None:
     check(said == [f"switchyard: repatriated {PROJECT}'s resumable role state to syrd350-owner; dedicated accounts were "
                    "left intact"] and result.config is rec.reloads[0] and rec.log[rec.kinds().index("cutover")][1] is rec.reloads[0],
           f"a real repatriation reloads, and the cutover reads the reloaded config: {said}")
+    check(("reload", PROJECT, CONFIG_PATH, U2_WRITTEN) in rec.log,
+          f"and the reload is of the document root wrote, never the tenant's file again (SYRD-665): {rec.log}")
 
 
 def test_u2_a_partial_cutover_is_reported_and_reverted_with_live_roles() -> None:

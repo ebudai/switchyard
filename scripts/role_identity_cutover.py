@@ -483,6 +483,7 @@ def repatriate_role_runtime_state(
     config_path: Path,
     dry_run: bool = False,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    written: dict[str, Any] | None = None,
 ) -> tuple[bool, list[str]]:
     """Move resumable role state back to the project account, fail closed.
 
@@ -684,6 +685,10 @@ def repatriate_role_runtime_state(
         for worktree, uid, gid in previous_worktree_owners:
             _give_tree(owner, worktree, str(uid), str(gid), runner=runner, by_descriptor=by_descriptor)
         return False, [f"configuration publish failed after state copy: {exc}"]
+    if written is not None:
+        # What root just wrote, for a caller that must act on it rather than on whatever the tenant's tree holds by
+        # the time it would read it back (SYRD-665).
+        written["document"] = payload
     return True, []
 
 

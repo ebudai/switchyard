@@ -717,6 +717,7 @@ def _refresh_upgrade_artifacts(
     upstream_report_token_file: str,
     upstream_report_url: str,
     board_ui_users: list[str] | tuple[str, ...] = (),
+    document: dict | None = None,
 ) -> ProjectConfig:
     """U3 of `upgrade_project_command`, unchanged: the generated layout, runtime
     artifacts, onboarding documents, board skill and repository hooks refreshed,
@@ -728,10 +729,18 @@ def _refresh_upgrade_artifacts(
     launcher.warn_if_artifact_source_checkout_is_stale(
         config, source_repo=effective_source_repo, runner=runner, print_func=print_func,
     )
-    result = launcher.upgrade_generated_project_layout(config, config_path=config_path, dry_run=dry_run, runner=runner)
+    # After a repatriation, the layout's bounded changes are made to the configuration root wrote, and that is what
+    # is loaded -- never the tenant's file, which it may have rewritten since (SYRD-665).
+    layout_written: dict = {}
+    trusted = {} if document is None else {"document": document, "written": layout_written}
+    result = launcher.upgrade_generated_project_layout(config, config_path=config_path, dry_run=dry_run, runner=runner,
+                                                       **trusted)
     print_func(result.message)
+    if document is not None:
+        document = layout_written.get("document", document)
     if result.changed and not dry_run:
-        config = launcher.load_project_config(config.project, config_path)
+        held = {} if document is None else {"document": document}
+        config = launcher.load_project_config(config.project, config_path, **held)
     runtime_artifacts = launcher.refresh_generated_project_runtime_artifacts(
         config,
         config_path=config_path,
@@ -771,6 +780,8 @@ def _refresh_upgrade_artifacts(
     )
     # Before the phases, because a tenant that cannot file a report is how this
     # host finds out anything is wrong with it at all (SYRD-238).
+    # And, after a repatriation, written onto the configuration root holds, not the tenant's file (SYRD-665).
+    report_written: dict = {}
     config, report_link_problems = launcher.record_upstream_report_link(
         config,
         config_path=config_path,
@@ -778,7 +789,10 @@ def _refresh_upgrade_artifacts(
         upstream_report_token_file=upstream_report_token_file,
         dry_run=dry_run,
         print_func=print_func,
+        **({} if document is None else {"document": document, "written": report_written}),
     )
+    if document is not None:
+        document = report_written.get("document", document)
     report_problems = report_link_problems + launcher.refresh_upstream_report_credential(
         config, dry_run=dry_run, registry_dir=registry_dir, print_func=print_func,
     )
@@ -815,6 +829,9 @@ class UpgradeStateReady:
     effective_source_repo: Path
     config: ProjectConfig
     cutover: RoleAccountCutover
+    #: The configuration root wrote when it repatriated, which the rest of the upgrade acts on instead of the
+    #: tenant's file (SYRD-665); None when there was no repatriation.
+    document: dict | None = None
 
 
 def _recover_upgrade_state(
@@ -917,8 +934,9 @@ def _recover_upgrade_state(
     ):
         return 1
 
+    written: dict[str, Any] = {}
     repatriated, repatriation_problems = launcher.repatriate_role_runtime_state(
-        config, config_path=config_path, dry_run=dry_run, runner=runner
+        config, config_path=config_path, dry_run=dry_run, runner=runner, written=written
     )
     if repatriation_problems:
         print_func(
@@ -941,7 +959,9 @@ def _recover_upgrade_state(
                 f"switchyard: repatriated {config.project}'s resumable role state to "
                 f"{config.run_as_user or launcher.current_user_name()}; dedicated accounts were left intact"
             )
-            config = launcher.load_project_config(config.project, config_path)
+            # The configuration root just wrote, from memory: re-read from the tenant's tree, a run_as_user the tenant
+            # put back in between made the cutover partial and led into its rollback (SYRD-665).
+            config = launcher.load_project_config(config.project, config_path, document=written["document"])
 
     # Detect the partial state before doing anything else, so every later phase
     # reads a configuration that matches the host.
@@ -985,6 +1005,7 @@ def _recover_upgrade_state(
         effective_source_repo=effective_source_repo,
         config=config,
         cutover=cutover,
+        document=written.get("document") if repatriated and not dry_run else None,
     )
 
 

@@ -319,7 +319,8 @@ elif case == "after_phases":
         launcher.UpgradeToolingStaged = launcher.UpgradeIdentitiesDone = SimpleNamespace
         launcher._pin_upgrade_source = lambda *_a, **_k: SimpleNamespace(
             desktop_choice=None, deploy_ref_chosen=False, source_repo=None, commit_git_dir=None, deploy_ref="x")
-        launcher._recover_upgrade_state = lambda c, **_k: SimpleNamespace(source_repo=None, effective_source_repo=tree, config=c, cutover=None)
+        launcher._recover_upgrade_state = lambda c, **_k: SimpleNamespace(source_repo=None, effective_source_repo=tree, config=c, cutover=None,
+                                                                   document=None)
         def refresh(c, **_k):
             raw = json.loads(CONFIG.read_text())
             for entry in raw["roles"]:

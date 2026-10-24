@@ -65,10 +65,10 @@ SEAMS = {
     'service_user_command': {'shell_quote': 1},
     'peer_auth_command': {'DEFAULT_PG_IDENT_MAP': 1, 'shell_quote': 5},
     'owned_directory_command': {'_dedupe': 1, '_is_within': 1, 'directory_line': 1, 'shell_quote': 3},
-    'render_operator_commands': {'REPOSITORY_BOUNDARY_BEGIN': 1, 'REPOSITORY_BOUNDARY_END': 1, 'TENANT_CONTROL_ROOT': 1, 'WRITABLE_REPOSITORY_COPY_MODE': 1, '_is_within': 1, 'acl_line': 3, 'commit_store_read_commands': 1, 'directory_line': 2, 'install_line': 1, 'owned_ancestor_dirs': 4, 'owned_directory_command': 5, 'owner_github_identity_commands': 1, 'packet_companion': 6, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'readable_system_unit_path': 1, 'repository_copy_confinement_commands': 1, 'repository_group_commands': 1, 'repository_group_name': 1, 'role_accounts_command': 1, 'role_control_sudoers': 1, 'role_runtime_command': 1, 'role_worktree_access_commands': 1, 'roles_group_name': 1, 'service_user_command': 1, 'shell_quote': 32, 'socket_group_retirement_commands': 1, 'system_unit_proof_commands': 1, 'tenant_control_grant_name': 1, 'tenant_control_grant_path': 1, 'tenant_control_repository': 1, 'tenant_paths_definition': 1, 'tenant_source_confinement_commands': 1, 'tenant_worktree_base': 1, 'tenant_worktree_confinement_commands': 1},
+    'render_operator_commands': {'REPOSITORY_BOUNDARY_BEGIN': 1, 'REPOSITORY_BOUNDARY_END': 1, 'TENANT_CONTROL_ROOT': 1, 'WRITABLE_REPOSITORY_COPY_MODE': 1, '_is_within': 1, 'acl_line': 3, 'commit_store_read_commands': 1, 'directory_line': 2, 'for_database': 1, 'install_line': 1, 'owned_ancestor_dirs': 4, 'owned_directory_command': 5, 'owner_github_identity_commands': 1, 'packet_companion': 6, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'readable_system_unit_path': 1, 'repository_copy_confinement_commands': 1, 'repository_group_commands': 1, 'repository_group_name': 1, 'role_accounts_command': 1, 'role_control_sudoers': 1, 'role_runtime_command': 1, 'role_worktree_access_commands': 1, 'roles_group_name': 1, 'service_user_command': 1, 'shell_quote': 32, 'socket_group_retirement_commands': 1, 'system_unit_proof_commands': 1, 'tenant_control_grant_name': 1, 'tenant_control_grant_path': 1, 'tenant_control_repository': 1, 'tenant_paths_definition': 1, 'tenant_source_confinement_commands': 1, 'tenant_worktree_base': 1, 'tenant_worktree_confinement_commands': 1},
 }
 #: Measured on the baseline: every project_provision definition outside the seven that names them, and how often.
-DISPATCH = {'write_artifacts': {'render_operator_commands': 1}, 'main': {'render_operator_commands': 1}}
+DISPATCH = {'write_artifacts': {'render_operator_commands': 1}, 'main': {'render_operator_commands': 1}, 'for_database': {'postgres_sql_file_command': 4, 'peer_auth_command': 1, 'packet_companion': 1}}  # for_database: SYRD-642, rebuilding the PostgreSQL lines it replaces
 #: Measured on the baseline, by AST: every production module that imports them from project_provision, and how often.
 READERS = {}
 #: The BASELINE's own behaviour for the cases below (`gold474.py`, run on the baseline project_provision under the guard).
@@ -332,7 +332,7 @@ def test_the_guard_itself_refuses_a_spawn_an_exec_a_lookup_and_a_connection() ->
 
 #: What the six functions read on project_provision when they run beyond each other: the shared helpers it keeps and
 #: re-exports. None of them may be read bare in the module.
-KEPT = ("shell_quote", "_dedupe", "DEFAULT_PG_IDENT_MAP", "tenant_worktree_base", "tenant_control_repository", "repository_group_name",
+KEPT = ("for_database", "shell_quote", "_dedupe", "DEFAULT_PG_IDENT_MAP", "tenant_worktree_base", "tenant_control_repository", "repository_group_name",
         "repository_group_commands", "WRITABLE_REPOSITORY_COPY_MODE", "TENANT_CONTROL_ROOT", "REPOSITORY_BOUNDARY_BEGIN", "REPOSITORY_BOUNDARY_END")
 #: The one constant, as the baseline wrote it: (annotation, value). Measured on the baseline, not typed.
 CONSTANT_TEXT = {'PACKET_PROVISION_DIR': (None, '\'"$provision_dir"\'')}

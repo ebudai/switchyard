@@ -10,11 +10,42 @@ sudo ./install
 
 The installer prints each system-changing command before it runs. It installs
 host packages, creates the shared Python venv, and installs the public
-`switchyard` command, and asks nothing of its own; on Arch-family hosts
-`pacman` shows its usual installation confirmation, which is yours to answer
-(SYRD-235 made it reachable: the installer no longer runs pacman under a second
-`sudo`). `--yes` is accepted for compatibility. `--dry-run` prints
-every command it would run and exits without changing the system.
+`switchyard` command. On Arch-family hosts `pacman` shows its usual
+installation confirmation, which is yours to answer (SYRD-235 made it
+reachable: the installer no longer runs pacman under a second `sudo`). `--yes`
+is accepted for compatibility. `--dry-run` prints every command it would run
+and exits without changing the system.
+
+### Which databases (SYRD-642)
+
+Before it plans or installs anything, the installer asks one question: which
+databases ticket boards on this host will use.
+
+| Answer | What is installed |
+|---|---|
+| 1) PostgreSQL (the default) | A local PostgreSQL server, its cluster and psycopg, exactly as every host had before. |
+| 2) Oracle | Only `python-oracledb`, in the shared venv. No PostgreSQL server, client or psycopg is installed, no cluster is created, and nothing of `postgresql.service` is enabled, started or probed. The board's Oracle database is remote, and its connection is configured later with `ticket-board-oracle` (`docs/syrd-642-oracle-backend.md`). |
+| 3) Both | Both of the above. |
+
+**Answering ahead of time.** Pass `--databases postgresql|oracle|both`, or set
+`SWITCHYARD_INSTALL_DATABASES`, to answer it without a terminal. With neither
+a terminal nor an answer, the installer keeps what the host was installed for,
+or installs PostgreSQL on a host that has never recorded a choice.
+
+**The record.** The choice is recorded in `/etc/switchyard/databases.json`.
+Choices are only ever added to it: re-running the installer with a narrower
+answer removes nothing.
+
+**Adding PostgreSQL later.** `sudo ./install --add-database postgresql` adds
+it without reinstalling Switchyard. On an Oracle-only host, `switchyard new`
+creates each project's board on a remote Oracle database: it asks for the
+connection first, and needs the project's declared workflow
+(`--workflow-config`). A PostgreSQL board on such a host is refused before
+anything is asked, naming that exact command (pointing at the installed
+release). See `docs/syrd-642-oracle-backend.md`, "Creating an Oracle project".
+
+The Oracle Database Free container in `tests/oracle/` is test infrastructure
+for the suites only. No installer, deploy or provisioning path uses it.
 
 Switchyard does not install, download, or upgrade the agent CLIs. Installing
 `claude`, `codex`, `agy`, `hermes`, or `copilot` is yours to do, with that vendor's own

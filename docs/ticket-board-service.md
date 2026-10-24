@@ -150,6 +150,14 @@ from the `workflow_stages` seed in `schema.sql`. Keep workflow stage labels in
 the schema; `ticket_board_workflow_config_equivalence_test.py` pins the emitted
 frontend fallback against that canonical source.
 
+## Oracle backend (SYRD-642)
+
+A board can keep its tickets in a remote Oracle database: `TICKET_BOARD_BACKEND=oracle`
+and `TICKET_BOARD_ORACLE_CONFIG` select it for the board server and the listener, and
+`ticket-board-oracle` configures, checks, migrates and tears down its local side. Caller
+authority stays the local socket's. The first slice is a deliberately limited core; its
+configuration, guarantees and parity boundary are in `docs/syrd-642-oracle-backend.md`.
+
 ## PostgreSQL notification listener
 
 The post-cutover notification shim runs as a separate `agent` user systemd

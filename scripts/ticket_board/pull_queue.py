@@ -18,6 +18,8 @@ def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: s
         raise ValueError(f"unknown pull queue operation: {operation}")
     if payload:
         raise ValueError("claim_next takes no arguments: a worker claims only for itself")
+    if getattr(app, "store_backend", "postgres") == "oracle":  # SYRD-642: the same claim, made by the Oracle core
+        return app.claim_next(caller_role)
     with app._pg_connect() as conn:
         with conn.transaction():
             app._pg_set_caller_role(conn, caller_role)

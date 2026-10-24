@@ -39,6 +39,12 @@ def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: s
 
 def before_transition(app: Any, ticket_id: str, action: str, payload: dict[str, Any], *, caller_role: str) -> None:
     """What the board measures, and a documentation decision checks (SYRD-624), before a declared transition."""
+    if getattr(app, "store_backend", "postgres") == "oracle":  # SYRD-642: neither check is in the Oracle core yet
+        from .documentation_gate import GATE_ACTIONS
+        if action in GATE_ACTIONS:
+            raise NotImplementedError(f"{action} is not in the Oracle core yet: its documentation-candidate check "
+                                      "is not, and a gate is never taken unchecked; nothing was changed")
+        return
     documentation_candidate.before_transition(app, ticket_id, action, payload, caller_role=caller_role)
     size_review.scan_for_transition(app, ticket_id, action, payload, caller_role=caller_role)
 

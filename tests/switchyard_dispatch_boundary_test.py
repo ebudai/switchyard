@@ -529,7 +529,8 @@ def test_the_guard_itself_refuses_a_spawn_an_exec_a_lookup_and_a_connection() ->
 # --- structure -----------------------------------------------------------------------------------------------------
 
 
-NESTED = ["from scripts.ticket_board import privileged_front_door", "from scripts import board_skill_cli",
+NESTED = ["from scripts.database_capabilities import require_new_project_capability",  # SYRD-642: `new` asks it first
+          "from scripts.ticket_board import privileged_front_door", "from scripts import board_skill_cli",
           "from scripts import onboarding_readiness", "from scripts import paste_image",  # SYRD-247
           "from scripts import workflow_manage"]
 

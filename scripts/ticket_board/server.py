@@ -527,7 +527,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         # PostgreSQL inserts already enqueue durable transition delivery. The
         # direct sender is only a fallback for stores without that queue.
         if (
-            getattr(self.app, "store_backend", "") != "postgres"
+            getattr(self.app, "store_backend", "") not in ("postgres", "oracle")
             and notification_source_role != "director"
             and str(created.get("state", "")).strip() == "analysis"
             and not list(created.get("blocked_by") or [])

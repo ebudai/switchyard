@@ -9,16 +9,34 @@ SWITCHYARD_INSTALL_SCRIPT="${SWITCHYARD_INSTALL_SWITCHYARD_SCRIPT:-$REPO_ROOT/sc
 SUDO_BIN="${SWITCHYARD_SUDO_BIN:-sudo}"
 ORIGINAL_ARGS=("$@")
 DRY_RUN=0
+#: postgresql, oracle or both (SYRD-642): asked before anything is planned, installed or escalated.
+DATABASES="${SWITCHYARD_INSTALL_DATABASES:-}"
+#: --add-database: add one database's support to an installed host, without reinstalling Switchyard.
+ADD_DATABASE=""
+#: Whether --databases (or SWITCHYARD_INSTALL_DATABASES) was given at all: given empty is refused, not defaulted.
+DATABASES_GIVEN=0
+[[ -z "${SWITCHYARD_INSTALL_DATABASES+set}" ]] || DATABASES_GIVEN=1
 
 usage() {
     cat <<'EOF'
-Usage: sudo ./install [--dry-run] [--yes|-y]
+Usage: sudo ./install [--dry-run] [--yes|-y] [--databases postgresql|oracle|both]
+       sudo ./install [--dry-run] --add-database postgresql|oracle
 
 Installs Switchyard host packages, the shared Python venv, and the public
 switchyard command. --dry-run prints the commands that would run and exits
-without changing the system. --yes is accepted for compatibility. The
-installer asks nothing of its own; on Arch-family hosts pacman shows its
-usual installation confirmation.
+without changing the system. --yes is accepted for compatibility.
+
+Ticket boards keep their tickets in a database. Before planning or installing
+anything, the installer asks which this host should support:
+  postgresql  a local PostgreSQL server on this host, as every host had before
+  oracle      a remote Oracle database: no PostgreSQL package, cluster, service
+              or psycopg is installed, started or checked here; only
+              python-oracledb. Each board's connection is configured later.
+  both
+--databases (or SWITCHYARD_INSTALL_DATABASES) answers it ahead of time. With
+no terminal to ask and no answer, the host gets PostgreSQL, as before.
+--add-database adds one later, without reinstalling Switchyard.
+On Arch-family hosts pacman shows its usual installation confirmation.
 
 Switchyard does not install, download, or upgrade agent CLIs. Installing
 claude, codex, agy, hermes, or copilot is yours to do with the vendor's own installer,
@@ -53,6 +71,24 @@ while (($#)); do
         --dry-run)
             DRY_RUN=1
             ;;
+        --databases)
+            (($# > 1)) || die "--databases needs postgresql, oracle or both"
+            DATABASES="$2"
+            DATABASES_GIVEN=1
+            shift
+            ;;
+        --databases=*)
+            DATABASES="${1#--databases=}"
+            DATABASES_GIVEN=1
+            ;;
+        --add-database)
+            (($# > 1)) || die "--add-database needs postgresql or oracle"
+            ADD_DATABASE="$2"
+            shift
+            ;;
+        --add-database=*)
+            ADD_DATABASE="${1#--add-database=}"
+            ;;
         -h|--help)
             usage
             exit 0
@@ -64,8 +100,80 @@ while (($#)); do
     shift
 done
 
+#: postgresql, oracle or both, from any accepted spelling; nothing else.
+normalize_databases() {
+    local raw="${1,,}" word pg=0 ora=0
+    local -a words=()
+    IFS=',' read -ra words <<< "${raw// /,}"
+    for word in "${words[@]}"; do
+        case "$word" in
+            "") ;;
+            postgresql|postgres) pg=1 ;;
+            oracle) ora=1 ;;
+            both) pg=1; ora=1 ;;
+            *) return 1 ;;
+        esac
+    done
+    if ((pg && ora)); then printf 'both\n'; elif ((pg)); then printf 'postgresql\n'; elif ((ora)); then printf 'oracle\n'; else return 1; fi
+}
+
+#: What an earlier install recorded (postgresql, oracle or both), or nothing on a host installed before the choice.
+recorded_databases() {
+    # Read without Python, which a host may not have yet: the record is database_capabilities.py's own
+    # one-line {"databases": [...]}, so its names are the only quoted capability words in it.
+    local record="${SWITCHYARD_DATABASE_RECORD:-/etc/switchyard/databases.json}" names=""
+    [[ -f "$record" && ! -L "$record" ]] || return 0
+    grep -q '"postgresql"' "$record" && names+="postgresql,"
+    grep -q '"oracle"' "$record" && names+="oracle,"
+    [[ -z "$names" ]] || normalize_databases "$names" || true
+}
+
+#: The question, asked only where somebody can answer it. The default is what the host already has.
+ask_databases() {
+    local answer default=1
+    case "$RECORDED" in oracle) default=2 ;; both) default=3 ;; esac
+    while true; do
+        printf '\nWhich databases should ticket boards on this host use?\n'
+        printf '  1) PostgreSQL: a local PostgreSQL server on this host\n'
+        printf '  2) Oracle: a remote Oracle database; nothing of PostgreSQL is installed here\n'
+        printf '  3) Both\n'
+        [[ -z "$RECORDED" ]] || printf 'This host was installed for: %s. Nothing installed is removed by a narrower answer.\n' "$RECORDED"
+        printf 'Choose 1, 2 or 3 [%s]: ' "$default"
+        IFS= read -r answer || die "no answer to the database question; pass --databases postgresql, oracle or both"
+        case "${answer,,}" in
+            "") answer="$default" ;;
+        esac
+        case "${answer,,}" in
+            1|postgresql|postgres) DATABASES=postgresql; return ;;
+            2|oracle) DATABASES=oracle; return ;;
+            3|both) DATABASES=both; return ;;
+            *) printf 'Answer 1, 2 or 3.\n' ;;
+        esac
+    done
+}
+
+# The database choice comes first: before escalating, reporting, planning or installing anything.
+RECORDED="$(recorded_databases)"
+if [[ -n "$ADD_DATABASE" ]]; then
+    [[ -z "$DATABASES" || -n "${SWITCHYARD_INSTALL_DATABASES:-}" ]] || die "--add-database and --databases are separate: pass one"
+    DATABASES="$(normalize_databases "$ADD_DATABASE")" && [[ "$DATABASES" != both ]] \
+        || die "--add-database must be postgresql or oracle"
+elif ((DATABASES_GIVEN)); then
+    DATABASES="$(normalize_databases "$DATABASES")" || die "--databases must be postgresql, oracle or both"
+elif [[ -t 0 && -t 1 ]]; then
+    ask_databases
+elif [[ -n "$RECORDED" ]]; then
+    DATABASES="$RECORDED"
+    printf 'install: no terminal to ask and no --databases: keeping what this host was installed for (%s).\n' "$RECORDED"
+else
+    DATABASES=postgresql
+    printf 'install: no terminal to ask which databases ticket boards use, and no --databases: installing for PostgreSQL, as before.\n'
+fi
+printf 'install: ticket boards on this host: %s.\n' "$DATABASES"
+
 if [[ "${EUID:-$(id -u)}" -ne 0 && "${SWITCHYARD_INSTALL_TEST_ASSUME_ROOT:-}" != "1" && "$DRY_RUN" -ne 1 ]]; then
     run_cmd "$SUDO_BIN" env \
+        SWITCHYARD_INSTALL_DATABASES="$DATABASES" \
         SWITCHYARD_INSTALL_ORIGINAL_USER="${SWITCHYARD_INSTALL_ORIGINAL_USER:-$(id -un)}" \
         SWITCHYARD_INSTALL_ORIGINAL_HOME="${SWITCHYARD_INSTALL_ORIGINAL_HOME:-$HOME}" \
         "$REPO_ROOT/install" "${ORIGINAL_ARGS[@]}"
@@ -81,11 +189,15 @@ ORIGINAL_HOME="${ORIGINAL_HOME:-$HOME}"
 
 dry_run_install() {
     printf 'DRY RUN: no changes will be made.\n'
-    report_checkout_version
+    [[ -n "$ADD_DATABASE" ]] || report_checkout_version
     run_cmd env \
         SWITCHYARD_INSTALL_ORIGINAL_USER="$ORIGINAL_USER" \
         SWITCHYARD_INSTALL_ORIGINAL_HOME="$ORIGINAL_HOME" \
-        "$PREREQS_SCRIPT" --dry-run
+        "$PREREQS_SCRIPT" --dry-run --databases "$DATABASES"
+    if [[ -n "$ADD_DATABASE" ]]; then
+        printf 'install: --add-database installs no Switchyard release; the installed one stays.\n'
+        return 0
+    fi
     run_cmd env \
         SWITCHYARD_SOURCE_REPO="$REPO_ROOT" \
         SWITCHYARD_SOURCE_REF="${SWITCHYARD_SOURCE_REF:-HEAD}" \
@@ -97,6 +209,9 @@ dry_run_install() {
 
 print_final_next_step() {
     printf '\nNEXT STEP\n'
+    if [[ "$DATABASES" == oracle ]]; then
+        printf 'This host supports Oracle boards only. `switchyard new` creates each board on a remote Oracle database: it asks for the connection (or reads SWITCHYARD_NEW_ORACLE_CONFIG) and needs the project'"'"'s declared workflow (--workflow-config). PostgreSQL can be added later: sudo %s --add-database postgresql (docs/syrd-642-oracle-backend.md).\n' "$REPO_ROOT/install"
+    fi
     printf 'Switchyard never fetches or runs a vendor'"'"'s installer. Install at least one of claude, codex, agy, hermes, or copilot yourself, with that vendor'"'"'s own installer -- you choose which version you run.\n'
     printf 'It does not have to be installed for each project owner. If a CLI is reachable only by your own account, `switchyard new` offers to promote that executable to a root-owned host-wide copy, reused by every later project; no credentials, config, trust or session travel with it.\n'
     printf 'Then run `switchyard new`: it classifies each selected CLI before creating anything, settles anything unusable with you, and walks you through signing in to each one before any pane starts.\n'
@@ -161,11 +276,20 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     exit 0
 fi
 
+if [[ -n "$ADD_DATABASE" ]]; then
+    run_cmd env \
+        SWITCHYARD_INSTALL_ORIGINAL_USER="$ORIGINAL_USER" \
+        SWITCHYARD_INSTALL_ORIGINAL_HOME="$ORIGINAL_HOME" \
+        "$PREREQS_SCRIPT" --databases "$DATABASES"
+    printf 'install: added %s support; Switchyard itself was not reinstalled.\n' "$DATABASES"
+    exit 0
+fi
+
 report_checkout_version
 run_cmd env \
     SWITCHYARD_INSTALL_ORIGINAL_USER="$ORIGINAL_USER" \
     SWITCHYARD_INSTALL_ORIGINAL_HOME="$ORIGINAL_HOME" \
-    "$PREREQS_SCRIPT"
+    "$PREREQS_SCRIPT" --databases "$DATABASES"
 run_cmd env \
     SWITCHYARD_SOURCE_REPO="$REPO_ROOT" \
     SWITCHYARD_SOURCE_REF="${SWITCHYARD_SOURCE_REF:-HEAD}" \

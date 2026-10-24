@@ -358,6 +358,9 @@ def add_project_role_command(
     input_func: Callable[[str], str] = input,
 ) -> int:
     from scripts import team_launcher as launcher
+    from scripts.ticket_board.provision_oracle import refuse_unsupported
+
+    refuse_unsupported(config.project, "adding a role")  # SYRD-642: its steps are PostgreSQL's
 
     if not cli:
         # The same list `switchyard new` and a runtime switch offer. A flag

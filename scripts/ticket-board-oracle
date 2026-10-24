@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+"""Entry point for ticket-board-oracle: configure, check, status, migrate and teardown for an Oracle board."""
+
+import os
+import sys
+
+# python-oracledb is installed into the shared Switchyard venv, not the system Python (SYRD-642): run there
+# when this interpreter cannot import it.
+# A venv's python is a link to the system one, so it is told apart by its prefix, not its executable.
+VENV = os.environ.get("SWITCHYARD_PYTHON_VENV") or "/opt/switchyard/venv"
+VENV_PYTHON = os.path.join(VENV, "bin", "python")
+try:
+    import oracledb  # noqa: F401
+except ImportError:
+    if os.access(VENV_PYTHON, os.X_OK) and os.path.realpath(sys.prefix) != os.path.realpath(VENV):
+        os.execv(VENV_PYTHON, [VENV_PYTHON, *sys.argv])
+
+from ticket_board.oracle_lifecycle import main
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

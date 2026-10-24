@@ -134,7 +134,9 @@ def set_project_vcs_close_role_command(
     print_func: Callable[[str], None] = print,
 ) -> int:
     from scripts import team_launcher as launcher
+    from scripts.ticket_board.provision_oracle import refuse_unsupported
 
+    refuse_unsupported(config.project, "setting the VCS close role")  # SYRD-642: its steps are PostgreSQL's
     plan = launcher._project_plan_for_vcs_close_role(config, config_path=config_path, role_name=role_name)
     role = dict(plan.operation_allowed_roles)["mark_done"][0]
     launcher.render_vcs_close_role_sql(plan)

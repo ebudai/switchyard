@@ -17,7 +17,10 @@ on a path the tenant's configuration names followed a link planted there and
 gave its target to the tenant. The directory is made or corrected by
 `scripts/tenant_paths.py dir`, rooted at the owner's home or runtime
 directory, and only for a path inside one of them -- decided on the path as
-written, never by resolving it.
+written, never by resolving it. In the runtime directory it is
+`scripts/owner_runtime_dirs.py`: root has nowhere there it alone can change
+to stage in, so once the directory is proven the owner's own, the owner makes
+its directories itself (SYRD-655).
 
 Moved out of `scripts/team_launcher.py` unchanged (SYRD-332). `team_launcher`
 imports this module at its top and still exports every name callers read there.
@@ -41,8 +44,13 @@ def install_owner_state_dir_args(config: ProjectConfig, path: Path) -> list[str]
     if not config.run_as_user:
         raise ValueError("state directory ownership setup requires run_as_user")
     owner = config.run_as_user
-    return tenant_paths_argv(owner_writes.owner_root(owner, path), "dir", "--mode", "0700", "--owner", owner,
-                             "--group", owner, str(path))
+    root = owner_writes.owner_root(owner, path)
+    if root in owner_writes._runtime_root(owner):
+        # The owner's own runtime directory: proven its, then made by the owner itself (SYRD-655).
+        from scripts.owner_runtime_dirs import helper_argv
+
+        return helper_argv(root, owner, 0o700, [str(path)])
+    return tenant_paths_argv(root, "dir", "--mode", "0700", "--owner", owner, "--group", owner, str(path))
 
 
 def _owner_state_roots(config: ProjectConfig) -> tuple[Path, ...]:

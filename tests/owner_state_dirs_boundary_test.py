@@ -194,6 +194,13 @@ def made(root: Path, path: Path) -> list[str]:
     return tenant_paths_argv(str(root), "dir", "--mode", "0700", "--owner", OWNER, "--group", OWNER, str(path))
 
 
+def made_in_runtime(root: Path, path: Path) -> list[str]:
+    """The argv that makes `path` in the owner's own runtime directory: proven its, then made as it (SYRD-655)."""
+    from scripts.owner_runtime_dirs import helper_argv
+
+    return helper_argv(str(root), OWNER, 0o700, [str(path)])
+
+
 def test_the_install_argv() -> None:
     from scripts import owner_state_dirs
 
@@ -289,7 +296,7 @@ def test_only_the_owners_directories_are_given_in_order() -> None:
         home = root / "home" / OWNER
         ran, stopped, _ = run(root, config(root, session=home / "sessions"), root / "run" / "user" / str(UID) / "p")
         runtime = root / "run" / "user" / str(UID)
-        check(stopped is None and ran == [made(home, home / "sessions"), made(runtime, runtime / "p")],
+        check(stopped is None and ran == [made(home, home / "sessions"), made_in_runtime(runtime, runtime / "p")],
               f"the session directory, then the pane-state directory, each through the caller's runner: {ran}")
         ran, stopped, _ = run(root, config(root, session=root / "shared" / "sessions"), home / "panes")
         check(ran == [made(home, home / "panes")],

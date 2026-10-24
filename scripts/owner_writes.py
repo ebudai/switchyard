@@ -393,7 +393,18 @@ def ensure_owner_dirs(owner_user: str, paths: list[Path], *, mode: int) -> None:
     except KeyError:
         raise SystemExit(f"switchyard: refusing to make {paths[0]}: {owner_user} is not an account on this host") from None
     for path in paths:
-        root = tenant_paths._quiet(owner_root(owner_user, path))
+        home = owner_root(owner_user, path)
+        if home in _runtime_root(owner_user):
+            # The owner's own runtime directory: proven its, then made by the owner itself (SYRD-655).
+            from scripts import owner_runtime_dirs
+
+            try:
+                owner_runtime_dirs.ensure_runtime_dirs(home, [str(path)], mode, owner_user)
+            except tenant_paths.Refused as refusal:
+                raise SystemExit(f"switchyard: refusing to make {path} for {owner_user}: {refusal}. "
+                                 "Nothing was made.") from None
+            continue
+        root = tenant_paths._quiet(home)
         try:
             tenant_paths.ensure_dirs(root, [str(path)], mode, account.pw_uid, account.pw_gid)
         except tenant_paths.Refused as refusal:

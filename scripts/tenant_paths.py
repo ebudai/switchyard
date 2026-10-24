@@ -259,7 +259,7 @@ class Root:
     """A principal's home, opened once, and everything reached from it by descriptor."""
 
     def __init__(self, home: str, *, preview: bool, report: Callable[[str], None],
-                 planned: set[str] | None = None) -> None:
+                 planned: set[str] | None = None, stage_in_home: bool = False) -> None:
         if not home.startswith("/") or str(PurePosixPath(home)) != home or home == "/":
             raise SystemExit(f"tenant_paths: {home!r} is not a normalised absolute home")
         self.home, self.preview, self.report = home, preview, report
@@ -272,6 +272,11 @@ class Root:
         self.stage_fd: int | None = None
         self.dev = -1
         self._open_home()
+        if stage_in_home and self.fd is not None and self._ours_alone(self.fd):
+            # Only `owner_runtime_dirs`, as the owner: its own runtime directory is the one only it can change.
+            if self.stage_fd is not None:
+                os.close(self.stage_fd)
+            self.stage_fd = os.dup(self.fd)
 
     def _open_home(self) -> None:
         """Walk to the home from `/`, by descriptor, refusing any link but one root itself made.

@@ -12,7 +12,9 @@
   installed wrapper and what it points at.
 - `switchyard_release_status_command` compares a tenant's recorded release
   with what it runs (`format_release_alignment`). With `--close` it records
-  the phase in the rollout journal (`close_release_phase`).
+  the phase in the rollout journal (`close_release_phase`). A tenant whose
+  configuration this account cannot use is reported from root-owned records
+  instead (`release_status_from_root_records`, SYRD-659).
 
 Loading project config, resolving users and releases, probing panes and
 recording rollout phases stay in `scripts/team_launcher.py`. This module reads
@@ -27,12 +29,14 @@ This module never imports `team_launcher` at its top.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Callable, Sequence
 
 if TYPE_CHECKING:
@@ -805,6 +809,105 @@ def _build_switchyard_release_status_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def release_status_from_root_records(
+    slug: str,
+    *,
+    config_path: Path,
+    problem: BaseException,
+    close: bool = False,
+    registry_dir: Path | None = None,
+    opener: Callable[[str], Any] | None = None,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    """`release-status` for a tenant whose generated configuration this account cannot use (SYRD-659).
+
+    The configuration is the tenant's own, in a tree only its owner may read,
+    so a Director or operator asking about another tenant cannot load it -- and
+    must not be given a way round that. What root-owned, world-readable records
+    show is reported instead: the shared release, the build the running board
+    reports at the port its root-owned unit names, and root's record of the
+    board service and the last rollout. What only the owner or root can read is
+    named as not read, with the command that compares everything. Nothing is
+    changed; the answer is never success, because the comparison is not
+    complete.
+    """
+    from scripts import team_launcher as launcher
+    from scripts import board_supervisor_spec
+
+    caller = launcher.current_user_name() or "this account"
+    owner = launcher._project_config_path_owner_user(config_path)
+    registry = (registry_dir or launcher.switchyard_registry_dir()) / f"{slug}.json"
+    code = getattr(problem, "errno", None)
+    if code is None:
+        # Root's reader refuses in words, not an errno. Which words is not the question here -- whether the file is
+        # there is, and a look at it decides only how this is said; nothing is read or written from it.
+        try:
+            os.stat(config_path)
+        except OSError as exc:
+            code = exc.errno
+    reason = " ".join(str(getattr(problem, "strerror", None) or problem).split()).removeprefix("switchyard: ")
+    reason = reason.removesuffix(" Nothing was changed.").rstrip(".")
+    if code in (errno.EACCES, errno.EPERM):
+        print_func(f"switchyard: {slug}'s generated configuration {config_path} is not readable from {caller}: "
+                   f"it is in {owner or 'its owner'}'s private tree.")
+    elif code in (errno.ENOENT, errno.ENOTDIR):
+        print_func(f"switchyard: {slug}'s registered configuration {config_path} does not exist, so the registry "
+                   f"entry {registry} is stale. Restore the checkout there, or have an operator remove that entry "
+                   f"and run `sudo switchyard register <the configuration's path>`.")
+    else:
+        if not isinstance(problem, (OSError, ValueError, SystemExit)):
+            reason = f"{reason} ({type(problem).__name__})"
+        print_func(f"switchyard: {slug}'s generated configuration {config_path} is not a usable launcher "
+                   f"configuration: {reason}. It is {owner or 'its owner'}'s file to repair; nothing was changed.")
+
+    unreadable = ("(not readable from this account)" if code in (errno.EACCES, errno.EPERM)
+                  else "(unknown without a usable configuration)")
+    marker = launcher._read_switchyard_release_marker(
+        (launcher.switchyard_shared_install_root() / "current").resolve(strict=False)
+    )
+    shared = marker.marker_commit if marker is not None else ""
+    notes: list[str] = [marker.marker_error] if marker is not None and marker.marker_error else []
+    live = ""
+    try:
+        unit = board_supervisor_spec.read_unit_spec(slug, board_supervisor_spec.Paths())
+    except (board_supervisor_spec.SpecError, OSError) as exc:
+        notes.append(f"the board's root-owned unit could not be read: {exc}")
+    else:
+        if unit.port is None:
+            notes.append(f"{unit.unit_path} names no --port")
+        else:
+            host = next((unit.argv[i + 1] for i, word in enumerate(unit.argv[:-1]) if word == "--host"), "127.0.0.1")
+            board = SimpleNamespace(project=slug, board_url=f"http://{host}:{unit.port}")
+            live, live_error = launcher._live_board_build_id(board, opener=opener)
+            if live_error:
+                notes.append(live_error)
+    active, journal = root_recorded_tenant_facts(slug)
+    service = "unknown" if active is None else ("active" if active else "inactive")
+    lines = [
+        f"switchyard: {slug} release phase, from root-owned records only",
+        f"  shared release   {launcher._format_release_sha(shared)}",
+        f"  live board build {launcher._format_release_sha(live)}",
+        f"  deployed release {unreadable}",
+        f"  pinned release   {unreadable}",
+        f"  trusted journal  {unreadable}",
+        f"  tenant journal   {unreadable}",
+        f"  board service    {service}" + (f"; {journal}" if journal else ""),
+        *(f"  note             {note}" for note in notes),
+    ]
+    for line in lines:
+        print_func(line)
+    if code in (errno.EACCES, errno.EPERM):
+        as_owner = f", or `switchyard release-status {slug}` as {owner}" if owner and owner != caller else ""
+        print_func(
+            f"switchyard: to compare everything, run `pkexec switchyard release-status {slug}`{as_owner}."
+            + (f" Closing the phase is root's: `pkexec switchyard release-status {slug} --close`." if close else "")
+        )
+    elif close:
+        print_func(f"switchyard: {slug}'s release phase was not closed: it is closed only against a configuration "
+                   "that loads.")
+    return 1
+
+
 def switchyard_release_status_command(
     project: str,
     *,
@@ -823,7 +926,17 @@ def switchyard_release_status_command(
     from scripts import team_launcher as launcher
 
     entry = launcher._resolve_switchyard_project(project, config_dir=config_dir, registry_dir=registry_dir)
-    config = launcher.load_project_config(entry.slug, entry.config_path)
+    try:
+        config = launcher.load_project_config(entry.slug, entry.config_path)
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - see below
+        # Another tenant's private tree, a checkout that moved, or a document that does not load: said, with what
+        # root-owned records show, never a traceback (SYRD-659). Any failure, not a list of them: the document is the
+        # tenant's to write, and its loader answers a malformed field with whatever the field breaks -- a TypeError
+        # for a `slot` that is an object, an IndexError for an empty `cli` (Audit of a9e26d1d). Its class is named.
+        return release_status_from_root_records(
+            entry.slug, config_path=entry.config_path, problem=exc, close=close,
+            registry_dir=registry_dir, opener=opener, print_func=print_func,
+        )
     if close:
         return close_release_phase(
             config, config_path=entry.config_path, opener=opener, print_func=print_func

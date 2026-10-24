@@ -171,7 +171,7 @@ def test_install_succeeds_on_a_host_with_no_agent_cli_present() -> None:
         assert "fake prereqs" in proc.stdout
         assert "fake release install" in proc.stdout
         assert (tmpdir / "commands.log").read_text(encoding="utf-8").splitlines() == [
-            "prereqs:",
+            "prereqs:--databases postgresql",
             "release:--apply",
         ]
 
@@ -248,7 +248,7 @@ def test_dry_run_prints_every_step_without_prompting_or_mutating() -> None:
         assert "NEXT STEP" not in output
         assert not list(tmpdir.glob("*.installed"))
         assert (tmpdir / "commands.log").read_text(encoding="utf-8").splitlines() == [
-            "prereqs:--dry-run",
+            "prereqs:--dry-run --databases postgresql",
             "release:--print-commands",
         ]
 

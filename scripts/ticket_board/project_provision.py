@@ -13,7 +13,7 @@ import re
 import stat
 import subprocess
 import sys
-from dataclasses import MISSING, asdict, dataclass
+from dataclasses import MISSING, asdict, dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Callable, Mapping, Sequence
 
@@ -191,6 +191,7 @@ try:
         render_operator_commands,
         service_user_command,
     )
+    from .provision_oracle import adopt_staged, for_database, is_oracle  # SYRD-642
 except ImportError:  # pragma: no cover - supports direct script execution
     import privileged_install
     from board_skill import RELEASE_MARKER_NAME, SKILLS_DIR_NAME
@@ -365,6 +366,7 @@ except ImportError:  # pragma: no cover - supports direct script execution
         render_operator_commands,
         service_user_command,
     )
+    from provision_oracle import adopt_staged, for_database, is_oracle  # SYRD-642
 
 
 PROJECT_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,39}$")
@@ -450,6 +452,8 @@ class ProjectBoardProvision:
     #: guessing at one (SYRD-156).
     project_repository: str = ""
     workflow: dict | None = None
+    #: Where the board keeps its tickets: `postgresql`, or `oracle` for root's record in /etc/switchyard/oracle (SYRD-642).
+    database_backend: str = "postgresql"
 
 
 def plan_field_names() -> tuple[str, ...]:
@@ -1091,6 +1095,8 @@ def privileged_provision_dir(project: str, *, root: Path | None = None) -> Path:
 
 
 def write_artifacts(plan: ProjectBoardProvision, output_dir: Path, *, enable_owner_linger: bool = True) -> None:
+    if adopt_staged(plan.project) or is_oracle(plan.project):  # SYRD-642: what `switchyard new` collected, or root holds
+        plan = replace(plan, database_backend="oracle")
     output_dir.mkdir(parents=True, exist_ok=True)
     files = {
         "plan.json": json.dumps(asdict(plan), indent=2, sort_keys=True) + "\n",

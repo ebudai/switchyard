@@ -6,6 +6,11 @@ ASSUME_MANAGER="${SWITCHYARD_PREREQS_ASSUME_MANAGER:-}"
 SUDO_BIN="${SWITCHYARD_SUDO_BIN:-sudo}"
 PYTHON_BIN="${SWITCHYARD_PYTHON_BIN:-python3}"
 PIP_SPEC="psycopg>=3.3,<4"
+#: An Oracle board's only database dependency: python-oracledb, used in thin mode (no Oracle client libraries).
+ORACLE_PIP_SPEC="oracledb>=2,<27"
+#: Which ticket-board databases to install for (SYRD-642): postgresql, oracle or both. ./install asks.
+DATABASES="${SWITCHYARD_INSTALL_DATABASES:-postgresql}"
+DATABASE_RECORD="${SWITCHYARD_DATABASE_RECORD:-/etc/switchyard/databases.json}"
 SWITCHYARD_PYTHON_VENV="${SWITCHYARD_PYTHON_VENV:-/opt/switchyard/venv}"
 # Matches ticket-board-service.sh: the shared venv when it is executable, /usr/bin/python3
 # otherwise. Verification has to run under the interpreter the services will actually use,
@@ -15,9 +20,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
     cat <<'EOF'
-Usage: scripts/install-switchyard-prereqs [--dry-run]
+Usage: scripts/install-switchyard-prereqs [--dry-run] [--databases postgresql|oracle|both]
 
-Installs Switchyard host packages with apt or pacman and installs psycopg.
+Installs Switchyard host packages with apt or pacman, and the database support
+the selection names:
+  postgresql  the PostgreSQL server and client, a local cluster, and psycopg
+  oracle      python-oracledb only: no PostgreSQL package, cluster, service or psycopg
+  both        both of the above
+The default is postgresql (SWITCHYARD_INSTALL_DATABASES sets it too). The
+selection is added to /etc/switchyard/databases.json; nothing already
+installed is forgotten.
 Agent CLIs are not installed by Switchyard; the user installs those.
 EOF
 }
@@ -32,6 +44,14 @@ while (($#)); do
         --dry-run)
             DRY_RUN=1
             ;;
+        --databases)
+            (($# > 1)) || die "--databases needs postgresql, oracle or both"
+            DATABASES="$2"
+            shift
+            ;;
+        --databases=*)
+            DATABASES="${1#--databases=}"
+            ;;
         -h|--help)
             usage
             exit 0
@@ -42,6 +62,39 @@ while (($#)); do
     esac
     shift
 done
+
+#: postgresql, oracle or both, from any accepted spelling; nothing else.
+normalize_databases() {
+    local raw="${1,,}" word pg=0 ora=0
+    local -a words=()
+    IFS=',' read -ra words <<< "${raw// /,}"
+    for word in "${words[@]}"; do
+        case "$word" in
+            "") ;;
+            postgresql|postgres) pg=1 ;;
+            oracle) ora=1 ;;
+            both) pg=1; ora=1 ;;
+            *) return 1 ;;
+        esac
+    done
+    if ((pg && ora)); then printf 'both\n'; elif ((pg)); then printf 'postgresql\n'; elif ((ora)); then printf 'oracle\n'; else return 1; fi
+}
+
+DATABASES="$(normalize_databases "$DATABASES")" || die "--databases must be postgresql, oracle or both"
+WANT_POSTGRESQL=0
+WANT_ORACLE=0
+[[ "$DATABASES" == oracle ]] || WANT_POSTGRESQL=1
+[[ "$DATABASES" == postgresql ]] || WANT_ORACLE=1
+case "$DATABASES" in
+    postgresql) DATABASES_LABEL="PostgreSQL" ;;
+    oracle) DATABASES_LABEL="Oracle" ;;
+    both) DATABASES_LABEL="PostgreSQL and Oracle" ;;
+esac
+#: Set once this run has made the shared venv, so a dry run does not show it made twice.
+VENV_MADE=0
+#: Whether Switchyard was installed here before this run: a host with no capability record then had PostgreSQL.
+PRIOR_INSTALL=0
+[[ -e "${SWITCHYARD_INSTALL_PATH:-/usr/local/bin/switchyard}" ]] && PRIOR_INSTALL=1
 
 detect_manager() {
     if [[ -n "$ASSUME_MANAGER" ]]; then
@@ -157,42 +210,92 @@ apt_polkit_packages() {
     fi
 }
 
+#: python-oracledb into the shared venv: the one database dependency an Oracle board has.
+install_oracle_driver() {
+    printf 'Installing python-oracledb (thin mode: no Oracle client libraries) into the shared Switchyard Python venv at %s.\n' "$SWITCHYARD_PYTHON_VENV"
+    ((VENV_MADE)) || run_root_cmd install -d -m 0755 "$(dirname "$SWITCHYARD_PYTHON_VENV")"
+    if ((!VENV_MADE)) && [[ ! -x "$SWITCHYARD_PYTHON_VENV/bin/python" ]]; then
+        run_root_cmd "$PYTHON_BIN" -m venv --system-site-packages "$SWITCHYARD_PYTHON_VENV"
+    fi
+    run_root_cmd "$SWITCHYARD_PYTHON_VENV/bin/python" -m pip install "$ORACLE_PIP_SPEC"
+}
+
+#: The selection, added to what the host already records, once everything it needs is in place.
+record_databases() {
+    local -a command=("$(service_python)" "$SCRIPT_DIR/database_capabilities.py" record --databases "$DATABASES")
+    ((PRIOR_INSTALL)) && command+=(--prior-install)
+    printf 'Recording that this host supports %s ticket boards in %s.\n' "$DATABASES_LABEL" "$DATABASE_RECORD"
+    run_root_cmd env SWITCHYARD_DATABASE_RECORD="$DATABASE_RECORD" "${command[@]}"
+}
+
+printf 'Installing for %s ticket boards.\n' "$DATABASES_LABEL"
+if ((!WANT_POSTGRESQL)); then
+    printf 'No PostgreSQL server, client, cluster, service or psycopg is installed, started or checked.\n'
+fi
+
 manager="$(detect_manager)"
 case "$manager" in
     apt)
+        apt_database_packages=()
+        ((WANT_POSTGRESQL)) && apt_database_packages=(postgresql postgresql-client)
         printf 'Refreshing apt package index with apt-get update before installing packages.\n'
         run_root_cmd apt-get update
         # shellcheck disable=SC2046 # one package name per word, on purpose
         run_root_cmd apt-get install -y \
-            python3 postgresql postgresql-client tmux git curl python3-venv python3-pil acl $(apt_polkit_packages)
+            python3 "${apt_database_packages[@]}" tmux git curl python3-venv python3-pil acl $(apt_polkit_packages)
         printf 'KDE/separate layout users also need Konsole: %s apt-get install -y konsole\n' "$SUDO_BIN"
-        ensure_postgres_cluster
-        printf 'Installing psycopg into the shared Switchyard Python venv at %s.\n' "$SWITCHYARD_PYTHON_VENV"
-        printf 'Using a system-site-packages venv avoids Debian/Ubuntu PEP 668 restrictions while keeping distro Pillow visible.\n'
-        run_root_cmd install -d -m 0755 "$(dirname "$SWITCHYARD_PYTHON_VENV")"
-        run_root_cmd "$PYTHON_BIN" -m venv --system-site-packages "$SWITCHYARD_PYTHON_VENV"
-        run_root_cmd "$SWITCHYARD_PYTHON_VENV/bin/python" -m pip install "$PIP_SPEC"
+        if ((WANT_POSTGRESQL)); then
+            ensure_postgres_cluster
+            printf 'Installing psycopg into the shared Switchyard Python venv at %s.\n' "$SWITCHYARD_PYTHON_VENV"
+            printf 'Using a system-site-packages venv avoids Debian/Ubuntu PEP 668 restrictions while keeping distro Pillow visible.\n'
+            run_root_cmd install -d -m 0755 "$(dirname "$SWITCHYARD_PYTHON_VENV")"
+            run_root_cmd "$PYTHON_BIN" -m venv --system-site-packages "$SWITCHYARD_PYTHON_VENV"
+            VENV_MADE=1
+            run_root_cmd "$SWITCHYARD_PYTHON_VENV/bin/python" -m pip install "$PIP_SPEC"
+        fi
+        ((WANT_ORACLE)) && install_oracle_driver
         printf 'Verifying ticket board runtime dependencies under the shared Switchyard Python venv.\n'
-        run_root_cmd "$SWITCHYARD_PYTHON_VENV/bin/python" -c "import psycopg, PIL; print(psycopg.__version__, PIL.__version__)"
+        if ((WANT_POSTGRESQL)); then
+            run_root_cmd "$SWITCHYARD_PYTHON_VENV/bin/python" -c "import psycopg, PIL; print(psycopg.__version__, PIL.__version__)"
+        fi
+        if ((WANT_ORACLE)); then
+            run_root_cmd "$SWITCHYARD_PYTHON_VENV/bin/python" -c "import oracledb, PIL; print(oracledb.__version__, PIL.__version__)"
+        fi
         printf 'Verifying the ticket board entry point loads under the shared Switchyard Python venv.\n'
         verify_ticket_board_entry_point "$SWITCHYARD_PYTHON_VENV/bin/python" 1
         ;;
     pacman)
+        pacman_database_packages=()
+        ((WANT_POSTGRESQL)) && pacman_database_packages=(postgresql)
+        pacman_psycopg=()
+        ((WANT_POSTGRESQL)) && pacman_psycopg=(python-psycopg)
         printf 'Not refreshing pacman package databases automatically; run %s pacman -Syu first on Arch-family systems.\n' "$SUDO_BIN"
         # As root when already root, as the apt branch does. A second sudo here,
         # under Arch's default use_pty, put pacman's [Y/n] on a nested pty that
         # no keystroke reached, so a fresh install hung at its own confirmation
         # (SYRD-235). The confirmation stays: it is the operator's consent.
         run_root_cmd pacman -S --needed \
-            python postgresql tmux git curl python-pillow python-psycopg acl polkit
+            python "${pacman_database_packages[@]}" tmux git curl python-pillow "${pacman_psycopg[@]}" acl polkit
         printf 'KDE/separate layout users also need Konsole: %s pacman -S --needed konsole\n' "$SUDO_BIN"
-        ensure_postgres_cluster
-        printf 'Installing psycopg from the distribution package python-psycopg, which satisfies %s.\n' "$PIP_SPEC"
-        printf 'Arch-family Python is externally managed under PEP 668, so a user pip install is refused rather than merely discouraged.\n'
+        if ((WANT_POSTGRESQL)); then
+            ensure_postgres_cluster
+            printf 'Installing psycopg from the distribution package python-psycopg, which satisfies %s.\n' "$PIP_SPEC"
+            printf 'Arch-family Python is externally managed under PEP 668, so a user pip install is refused rather than merely discouraged.\n'
+        fi
+        # Arch packages no python-oracledb, and PEP 668 refuses a system pip: it goes into the shared venv,
+        # which the generated services then use.
+        ((WANT_ORACLE)) && install_oracle_driver
         verify_python="$(service_python)"
+        ((WANT_ORACLE)) && verify_python="$SWITCHYARD_PYTHON_VENV/bin/python"
         printf 'Verifying ticket board runtime dependencies with %s, the interpreter generated services use.\n' "$verify_python"
-        run_cmd "$verify_python" -c "import psycopg, PIL; print(psycopg.__version__, PIL.__version__)"
+        if ((WANT_POSTGRESQL)); then
+            run_cmd "$verify_python" -c "import psycopg, PIL; print(psycopg.__version__, PIL.__version__)"
+        fi
+        if ((WANT_ORACLE)); then
+            run_cmd "$verify_python" -c "import oracledb, PIL; print(oracledb.__version__, PIL.__version__)"
+        fi
         printf 'Verifying the ticket board entry point loads with %s.\n' "$verify_python"
         verify_ticket_board_entry_point "$verify_python"
         ;;
 esac
+record_databases

@@ -12,6 +12,12 @@ if [[ "$PROJECT_SLUG" != "pgu" ]]; then
     DEFAULT_DATABASE_NAME="${PROJECT_DB_IDENT}_ticket_board"
 fi
 readonly PROJECT_SLUG PROJECT_DB_IDENT DEFAULT_DATABASE_NAME
+# SYRD-642: root's Oracle record makes this a board on a remote Oracle database. The board, its canary and
+# its migrations then use the record; nothing below asks PostgreSQL anything.
+readonly ORACLE_TENANT_DIR="${SWITCHYARD_ORACLE_TENANT_ROOT:-/etc/switchyard/oracle}/$PROJECT_SLUG"
+if [[ -f "$ORACLE_TENANT_DIR/board.json" && ! -L "$ORACLE_TENANT_DIR/board.json" ]]; then
+    export TICKET_BOARD_BACKEND=oracle TICKET_BOARD_ORACLE_CONFIG="$ORACLE_TENANT_DIR/board.json"
+fi
 readonly SERVICE_NAME="${TICKET_BOARD_SERVICE_NAME:-$PROJECT_SLUG-ticket-board.service}"
 readonly SERVICE_SCRIPT_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly SOURCE_REPO="${SOURCE_REPO:-$SERVICE_SCRIPT_REPO}"
@@ -800,6 +806,35 @@ apply_database_migrations_for_release() {
         log "skipping ticket-board migrations because TICKET_BOARD_SKIP_MIGRATIONS=1"
         return 0
     fi
+    if [[ "${TICKET_BOARD_BACKEND:-}" == oracle ]]; then
+        # Root migrates with its own record; the tenant owner (deploy-release and deploy-restart run the deploy as
+        # the owner) with its own copies, as a PostgreSQL tenant's owner migrates its own database (SYRD-645).
+        local oracle_cli="$release_dir/scripts/ticket-board-oracle" prefix="${TICKET_BOARD_TICKET_PREFIX:-${PROJECT_SLUG^^}}"
+        local config="$ORACLE_TENANT_DIR/owner.json" schema_owner="$ORACLE_TENANT_DIR/owner-bootstrap.credentials"
+        local remedy="Root applies them with: sudo $oracle_cli migrate --config $ORACLE_TENANT_DIR/bootstrap.json"
+        if [[ "$(id -u)" == 0 ]]; then
+            config="$ORACLE_TENANT_DIR/bootstrap.json" schema_owner="$ORACLE_TENANT_DIR/bootstrap.credentials"
+            remedy="The schema owner applies them with: $oracle_cli migrate --config <a configuration naming their credentials>"
+        fi
+        if [[ -f "$schema_owner" ]]; then
+            "$PYTHON_BIN" "$oracle_cli" migrate --config "$config" --project "$PROJECT_SLUG" --ticket-prefix "$prefix" \
+                || die "failed to migrate the Oracle board with $config"
+            log "applied ticket-board Oracle migrations"
+            return 0
+        fi
+        # This account holds no schema-owner credential, so nothing is migrated here. The schema must already be
+        # what this release needs; steps it lacks are reported, and the release is refused before it is live.
+        output="$("$PYTHON_BIN" "$oracle_cli" status --config "$config" --json)" \
+            || die "cannot read the Oracle board's schema with $config"
+        local pending
+        pending="$("$PYTHON_BIN" -c 'import json, sys; print(json.load(sys.stdin).get("steps_pending", "unknown"))' \
+            <<<"$output")" || die "cannot read the Oracle board's schema state"
+        [[ "$pending" == 0 ]] || die "the Oracle board's schema lacks ${pending} migration step(s) this release needs," \
+            "and this account holds no schema-owner credentials ($schema_owner). $remedy" \
+            "--project $PROJECT_SLUG --ticket-prefix $prefix; then deploy again."
+        log "the Oracle board's schema is up to date; this account holds no schema-owner credentials, so nothing was migrated"
+        return 0
+    fi
     [[ -x "$migration_runner" ]] || die "missing executable migration runner after deploy: $migration_runner"
     [[ -f "$release_rbac" ]] || die "missing ticket-board RBAC SQL in release: $release_rbac"
     TICKET_BOARD_ADMIN_DATABASE_URL="$BOARD_ADMIN_DATABASE_URL" "$migration_runner"
@@ -823,6 +858,7 @@ apply_database_migrations() {
 }
 
 ensure_database_roles() {
+    [[ "${TICKET_BOARD_BACKEND:-}" != oracle ]] || return 0  # SYRD-642: Oracle's grants are its migrate's
     [[ -f "$RBAC_SQL" ]] || die "missing ticket-board RBAC SQL after deploy: $RBAC_SQL"
     command -v psql >/dev/null 2>&1 || die "psql is required to ensure ticket-board service roles"
     local output

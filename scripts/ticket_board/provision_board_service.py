@@ -113,7 +113,7 @@ def render_board_unit(plan: ProjectBoardProvision) -> str:
     # records who may use the board UI's Director operations, is on the command line for the same reason:
     # the owner's file must not name another (SYRD-598).
     ui_record = f"/etc/switchyard/projects/{plan.project}.json"
-    return f"""[Unit]
+    return provision.for_database(plan, "board", f"""[Unit]
 Description={plan.project} Ticket Board
 After=network.target postgresql.service
 StartLimitIntervalSec=5min
@@ -156,7 +156,7 @@ StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
-"""
+""")
 
 
 def tenant_primary_group(owner_user: str) -> str:
@@ -232,7 +232,7 @@ def render_listener_unit(plan: ProjectBoardProvision) -> str:
     process_authority_line = (
         "" if plan.role_accounts else "Environment=TICKET_BOARD_PROCESS_AUTHORITY=1\n"
     )
-    return f"""[Unit]
+    return provision.for_database(plan, "listener", f"""[Unit]
 Description={plan.project} Ticket Board Notify Listener
 After=network.target postgresql.service
 Wants=postgresql.service
@@ -260,7 +260,7 @@ StandardError=append:{plan.listener_log}
 
 [Install]
 WantedBy=default.target
-"""
+""")
 
 
 def render_canary_unit(plan: ProjectBoardProvision) -> str:
@@ -269,7 +269,7 @@ def render_canary_unit(plan: ProjectBoardProvision) -> str:
     except ImportError:  # pragma: no cover - supports direct script execution
         import project_provision as provision
 
-    return f"""[Unit]
+    return provision.for_database(plan, "canary", f"""[Unit]
 Description={plan.project} Ticket Board Deploy Canary
 After=network.target postgresql.service
 Wants=postgresql.service
@@ -286,7 +286,7 @@ NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=read-only
 ReadWritePaths=/tmp
-"""
+""")
 
 
 def render_tmpfiles(plan: ProjectBoardProvision) -> str:

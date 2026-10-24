@@ -17,8 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
-import psycopg
-from psycopg import sql
+from .pg_driver import psycopg, sql  # SYRD-645: or a stand-in that refuses, on an Oracle-only host
 
 from .pane_activity_gate import (
     ChildWorkMemory,

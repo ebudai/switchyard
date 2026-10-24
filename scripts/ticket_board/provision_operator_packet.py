@@ -433,7 +433,7 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
         owner_bus_error = (
             f"ERROR: user bus for {plan.owner_user} did not appear at $owner_bus; enable linger or start that user's systemd manager"
         )
-    return f"""#!/usr/bin/env bash
+    return provision.for_database(plan, "packet", f"""#!/usr/bin/env bash
 set -euo pipefail
 
 # Review generated artifacts first. These commands require host privileges.
@@ -517,4 +517,4 @@ sudo -u {q_owner_user} -H {q_board_skill_installer} install --home {q_owner_home
 {install_tenant_control}
 sudo -u {q_owner_user} env XDG_RUNTIME_DIR="$owner_runtime_dir" DBUS_SESSION_BUS_ADDRESS="unix:path=$owner_bus" systemctl --user enable --now {plan.listener_unit}
 curl -fsS http://127.0.0.1:{plan.port}/api/board >/dev/null
-"""
+""")

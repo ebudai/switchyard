@@ -460,6 +460,15 @@ def board_supervisor_lines(slugs: Sequence[str]) -> list[str]:
     return lines
 
 
+def board_database_entries(
+    slugs: Sequence[str], *, runner: Callable[..., subprocess.CompletedProcess[Any]]
+) -> list[dict[str, Any]]:
+    """Each Oracle tenant's board database, as this account may read it (SYRD-645); PostgreSQL tenants add nothing."""
+    from scripts.ticket_board import provision_oracle
+
+    return [entry for slug in slugs if (entry := provision_oracle.database_status(slug, runner=runner))]
+
+
 def root_recorded_tenant_facts(
     slug: str,
     *,
@@ -581,6 +590,7 @@ def switchyard_status_command(
         switchyard_install_path=switchyard_install_path,
     )
     supervised = supervised_board_entries()
+    databases = board_database_entries([status.slug for status in statuses], runner=runner)
     if json_output:
         payload: dict[str, Any] = {
             "projects": [_switchyard_project_status_payload(status) for status in statuses],
@@ -592,6 +602,8 @@ def switchyard_status_command(
             payload["supervised_boards"] = [
                 supervised[slug] for slug in sorted(supervised) if not project or slug == project
             ]
+        if databases:
+            payload["board_databases"] = databases
         from scripts import upstream_report_sinks
 
         # SYRD-674: from root-owned registry records only -- no root, no configuration, no token.
@@ -649,6 +661,12 @@ def switchyard_status_command(
         print_func("")
         for line in board_lines:
             print_func(line)
+    if databases:
+        from scripts.ticket_board.provision_oracle import database_line
+
+        print_func("")
+        for entry in databases:
+            print_func(database_line(entry))
     from scripts import upstream_report_sinks
 
     # Whether each project can file Switchyard reports, and if not why and the repair (SYRD-674).

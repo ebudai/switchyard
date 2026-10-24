@@ -523,7 +523,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         # PostgreSQL inserts already enqueue durable transition delivery. The
         # direct sender is only a fallback for stores without that queue.
         if (
-            getattr(self.app, "store_backend", "") != "postgres"
+            getattr(self.app, "store_backend", "") not in ("postgres", "oracle")
             and notification_source_role != "director"
             and str(created.get("state", "")).strip() == "analysis"
             and not list(created.get("blocked_by") or [])
@@ -949,6 +949,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/workflow":
             self.send_json(self.app.workflow_document())
             return
+        if refusal := extension_operations.oracle_absent_read(self.app, parsed.path):  # SYRD-645: never attempted
+            return self.send_text(refusal, HTTPStatus.NOT_IMPLEMENTED)
         if parsed.path == "/api/reservations":
             # Each implementer's serial slot as the routing gate sees it, so a
             # worker's capacity is read from the board rather than guessed from
@@ -978,7 +980,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/runtime-assignments":
             self.send_json({
                 "project": getattr(self.app, "project", "pgu"),
-                "report_credentials": "bound" if self.server.report_binding_key else "shared",  # SYRD-677
+                "report_credentials": "bound" if getattr(self.server, "report_binding_key", "") else "shared",  # SYRD-677
                 "authority_mode": (
                     "process"
                     if os.environ.get("TICKET_BOARD_PROCESS_AUTHORITY", "").strip() == "1"

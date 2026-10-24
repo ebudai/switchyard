@@ -161,6 +161,9 @@ def handle(handler: Any, action: str, payload: Any) -> None:
         raise PermissionError(
             "a follow-up needs this project's own report credential, bound to it; this is the board's shared "
             "report token. An operator refreshes it: `sudo switchyard upgrade <project> --only upstream-report`")
+    from .extension_operations import refuse_on_oracle
+
+    refuse_on_oracle(handler.app, action)  # SYRD-645
     result = submit(handler.app, project, payload)
     handler.events.notify_change(handler.app.store_signature())
     handler.send_json(result, HTTPStatus.CREATED if result["created"] else HTTPStatus.OK)

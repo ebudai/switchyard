@@ -309,6 +309,10 @@ write_canary_env_file() {
         printf 'BOARD_CANARY_ASSET_DIR=%s\n' "$(systemd_env_value "$asset_dir")"
         printf 'BOARD_CANARY_LOG=%s\n' "$(systemd_env_value "$canary_log")"
         printf 'BOARD_CANARY_DATABASE_URL=%s\n' "$(systemd_env_value "$BOARD_DATABASE_URL")"
+        if [[ "${TICKET_BOARD_BACKEND:-}" == oracle ]]; then  # SYRD-642: the canary runs on the tenant's Oracle record
+            printf 'TICKET_BOARD_BACKEND=oracle\n'
+            printf 'TICKET_BOARD_ORACLE_CONFIG=%s\n' "$(systemd_env_value "$TICKET_BOARD_ORACLE_CONFIG")"
+        fi
     } >"$tmp_path"
     chmod 0644 "$tmp_path"
     mv "$tmp_path" "$BOARD_CANARY_ENV_FILE"

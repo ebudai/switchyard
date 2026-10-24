@@ -50,6 +50,11 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         return 0
     if argv[0].casefold() == "new":
         args = launcher._build_switchyard_new_parser().parse_args(argv[1:])
+        from scripts.database_capabilities import require_new_project_capability
+
+        # Before any question, and before anything probes PostgreSQL: a host installed for the Oracle
+        # database only has no local cluster to provision a board on (SYRD-642).
+        require_new_project_capability(args)
         return launcher.switchyard_new_command(
             slug=args.slug,
             agent_name=args.agent_name,

@@ -355,7 +355,9 @@ def _switchyard_teardown_actions(
     remove_owner_user: bool,
 ) -> tuple[SwitchyardTeardownAction, ...]:
     from scripts import team_launcher as launcher
+    from scripts.ticket_board import provision_oracle
 
+    oracle = provision_oracle.is_oracle(plan.project)
     owner_home = home_base / plan.owner_user
     listener_unit_path = owner_home / ".config" / "systemd" / "user" / plan.listener_unit
     owner_runtime_script = (
@@ -416,10 +418,11 @@ def _switchyard_teardown_actions(
             "reload systemd manager configuration",
             ("systemctl", "daemon-reload"),
         ),
-        launcher.SwitchyardTeardownAction(
-            f"drop PostgreSQL database {plan.database}",
-            launcher._drop_database_command(plan.database),
-        ),
+        # SYRD-642: an Oracle tenant's board database is remote and somebody else's: teardown removes root's
+        # local record of it (through `ticket-board-oracle teardown`, SYRD-645), never the database or its rows.
+        *(launcher.SwitchyardTeardownAction(label, command) for label, command in (
+            [(f"drop PostgreSQL database {plan.database}", launcher._drop_database_command(plan.database))]
+            if not oracle else provision_oracle.teardown_steps(plan.project))),
         launcher.SwitchyardTeardownAction(
             f"remove board release root {board_root}",
             ("rm", "-rf", "--", str(board_root)),
@@ -566,7 +569,11 @@ def switchyard_teardown_command(
         registry_dir=registry_dir,
         home_base=home_base,
     )
-    ticket_count = launcher._ticket_board_existing_ticket_count(plan.database, runner=runner)
+    from scripts.ticket_board import provision_oracle
+
+    # An Oracle board's tickets stay in its remote database, so teardown loses none of them.
+    ticket_count = 0 if provision_oracle.is_oracle(plan.project) else launcher._ticket_board_existing_ticket_count(
+        plan.database, runner=runner)
     owner_home = home_base / plan.owner_user
     teardown = launcher.SwitchyardTeardownPlan(
         project=plan.project,

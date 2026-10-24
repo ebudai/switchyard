@@ -40,9 +40,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from psycopg.types.json import Jsonb
-
 from . import background_child, execution_lease as lease
+from .pg_driver import Jsonb  # SYRD-645: None on an Oracle-only host, where this pass never runs
 
 #: How long a session runs before it is recorded at all: a short command can reach no deadline.
 MIN_AGE_SECONDS = 60.0

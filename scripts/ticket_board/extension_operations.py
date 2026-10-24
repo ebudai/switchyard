@@ -17,8 +17,35 @@ OPERATIONS = (reminder_snooze.OPERATIONS | size_review.OPERATIONS | report_intak
               | provider_hold_ops.OPERATIONS | user_wait.OPERATIONS | audit_return.OPERATIONS)
 
 
+#: The board's reads that the Oracle core lacks: those modules' own routes, and images (attachments are not in the
+#: core). On Oracle each is answered with the plain refusal, never attempted. A trailing "/" takes an argument.
+ORACLE_ABSENT_READS = ("/api/reservations", "/api/context-recovery/", "/api/board-stall", "/api/cohorts",
+                       "/api/provider-holds", "/api/execution-leases", "/api/reminder-snoozes", "/api/image/",
+                       "/api/thumb/")
+
+
+def oracle_absent_read(app: Any, path: str) -> str:
+    """The plain refusal for a read the Oracle core lacks, or "" to serve it (SYRD-645)."""
+    if getattr(app, "store_backend", "postgres") != "oracle":
+        return ""
+    route = next((r for r in ORACLE_ABSENT_READS if path == r or (r.endswith("/") and path.startswith(r))), "")
+    return oracle_refusal(route.rstrip("/")) if route else ""
+
+
+def oracle_refusal(name: str) -> str:
+    return (f"{name} is not in the Oracle core yet (docs/syrd-642-oracle-backend.md lists the follow-on slices); "
+            "nothing was changed")
+
+
+def refuse_on_oracle(app: Any, name: str) -> None:
+    """None of these modules is in the Oracle core yet (SYRD-645): each reads PostgreSQL's board, so say so plainly."""
+    if getattr(app, "store_backend", "postgres") == "oracle":
+        raise NotImplementedError(oracle_refusal(name))
+
+
 def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: str,
             ticket_id: str | None = None) -> dict[str, Any]:
+    refuse_on_oracle(app, operation)
     if operation in reminder_snooze.OPERATIONS:
         if ticket_id is not None:
             raise ValueError(f"{operation} names its tickets in the request, not the path")
@@ -50,6 +77,12 @@ def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: s
 
 def before_transition(app: Any, ticket_id: str, action: str, payload: dict[str, Any], *, caller_role: str) -> None:
     """What the board measures, and a documentation decision checks (SYRD-624), before a declared transition."""
+    if getattr(app, "store_backend", "postgres") == "oracle":  # SYRD-642: neither check is in the Oracle core yet
+        from .documentation_gate import GATE_ACTIONS
+        if action in GATE_ACTIONS:
+            raise NotImplementedError(f"{action} is not in the Oracle core yet: its documentation-candidate check "
+                                      "is not, and a gate is never taken unchecked; nothing was changed")
+        return
     documentation_candidate.before_transition(app, ticket_id, action, payload, caller_role=caller_role)
     size_review.scan_for_transition(app, ticket_id, action, payload, caller_role=caller_role)
 

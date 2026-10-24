@@ -83,12 +83,19 @@ def run_server(args: argparse.Namespace) -> int:
         from . import ui_user_identity
 
         ui_user_identity.RECORD_PATH = Path(args.board_ui_record)
-    app = TicketBoardApp(
-        frame_dir=Path(args.frames),
-        asset_dir=Path(args.assets),
-        commit_git_dir=commit_git_dir_arg if commit_git_dir_arg else None,
-        database_url=args.database,
-    )
+    from . import oracle_config
+
+    if oracle_config.backend() == "oracle":  # SYRD-642: a remote Oracle database; no PostgreSQL is used or needed
+        from .oracle_app import OracleBoardApp
+        app = OracleBoardApp(Path(args.frames), Path(args.assets), oracle_config.from_environment(),
+                             commit_git_dir=commit_git_dir_arg or None)
+    else:
+        app = TicketBoardApp(
+            frame_dir=Path(args.frames),
+            asset_dir=Path(args.assets),
+            commit_git_dir=commit_git_dir_arg if commit_git_dir_arg else None,
+            database_url=args.database,
+        )
     event_hub = TicketBoardEventHub(app)
     director_notifier = DirectorNotifier()
     role_authority = None
@@ -180,6 +187,8 @@ def run_server(args: argparse.Namespace) -> int:
         server.server_close()
         event_hub.close()
         director_notifier.close()
+        if oracle_config.backend() == "oracle":
+            app.close()  # its session pool
     return 0
 
 

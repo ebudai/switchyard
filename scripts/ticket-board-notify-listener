@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """Entry point for the PGU ticket-board notification listener."""
 
-from ticket_board.notify_listener import main
+import os
+
+if os.environ.get("TICKET_BOARD_BACKEND", "").strip().lower() == "oracle":  # SYRD-642: the queue, polled
+    from ticket_board.oracle_listener import main
+else:
+    from ticket_board.notify_listener import main
 
 
 if __name__ == "__main__":

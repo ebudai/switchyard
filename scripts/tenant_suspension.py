@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -82,6 +83,49 @@ def suspend_tenant(
     return problems
 
 
+def await_started_board(
+    config: ProjectConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    connection_factory: Callable[[str, float], Any] | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> str:
+    """Wait, bounded, until the board just started answers on its write socket: "" once it does, else why not.
+
+    The deploy's readiness bound and poll (`tenant_release_deploy`), asked of
+    the socket every pane and the authority check use. Ready is this project's
+    board answering there while its unit is active. It stops early, failing
+    closed, when something else answers there or the unit is no longer active,
+    and says where to look either way (SYRD-670).
+    """
+    from scripts import board_authority_preflight, tenant_release_deploy
+    from scripts import team_launcher as launcher
+
+    unit = launcher._board_system_unit(config)
+    bound = tenant_release_deploy.BOARD_READY_SECONDS
+    deadline = clock() + bound
+    while True:
+        answer, why = board_authority_preflight.board_socket_answer(config, connection_factory=connection_factory)
+        # Asked after the answer, so the board that answered is a board whose unit is still running: an answer from a
+        # unit that has already exited is somebody else's (Audit of 4ae2184d).
+        active = launcher.board_system_unit_is_active(config, runner=runner)
+        if answer == "answered" and active:
+            return ""
+        if answer != "silent" or not active or clock() >= deadline:
+            state = "active" if active else "not active"
+            if answer == "answered":
+                reason = "its socket answers, but the unit is no longer active, so the answer is not from it"
+            elif answer == "refused":
+                reason = why
+            else:
+                reason = f"it stopped before it answered ({why})" if not active else f"no answer within {bound:g}s ({why})"
+            return (f"{unit} started, but {config.project}'s board never answered on {config.board_socket}: "
+                    f"{reason}; the unit is {state}. Its log is `journalctl -u {unit}`. Nothing after it was "
+                    "started: no listener and no pane")
+        sleep(tenant_release_deploy.BOARD_READY_POLL_SECONDS)
+
+
 def resume_tenant(
     config: ProjectConfig,
     *,
@@ -115,7 +159,9 @@ def resume_tenant(
     # Idempotent by asking first. `systemctl start` on a live unit is a no-op,
     # but the listener is restored with `restart`, which would bounce a healthy
     # one -- and resuming an already-running tenant must not interrupt it.
+    already_running = False
     if launcher.board_system_unit_is_active(config, runner=runner):
+        already_running = True
         print_func(f"already running board: {launcher._board_system_unit(config)}")
         board_problems: list[str] = []
     else:
@@ -127,6 +173,12 @@ def resume_tenant(
         ]
     if not board_problems and not launcher.board_system_unit_is_active(config, runner=runner):
         return [f"{launcher._board_system_unit(config)} did not come up; nothing after it was started"]
+    if not already_running:
+        # Active is only exec'd: a `Type=simple` board is active before it has opened its socket, and the launch
+        # asks that socket for authority straight after this returns (SYRD-670).
+        waited = await_started_board(config, runner=runner)
+        if waited:
+            return [waited]
     print_func(f"started board: {launcher._board_system_unit(config)}")
     if launcher.capture_listener_state(config, runner=runner, config_path=config_path) == "active":
         print_func(f"already running listener: {launcher._listener_user_unit(config)}")

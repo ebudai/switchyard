@@ -301,7 +301,13 @@ def run(fn: str, kw: dict, answers: dict, *, defaults: bool) -> object:
     stdout = io.StringIO()
     if not defaults:
         kw = {**kw, "print_func": lambda line: said.append(line) or log.append(["say"])}
-    with contained(), patched(t, **stand_ins(log, answers)), contextlib.redirect_stdout(stdout):
+    def waited(config, *, runner):
+        # SYRD-670: the resume's own wait on a board it started, recorded like the launcher's seams.
+        log.append(["await_started_board", [norm(config)], {"runner": norm(runner)}])
+        return answers.get("await_started_board", "")
+
+    with contained(), patched(t, **stand_ins(log, answers)), patched(m, await_started_board=waited), \
+            contextlib.redirect_stdout(stdout):
         try:
             got = getattr(m, fn)(CONFIG, config_path=CONFIG_PATH, **({} if defaults else kw))
         except AssertionError:
@@ -411,11 +417,22 @@ def test_the_seams_read_through_the_launcher_and_nothing_bound() -> None:
               f"{name}: the runner, signaller and print defaults are bound when it is defined: {defaults}")
     top = [ast.unparse(n) for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
     tc = [ast.unparse(n) for n in tree.body if isinstance(n, ast.If)]
-    check(top == ["from __future__ import annotations", "import os", "import subprocess", "from pathlib import Path",
+    # SYRD-670: `time`, for the resume's bounded wait on the board it started.
+    check(top == ["from __future__ import annotations", "import os", "import subprocess", "import time", "from pathlib import Path",
                   "from typing import TYPE_CHECKING, Any, Callable"] and tc == ["if TYPE_CHECKING:\n    from scripts.team_launcher import ProjectConfig"],
           f"only the standard library at the top, and the annotation's type under TYPE_CHECKING: {top} {tc}")
     order = [n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef, ast.Assign))]
-    check(order == list(MOVED), f"the two in the launcher's order, and nothing else: {order}")
+    # SYRD-670 adds the resume's own bounded wait on the board it started, defined just before it; it reads the unit's
+    # name and state through the launcher, as the resume does, and nothing else of the launcher's.
+    check(order == ["suspend_tenant", "await_started_board", "resume_tenant"],
+          f"the two in the launcher's order, the resume's wait before it, and nothing else: {order}")
+    waiting = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "await_started_board")
+    reads: dict[str, int] = {}
+    for x in ast.walk(waiting):
+        if isinstance(x, ast.Attribute) and isinstance(x.value, ast.Name) and x.value.id == "launcher":
+            reads[x.attr] = reads.get(x.attr, 0) + 1
+    check(reads == {"_board_system_unit": 1, "board_system_unit_is_active": 1},
+          f"the wait's call-time reads of the launcher: {reads}")
 
 
 def test_the_launcher_reexports_the_two_and_dispatches_through_them() -> None:
@@ -444,12 +461,44 @@ def test_the_launcher_reexports_the_two_and_dispatches_through_them() -> None:
 # --- behaviour -----------------------------------------------------------------------------------------------------
 
 
+def with_the_wait(golden: dict) -> dict:
+    """The baseline's calls with SYRD-670's one addition: where the resume started the board itself and went on to
+    say so -- `start`, a look that found it active, then naming the unit -- it waits for the board to answer, there."""
+    calls = list(golden["calls"])
+    told = " ".join(golden["said"]) + golden["stdout"]
+    if "started board:" not in told or "already running board" in told:
+        return golden  # the board was not started here, or it never came up: the resume never reached the wait
+    for i, call in enumerate(calls[:-2]):
+        if call[:2] == ["_board_system_unit_action", ["CONFIG", "start"]] and calls[i + 1][0] == "board_system_unit_is_active" \
+                and calls[i + 2][0] == "_board_system_unit":
+            calls.insert(i + 2, ["await_started_board", ["CONFIG"], {"runner": calls[i + 1][2]["runner"]}])
+            break
+    return {**golden, "calls": calls}
+
+
 def test_every_suspension_and_resume_is_the_baselines() -> None:
     measured = cases()
     check(sorted(measured) == sorted(GOLDEN), "every measured case is asserted, and nothing else")
+    waits = sorted(label for label in GOLDEN if with_the_wait(GOLDEN[label]) != GOLDEN[label])
+    check(waits == sorted(["resume:defaults"] + [f"resume:staging ok; board inactive; start ok; then up; listener {state}; "
+                                                f"listener start {outcome}" for state in ("active", "inactive", "failed")
+                                                for outcome in ("ok", "fails")]),
+          f"the wait is added exactly where the resume started the board and saw it up, and nowhere else: {waits}")
     for label, (fn, kw, answers, defaults) in measured.items():
         got = run(fn, kw, answers, defaults=defaults)
-        check(got == GOLDEN[label], f"{label}: the baseline's answer, messages and every call in order: {got}")
+        check(got == with_the_wait(GOLDEN[label]),
+              f"{label}: the baseline's answer, messages and every call in order, the wait added: {got}")
+
+
+def test_a_board_that_never_answers_stops_the_resume_there() -> None:
+    """SYRD-670: what the wait says is the resume's answer; nothing after it -- no "started", no listener -- runs."""
+    fn, kw, answers, defaults = cases()["resume:staging ok; board inactive; start ok; then up; listener inactive; listener start ok"]
+    got = run(fn, kw, {**answers, "await_started_board": "atlas-board.service started, but atlas's board never answered"},
+              defaults=defaults)
+    check(got["answer"] == ["atlas-board.service started, but atlas's board never answered"] and got["said"] == []
+          and [c[0] for c in got["calls"]] == ["ensure_staged_role_tooling", "board_system_unit_is_active",
+                                               "_board_system_unit_action", "board_system_unit_is_active", "await_started_board"],
+          f"the wait's problem is the answer, and the resume stops at it: {got}")
 
 
 def test_a_suspension_attempts_every_step_and_a_resume_stops_at_its_boundary() -> None:

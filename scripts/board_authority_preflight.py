@@ -7,6 +7,10 @@ asks it before a launch changes any layout, worktree, state file or tmux
 session, so a config repatriated by a newer launcher never starts against an
 older board (SYRD-69).
 
+`board_socket_answer` is the same request asked only whether this project's
+board answers it: how a resume knows the board it just started is up before
+anything asks it for authority (SYRD-670).
+
 It reads nothing from `scripts/team_launcher.py`; its board connection is its
 own function-level import.
 
@@ -63,3 +67,47 @@ def process_authority_board_compatibility(
     except Exception as exc:  # noqa: BLE001 - refusal must preserve the exact boundary failure
         return False, str(exc)
     return True, "process authority ready"
+
+
+def board_socket_answer(
+    config: ProjectConfig,
+    *,
+    connection_factory: Callable[[str, float], Any] | None = None,
+) -> tuple[str, str]:
+    """Whether this project's board answers on its write socket: ("answered", ""), ("silent", why) while nothing
+    answers there yet, or ("refused", why) for an answer that is not this board's.
+
+    Only HTTP 200 with a JSON object naming this project is this board: the
+    route every board this release resumes serves, to any caller on its socket.
+    Another project's name, no name, a body that is not JSON, or any other status
+    is something else answering there -- an incompatible board, or not a board
+    -- and no reason to wait (Audit of 4ae2184d).
+    """
+    try:
+        from scripts.ticket_board.write_client import UnixHTTPConnection
+
+        factory = connection_factory or (
+            lambda socket_path, timeout: UnixHTTPConnection(socket_path, timeout=timeout)
+        )
+        connection = factory(config.board_socket, 3)
+        try:
+            connection.request("GET", "/api/runtime-assignments")
+            response = connection.getresponse()
+            body = response.read().decode("utf-8", errors="replace")
+        finally:
+            connection.close()
+    except Exception as exc:  # noqa: BLE001 - not answering, whatever the reason, is the answer
+        return "silent", str(exc)
+    where = f"what answers on {config.board_socket}"
+    if response.status != 200:
+        return "refused", (f"{where} answered GET /api/runtime-assignments with HTTP {response.status}, which no board "
+                           f"this release resumes does: {body[:120]!r}")
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return "refused", f"{where} answered with a body that is not JSON: {body[:120]!r}"
+    named = payload.get("project") if isinstance(payload, dict) else None
+    if named != config.project:
+        return "refused", (f"{where} answers as {named!r}, not {config.project!r}" if isinstance(named, str)
+                           else f"{where} names no project")
+    return "answered", ""

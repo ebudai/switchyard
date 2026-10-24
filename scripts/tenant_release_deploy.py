@@ -13,6 +13,14 @@ the board stayed on 49abeb4 and the phase stayed `ready` (SYRD-531). This runs
 that sequence, in that order, as the helper's root: only for a tenant already
 prepared for exactly this commit, from root's installed release of it, and it
 closes the phase only by the same re-proof `release-status --close` makes.
+
+The close reads the running board, so it waits until the board answers. A
+board's unit is `Type=simple`: `systemctl start` returns when its process has
+forked, not when it serves. On MEFP, suspended and already on its release, the
+close ran in that gap -- connection refused, no build, no workflow -- and the
+phase was recorded blocked; the board was then put back down 1.17 s after it
+was started. The operator's recovery waited for `/api/board` first and closed
+the same release cleanly (SYRD-632).
 """
 
 from __future__ import annotations
@@ -20,6 +28,7 @@ from __future__ import annotations
 import argparse
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -30,6 +39,24 @@ from typing import Any, Callable
 #: `deploy-release` then exits with itself (SYRD-113).
 ROLLED_BACK_EXIT = 3
 ROLLED_BACK = "rolled back: "
+#: How long the board has to answer before the close reads it, and how often it is asked (SYRD-632).
+BOARD_READY_SECONDS = 30.0
+BOARD_READY_POLL_SECONDS = 0.5
+
+
+def _await_board(config: Any, *, opener: Callable[[str], Any] | None, clock: Callable[[], float] = time.monotonic,
+                 sleep: Callable[[float], None] = time.sleep) -> str:
+    """Wait until the running board reports a build: '' once it does, else the last reason it could not be read."""
+    from scripts import team_launcher as launcher
+
+    deadline = clock() + BOARD_READY_SECONDS
+    while True:
+        build, why = launcher._live_board_build_id(config, opener=opener)
+        if build:
+            return ""
+        if clock() >= deadline:
+            return why
+        sleep(BOARD_READY_POLL_SECONDS)
 
 
 def _build_switchyard_deploy_release_parser() -> argparse.ArgumentParser:
@@ -141,6 +168,14 @@ def switchyard_deploy_release_command(
             return []
         return launcher._board_system_unit_action(config, "stop", runner=runner)
 
+    def close() -> int:
+        """The close, once the board answers: it re-proves the release from what the running board reports."""
+        unanswered = _await_board(config, opener=opener)
+        if unanswered:
+            print_func(f"switchyard: {config.project}'s board did not answer within {BOARD_READY_SECONDS:g}s "
+                       f"({unanswered}); the close below records what it could read.")
+        return launcher.close_release_phase(config, config_path=config_path, opener=opener, print_func=closing)
+
     def ended(code: int, leftovers: list[str]) -> int:
         """The lifecycle report every exit after this point ends with."""
         if leftovers:
@@ -168,7 +203,7 @@ def switchyard_deploy_release_command(
             if started_board:
                 return ended(refuse(f"the board could not be started for the close: {'; '.join(started_board)}"),
                              board_back())
-        code = launcher.close_release_phase(config, config_path=config_path, opener=opener, print_func=closing)
+        code = close()
         return ended(code, board_back())
     if status.provisioned_system_unit is None:
         return refuse(launcher.release_update_blocked(status) or f"{config.project} has no provisioned board units")
@@ -248,7 +283,7 @@ def switchyard_deploy_release_command(
         f"switchyard: {config.project}'s board was deployed at {commit}; closing the phase only against what "
         "the running board reports. Panes are not restarted."
     )
-    code = launcher.close_release_phase(config, config_path=config_path, opener=opener, print_func=closing)
+    code = close()
     return ended(code, board_back())
 
 

@@ -363,18 +363,19 @@ def test_desktop_access_then_the_launch_then_readiness() -> None:
             fx.log.clear(); fx.said.clear(); fx.desktop = desktop_answer
             check(fx.run() == 1 and fx.kinds()[-1] == "desktop" and fx.said[-1] == (
                 f"switchyard: {SLUG} is registered, but its roles were not started: the desktop access they need is not "
-                f"installed. Address what is named above and run `sudo switchyard resume-provision {SLUG}` again -- the "
-                "phases already done are not repeated."), f"{desktop_answer}: no launch without desktop access: {fx.said}")
+                f"installed. Address what is named above and run `sudo switchyard resume-provision {SLUG} --config {fx.verified}` "
+                "again -- the phases already done are not repeated."), f"{desktop_answer}: no launch without desktop access: {fx.said}")
         fx.log.clear(); fx.said.clear(); fx.desktop = (fx.configured, True); fx.launched = 2
         check(fx.run() == 1 and fx.kinds()[-1] == "launch" and fx.said[-1] == (
             f"switchyard: {SLUG} is registered, but starting its roles did not succeed. Fix what the launcher named above and "
-            f"run `sudo switchyard resume-provision {SLUG}` again -- the phases already done are not repeated."),
-              f"a failed launch: no readiness claimed: {fx.said}")
+            f"run `sudo switchyard resume-provision {SLUG} --config {fx.verified}` again -- the phases already done are not "
+            "repeated."), f"a failed launch: no readiness claimed: {fx.said}")
         fx.log.clear(); fx.said.clear(); fx.launched = 0; fx.remaining = ["ops has no running pane", "the wait failed"]
         check(fx.run() == 1 and fx.said[-3:] == [
             f"switchyard: {SLUG} is not finished: ops has no running pane", f"switchyard: {SLUG} is not finished: the wait failed",
-            f"switchyard: run `sudo switchyard resume-provision {SLUG}` again once that is addressed -- resuming is the supported "
-            "retry, and it continues from wherever this stopped."], f"what is left, in order, and how to continue: {fx.said}")
+            f"switchyard: run `sudo switchyard resume-provision {SLUG} --config {fx.verified}` again once that is addressed -- "
+            "resuming is the supported retry, and it continues from wherever this stopped."],
+              f"what is left, in order, and how to continue: {fx.said}")
         fx.log.clear(); fx.said.clear(); fx.remaining = []
         check(fx.run(start_roles=False) == 0 and "desktop" not in fx.kinds() and "launch" not in fx.kinds()
               and [e for e in fx.log if e[0] == "ready"][0][1] == "checked config",
@@ -558,6 +559,14 @@ def test_the_command_rebuilds_or_leaves_artifacts_then_reads_the_packet() -> Non
             "phase in it is re-runnable, so the work already done is left alone.",
             f"switchyard: then run `sudo switchyard resume-provision {SLUG}` again -- it continues from there, registers the project and "
             "starts its roles."], f"a supplied reader, an unfinished packet, and the ordinary operator path: {fx.said}")
+        # SYRD-658: a configuration root verified before the packet is named in the retry, quoted as one argument.
+        fx.log.clear(); fx.said.clear()
+        fx.verified_config = Path("/fixture/home/Projects/p366 engine's/.switchyard/provision/p366.json")
+        check(fx.run() == 1 and fx.said[-1] == (
+            f"switchyard: then run `sudo switchyard resume-provision {SLUG} --config "
+            "'/fixture/home/Projects/p366 engine'\"'\"'s/.switchyard/provision/p366.json'` again -- it continues from there, "
+            "registers the project and starts its roles."), f"a verified configuration, named exactly in the retry: {fx.said}")
+        fx.verified_config = None
         fx.log.clear(); fx.said.clear()
         fx.completion = SimpleNamespace(done=True, problems=())
         fx.finished = 7

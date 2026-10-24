@@ -178,6 +178,13 @@ def _tenant_config_candidates(
     the three that a host with a checkout named unlike its slug can answer
     correctly (SYRD-167).
 
+    Then the checkout root's own plan records `switchyard new` making, which is
+    the whole answer too: it is the operator's choice, so no spelling of the
+    project's name or slug finds `personal_inference_engine`, and a guess tried
+    after it would let a file the tenant made at a guessed name stand in for it.
+    It is taken only when it is an absolute path inside the owner's home with no
+    `..` in it (SYRD-658).
+
     Only then the conventional layout, and only tried: whatever is found by any
     of these still has to survive every check below before root registers it.
     Being named by the registry buys a candidate a look, not a pass.
@@ -189,6 +196,11 @@ def _tenant_config_candidates(
     if registered is not None:
         return [registered]
     home = Path(plan.owner_home)
+    recorded_checkout = str(getattr(plan, "project_repository", "") or "")
+    checkout = Path(recorded_checkout)
+    if (recorded_checkout and checkout.is_absolute() and ".." not in checkout.parts and checkout != home
+            and checkout.is_relative_to(home)):
+        return [checkout / ".switchyard" / "provision" / f"{slug}.json"]
     names = [name for name in (plan.project_name, slug) if name]
     seen: list[Path] = []
     for name in names:

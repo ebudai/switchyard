@@ -210,6 +210,10 @@ def _resume_plan_from_record(
         board_service_traversal=bool(recorded.get("board_service_traversal", True)),
         control_user=str(recorded.get("control_user") or ""),
         audit_roles=launcher._validated_role_names(recorded.get("audit_roles"), "audit_roles", []) or None,
+        # Where `switchyard new` made the tenant's checkout: root's own record, and the one place a checkout
+        # named unlike its slug or display name is written down. A rebuild without it re-rendered root's
+        # record without it too, and recovery was left guessing spellings (SYRD-658).
+        project_repository=str(recorded.get("project_repository") or "").strip() or None,
     )
     plan, workflow_problem = launcher.plan_workflow_from_root(
         plan,

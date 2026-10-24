@@ -27,6 +27,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -408,7 +409,10 @@ def privileged_cases() -> int:
         # the uid that counts as root's is named here instead and the entry
         # belongs to somebody else. A registry the tenant could write would be
         # the tenant choosing which document root adopts.
-        registry_entry(registry, config_path)
+        # SYRD-658: the entry names somewhere else, so following it would show -- discovery now continues to the
+        # checkout root's own plan records, which finds the real configuration.
+        unfollowed = home / "Projects" / "not-followed" / ".switchyard" / "provision" / f"{SLUG}.json"
+        registry_entry(registry, unfollowed)
         with patch.object(launcher, "expected_privileged_uid", lambda: 4243):
             check(launcher.registered_tenant_config_path(SLUG, registry_dir=registry) is None,
                   "a registry entry root does not own names nothing")
@@ -416,8 +420,9 @@ def privileged_cases() -> int:
                 found, config, problems = launcher.verified_tenant_config(
                     plan, SLUG, owner_uid=TENANT_UID, registry_dir=registry
                 )
-            check(found is None,
-                  f"and discovery falls back to the guesses rather than following it: {found}")
+            check(found == config_path and not any(str(unfollowed) in line for line in problems),
+                  f"and discovery goes on to root's own records rather than following it: {found} {problems}")
+        registry_entry(registry, config_path)
 
         # A registry naming a relative path is not a pointer at all.
         registry_entry(registry, "relative/../provision.json")
@@ -430,8 +435,14 @@ def privileged_cases() -> int:
         (registry / f"{SLUG}.json").unlink()
         check(launcher.registered_tenant_config_path(SLUG, registry_dir=registry) is None,
               "no entry, no registered path")
+        # SYRD-658: root's plan records the checkout, and that is the whole answer; the guesses are for a plan
+        # that records none.
         candidates = launcher._tenant_config_candidates(
             plan, SLUG, explicit=None, recorded=None, registered=None
+        )
+        check(candidates == [config_path], f"the checkout root's plan records is the pre-registration answer: {candidates}")
+        candidates = launcher._tenant_config_candidates(
+            replace(plan, project_repository=""), SLUG, explicit=None, recorded=None, registered=None
         )
         check(candidates == [
             home / "Projects" / DISPLAY / ".switchyard" / "provision" / f"{SLUG}.json",

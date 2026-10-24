@@ -26,6 +26,7 @@ imports `team_launcher` at its top.
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -110,6 +111,9 @@ def _finish_provision_after_packet(
         )
         return 1
     launcher.record_tenant_config_path(slug, verified)
+    # The retry, exactly: the configuration root has just verified, named, so no retry depends on finding it
+    # again, and quoted, so a checkout with spaces or punctuation in its name is one argument (SYRD-658).
+    retry = shlex.join(["sudo", "switchyard", "resume-provision", slug, "--config", str(verified)])
 
     registry_path = (registry_dir or launcher.switchyard_registry_dir()) / f"{slug}.json"
     if registry_path.exists():
@@ -153,8 +157,7 @@ def _finish_provision_after_packet(
             print_func(
                 f"switchyard: {slug} is registered, but its roles were not started: the "
                 "desktop access they need is not installed. Address what is named above and "
-                f"run `sudo switchyard resume-provision {slug}` again -- the phases already "
-                "done are not repeated."
+                f"run `{retry}` again -- the phases already done are not repeated."
             )
             return 1
         config = configured
@@ -171,8 +174,8 @@ def _finish_provision_after_packet(
         if launched != 0:
             print_func(
                 f"switchyard: {slug} is registered, but starting its roles did not succeed. "
-                f"Fix what the launcher named above and run `sudo switchyard resume-provision "
-                f"{slug}` again -- the phases already done are not repeated."
+                f"Fix what the launcher named above and run `{retry}` again -- the phases "
+                "already done are not repeated."
             )
             return 1
 
@@ -194,9 +197,8 @@ def _finish_provision_after_packet(
         for objection in remaining:
             print_func(f"switchyard: {slug} is not finished: {objection}")
         print_func(
-            f"switchyard: run `sudo switchyard resume-provision {slug}` again once that is "
-            "addressed -- resuming is the supported retry, and it continues from wherever "
-            "this stopped."
+            f"switchyard: run `{retry}` again once that is addressed -- resuming is the "
+            "supported retry, and it continues from wherever this stopped."
         )
         return 1
     print_func(
@@ -379,8 +381,12 @@ def switchyard_resume_provision_command(
             "path to finish those phases. Every phase in it is re-runnable, so the work already "
             "done is left alone."
         )
+        retry = ["sudo", "switchyard", "resume-provision", slug]
+        if verified_config is not None:
+            # Named exactly, as root verified it above, so the retry does not depend on finding it again (SYRD-658).
+            retry += ["--config", str(verified_config)]
         print_func(
-            f"switchyard: then run `sudo switchyard resume-provision {slug}` again -- it "
+            f"switchyard: then run `{shlex.join(retry)}` again -- it "
             "continues from there, registers the project and starts its roles."
         )
         return 1

@@ -273,7 +273,7 @@ def test_the_rebuild_uses_roots_facts_and_reports_a_workflow_problem_first() -> 
     check(built == [dict(project="p360", project_name=None, owner_user="syrd360-kernel-owner", owner_home=Path("/nonexistent/syrd360/home"),
                          port=8360, database="p360db", service_user="syrd360-board", source_repo=Path("/rel"), commit_git_dir=None,
                          implementer_roles=("main",), ticket_prefix="SY", board_service_traversal=False, control_user="",
-                         audit_roles=None)],
+                         audit_roles=None, project_repository=None)],
           f"the kernel-checked owner, root's recorded values converted, validated roles, the default service user: {built}")
     check(log == ["service", ("workflow", {"doc": 1}, True), ("divergence", "W", True)] and plan.workflow == "W"
           and divergence == ["syrd360: workflow record unusable", "port: 1 vs 2"],
@@ -281,11 +281,14 @@ def test_the_rebuild_uses_roots_facts_and_reports_a_workflow_problem_first() -> 
     built.clear(); log.clear()
     names["plan_workflow_from_root"] = lambda plan, *, root_plan_document, declares_workflow: log.append(("workflow", root_plan_document, declares_workflow)) or (plan, "")
     names["_regenerated_field_divergence"] = lambda plan, data: []
-    bare = {"project": "p360", "port": "  ", "service_user": "svc", "workflow": {}}
+    # SYRD-658: and the checkout root recorded, as recorded.
+    bare = {"project": "p360", "port": "  ", "service_user": "svc", "workflow": {},
+            "project_repository": " /nonexistent/syrd360/home/Projects/p_360 engine "}
     with patched(team_launcher, **names), patched(project_provision, build_plan=lambda **kw: built.append(kw) or Plan()):
         plan, divergence = m._resume_plan_from_record(SimpleNamespace(data=bare), identity, source_repo=Path("/rel"))
     check(built[0]["port"] is None and built[0]["service_user"] == "svc" and built[0]["implementer_roles"] is None
-          and built[0]["board_service_traversal"] is True and log == [("workflow", None, True)] and divergence == [],
+          and built[0]["board_service_traversal"] is True and log == [("workflow", None, True)] and divergence == []
+          and built[0]["project_repository"] == "/nonexistent/syrd360/home/Projects/p_360 engine",
           f"a blank port is no port; a recorded service user wins; traversal on unless recorded; an empty recorded workflow is declared but not a document: {built[0]} {log}")
 
 

@@ -7,6 +7,9 @@
 - `root_owner_refusal` is why root may not act for a project as the account a
   configuration's `run_as_user` names -- blank, `root`, or anybody but that
   owner -- or nothing.
+- `root_checked_plan_identity` holds the tenant's own `plan.json` to the same
+  records: its `owner_user`, `owner_home` and `board_root` are root's, or the
+  plan is refused (SYRD-664).
 
 The command entry points ask `root_recorded_owner` strictly, before the
 configuration is read, and `load_project_config` asks `root_owner_refusal` on
@@ -133,3 +136,91 @@ def root_owner_refusal(project: str, run_as_user: str, config_path: Path | None 
         return (f"{project}'s configuration names {named!r} as its owner, and root provisioned it for "
                 f"{recorded!r}; root acts only for the owner it provisioned")
     return ""
+
+
+#: The fields of the tenant's own plan that decide which account and which trees root acts in (SYRD-664).
+PLAN_IDENTITY_FIELDS = ("owner_user", "owner_home", "board_root")
+
+
+def root_recorded_identity(project: str, config_path: Path | None = None) -> tuple[dict[str, str | None] | None, str]:
+    """The owner, home and board root root's own records name for `project`; None when they say nothing about it.
+
+    Root's provisioning record names all three. A tenant root registered but
+    holds no plan for has its owner from root's registry entry
+    (`root_recorded_owner`) and that account's home from passwd; its board root
+    is not recorded anywhere root owns, so it is None, and a plan's board root
+    is then held to the owner's own roots instead.
+    """
+    from scripts import team_launcher as launcher
+
+    baseline = launcher.privileged_baseline_plan_path(project)
+    if os.path.lexists(baseline):
+        document, problem = launcher.read_plan_no_follow(baseline, require_root_owned=True)
+        if document is None:
+            return None, f"root's provisioning record for {project} cannot say whose project it is: {problem}"
+        recorded = {field: str(document.data.get(field) or "").strip() or None for field in PLAN_IDENTITY_FIELDS}
+        if not recorded["owner_user"] or not recorded["owner_home"]:
+            return None, f"root's provisioning record {baseline} names no owner or home for {project}"
+        return recorded, ""
+    owner, problem = root_recorded_owner(project, config_path, strict=False)
+    if owner is None:
+        return None, ""
+    if problem:
+        return None, problem
+    # The codebase's own home lookup, as `trusted_owner_identity` reads it.
+    home = launcher.home_dir_for_user(owner)
+    if home is None:
+        return None, f"{owner}, the owner root's records name for {project}, is not an account on this host"
+    return {"owner_user": owner, "owner_home": str(home), "board_root": None}, ""
+
+
+def root_checked_plan_identity(project: str, config_path: Path | None, plan_data: dict, config: object = None) -> dict:
+    """`plan_data`, the tenant's own plan, with the account and trees root acts in held to root's records.
+
+    The plan lives in the tenant's provision directory and is the tenant's to
+    write, and root took its `owner_home` as the home it provisions a GitHub
+    identity in and installs the listener unit under, its `board_root` as where
+    it restores a release pointer, and its `owner_user` as whose record it
+    writes. So as root, a plan naming anything other than root's record is
+    refused, and a field it leaves out is root's record's (SYRD-664).
+    Unprivileged callers, and a project root holds no record of, are given the
+    plan as it is.
+
+    Without a recorded board root, one the plan leaves out is the one `config`
+    implies through its pane launcher, held to the owner's roots like a named
+    one and put in the plan, so no consumer falls back past this check to the
+    configuration's unchecked value (Audit of 4ebc856b).
+    """
+    from scripts import owner_writes
+    from scripts import team_launcher as launcher
+
+    if os.geteuid() != 0:
+        return plan_data
+    recorded, problem = root_recorded_identity(project, config_path)
+    if problem:
+        raise SystemExit(f"switchyard: {problem}. Nothing was changed.")
+    if recorded is None:
+        return plan_data
+    checked = dict(plan_data)
+    for field in PLAN_IDENTITY_FIELDS:
+        named = str(plan_data.get(field) or "").strip()
+        expected = recorded[field]
+        if expected is None:
+            # No record of it, so the owner's own roots bound it -- the plan's, or else the configuration's.
+            source = "plan.json names"
+            if not named and field == "board_root" and config is not None:
+                implied = launcher._tenant_board_root_from_config(config)
+                named = str(implied) if implied is not None else ""
+                source = "configuration's pane launcher implies"
+                if named:
+                    checked[field] = named
+            if named and not owner_writes.within_owner_root(str(recorded["owner_user"]), Path(named)):
+                raise SystemExit(f"switchyard: {project}'s {source} {field} {named!r}, outside "
+                                 f"{recorded['owner_user']}'s own roots; root does not act there. Nothing was changed.")
+            continue
+        differs = named != expected if field == "owner_user" else bool(named) and Path(named) != Path(expected)
+        if differs:
+            raise SystemExit(f"switchyard: {project}'s plan.json names {field} {named!r}, and root's own record "
+                             f"names {expected!r}; root acts only on what its record names. Nothing was changed.")
+        checked[field] = expected
+    return checked

@@ -741,6 +741,9 @@ def tenant_project(sb: Sandbox) -> tuple[Any, Path]:
     plan = project_provision.build_plan(project=PROJECT, project_name="Porter", owner_user=OWNER,
                                         owner_home=sb.home, source_repo=ROOT)
     project_provision.write_artifacts(plan, sb.provision, enable_owner_linger=False)
+    # Root's own record of the plan, as provisioning installs it: since SYRD-664 the account and trees root acts in
+    # for this tenant are that record's, so a tenant whose plan names a home passwd does not is one root provisioned.
+    launcher.install_privileged_artifacts(plan, launcher.render_privileged_artifacts(plan))
     config_path = launcher.write_new_project_launcher_artifacts(
         plan, sb.provision, repository=sb.repository, print_func=lambda _text: None
     )

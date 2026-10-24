@@ -1179,7 +1179,7 @@ from scripts.tenant_release_root import (
     release_root_repair_record_path,
 )
 from scripts.trusted_owner_identity import TrustedOwnerIdentity, trusted_owner_identity
-from scripts.root_recorded_owner import root_owner_refusal, root_recorded_owner
+from scripts.root_recorded_owner import root_checked_plan_identity, root_owner_refusal, root_recorded_owner
 from scripts.no_follow_records import (
     _directory_owner_no_follow,
     _walk_no_follow,
@@ -2501,14 +2501,14 @@ def _plan_data_from_config(config: ProjectConfig, config_path: Path) -> dict[str
         plan_path, what=f"{config.project}'s generated runtime plan"
     )
     raw = dict(document or {})
-    if raw:
-        return raw
+    if raw:  # as root, its account and trees are root's own record's (SYRD-664)
+        return root_checked_plan_identity(config.project, config_path, raw, config)
     port = None
     match = re.search(r":([0-9]{1,5})(?:/|$)", config.board_url)
     if match:
         port = int(match.group(1))
     board_root = _tenant_board_root_from_config(config)
-    return {
+    return root_checked_plan_identity(config.project, config_path, {
         "project": config.project,
         "owner_user": config.run_as_user or current_user_name(),
         "port": port,
@@ -2521,7 +2521,7 @@ def _plan_data_from_config(config: ProjectConfig, config_path: Path) -> dict[str
         "audit_roles": ["audit"] if any(role.role == "audit" for role in config.roles) else [],
         "board_service_traversal": True,
         "operation_allowed_roles": [],
-    }
+    })
 
 
 def _layout_slot_count(config: ProjectConfig) -> int:

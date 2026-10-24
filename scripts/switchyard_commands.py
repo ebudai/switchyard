@@ -230,6 +230,27 @@ Bare project names start or attach the project. Recognized commands: {commands}.
 """
 
 
+def release_status_invocation_closes(arguments: Sequence[str]) -> bool:
+    """Whether `release-status <arguments>` would close the release phase, read by the parser the command itself uses.
+
+    Every spelling of `--close` that parser takes -- an abbreviation, any position -- is a close. Help, and a form it
+    refuses, close nothing: the command reads or writes nothing then, whoever runs it. Silent either way, because the
+    trampoline reads this process's output as its answer (SYRD-671).
+    """
+    import contextlib
+    import io
+
+    from scripts import team_launcher as launcher
+
+    sink = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+            parsed = launcher._build_switchyard_release_status_parser().parse_args(list(arguments))
+    except SystemExit:
+        return False
+    return bool(parsed.close)
+
+
 def switchyard_invocation_requires_root(argv: Sequence[str]) -> bool:
     from scripts import team_launcher as launcher
 
@@ -240,6 +261,11 @@ def switchyard_invocation_requires_root(argv: Sequence[str]) -> bool:
         return False
     if len(argv) >= 2 and argv[1] in {"-h", "--help"}:
         return False
+    if command == "release-status":
+        # Root's only to close the phase. The read runs as the caller, as `status` does: the tenant's owner sees the
+        # whole comparison and anybody else what root's own records show -- and the remedy it prints, "as <owner>",
+        # runs as printed (SYRD-671).
+        return release_status_invocation_closes(argv[1:])
     if command not in launcher.SWITCHYARD_PRIVILEGED_COMMANDS:
         return False
     # A lifecycle verb this caller can reach over their tenant's control bridge

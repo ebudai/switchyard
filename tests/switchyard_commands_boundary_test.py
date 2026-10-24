@@ -358,7 +358,17 @@ def test_the_seams_read_through_the_launcher_and_nothing_bound() -> None:
           and not any(isinstance(x, ast.Name) and x.id == "launcher" for n in tables for x in ast.walk(n)),
           f"the privileged set is computed when the module loads, from the two tables beside it, never through the launcher: {reads}")
     names = [n.name if isinstance(n, ast.FunctionDef) else n.targets[0].id for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef, ast.Assign))]
-    check(names == list(MOVED), f"the five in the launcher's order, and nothing else: {names}")
+    # SYRD-671 adds the classification of `release-status`'s own parse, defined just before the classifier that asks
+    # it; it reads the command's parser through the launcher, and nothing else of the launcher's.
+    expected = list(MOVED)
+    expected.insert(expected.index("switchyard_invocation_requires_root"), "release_status_invocation_closes")
+    check(names == expected, f"the five in the launcher's order, the release-status parse before its classifier, "
+                             f"and nothing else: {names}")
+    parse = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "release_status_invocation_closes")
+    parse_reads = sorted(x.attr for x in ast.walk(parse)
+                         if isinstance(x, ast.Attribute) and isinstance(x.value, ast.Name) and x.value.id == "launcher")
+    check(parse_reads == ["_build_switchyard_release_status_parser"],
+          f"the release-status parse reads only the command's own parser through the launcher: {parse_reads}")
 
 
 def test_the_launcher_reexports_the_five_and_its_readers_reach_them_there() -> None:
@@ -397,12 +407,28 @@ def test_the_launcher_reexports_the_five_and_its_readers_reach_them_there() -> N
 # --- behaviour -----------------------------------------------------------------------------------------------------
 
 
+def with_release_status_read(golden: dict) -> dict:
+    """The baseline's answer with SYRD-671's one change: `release-status <slug>` without --close is a read, which runs
+    as the caller -- not root's, and decided before the control bridge is asked about it."""
+    result = golden["result"]
+    if not isinstance(result, dict) or "release-status" not in result:
+        return golden
+    read = ["release-status", "p432"]
+    return {**golden, "result": {**result, "release-status": [False, result["release-status"][1]]},
+            "calls": [call for call in golden["calls"] if call != ["_tenant_control_can_serve", [read], {}]]}
+
+
 def test_every_answer_is_the_baselines() -> None:
     check(sorted(CASES) == sorted(GOLDEN), "every measured case is asserted, and nothing else")
+    changed = sorted(label for label in GOLDEN if with_release_status_read(GOLDEN[label]) != GOLDEN[label])
+    check(changed == ["every verb in the table, not served", "every verb in the table, served over the bridge"],
+          f"only the two every-verb cases name release-status, and only its entry changes: {changed}")
     for label, spec in CASES.items():
         for holder in (m, t):
             got = run(holder, spec)
-            check(got == GOLDEN[label], f"{label} ({holder.__name__}): the baseline's answer, every call in order: {got}")
+            check(got == with_release_status_read(GOLDEN[label]),
+                  f"{label} ({holder.__name__}): the baseline's answer, every call in order, release-status read as "
+                  f"the caller's: {got}")
 
 
 def test_the_rules_hold_in_the_measured_record() -> None:

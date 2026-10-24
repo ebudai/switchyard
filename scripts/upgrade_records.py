@@ -647,7 +647,9 @@ def outstanding_release_phase_report(
         f"`pkexec switchyard release-status {config.project} --close`, which re-verifies the live "
         "build before recording anything.",
         f"switchyard: `switchyard release-status {config.project}` compares the shared release, "
-        "the deployed board, the live build and both journals at any time, and changes nothing.",
+        "the deployed board, the live build and both journals at any time, and changes nothing: "
+        f"as {getattr(config, 'run_as_user', '') or 'its owner'} or root everything, as any other account what root's own "
+        f"records show (`pkexec switchyard release-status {config.project}` for the rest).",
     ] + (
         # The Director's own way to deploy the release it prepared, when it
         # prepared an exact one. `upgrade-tenant-release` prepares; before

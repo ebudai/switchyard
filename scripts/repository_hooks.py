@@ -44,21 +44,45 @@ def _git(repository: Path, *args: str, check: bool = True) -> subprocess.Complet
     )
 
 
+def _root_alone(path: Path, what: str) -> None:
+    """As root in its own tree, refuse to write `what` unless root alone controls it (SYRD-667).
+
+    The repository's own path is proven root's from `/` down (`_root_actor`), but what git names from it -- the
+    common directory a `.git` file points to, `core.hooksPath`, the hooks directory, the config -- is decided
+    by files inside it and may lead anywhere: each is proven the same way, its nearest existing directory when
+    it is not there yet, before root writes into it by path."""
+    if _ACTING != "root":
+        return
+    from scripts import owner_git
+
+    target = path
+    while not os.path.lexists(target) and target != target.parent:
+        target = target.parent
+    problem, controlled = owner_git._walk_git_target(str(target))
+    if problem or not controlled:
+        raise RuntimeError(f"refusing to install hooks as root: {what} {path} is not in a tree root alone controls"
+                           + (f" ({problem})" if problem else ""))
+
+
 def _hooks_path(repository: Path) -> Path:
     """Return and pin the repository's hook path independently of user config."""
     configured = _git(repository, "config", "--local", "--get", "core.hooksPath", check=False)
     if configured.stdout.strip():
         path = Path(_git(repository, "rev-parse", "--git-path", "hooks").stdout.strip())
-        return (path if path.is_absolute() else repository / path).resolve(strict=False)
+        path = (path if path.is_absolute() else repository / path).resolve(strict=False)
+        _root_alone(path, "its configured hooks directory")
+        return path
 
     common = Path(_git(repository, "rev-parse", "--git-common-dir").stdout.strip())
     if not common.is_absolute():
         common = repository / common
     path = (common / "hooks").resolve(strict=False)
+    _root_alone(path, "its hooks directory")
 
     # Root performs the host-wide rollout. Restore the config's repository
     # ownership after git's lock-and-rename update so tenant Git remains writable.
     config = (common / "config").resolve(strict=False)
+    _root_alone(config, "its git config")
     config_owner = _owner(config)
     _git(repository, "config", "--local", "core.hooksPath", str(path))
     os.chown(config, *config_owner)

@@ -159,6 +159,7 @@ from scripts.upstream_report import (
     record_upstream_report_link,
     refresh_upstream_report_credential,
     upstream_report_board,
+    upstream_report_board_owner,
     upstream_report_credential_path,
 )
 # Onboarding documents, director onboarding and the generated board skill
@@ -2046,8 +2047,10 @@ def _owner_state_layout_output_path(project: str, *, owner_home: Path) -> Path:
 
 
 def _is_generated_project_layout_template(config: ProjectConfig, *, config_path: Path) -> bool:
-    config_file = config_path.expanduser().resolve(strict=False)
-    layout_path = config.layout.expanduser().resolve(strict=False)
+    # Compared as named, not resolved: whether root treats a layout as one it generated is never decided by where a
+    # link the tenant left leads (SYRD-667).
+    config_file = Path(os.path.abspath(config_path.expanduser()))
+    layout_path = Path(os.path.abspath(config.layout.expanduser()))
     provision_dir = config_file.parent
     return (
         provision_dir.name == "provision"
@@ -2524,11 +2527,28 @@ def _plan_data_from_config(config: ProjectConfig, config_path: Path) -> dict[str
     })
 
 
+def _read_layout_text(config: ProjectConfig) -> str:
+    """The configuration's layout: as root for its owner, read by descriptor from the owner's roots, so a link at
+    it or above it is refused rather than followed and a FIFO there is refused rather than waited on (SYRD-667);
+    the caller's own file otherwise. A refusal raises SystemExit, a missing file FileNotFoundError."""
+    from scripts import owner_writes
+
+    owner = str(getattr(config, "run_as_user", "") or "")  # some callers hand a duck-typed configuration
+    if owner and owner_writes.root_writes_for(owner):
+        data = owner_writes.read_owner_bytes(owner, config.layout)
+        if data is None:
+            raise FileNotFoundError(2, "No such file or directory", str(config.layout))
+        return data.decode("utf-8")
+    return config.layout.read_text(encoding="utf-8")
+
+
 def _layout_slot_count(config: ProjectConfig) -> int:
     try:
-        layout = json.loads(config.layout.read_text(encoding="utf-8"))
+        layout = json.loads(_read_layout_text(config))
     except OSError as exc:
         raise SystemExit(f"team-launcher: cannot read layout {config.layout}: {exc}") from exc
+    except SystemExit as refusal:
+        raise SystemExit(f"team-launcher: cannot read layout {config.layout}: {refusal}") from None
     return len(_layout_leaves(layout))
 
 

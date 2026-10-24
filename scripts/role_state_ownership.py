@@ -141,6 +141,16 @@ def _walk_tenant_state_tree(
     reason to report, or "". A symlink is visited as the link itself and never
     descended into, so it cannot become a traversal root.
 
+    With `tenant_paths`' guarantees (SYRD-667): nothing on another filesystem
+    than the root's is visited -- a mount below it is a refusal -- and `chown`
+    changes exactly the object that was examined, held by an `O_PATH`
+    descriptor bound to its inode, never a name looked up again; a directory
+    is descended into only when what opens at its name is the directory that
+    was examined. A file with
+    more than one hard link is never given away: another name, perhaps another
+    account's, holds the same inode. Either is a refusal, and nothing is
+    changed for it.
+
     Returns (findings, refusals). A refusal is a root that could not be walked
     safely, which is a reason to stop rather than a path to fix.
     """
@@ -153,6 +163,30 @@ def _walk_tenant_state_tree(
         return findings, [(root, problem)]
     if fd < 0:
         return findings, refusals
+
+    from scripts import tenant_paths
+
+    def chown_observed(child: Path, name: str, directory: int, info: os.stat_result, uid: int, gid: int) -> None:
+        if (info.st_uid, info.st_gid) == (uid, gid):
+            return  # nothing given away, so nothing for another name to share in
+        if not stat.S_ISDIR(info.st_mode) and info.st_nlink > 1:
+            refusals.append((child, f"has {info.st_nlink} hard links; root does not give away a file another name "
+                                    "may hold"))
+            return
+        try:
+            handle = os.open(name, tenant_paths.HANDLE, dir_fd=directory)
+        except FileNotFoundError:
+            refusals.append((child, "vanished: it changed while root was walking it"))
+            return
+        try:
+            held = os.fstat(handle)
+            if (held.st_ino, held.st_dev, stat.S_IFMT(held.st_mode)) != (
+                    info.st_ino, info.st_dev, stat.S_IFMT(info.st_mode)):
+                refusals.append((child, "was replaced while root was walking it"))
+                return
+            tenant_paths._fchown_handle(handle, uid, gid)
+        finally:
+            os.close(handle)
 
     def visit(display: Path, directory: int, depth: int) -> None:
         if depth > launcher.STATE_TREE_MAX_DEPTH:
@@ -170,9 +204,13 @@ def _walk_tenant_state_tree(
             except OSError as exc:
                 findings.append((child, f"cannot be inspected ({exc.strerror})"))
                 continue
+            if info.st_dev != root_dev:
+                refusals.append((child, "is on another filesystem than its store; root does not cross a mount"))
+                continue
 
-            def chown(uid: int, gid: int, _name: str = name, _fd: int = directory) -> None:
-                os.chown(_name, uid, gid, dir_fd=_fd, follow_symlinks=False)
+            def chown(uid: int, gid: int, _child: Path = child, _name: str = name, _fd: int = directory,
+                      _info: os.stat_result = info) -> None:
+                chown_observed(_child, _name, _fd, _info, uid, gid)
 
             reason = act(child, info, chown)
             if reason:
@@ -189,12 +227,20 @@ def _walk_tenant_state_tree(
                 findings.append((child, f"cannot be opened ({exc.strerror})"))
                 continue
             try:
+                # The directory examined, or none: O_NOFOLLOW refuses a link swapped in at the name, but another real
+                # directory renamed there opens just the same (Audit of 458bcd63).
+                held = os.fstat(below)
+                if (held.st_ino, held.st_dev, stat.S_IFMT(held.st_mode)) != (
+                        info.st_ino, info.st_dev, stat.S_IFMT(info.st_mode)):
+                    refusals.append((child, "was replaced while root was walking it"))
+                    continue
                 visit(child, below, depth + 1)
             finally:
                 os.close(below)
 
     try:
         info = os.fstat(fd)
+        root_dev = info.st_dev
 
         def chown_root(uid: int, gid: int, _fd: int = fd) -> None:
             os.fchown(_fd, uid, gid)

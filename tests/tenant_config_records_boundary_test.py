@@ -59,6 +59,8 @@ MOVED = ("TENANT_CONFIG_RECORD_NAME", "tenant_config_record_path", "normalize_te
          "tenant_config_conflicts", "verified_tenant_config")
 OWN = ("json", "os", "stat", "Path", "Any")
 SEAMS = {
+    # SYRD-667: the mode repair reaches the file by the reader's no-follow walk.
+    "normalize_tenant_config_mode": {"_walk_no_follow": 1},
     "tenant_config_record_path": {"privileged_baseline_plan_path": 1, "TENANT_CONFIG_RECORD_NAME": 1},
     "registered_tenant_config_path": {"switchyard_registry_dir": 1, "read_plan_no_follow": 1},
     "recorded_tenant_config_path": {"read_plan_no_follow": 1, "tenant_config_record_path": 1},
@@ -141,9 +143,9 @@ class RecordingOs:
         if name in self.fail:
             raise self.fail[name]
 
-    def open(self, path, flags, mode=0o777):
+    def open(self, path, flags, mode=0o777, *, dir_fd=None):
         self._step("open", str(path), flags, mode)
-        return os.open(path, flags, mode)
+        return os.open(path, flags, mode, dir_fd=dir_fd)
 
     def fstat(self, descriptor):
         self._step("fstat")
@@ -256,7 +258,9 @@ def test_the_mode_is_normalised_on_one_no_follow_descriptor() -> None:
     from scripts import tenant_config_records as m
 
     me = os.getuid()
-    flags = os.O_RDONLY | os.O_NOFOLLOW
+    # SYRD-667: reached by the reader's no-follow walk, the file opened by name below the directory it holds -- which
+    # is closed once the file is open -- and never waited on.
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "config.json"
         path.write_text("{}\n")
@@ -265,8 +269,8 @@ def test_the_mode_is_normalised_on_one_no_follow_descriptor() -> None:
         with patched(m, os=fake):
             check(judged(m.normalize_tenant_config_mode, path, permitted_uids=[me]) == [], "tightened: no problem")
         check(stat.S_IMODE(path.stat().st_mode) == 0o644, f"only group and world write came off: {oct(path.stat().st_mode)}")
-        check(fake.calls == [("open", str(path), flags, 0o777), ("fstat",), ("fchmod", "0o644"), ("close",)],
-              f"open no-follow, fstat, fchmod on that descriptor, close: {fake.calls}")
+        check(fake.calls == [("open", path.name, flags, 0o777), ("close",), ("fstat",), ("fchmod", "0o644"), ("close",)],
+              f"open no-follow below the walked directory, close that, fstat, fchmod on the descriptor, close: {fake.calls}")
 
         path.chmod(0o2775)
         fake = RecordingOs()
@@ -276,13 +280,13 @@ def test_the_mode_is_normalised_on_one_no_follow_descriptor() -> None:
 
         fake = RecordingOs()
         with patched(m, os=fake):
-            check(judged(m.normalize_tenant_config_mode, path, permitted_uids=[me]) == [] and fake.names() == ["open", "fstat", "close"],
+            check(judged(m.normalize_tenant_config_mode, path, permitted_uids=[me]) == [] and fake.names() == ["open", "close", "fstat", "close"],
                   f"already compliant: not written to at all: {fake.calls}")
         path.chmod(0o660)
         fake = RecordingOs()
         with patched(m, os=fake):
             check(judged(m.normalize_tenant_config_mode, path, permitted_uids=[me + 4242, me + 4243]) == []
-                  and fake.names() == ["open", "fstat", "close"] and stat.S_IMODE(path.stat().st_mode) == 0o660,
+                  and fake.names() == ["open", "close", "fstat", "close"] and stat.S_IMODE(path.stat().st_mode) == 0o660,
                   f"somebody else's file is left alone, for the reader to refuse: {fake.calls}")
         fake = RecordingOs(fail={"fchmod": PermissionError(errno.EPERM, "Operation not permitted")})
         with patched(m, os=fake):
@@ -292,22 +296,22 @@ def test_the_mode_is_normalised_on_one_no_follow_descriptor() -> None:
         fake = RecordingOs(fail={"fstat": OSError(errno.EIO, "I/O error")})
         with patched(m, os=fake):
             got = judged(m.normalize_tenant_config_mode, path, permitted_uids=[me])
-        check(isinstance(got, OSError) and fake.names() == ["open", "fstat", "close"], f"closed even when fstat raises: {got!r} {fake.calls}")
+        check(isinstance(got, OSError) and fake.names() == ["open", "close", "fstat", "close"], f"closed even when fstat raises: {got!r} {fake.calls}")
 
         directory = Path(tmp) / "adir"
         directory.mkdir()
         fake = RecordingOs()
         with patched(m, os=fake):
             got = judged(m.normalize_tenant_config_mode, directory, permitted_uids=[me])
-        check(got == [f"{directory} is not a regular file"] and fake.names() == ["open", "fstat", "close"], f"not a regular file: {got}")
+        check(got == [f"{directory} is not a regular file"] and fake.names() == ["open", "close", "fstat", "close"], f"not a regular file: {got}")
         link = Path(tmp) / "link.json"
         link.symlink_to(path)
         fake = RecordingOs()
         with patched(m, os=fake):
             got = judged(m.normalize_tenant_config_mode, link, permitted_uids=[me])
         check(isinstance(got, list) and len(got) == 1 and got[0].startswith(f"{link} could not be opened to check its mode: ")
-              and fake.names() == ["open"] and stat.S_IMODE(path.stat().st_mode) == 0o660,
-              f"a symlink is not followed, and nothing is closed that was never opened: {got} {fake.calls}")
+              and fake.names() == ["open", "close"] and stat.S_IMODE(path.stat().st_mode) == 0o660,
+              f"a symlink is not followed, and only the walked directory is closed: {got} {fake.calls}")
         missing = Path(tmp) / "absent.json"
         got = judged(m.normalize_tenant_config_mode, missing, permitted_uids=[me])
         check(got == [f"{missing} could not be opened to check its mode: No such file or directory"], f"the open error's strerror: {got}")

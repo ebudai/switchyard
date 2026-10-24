@@ -187,9 +187,17 @@ class Host:
                          chown=lambda *a, **k: self.chowned.append(("chown", a, k)),
                          fchown=lambda *a, **k: self.chowned.append(("fchown", a, k)))
         self.p.__enter__()
+        # SYRD-667: an entry's chown is `fchownat(AT_EMPTY_PATH)` on an O_PATH handle bound to what was examined --
+        # recorded with the name the handle holds, never made.
+        from scripts import tenant_paths
+
+        self.handle = patched(tenant_paths, _fchown_handle=lambda fd, uid, gid: self.chowned.append(
+            ("fchownat", (os.path.basename(os.readlink(f"/proc/self/fd/{fd}")), uid, gid), {})))
+        self.handle.__enter__()
         return self
 
     def __exit__(self, *exc: object) -> None:
+        self.handle.__exit__(*exc)
         self.p.__exit__(*exc)
 
     def nothing_left_open(self) -> bool:
@@ -248,6 +256,9 @@ def test_the_seams_read_through_the_launcher_and_nothing_bound() -> None:
             first = 1 if ast.get_docstring(node) is not None else 0
             # SYRD-609 adds one, to the repair: the owner's roots, which bound the store it may give back.
             extra = ["from scripts import owner_writes"] if name == "repair_role_state_ownership" else []
+            # SYRD-667 adds one, to the walk: `tenant_paths`' O_PATH handle and its fchownat, for a chown bound to the
+            # inode the walk examined.
+            extra = ["from scripts import tenant_paths"] if name == "_walk_tenant_state_tree" else extra
             check(imports == ["from scripts import team_launcher as launcher", *extra] and ast.unparse(node.body[first]) == imports[0],
                   f"{name}: the launcher imported once, first thing when it runs: {imports}")
         else:
@@ -386,9 +397,10 @@ def test_the_tree_is_visited_in_order_without_following_any_link() -> None:
               f"the root, then each entry sorted, a directory before its later siblings, a link as itself and never entered: {seen}")
         check(findings == [(root / "a", "wrong")] and refusals == [], f"what act reports: {findings}")
         check(h.chowned[0] == ("fchown", (h.chowned[0][1][0], 4392, 4393), {})
-              and all(c[0] == "chown" and c[1][1:] == (4392, 4393) and c[2]["follow_symlinks"] is False and "dir_fd" in c[2] for c in h.chowned[1:])
+              and all(c[0] == "fchownat" and c[1][1:] == (4392, 4393) for c in h.chowned[1:])
               and [c[1][0] for c in h.chowned[1:]] == ["a", "b", "d", "c"],
-              f"the root through its descriptor, each entry by name relative to its directory, never following: {h.chowned}")
+              f"the root through its descriptor, each entry through a handle on exactly what was examined -- a link as "
+              f"itself -- never a name looked up again (SYRD-667): {h.chowned}")
         check(h.leaked() == [], f"every descriptor closed: {h.leaked()}")
         with Host() as h, patched(t, STATE_TREE_MAX_DEPTH=1):
             findings, refusals = m._walk_tenant_state_tree(root, lambda *a: "")

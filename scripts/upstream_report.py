@@ -77,18 +77,33 @@ def upstream_report_credential_path(
     return home / ".config" / config.project / UPSTREAM_REPORT_CREDENTIAL_NAME
 
 
-def _board_env_report_token(path: Path) -> tuple[str, str]:
+def _board_env_report_token(path: Path, owner_user: str = "") -> tuple[str, str]:
     """The report token recorded in a board's own environment file.
 
     Reads ONLY `TICKET_BOARD_TENANT_REPORT_TOKEN`. Everything else in that file
     is the board's business and must not be copied into a credential a tenant
     holds -- the point of this credential is that it opens `file_report` and
     nothing else.
+
+    With `owner_user`, the file is that account's, and root reads it by
+    descriptor from the account's roots: a link at it or above it -- an
+    attacker's `~/.config/<slug>` pointing into another tenant's -- is refused,
+    never read through (SYRD-667).
     """
+    from scripts import owner_writes
+
     try:
-        text = path.read_text(encoding="utf-8")
+        if owner_user:
+            data = owner_writes.read_owner_bytes(owner_user, path)
+            if data is None:
+                raise FileNotFoundError(2, "No such file or directory", str(path))
+            text = data.decode("utf-8")
+        else:
+            text = path.read_text(encoding="utf-8")
     except OSError as exc:
         return "", f"{path} cannot be read ({exc.strerror})"
+    except (SystemExit, UnicodeDecodeError) as exc:
+        return "", f"{path} cannot be read ({exc})"
     for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
@@ -109,34 +124,66 @@ def upstream_report_board(
     registry_dir: Path | None = None,
     home_for_user: Callable[[str], Path | None] = home_dir_for_user,
 ) -> tuple[str, Path, str]:
-    """(project, its board env file, problem) for the board a tenant reports to.
+    """(project, its board env file, problem) for the board a tenant reports to: `upstream_report_board_owner`'s
+    answer, without the owner."""
+    slug, env_file, _owner, problem = upstream_report_board_owner(
+        board_url, registry_dir=registry_dir, home_for_user=home_for_user)
+    return slug, env_file, problem
+
+
+def upstream_report_board_owner(
+    board_url: str,
+    *,
+    registry_dir: Path | None = None,
+    home_for_user: Callable[[str], Path | None] = home_dir_for_user,
+) -> tuple[str, Path, str, str]:
+    """(project, its board env file, its owner, problem) for the board a tenant reports to.
 
     Resolved from the host registry rather than configured a second time: the
     upstream board is itself a Switchyard project here, and its provision
     artifact already records the URL it serves and the account that owns it.
     Asking the registry is what keeps the tenant's configuration from carrying
     a second copy of a fact that can drift.
+
+    As root, each registered configuration is read as the owner root's own
+    records name for it, by descriptor from that owner's roots, and a board is
+    the one asked for only while its configuration names that same owner: a
+    tenant's configuration -- or a link it planted -- cannot make root copy
+    another tenant's report token (SYRD-667).
     """
+    from scripts import owner_writes
     from scripts import team_launcher as launcher
 
     wanted = board_url.strip().rstrip("/")
     if not wanted:
-        return "", Path(), "no upstream report URL is configured"
+        return "", Path(), "", "no upstream report URL is configured"
+    as_root = os.geteuid() == 0
     for entry in launcher._registry_project_entries(registry_dir):
+        recorded = ""
         try:
-            raw = launcher._load_json(entry.config_path)
+            if as_root:
+                recorded, problem = launcher.root_recorded_owner(entry.slug, entry.config_path, strict=False)
+                if not recorded:
+                    # Root's records say nothing about this configuration, or nothing usable: root reads nothing of it.
+                    continue
+                raw = owner_writes.read_owner_json(recorded, entry.config_path)
+            else:
+                raw = launcher._load_json(entry.config_path)
         except (OSError, json.JSONDecodeError, SystemExit):
             continue
         if str(raw.get("board_url") or "").strip().rstrip("/") != wanted:
             continue
         owner = str(raw.get("run_as_user") or "").strip()
         if not owner:
-            return "", Path(), f"{entry.slug} serves {board_url} but records no owner account"
+            return "", Path(), "", f"{entry.slug} serves {board_url} but records no owner account"
+        if as_root and owner != recorded:
+            return "", Path(), "", (f"{entry.slug} serves {board_url}, but its configuration names {owner!r} as its "
+                                    f"owner and root provisioned it for {recorded!r}")
         home = home_for_user(owner)
         if home is None:
-            return "", Path(), f"{entry.slug}'s owner {owner} is not an account on this host"
-        return entry.slug, home / ".config" / entry.slug / "ticket-board.env", ""
-    return "", Path(), f"no project registered on this host serves {board_url}"
+            return "", Path(), "", f"{entry.slug}'s owner {owner} is not an account on this host"
+        return entry.slug, home / ".config" / entry.slug / "ticket-board.env", owner, ""
+    return "", Path(), "", f"no project registered on this host serves {board_url}"
 
 
 def record_upstream_report_link(
@@ -247,17 +294,17 @@ def refresh_upstream_report_credential(
     destination = upstream_report_credential_path(config, home_for_user=home_for_user)
     if destination is None:
         return [f"{config.project}'s upstream report credential path cannot be resolved"]
-    upstream, board_env, problem = upstream_report_board(
+    upstream, board_env, board_owner, problem = upstream_report_board_owner(
         config.upstream_report_url, registry_dir=registry_dir, home_for_user=home_for_user
     )
     if problem:
         return [f"{config.project} cannot be given a report credential: {problem}"]
-    token, problem = _board_env_report_token(board_env)
+    token, problem = _board_env_report_token(board_env, board_owner)
     if problem:
         return [f"{config.project} cannot be given {upstream}'s report credential: {problem}"]
 
     desired = f"{UPSTREAM_REPORT_TOKEN_KEY}={token}\n"
-    current, _ = _board_env_report_token(destination)
+    current, _ = _board_env_report_token(destination, owner)
     if current == token and _credential_is_private(destination, owner):
         print_func(
             f"switchyard: {config.project} already holds {upstream}'s current report credential "
@@ -314,12 +361,12 @@ def connect_upstream_report(
         return config, [
             f"{config.project} records no upstream report board; name it with --upstream-report-url"
         ]
-    upstream, board_env, problem = launcher.upstream_report_board(
+    upstream, board_env, board_owner, problem = launcher.upstream_report_board_owner(
         url, registry_dir=registry_dir, home_for_user=home_for_user
     )
     if problem:
         return config, [f"{config.project} cannot be connected for reports: {problem}"]
-    _token, problem = _board_env_report_token(board_env)
+    _token, problem = _board_env_report_token(board_env, board_owner)
     if problem:
         return config, [f"{config.project} cannot be given {upstream}'s report credential: {problem}"]
     linked, problems = launcher.record_upstream_report_link(

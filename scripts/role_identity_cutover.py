@@ -661,7 +661,13 @@ def repatriate_role_runtime_state(
     previous_worktree_owners: list[tuple[Path, int, int]] = []
     for role in legacy_roles:
         worktree = Path(role.workdir)
-        info = _tree_status(owner, worktree) if by_descriptor else (worktree.stat() if worktree.exists() else None)
+        try:
+            info = _tree_status(owner, worktree) if by_descriptor else (worktree.stat() if worktree.exists() else None)
+        except SystemExit as refusal:
+            # A link at a later role's worktree is refused -- after earlier ones have changed hands, which the
+            # rollback below puts back rather than leaving them the owner's (SYRD-667).
+            problems.append(f"{role.role}: {refusal}")
+            break
         if info is None:
             continue
         previous_worktree_owners.append((worktree, info.st_uid, info.st_gid))
@@ -673,15 +679,16 @@ def repatriate_role_runtime_state(
             _give_tree(owner, worktree, str(uid), str(gid), runner=runner, by_descriptor=by_descriptor)
         return False, problems
 
-    payload = owner_writes.read_owner_json(owner, config_path)
-    for section in (payload.get("roles", []), payload.get("retired_workflow_roles", {}).values()):
-        for role in section:
-            if isinstance(role, dict):
-                role.pop("run_as_user", None)
-    payload["role_state_isolation"] = True
     try:
+        # The read refusing is the publish failing, and puts the worktrees back the same (SYRD-667).
+        payload = owner_writes.read_owner_json(owner, config_path)
+        for section in (payload.get("roles", []), payload.get("retired_workflow_roles", {}).values()):
+            for role in section:
+                if isinstance(role, dict):
+                    role.pop("run_as_user", None)
+        payload["role_state_isolation"] = True
         launcher._write_json_atomic(config_path, payload, owner_user=owner)
-    except (OSError, SystemExit) as exc:
+    except (OSError, ValueError, SystemExit) as exc:
         for worktree, uid, gid in previous_worktree_owners:
             _give_tree(owner, worktree, str(uid), str(gid), runner=runner, by_descriptor=by_descriptor)
         return False, [f"configuration publish failed after state copy: {exc}"]
@@ -994,7 +1001,13 @@ def cutover_role_identities_command(
             ownership_failures.append(f"{role.role}: {role.workdir} is outside {owner}'s home and every directory root "
                                       "chose for it; root does not give it away")
             continue
-        if (_tree_status(owner, Path(role.workdir)) if by_descriptor else Path(role.workdir).exists() or None) is None:
+        try:
+            if (_tree_status(owner, Path(role.workdir)) if by_descriptor else Path(role.workdir).exists() or None) is None:
+                continue
+        except SystemExit as refusal:
+            # A failure like any other transfer's: the earlier roles' trees are rolled back below, the workers left
+            # stopped, rather than the refusal leaving the transaction half done (SYRD-667).
+            ownership_failures.append(f"{role.role}: {refusal}")
             continue
         if not _give_tree(owner, Path(role.workdir), identity["account"], "", runner=runner, by_descriptor=by_descriptor):
             ownership_failures.append(f"{role.role}: could not transfer {role.workdir}")

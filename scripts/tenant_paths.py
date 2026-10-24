@@ -734,6 +734,11 @@ def chown_tree(root: Root, path: str, uid: int, gid: int, if_exists: bool) -> No
                         # and changed through it: never followed, and never a name
                         # looked up again (audit of 8a1f1c33).
                         if (child_status.st_uid, child_status.st_gid) != (uid, gid):
+                            if child_status.st_nlink > 1:
+                                # Another name -- anywhere on this filesystem, another account's file -- holds the
+                                # same inode, and giving this one away gives that away too (SYRD-667).
+                                raise Refused(child_path, f"has {child_status.st_nlink} hard links; root does not give "
+                                                          "away a file another name may hold")
                             root.report(f"{child_path}: owner {child_status.st_uid}:{child_status.st_gid} -> {uid}:{gid}")
                             if not root.preview:
                                 root.own_observed(directory, name, child_path, child_status, uid, gid)

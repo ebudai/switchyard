@@ -69,15 +69,33 @@ def normalize_tenant_config_mode(path: Path, *, permitted_uids: "list[int]") -> 
     the change is not what gets chmodded. Ownership is checked first for the
     same reason the reader checks it: root repairing a file the tenant does not
     own would be root repairing somebody else's file.
+
+    Reached the way the reader reaches it: every directory from `/` opened
+    without following a link, so one planted above the file -- at
+    `.switchyard` -- is refused before anything is changed, where `O_NOFOLLOW`
+    on the path guarded only its last component. A FIFO there is not waited
+    on, and a file with another hard link is left alone, since tightening it
+    would change whatever else that name is (SYRD-667).
     """
+    from scripts import team_launcher as launcher
+
+    absolute = Path(os.path.abspath(path))
+    directory, problem = launcher._walk_no_follow(Path(absolute.anchor or "/"), absolute.relative_to(absolute.anchor or "/"))
+    if problem:
+        why = os.strerror(2) if problem == "missing" else problem  # as the open of a missing path said before
+        return [f"{path} could not be opened to check its mode: {why}"]
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        descriptor = os.open(absolute.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory)
     except OSError as exc:
         return [f"{path} could not be opened to check its mode: {exc.strerror or exc}"]
+    finally:
+        os.close(directory)
     try:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode):
             return [f"{path} is not a regular file"]
+        if info.st_nlink > 1:
+            return []  # the reader refuses it, and says why
         if info.st_uid not in permitted_uids:
             # Left alone deliberately: the reader refuses it a moment later and
             # says whose it is, which is the more useful answer.
@@ -269,6 +287,11 @@ def tenant_config_conflicts(
         if path is None:
             continue
         resolved = Path(path).expanduser()
+        if ".." in resolved.parts:
+            # A text bound is no bound with a `..` in it: `/home/t/../../etc` is "under" /home/t (SYRD-667).
+            conflicts.append(f"{what}: the configuration points at {resolved}, which names '..'; root does not "
+                             "normalise it past a link")
+            continue
         if not (resolved == owner_home or resolved.is_relative_to(owner_home)):
             conflicts.append(
                 f"{what}: the configuration points at {resolved}, which is outside "

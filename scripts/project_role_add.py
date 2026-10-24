@@ -47,8 +47,9 @@ def _is_recognized_generated_project_layout(config: ProjectConfig, *, config_pat
         return False
     role_count = sum(1 for role in config.roles if not role.detached)
     try:
-        existing_layout = json.loads(config.layout.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        # By descriptor as root for the owner (SYRD-667): a link or a FIFO at the layout is refused, so not recognised.
+        existing_layout = json.loads(launcher._read_layout_text(config))
+    except (OSError, json.JSONDecodeError, SystemExit):
         return False
     return existing_layout in launcher._known_generated_project_layout_payloads(role_count)
 

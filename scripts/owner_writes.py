@@ -503,6 +503,57 @@ def read_owner_bytes(owner_user: str, path: Path) -> bytes | None:
         raise SystemExit(f"switchyard: refusing to read {path} for {owner_user}: {stop}") from None
 
 
+def claim_owner_file(owner_user: str, path: Path, *, accept: Callable[[bytes], bool], mode: int,
+                     apply: bool) -> tuple[bytes | None, str]:
+    """Root's read of a file in the owner's tree that should be the owner's, and, if root left it as its own, the
+    owner's from now on (SYRD-657): its contents (None when missing) and what happened -- "" (already the owner's),
+    "handed", "would hand", or why not.
+
+    One descriptor, opened without following a link at it or above it, is read, and one `fstat` of it decides:
+    the owner's own file is left alone; only a file root owns can be handed over, and only if `accept` takes its
+    contents; a file any other account owns is left exactly as it is, whatever it holds -- generated-looking
+    contents do not show that root made it (Audit of 88c86394). The change is then made on that same descriptor.
+    Judging one file and changing whatever is at the name afterwards would let the tenant rename another of root's
+    files there in between.
+    """
+    from scripts import tenant_paths
+
+    root = tenant_paths._quiet(owner_root(owner_user, path))
+    try:
+        found = root.leaf(root.relative(str(path)))
+        if found is None:
+            return None, ""
+        parent, fd, display, status = found
+        try:
+            if not stat.S_ISREG(status.st_mode):
+                raise tenant_paths.Refused(display, "is not a regular file")
+            chunks = []
+            while chunk := os.read(fd, 1 << 16):
+                chunks.append(chunk)
+            content = b"".join(chunks)
+            account = pwd.getpwnam(owner_user)
+            held = os.fstat(fd)
+            if held.st_uid == account.pw_uid:
+                return content, ""
+            if held.st_uid != 0:
+                return content, f"it is uid {held.st_uid}'s, not root's, so root leaves it"
+            if not accept(content):
+                return content, "it is root's and not what root generates, so root leaves it"
+            if not apply:
+                return content, "would hand"
+            os.fchown(fd, account.pw_uid, account.pw_gid)
+            if stat.S_IMODE(held.st_mode) != mode:
+                os.fchmod(fd, mode)
+            return content, "handed"
+        finally:
+            os.close(fd)
+            os.close(parent)
+    except tenant_paths.Refused as refusal:
+        raise SystemExit(f"switchyard: refusing to read {path} for {owner_user}: {refusal}") from None
+    finally:
+        root.close()
+
+
 def owner_file_status(owner_user: str, path: Path) -> os.stat_result | None:
     """The status of a regular file in the owner's tree, opened by descriptor from its root; None when missing.
 

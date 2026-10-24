@@ -88,6 +88,16 @@ def owner_patches(home: Path):
             side_effect=lambda value: SimpleNamespace(pw_gid=value, pw_name=TENANT) if value == TENANT_UID else real(value),
         )
     )
+    # The generated configuration is the tenant's own since SYRD-657, so the descriptor writer looks the account up
+    # by name: answered there alone, so nothing else about this fixture's lookups changes.
+    from scripts import owner_writes
+
+    real_pwd = owner_writes.pwd
+    stack.enter_context(patch.object(owner_writes, "pwd", SimpleNamespace(
+        getpwnam=lambda name: SimpleNamespace(pw_uid=TENANT_UID, pw_gid=TENANT_UID, pw_dir=str(home), pw_name=TENANT)
+        if name == TENANT else real_pwd.getpwnam(name),
+        getpwuid=real_pwd.getpwuid,
+    )))
     return stack
 
 
@@ -452,7 +462,8 @@ def main() -> int:
         "and a fixture cannot own one otherwise. This suite fails rather than skipping."
     )
     done = subprocess.run(
-        ["unshare", "--user", "--map-root-user", sys.executable, __file__, "--privileged-child"],
+        # --map-auto: the tenant's uid is mapped too, so files can be the tenant's (SYRD-657).
+        ["unshare", "--user", "--map-auto", "--map-root-user", sys.executable, __file__, "--privileged-child"],
         text=True,
     )
     return done.returncode

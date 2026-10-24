@@ -331,9 +331,10 @@ def launcher_artifacts(host: Host) -> None:
     layout = host.provision / "p-konsole-layout.json"
     aside = host.plant(layout, host.foreign / "file")
     config = write()
-    check(owned(config) == (0, 0o644) and owned(layout) == (0, 0o644) and not layout.is_symlink() and host.foreign_unchanged()
-          and json.loads(config.read_text())["project"] == "p",
-          "the launcher config and layout are root's, as before; a link at one is replaced")
+    check(owned(config) == (OWNER_UID, 0o644) and owned(layout) == (OWNER_UID, 0o644) and not layout.is_symlink()
+          and host.foreign_unchanged() and json.loads(config.read_text())["project"] == "p",
+          "the launcher config and layout are the owner's, whose launch reads them (SYRD-657); a link at one is "
+          "replaced, and what it named is untouched")
     aside.unlink(missing_ok=True)
     aside = host.plant(host.provision, host.foreign)
     refused(write, "symbolic link")

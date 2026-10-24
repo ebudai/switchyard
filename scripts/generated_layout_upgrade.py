@@ -103,8 +103,28 @@ def upgrade_generated_project_config(
     role_count = sum(1 for role in config.roles if not role.detached)
     current_layout = launcher._new_project_layout_payload(role_count)
     known_layouts = launcher._known_generated_project_layout_payloads(role_count)
+    handover = ""
     try:
-        existing_layout = json.loads(config.layout.read_text(encoding="utf-8"))
+        if config.run_as_user and launcher.root_writes_for(config.run_as_user):
+            # As root, by descriptor: a layout root left as its own record -- 0600, which PIE's first start as the
+            # owner could not open -- is handed to the owner: the inode that was read, and only if it is a layout
+            # this release generates (SYRD-657).
+            def generated(raw: bytes) -> bool:
+                try:
+                    return json.loads(raw.decode("utf-8")) in (current_layout, *known_layouts)
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    return False
+
+            try:
+                raw, handover = launcher.claim_owner_file(config.run_as_user, config.layout, accept=generated,
+                                                          mode=0o644, apply=not dry_run)
+            except SystemExit as refusal:
+                raise OSError(str(refusal)) from None
+            if raw is None:
+                raise FileNotFoundError(f"{config.layout} is not there")
+            existing_layout = json.loads(raw.decode("utf-8"))
+        else:
+            existing_layout = json.loads(config.layout.read_text(encoding="utf-8"))
     except OSError as exc:
         return launcher.LauncherUpgradeResult(
             changed=False,
@@ -115,6 +135,11 @@ def upgrade_generated_project_config(
             changed=False,
             message=f"switchyard: generated layout template {config.layout} is not valid JSON: {exc}",
         )
+    if handover == "handed":
+        changed_messages.append(f"handed generated layout template {config.layout} to {config.run_as_user}, 0644")
+    elif handover == "would hand":
+        changed_messages.append(f"layout template {config.layout} is root's and can be handed to {config.run_as_user}")
+    # Any other answer is a file root leaves as it is: no change to report, and the shape check below says so.
     if existing_layout != current_layout:
         if existing_layout not in known_layouts:
             if not changed_messages:

@@ -1607,11 +1607,11 @@ from scripts.env_composition import (
 )
 from scripts.owner_files import (
     _chown_project_file,
-    _path_owner_ids,
-    _path_owner_label,
+    _path_owner_ids, _path_owner_label,
     chown_owner_file_args, ensure_owner_file,
 )
-from scripts.owner_writes import owner_handoff_args, read_owner_bytes, read_owner_json, root_writes_for, write_owner_file
+from scripts.owner_writes import (claim_owner_file, owner_handoff_args, read_owner_bytes, read_owner_json,
+                                   root_writes_for, write_owner_file)
 from scripts.new_project_selection import (
     NEW_PROJECT_NON_AUDIT_RESERVED_ROLE_NAMES,
     NEW_PROJECT_RESERVED_ROLE_NAMES,

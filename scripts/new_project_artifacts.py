@@ -271,15 +271,17 @@ def write_new_project_launcher_artifacts(
     layout_path = output_dir / f"{plan.project}-konsole-layout.json"
     from scripts import owner_writes
 
-    # Under `switchyard new` the output directory is the tenant's provision directory: root's files there are its
-    # own, as the by-path writes made them, but written and read by descriptor from the owner's root -- never
-    # through a link the tenant left at a name or above it (SYRD-611). Root's own or the operator's directory
-    # (`team-launcher new`) is written as before.
+    # Under `switchyard new` the output directory is the tenant's provision directory, and what is written there is
+    # the owner's: written and read by descriptor from the owner's root -- never through a link the tenant left at
+    # a name or above it (SYRD-611) -- and owned by the owner, whose launch reads them. `.switchyard` was handed to
+    # the owner before these are written, so a root record here stayed root's: PIE's layout, 0600, could not be
+    # opened by its first start through the tenant-control bridge, nor a headless tenant's configuration (SYRD-657).
+    # Root's own or the operator's directory (`team-launcher new`) is written as before.
     in_tree = owner_writes.root_writes_in(plan.owner_user, output_dir)
 
     def put(path: Path, text: str, mode: int | None, new_mode: int) -> None:
         if in_tree:
-            owner_writes.write_root_record(plan.owner_user, path, text.encode("utf-8"), mode=mode, new_mode=new_mode)
+            owner_writes.write_owner_file(plan.owner_user, path, text, mode=mode, new_mode=new_mode)
         elif new_mode == 0o600:
             launcher._write_json_atomic(path, json.loads(text))
         else:
@@ -288,8 +290,15 @@ def write_new_project_launcher_artifacts(
     def load(path: Path) -> dict[str, Any]:
         return owner_writes.read_owner_json(plan.owner_user, path) if in_tree else launcher._load_json(path)
 
-    put(layout_path, json.dumps(launcher._new_project_layout_payload(visible_role_count), indent=2,
-                                sort_keys=True) + "\n", None, 0o644)
+    def put_layout(text: str, mode: int | None, new_mode: int) -> None:
+        """In the owner's tree the layout keeps the mode it was made with, 0644 (SYRD-657)."""
+        if in_tree:
+            owner_writes.write_owner_file(plan.owner_user, layout_path, text, mode=None, new_mode=0o644)
+        else:
+            put(layout_path, text, mode, new_mode)
+
+    put_layout(json.dumps(launcher._new_project_layout_payload(visible_role_count), indent=2, sort_keys=True) + "\n",
+               None, 0o644)
     config_text = (
         json.dumps(
             launcher._new_project_launcher_config_payload(
@@ -332,8 +341,8 @@ def write_new_project_launcher_artifacts(
     if plan.workflow:
         projected = load(config_path)
         visible_role_count = max(1, 1 + max((role.get("slot", -1) for role in projected["roles"]), default=-1))
-        put(layout_path, json.dumps(launcher._new_project_layout_payload(visible_role_count), indent=2,
-                                    sort_keys=True) + "\n", 0o600, 0o600)
+        put_layout(json.dumps(launcher._new_project_layout_payload(visible_role_count), indent=2,
+                              sort_keys=True) + "\n", 0o600, 0o600)
         if artifact_path and owner_writes.root_writes_in(plan.owner_user, artifact_path):
             # The owner's design artifact stays the owner's, read and replaced by descriptor (SYRD-611).
             if owner_writes.owner_file_status(plan.owner_user, artifact_path) is not None:

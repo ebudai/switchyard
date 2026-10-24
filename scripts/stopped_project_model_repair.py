@@ -177,15 +177,18 @@ def clear_role_records(config: "ProjectConfig", role: "RoleConfig", *, pane_stat
     """
     from scripts import owner_writes, tenant_paths
     from scripts import team_launcher as launcher
+    from scripts.runtime_return_records import keep_left_record
 
     session_dir = launcher.role_session_dir(config, role)
     owner = config.run_as_user or launcher.current_user_name()
+    record = session_dir / launcher.session_file_name(role.target)
     if not owner_writes.root_writes_for(owner):
+        keep_left_record(config, role, session_dir, record)  # SYRD-622: a switch back resumes it
         launcher.clear_session_record_for_role(role, session_dir)
         launcher.clear_pane_idle_state_for_role(role, pane_state_dir=pane_state_dir)
         return
-    record = session_dir / launcher.session_file_name(role.target)
     account = owner if owner_writes.within_owner_root(owner, record) else launcher.role_run_as_user(config, role) or owner
+    keep_left_record(config, role, session_dir, record, account=account)
     owner_writes.supersede_owner_record(account, record)
     pane_state = pane_state_dir / launcher.pane_state_file_name(role.target)
     try:

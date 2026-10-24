@@ -370,6 +370,10 @@ def attach_role_to_slot(
         return 1
     exists = runner(launcher.tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
     if not exists:
+        # SYRD-622: back on a runtime it left, the role resumes the conversation it left it with.
+        from scripts.runtime_return_records import settle_return_record
+
+        settle_return_record(role, session_dir, resume=True)
         # SYRD-569: the last conversation may be recorded in the project's shared store.
         from scripts.stranded_session_records import adopt_stranded_session_record
 
@@ -390,6 +394,10 @@ def attach_role_to_slot(
             return 1
         resume = recovery is None or recovery.action == "resume"
         recovered = recovery is not None and recovery.action == "resume"
+    if not exists and not resume:
+        # A fresh start leaves nothing for a later one to resume: the record, adopted above or not, is set aside
+        # as `_start_role_session` sets it aside (SYRD-622).
+        launcher.clear_session_record_for_role(role, session_dir)
     session_id = launcher.session_id_for_role(role, session_dir)
 
     if not exists and resume:

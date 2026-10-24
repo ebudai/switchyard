@@ -343,22 +343,34 @@ def named_elsewhere(role: RoleConfig, session_dir: Path, session_id: str) -> str
     return ""
 
 
-def judge(role: RoleConfig, session_id: str, record: dict[str, Any] | None, *, session_dir: Path) -> Verdict:
-    """Whether the provider records this conversation as the role's: its runtime's, and in the role's worktree."""
+def role_runtime(role: RoleConfig) -> str:
+    """The runtime whose conversations the role resumes, as `SOURCE_RUNTIMES` names it; '' for one that resumes none here."""
     from scripts import provider_resume as resume
 
     if resume._uses_agy_conversation_resume(role):
-        runtime = "agy"
-    elif resume._uses_codex_resume(role):
-        runtime = "codex"
-    elif resume._uses_copilot_resume(role):
-        runtime = "copilot"
-    elif resume._uses_claude_resume(role):
-        runtime = "claude"
-    else:
+        return "agy"
+    if resume._uses_codex_resume(role):
+        return "codex"
+    if resume._uses_copilot_resume(role):
+        return "copilot"
+    if resume._uses_claude_resume(role):
+        return "claude"
+    return ""
+
+
+def source_runtime(record: dict[str, Any] | None) -> str:
+    """The runtime whose hook wrote a record, from its `source`; '' when it names none."""
+    source = str((record or {}).get("source") or "")
+    return SOURCE_RUNTIMES.get(source.split(".", 1)[0], "")
+
+
+def judge(role: RoleConfig, session_id: str, record: dict[str, Any] | None, *, session_dir: Path) -> Verdict:
+    """Whether the provider records this conversation as the role's: its runtime's, and in the role's worktree."""
+    runtime = role_runtime(role)
+    if not runtime:
         return Verdict(True)  # Hermes keeps each role's sessions in its own home; anything else resumes nothing
     source = str((record or {}).get("source") or "")
-    wrote = SOURCE_RUNTIMES.get(source.split(".", 1)[0], "")
+    wrote = source_runtime(record)
     if wrote and wrote != runtime:
         return Verdict(False, "runtime",
                        f"its record was written by {source}, a {wrote} hook, and {role.role} now runs {runtime}")

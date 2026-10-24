@@ -110,6 +110,10 @@ def _start_role_session(
 ) -> int:
     from scripts import team_launcher as launcher
 
+    # SYRD-622: back on a runtime it left, the role resumes the conversation it left it with.
+    from scripts.runtime_return_records import settle_return_record
+
+    settle_return_record(role, session_dir, resume=prefer_resume)
     if prefer_resume:
         # SYRD-569: the last conversation may be recorded in the project's shared store.
         from scripts.stranded_session_records import adopt_stranded_session_record

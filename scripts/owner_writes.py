@@ -172,6 +172,24 @@ def root_writes_for(owner_user: str) -> bool:
     return bool(owner_user) and os.geteuid() == 0 and launcher.current_user_name() != owner_user
 
 
+def tenant_root_holding(path: Path, *accounts: str) -> str:
+    """The account among `accounts` -- and the owners of the projects the trusted registry names -- whose roots hold
+    `path`, or "" (SYRD-666): a directory root must not write into by path."""
+    owners = list(accounts)
+    for root in _registered_project_roots():
+        try:
+            owners.append(pwd.getpwuid(os.lstat(root).st_uid).pw_name)
+        except (OSError, KeyError):
+            continue
+    for owner in dict.fromkeys(name for name in owners if name):
+        try:
+            if within_owner_root(owner, path):
+                return owner
+        except ValueError:  # no such account, so no tree of its
+            continue
+    return ""
+
+
 def root_writes_in(owner_user: str, path: Path) -> bool:
     """Whether root, writing `path` now, writes into one of `owner_user`'s roots -- and so must by descriptor.
 

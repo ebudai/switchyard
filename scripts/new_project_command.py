@@ -106,7 +106,8 @@ def new_project_command(
         if owner_user is not None or repository is not None:
             raise SystemExit("team-launcher: --from owns owner/repository answers; do not also pass --owner-user or --repository")
         effective_owner = design_artifact.owner_user
-        effective_repository = design_artifact.repository.expanduser().resolve(strict=False)
+        # As named, never resolved: root trusts it as the owner's project root below (SYRD-666).
+        effective_repository = launcher._resolve_project_path(design_artifact.repository)
         remote = design_artifact.remote
         default_branch = design_artifact.default_branch
         worktree_policy = design_artifact.worktree_policy
@@ -128,7 +129,7 @@ def new_project_command(
         if repository is None:
             raise SystemExit("team-launcher: new project requires --repository for the project's working checkout")
         effective_owner = (owner_user or launcher._default_new_project_owner(project)).strip()
-        effective_repository = repository.expanduser().resolve(strict=False)
+        effective_repository = launcher._resolve_project_path(repository)
         remote = "origin"
         default_branch = "main"
         worktree_policy = "shared"
@@ -224,6 +225,19 @@ def new_project_command(
     # Made absolute as named, never resolved: under `switchyard new` this is the tenant's provision directory, and
     # resolving it would follow a link the tenant left at `.switchyard` to wherever it points (SYRD-611).
     artifact_dir = Path(os.path.abspath((output_dir or launcher._new_project_artifact_dir(plan.project)).expanduser()))
+    if os.geteuid() == 0 and not execute:
+        # Root's dry run writes its artifacts by path, so never into a tenant's tree, where a link the tenant left
+        # would redirect them (SYRD-666). `switchyard new` always executes; this is `team-launcher <p> new`. Whatever
+        # chose the directory: a temporary one root just made is no safer in a tenant's tree, where the tenant can
+        # rename it and put a link in its place (Audit of b4a2b905).
+        holder = owner_writes.tenant_root_holding(artifact_dir, plan.owner_user)
+        if holder:
+            remedy = ("name an output directory of your own or root's with --new-output-dir" if output_dir is None
+                      else "name an output directory of your own or root's, or leave --new-output-dir out")
+            raise SystemExit(
+                f"team-launcher: a dry run as root writes {plan.project}'s artifacts by path, and {artifact_dir} is in "
+                f"{holder}'s tree; {remedy}. Nothing was written into it."
+            )
     if desktop_policy is not None:
         from scripts.desktop_access import validate_policy
         selected = {"mode": "headless"} if str(desktop_policy) == "headless" else launcher._load_json(desktop_policy)

@@ -159,6 +159,16 @@ def _owner_project_install_command(owner_user: str, directory: str, owner_home: 
     if owner_home and Path(directory).is_relative_to(owner_home):
         return tenant_paths_argv(owner_home, "dir", "--mode", TENANT_SOURCE_MODE, "--owner", owner_user,
                                  "--group", owner_user, directory)
+    # Outside the home, the same helper from the deepest directory that already exists, walked to from `/` without
+    # following a link anybody but root made: by path, `install -d` followed one an account had planted in the
+    # chain (SYRD-666). Only a path none of whose directories exist yet below `/` -- which no account can have
+    # planted anything in -- is still made by path.
+    base = Path(directory).parent
+    while str(base) != "/" and not os.path.lexists(base):
+        base = base.parent
+    if str(base) != "/":
+        return tenant_paths_argv(str(base), "dir", "--mode", TENANT_SOURCE_MODE, "--owner", owner_user,
+                                 "--group", owner_user, directory)
     return ["install", "-d", "-m", TENANT_SOURCE_MODE, "-o", owner_user, "-g", owner_user, directory]
 
 
@@ -248,6 +258,10 @@ def _precheck_project_path_before_mutating(owner_user: str, project_dir: Path) -
             return
         if stat.S_ISLNK(info.st_mode):
             raise SystemExit(f"switchyard: project path {project_dir} is a symbolic link; root does not follow it")
+    elif os.geteuid() == 0 and os.path.islink(project_dir):
+        # Outside the owner's roots too: root never creates, checks or trusts a project directory through a link,
+        # which would put the project wherever that link points (SYRD-666).
+        raise SystemExit(f"switchyard: project path {project_dir} is a symbolic link; root does not follow it")
     elif not project_dir.exists():
         return
     if not (stat.S_ISDIR(info.st_mode) if info is not None else project_dir.is_dir()):

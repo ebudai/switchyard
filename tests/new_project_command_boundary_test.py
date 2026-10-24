@@ -62,7 +62,7 @@ MOVED = ('recorded_provisioning_command', '_new_project_artifact_dir', 'new_proj
 #: Measured on the baseline launcher: each moved body's call-time reads of launcher globals, siblings included.
 SEAMS = {
     'recorded_provisioning_command': {'_rollout_recorder_path': 1},
-    'new_project_command': {'DEFAULT_PROJECT_IMPLEMENTER_ROLES': 1, 'WORKTREE_POLICIES': 2, '_default_new_project_owner': 1, '_default_role_cli_pairs': 1, '_load_json': 2, '_new_project_artifact_dir': 1, '_new_project_worktree_base': 1, '_repo_root': 1, '_rollout_recorder_path': 1, '_write_json_atomic': 1, 'build_plan': 1, 'configure_project_desktop': 1, 'invoking_human': 1, 'load_project_config': 2, 'load_project_design_artifact': 1, 'precheck_new_project': 1, 'publish_role_account_migration': 1, 'resolve_control_user': 1, 'role_isolation_gaps': 1, 'seed_director_onboarding': 1, 'write_artifacts': 1, 'write_new_project_launcher_artifacts': 1},
+    'new_project_command': {'DEFAULT_PROJECT_IMPLEMENTER_ROLES': 1, 'WORKTREE_POLICIES': 2, '_default_new_project_owner': 1, '_default_role_cli_pairs': 1, '_load_json': 2, '_new_project_artifact_dir': 1, '_new_project_worktree_base': 1, '_repo_root': 1, '_resolve_project_path': 2, '_rollout_recorder_path': 1, '_write_json_atomic': 1, 'build_plan': 1, 'configure_project_desktop': 1, 'invoking_human': 1, 'load_project_config': 2, 'load_project_design_artifact': 1, 'precheck_new_project': 1, 'publish_role_account_migration': 1, 'resolve_control_user': 1, 'role_isolation_gaps': 1, 'seed_director_onboarding': 1, 'write_artifacts': 1, 'write_new_project_launcher_artifacts': 1},
 }
 #: Measured on the baseline launcher: every launcher definition outside the command that names it, and how often.
 DISPATCH = {'main': {'new_project_command': 1}}
@@ -275,7 +275,7 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
              "_load_json", "resolve_control_user", "invoking_human", "build_plan", "precheck_new_project", "_write_json_atomic", "_new_project_worktree_base",
              "write_artifacts", "render_privileged_artifacts", "install_privileged_artifacts", "write_new_project_launcher_artifacts", "load_project_config",
              "role_isolation_gaps", "publish_role_account_migration", "_rollout_recorder_path", "configure_project_desktop", "WORKTREE_POLICIES",
-             "DEFAULT_PROJECT_IMPLEMENTER_ROLES"]
+             "DEFAULT_PROJECT_IMPLEMENTER_ROLES", "_resolve_project_path"]
     saved = {n: getattr(t, n) for n in names}
     saved_assign, saved_geteuid = workflow_launcher.assign_projection_owner, os.geteuid
     saved_root_packet = (root_packet.stage_root_packet, root_packet.publish_packet_record, root_packet.trusted_launcher,
@@ -368,6 +368,9 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
             return f
         on_launcher = {
             "_repo_root": lambda: note("_repo_root") or tmp / "src",
+            # Lexical, so the real one; what it names is in every recorded call it reaches (SYRD-666).
+            "_resolve_project_path": lambda path, __real=saved["_resolve_project_path"]: (
+                reached.add("_resolve_project_path"), __real(path))[1],
             "load_project_design_artifact": load_artifact,
             "_default_new_project_owner": passthrough("_default_new_project_owner"),
             "_default_role_cli_pairs": passthrough("_default_role_cli_pairs"),

@@ -1455,7 +1455,13 @@ def test_fresh_provisioning_emits_no_role_account_handoff() -> None:
         # so provisioning is driven as the root it is on a host.
         privileged_root = tmp_path / "etc-switchyard"
 
-        # The fixture source stands in for root's installed release (SYRD-630).
+        # The fixture source stands in for root's installed release (SYRD-630). Root's dry run refuses an output
+        # directory in the owner's tree (SYRD-666), and this suite's stand-in home for the owner holds every
+        # temporary directory, so the owner's home is one of this case's own for that judgement.
+        from scripts import owner_writes
+
+        real_owner_home = owner_writes.owner_home
+        owner_writes.owner_home = lambda _owner: str(tmp_path / "owner-home")
         with _provisioning_as_root(privileged_root), roots_own(source_repo), redirect_stdout(StringIO()):
             assert new_project_command(
                 "porter",
@@ -1469,6 +1475,7 @@ def test_fresh_provisioning_emits_no_role_account_handoff() -> None:
                 socket_exists=lambda _path: False,
                 print_func=printed.append,
             ) == 0
+        owner_writes.owner_home = real_owner_home
 
         handoff = privileged_root / "porter" / "porter-role-accounts.sh"
         assert not handoff.exists(), printed

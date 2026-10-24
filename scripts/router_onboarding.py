@@ -334,6 +334,19 @@ def _rewrite(path: Path, payload: dict[str, Any], *, owner_user: str = "") -> No
     if owner_writes.root_writes_in(owner_user, path):
         owner_writes.rewrite_owner_file(owner_user, path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
         return
+    if os.geteuid() == 0:
+        # Outside the owner's roots every step below is by path, and follows a link at the name or above it. Root
+        # takes them only in a directory nobody but root can change -- its own temporary output directory, say --
+        # and refuses anywhere else (SYRD-666).
+        from scripts import root_packet
+
+        problem = root_packet.root_controlled(path.parent)
+        if problem:
+            raise SystemExit(
+                f"switchyard: refusing to rewrite {path} as root: it is outside {owner_user or 'the owner'}'s roots, "
+                f"where root writes by descriptor, and its directory is not root's alone ({problem}). Put the file "
+                "in the project's .switchyard directory, or in a directory only root controls, and run again. "
+                "Nothing was changed.")
     before = path.lstat()
     launcher._write_json_atomic(path, payload)
     if os.geteuid() == 0:

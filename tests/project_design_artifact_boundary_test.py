@@ -507,7 +507,8 @@ def test_the_seams_read_through_the_launcher_and_nothing_bound() -> None:
         check(bare == [], f"{name}: none of them read past it: {bare}")
     top = [ast.unparse(n) for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
     tc = [ast.unparse(n) for n in tree.body if isinstance(n, ast.If)]
-    check(top == ["from __future__ import annotations", "from pathlib import Path", "from typing import TYPE_CHECKING, Any, Sequence"]
+    check(top == ["from __future__ import annotations", "import os", "from pathlib import Path",
+                  "from typing import TYPE_CHECKING, Any, Sequence"]
           and tc == ["if TYPE_CHECKING:\n    from scripts.team_launcher import ProjectDesignArtifact"],
           f"the standard library, and the result type under TYPE_CHECKING: {top} {tc}")
     names = [n.name if isinstance(n, ast.FunctionDef) else n.targets[0].id for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef, ast.Assign))]

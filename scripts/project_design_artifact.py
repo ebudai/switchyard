@@ -31,6 +31,7 @@ inside the functions, when they run.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Sequence
 
@@ -235,7 +236,9 @@ def _artifact_capability_grants(raw: Any, *, path: Path) -> dict[str, object]:
 def load_project_design_artifact(path: Path, *, expected_project: str | None = None) -> ProjectDesignArtifact:
     from scripts import team_launcher as launcher
 
-    artifact_path = path.expanduser().resolve(strict=False)
+    # Absolute as named, not resolved: a relative `project.repository` is beneath the artifact as the caller named
+    # it, never wherever a link at or above it points (SYRD-666).
+    artifact_path = Path(os.path.abspath(path.expanduser()))
     raw = launcher._load_json(artifact_path)
     forbidden = launcher._artifact_forbidden_keys(raw)
     if forbidden:

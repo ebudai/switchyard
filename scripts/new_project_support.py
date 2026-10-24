@@ -120,7 +120,18 @@ def _project_dir(home_base: Path, owner_user: str, project_name: str) -> Path:
 
 
 def _resolve_project_path(raw_path: Path | str) -> Path:
-    return Path(os.path.expandvars(str(raw_path))).expanduser().resolve(strict=False)
+    """The project path made absolute as named, never resolved (SYRD-666).
+
+    Resolving it followed a link an existing owner had left at the default
+    path in its home to wherever that pointed, and root then created and
+    trusted that directory by path. As named, a link there stays inside the
+    home, where root's no-follow helper refuses it. A `..` is refused rather
+    than normalised away, since what it names depends on links above it.
+    """
+    path = Path(os.path.expandvars(str(raw_path))).expanduser()
+    if ".." in path.parts:
+        raise SystemExit(f"switchyard: project path {raw_path} contains '..'; name the directory itself")
+    return Path(os.path.abspath(path))
 
 
 def _write_initial_switchyard_project_artifact(

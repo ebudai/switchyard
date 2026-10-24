@@ -269,13 +269,19 @@ def test_owner_and_project_paths() -> None:
         saved = os.environ.get("SYRD375_BASE")
         os.environ["SYRD375_BASE"] = tmp
         try:
-            resolved = judged(m._resolve_project_path, "$SYRD375_BASE/a/../b")
+            resolved = judged(m._resolve_project_path, "$SYRD375_BASE/a/b")
+            dotted = judged(m._resolve_project_path, "$SYRD375_BASE/a/../b")
+            (Path(tmp) / "link").symlink_to(Path(tmp) / "a")
+            linked = judged(m._resolve_project_path, "$SYRD375_BASE/link/b")
         finally:
             if saved is None:
                 os.environ.pop("SYRD375_BASE")
             else:
                 os.environ["SYRD375_BASE"] = saved
-        check(resolved == Path(tmp).resolve() / "b", f"variables expanded and the path resolved, not required to exist: {resolved}")
+        # Named, never resolved, and a '..' refused rather than normalised past a link (SYRD-666).
+        check(resolved == Path(tmp) / "a" / "b", f"variables expanded and the path made absolute, not required to exist: {resolved}")
+        check(linked == Path(tmp) / "link" / "b", f"a link on the way is not followed: {linked}")
+        check(isinstance(dotted, SystemExit) and "contains '..'" in str(dotted), f"a '..' is refused: {dotted!r}")
 
 
 class Artifact:

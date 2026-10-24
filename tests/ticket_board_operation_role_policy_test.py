@@ -93,6 +93,9 @@ def test_server_keeps_identical_aliases_and_no_reverse_import() -> None:
         # question is a comment (the operation then admits only the User).
         "set_uat_instructions": frozenset({"director_edit"}),
         "ask_director": frozenset({"add_comment"}),
+        # SYRD-616: letting a role's command run on, or stopping it, takes the hold's authority.
+        "extend_lease": frozenset({"set_manually_controlled"}),
+        "interrupt_lease": frozenset({"set_manually_controlled"}),
     }
 
 
@@ -117,7 +120,9 @@ def test_default_environment() -> None:
     assert table["force_fresh_context"] == ["director"]
     # SYRD-629: the Director prepares the User's UAT steps; the User asks the Director.
     assert table["set_uat_instructions"] == ["director"] and table["ask_director"] == ["user"]
-    assert len(table) == 49, len(table)  # SYRD-548: set_report_intake; SYRD-598: withdraw_signoff; SYRD-626; SYRD-629
+    # SYRD-616: extending or interrupting a role's execution lease is the Director's.
+    assert table["extend_lease"] == ["director"] and table["interrupt_lease"] == ["director"]
+    assert len(table) == 51, len(table)  # SYRD-548: set_report_intake; SYRD-598: withdraw_signoff; SYRD-626; SYRD-629; SYRD-616: extend_lease, interrupt_lease
 
 
 def test_role_environment_is_read_at_import() -> None:

@@ -969,6 +969,9 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/board-stall":  # SYRD-637: why the stall alert did or did not fire
             self.send_json(extension_operations.board_stall_status(self.app))
             return
+        if parsed.path == "/api/execution-leases":  # SYRD-616
+            self.send_json(extension_operations.execution_lease_status(self.app, urllib.parse.parse_qs(parsed.query)))
+            return
         if parsed.path == "/api/reminder-snoozes":  # SYRD-537
             self.send_json({"batches": extension_operations.reminder_snoozes(self.app)})
             return

@@ -1163,6 +1163,15 @@ class TicketBoardWriteClient:
         payload = {"tickets": list(tickets), "until": until, "reason": reason, "apply": apply}
         return self._post("/actions/snooze_reminders", payload, caller_role=caller_role)
 
+    def extend_lease(self, lease: int, *, minutes: int, reason: str, caller_role: str | None = None) -> dict[str, Any]:
+        """Move a live execution lease's deadline by `minutes`, with a reason (SYRD-616)."""
+        return self._post("/actions/extend_lease", {"lease": lease, "minutes": minutes, "reason": reason},
+                          caller_role=caller_role)
+
+    def interrupt_lease(self, lease: int, *, reason: str, caller_role: str | None = None) -> dict[str, Any]:
+        """Ask for a live execution lease's process group to be interrupted (SYRD-616)."""
+        return self._post("/actions/interrupt_lease", {"lease": lease, "reason": reason}, caller_role=caller_role)
+
     def claim_next(self, *, caller_role: str | None = None) -> dict[str, Any]:
         """Claim this worker's next ready ticket under a pull policy (SYRD-539)."""
         return self._post("/actions/claim_next", {}, caller_role=caller_role)

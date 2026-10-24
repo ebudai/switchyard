@@ -65,6 +65,8 @@ ROLE_STAGED_EXECUTABLES: tuple[str, ...] = (
     # still reach for it, and says once what changed.
     "switchyard-publish-candidate",
     "switchyard-request-publication",
+    # SYRD-616: every role bounds its tests and long commands the board can see.
+    "switchyard-bounded",
     "ticket-board-register-runtime",
     # Root-owned and reached only through this tenant's sudo grant.
     "switchyard-tenant-control",

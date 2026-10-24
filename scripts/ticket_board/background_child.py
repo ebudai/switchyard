@@ -41,8 +41,6 @@ _TICKET_ID = re.compile(r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9]{0,15})-(\d{1,7})(
 _PATH = re.compile(r"""(?<![\w.~-])(/[^\s"';|&()<>`]+)""")
 #: A `pgrep` with `-f` in its options, and its pattern.
 _PGREP_F = re.compile(r"""\bpgrep((?:\s+-[A-Za-z]+)+)\s+(?:--\s+)?(?:"([^"]*)"|'([^']*)'|([^\s;|&)]+))""")
-#: How much of a command line the Director is shown.
-COMMAND_CHARS = 240
 #: What a ticket's holder is called once its ticket is no longer the role's.
 COMPLETED_TICKET_CHILD = "completed_ticket_child"
 
@@ -58,6 +56,8 @@ class Holder:
     pid: int
     #: Epoch seconds; 0.0 when the kernel's start time could not be read.
     started_at: float
+    #: The command line, raw, for judging it here (its ticket, an endless wait). Never written anywhere: what is
+    #: recorded or told is `summary` (SYRD-616).
     command: str = ""
     cwd: str = ""
     #: Started before the runtime's own trusted turn end: a finished turn's.
@@ -65,6 +65,18 @@ class Holder:
     #: Whether the session is its own, apart from the pane's. Only then is its
     #: process group surely not the provider's.
     detached: bool = True
+    #: The raw argv, when read from /proc; the summary is made from it.
+    argv: tuple[str, ...] = ()
+    #: Whether it never ends by itself, as judged on the raw command line -- kept for a holder read back from a
+    #: record, which holds only the summary.
+    endless: bool | None = None
+
+    @property
+    def summary(self) -> str:
+        """What may be recorded of its command line (`execution_lease.sanitize_command`)."""
+        from .execution_lease import sanitize_command
+
+        return sanitize_command(list(self.argv) or self.command.split(), cwd=self.cwd)
 
     @property
     def key(self) -> str:
@@ -87,6 +99,8 @@ class Holder:
         Such a loop always finds itself, so it never ends by itself. A pattern
         written not to match itself (`[s]weep`) is not flagged.
         """
+        if self.endless is not None:
+            return self.endless
         for match in _PGREP_F.finditer(self.command):
             pattern = next((group for group in match.groups()[1:] if group is not None), "")
             if "f" not in match.group(1).replace("-", "") or not pattern or pattern.startswith("$"):
@@ -108,16 +122,19 @@ class Holder:
                 f"`kill -TERM {self.pid}`. Its process group is the pane's own, so never stop the group or the provider{keep}")
 
     def as_detail(self) -> dict[str, Any]:
-        return asdict(self)
+        """The holder as a record keeps it: its summary, never its raw command line (SYRD-616)."""
+        detail = {key: value for key, value in asdict(self).items() if key not in ("argv", "endless")}
+        return detail | {"command": self.summary, "endless": self.self_matching}
 
     @classmethod
     def from_detail(cls, raw: Any) -> "Holder | None":
         if not isinstance(raw, dict):
             return None
         try:
+            endless = raw.get("endless")
             return cls(int(raw["session"]), int(raw["pgid"]), int(raw["pid"]), float(raw["started_at"]),
                        str(raw.get("command") or ""), str(raw.get("cwd") or ""), bool(raw.get("finished_turn")),
-                       bool(raw.get("detached", True)))
+                       bool(raw.get("detached", True)), endless=endless if isinstance(endless, bool) else None)
         except (KeyError, TypeError, ValueError):
             return None
 
@@ -196,9 +213,9 @@ def _process_group(proc_root: Path, pid: int) -> int:
         return 0
 
 
-def _command(proc_root: Path, pid: int) -> str:
+def _argv(proc_root: Path, pid: int) -> tuple[str, ...]:
     raw = _read(proc_root / str(pid) / "cmdline")
-    return " ".join(part.decode("utf-8", errors="replace") for part in raw.split(b"\0") if part)[:COMMAND_CHARS]
+    return tuple(part.decode("utf-8", errors="replace") for part in raw.split(b"\0") if part)
 
 
 def _cwd(proc_root: Path, pid: int) -> str:
@@ -232,8 +249,8 @@ def describe(sample: Any, pids: Iterable[int], finished: Iterable[int], *, proc_
         holders.append(Holder(
             session=session_of.get(root, 0), pgid=_process_group(proc_root, root), pid=root,
             started_at=min((started[pid] for pid in known), default=0.0),
-            command=_command(proc_root, root), cwd=_cwd(proc_root, root),
-            finished_turn=bool(set(members) & finished), detached=kind == "session"))
+            command=" ".join(argv := _argv(proc_root, root)), cwd=_cwd(proc_root, root),
+            finished_turn=bool(set(members) & finished), detached=kind == "session", argv=argv))
     return tuple(holders)
 
 
@@ -257,7 +274,7 @@ def sentence(holder: Holder, origin: dict[str, Any] | None, *, now: float | None
     else:
         whose = "its ticket is not known"
     turn = "left running by a finished turn" if holder.finished_turn else "started since the runtime's last turn ended"
-    command = f": `{holder.command}`" if holder.command else ""
+    command = f": `{holder.summary}`" if holder.summary else ""
     where = f" in {holder.cwd}" if holder.cwd else ""
     endless = (" It waits on a `pgrep -f` whose pattern matches its own command line, so it can never end by itself."
                if holder.self_matching else "")
@@ -265,10 +282,39 @@ def sentence(holder: Holder, origin: dict[str, Any] | None, *, now: float | None
             f"Nothing was stopped. To end it: {stop or holder.recovery(provider_pid)}.")
 
 
+def _lease_tickets(conn: Any, holders: list[Holder]) -> dict[str, str]:
+    """The ticket each holder's execution lease was recorded for (SYRD-616), by holder key; never fatal."""
+    try:
+        if not _one_value(conn.execute("SELECT to_regclass('ticket_board.execution_leases') IS NOT NULL").fetchone()):
+            return {}
+        rows = conn.execute("SELECT child, ticket_id FROM ticket_board.execution_leases WHERE child = ANY(%s::text[]) "
+                            "AND ticket_id IS NOT NULL", ([holder.key for holder in holders],)).fetchall()
+    except Exception:  # an older board, or a connection that cannot answer: the worktree still can
+        return {}
+    found = {}
+    for row in rows:
+        values = [row["child"], row["ticket_id"]] if isinstance(row, dict) else list(row)[:2]
+        child, ticket = (value.decode() if isinstance(value, bytes) else str(value) for value in values)
+        found[child] = ticket
+    return found
+
+
+def _one_value(row: Any) -> bool:
+    value = (next(iter(row.values())) if isinstance(row, dict) else row[0]) if row else False
+    return value is True or value in ("t", b"t", 1)
+
+
 def origins(conn: Any, holders: Iterable[Holder]) -> dict[str, dict[str, Any]]:
-    """The board's record of each ticket the holders name, by holder key; holders naming none are absent."""
+    """The board's record of each ticket the holders were started for, by holder key; holders with none are absent.
+
+    A holder's execution lease names the ticket that was its role's active work
+    when it was recorded (SYRD-616), and that comes first; a worktree it runs
+    in or names, second.
+    """
     holders = list(holders)
-    wanted = sorted({ticket for holder in holders for ticket in holder.candidate_tickets()})
+    leased = _lease_tickets(conn, holders)
+    wanted = sorted({ticket for holder in holders
+                     for ticket in ([leased[holder.key]] if holder.key in leased else holder.candidate_tickets())})
     if not wanted:
         return {}
     rows = conn.execute("SELECT id, state, assignee FROM ticket_board.tickets WHERE id = ANY(%s::text[])",
@@ -280,8 +326,9 @@ def origins(conn: Any, holders: Iterable[Holder]) -> dict[str, dict[str, Any]]:
         known[ticket] = {"id": ticket, "state": state, "assignee": assignee}
     found: dict[str, dict[str, Any]] = {}
     for holder in holders:
-        ticket = next((ticket for ticket in holder.candidate_tickets() if ticket in known), "")
-        if ticket:
+        ticket = leased.get(holder.key) if holder.key in leased else next(
+            (ticket for ticket in holder.candidate_tickets() if ticket in known), "")
+        if ticket in known:
             found[holder.key] = known[ticket]
     return found
 

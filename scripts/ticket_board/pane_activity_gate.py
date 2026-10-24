@@ -895,6 +895,17 @@ class PaneActivityGate:
         # descendant of the pane shell and holds nothing, so it is not part of
         # this and an ordinary idle pane keeps reporting `hook_idle`.
         holding = second.detached | arrived
+        # A finished turn's session that neither advances nor has started anything since the turn ended would hold
+        # nothing on its own -- a provider's idle daemon, a parked VM -- so it is no holder of a hold something else
+        # makes: kept, it was a holder no ticket names, and no lease could lapse past it (SYRD-616).
+        session_of, started_at = dict(second.sessions), dict(second.starts)
+        moving = {session_of.get(pid) for pid in advancing} | {
+            session_of.get(pid) for pid in second.pids if started_at.get(pid, 0.0) > (trusted_idle_at or float("inf"))}
+        idle_leftovers = frozenset(pid for pid in prior_turn & second.detached if session_of.get(pid) not in moving)
+
+        def hold(pids: frozenset[int], reason: str):
+            return self._holding(target, second, pids - idle_leftovers, prior_turn, reason)
+
         if advanced:
             # Progress settles it before anything else does. A build or a sweep
             # the previous turn started and that is still running is real work,
@@ -909,15 +920,15 @@ class PaneActivityGate:
             # anything is the listener's, not this probe's -- a probe cannot
             # know how long a build should be allowed to run.
             if advancing and advancing <= prior_turn:
-                return self._holding(target, second, advancing | holding, prior_turn, listener.PRIOR_TURN_CHILD_WORK)
-            return self._holding(target, second, advancing | holding, prior_turn, "pane_child_work")
+                return hold(advancing | holding, listener.PRIOR_TURN_CHILD_WORK)
+            return hold(advancing | holding, "pane_child_work")
         if holding and holding <= prior_turn:
             if any(started > (trusted_idle_at or 0) for pid, started in second.starts if pid in holding):
                 # A finished turn's session that has started processes since the
                 # turn ended -- a poll loop's latest `sleep` -- is still cycling:
                 # held as work, but named as a finished turn's, so the listener's
                 # bound and the ticket lease apply to it (SYRD-583).
-                return self._holding(target, second, holding, prior_turn, listener.PRIOR_TURN_CHILD_WORK)
+                return hold(holding, listener.PRIOR_TURN_CHILD_WORK)
             # Everything that would have held this pane predates the turn's own
             # idle hook, and none of it is progressing. Said out loud, with a
             # reason of its own, so it can never be read as this turn's work.
@@ -927,14 +938,14 @@ class PaneActivityGate:
             # gives it a new session; the runtime and the helpers it keeps stay
             # in the pane's. This needs no history, so it is the signal that
             # survives a listener restart in the middle of a turn's work.
-            return self._holding(target, second, holding, prior_turn, "pane_child_work")
+            return hold(holding, "pane_child_work")
         if appeared:
-            return self._holding(target, second, holding, prior_turn, "pane_child_work")
+            return hold(holding, "pane_child_work")
         if arrived:
             # A child this turn started, sitting on a fetch, a lock or a long
             # build, using no CPU and printing nothing. It is work until it
             # leaves: a wait has no length at which it stops being a wait.
-            return self._holding(target, second, holding, prior_turn, "pane_child_work")
+            return hold(holding, "pane_child_work")
         return None
 
     def _holding(self, target: str, sample: ChildWorkSample, pids: frozenset[int],

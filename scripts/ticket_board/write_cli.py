@@ -536,6 +536,15 @@ def _build_parser() -> argparse.ArgumentParser:
     snooze.add_argument("--until", required=True, help="deadline, ISO 8601 with an offset, e.g. 2026-10-03T07:00:00-04:00")
     add_free_text_argument(snooze, "--reason", required=True, help="why these reminders can wait")
     snooze.add_argument("--apply", action="store_true", help="create the snooze; without it nothing is written")
+    extend_lease = subparsers.add_parser(
+        "extend-lease", help="move a live execution lease's deadline by 1 to 240 minutes, with a reason (SYRD-616)")
+    extend_lease.add_argument("lease", type=int, help="the lease number, from ticket-board-read leases")
+    extend_lease.add_argument("--minutes", type=int, required=True, help="how much longer it may run")
+    add_free_text_argument(extend_lease, "--reason", required=True, help="why it may run on")
+    interrupt_lease = subparsers.add_parser(
+        "interrupt-lease", help="interrupt only a live execution lease's process group, with a reason (SYRD-616)")
+    interrupt_lease.add_argument("lease", type=int, help="the lease number, from ticket-board-read leases")
+    add_free_text_argument(interrupt_lease, "--reason", required=True, help="why it is stopped; the role is told")
     subparsers.add_parser(
         "claim-next",
         help="under a pull policy, claim your own next ready ticket; held work is returned instead (SYRD-539)",
@@ -853,6 +862,10 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif command == "claim_next":
             response = client.claim_next()
+        elif command == "extend_lease":
+            response = client.extend_lease(args.lease, minutes=args.minutes, reason=args.reason)
+        elif command == "interrupt_lease":
+            response = client.interrupt_lease(args.lease, reason=args.reason)
         elif command == "snooze_reminders":
             response = client.snooze_reminders(args.tickets, until=args.until, reason=args.reason, apply=args.apply)
         elif command == "clear_reminder_snooze":
@@ -936,7 +949,7 @@ def main(argv: list[str] | None = None) -> int:
     if command in {"merge", "dismiss_notification", "verify_caller", "add_user_acceptance_relay",
                    "snooze_reminders", "clear_reminder_snooze", "claim_next", "approve_size_exception",
                    "enable_size_review", "measure_size", "set_report_intake", "force_fresh_context",
-                   "uat_instructions"}:
+                   "uat_instructions", "extend_lease", "interrupt_lease"}:
         print(json.dumps(response))
     else:
         print(json.dumps(_ticket_from_response(response)))

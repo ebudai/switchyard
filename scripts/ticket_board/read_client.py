@@ -399,6 +399,10 @@ def _build_parser() -> argparse.ArgumentParser:
     director.add_argument("--json", action="store_true", help="print director queue JSON")
     mine = subparsers.add_parser("mine", help="alias for director")
     mine.add_argument("--json", action="store_true", help="print director queue JSON")
+    leases = subparsers.add_parser("leases", help="show long commands under roles' panes and their deadlines (SYRD-616)")
+    leases.add_argument("--role", default="", help="only this role's")
+    leases.add_argument("--all", action="store_true", help="include ended leases the board still keeps")
+    leases.add_argument("--json", action="store_true", help="print JSON")
     stall = subparsers.add_parser("stall", help="show why the board stall alert has or has not fired (SYRD-637)")
     stall.add_argument("--json", action="store_true", help="print the stall state JSON")
 
@@ -455,6 +459,15 @@ def main(argv: list[str] | None = None) -> int:
         elif command in {"director", "mine"}:
             payload = director_payload(client.get_board())
             print_json(payload) if command_wants_json(args) else print(format_director(payload))
+        elif command == "leases":
+            import urllib.parse
+
+            from .execution_lease_ops import describe as describe_leases
+
+            query = urllib.parse.urlencode({key: value for key, value in (("role", args.role), ("all", "1" if args.all else ""))
+                                            if value})
+            payload = client._get_json(client.root_url + "/api/execution-leases" + (f"?{query}" if query else ""))
+            print_json(payload) if command_wants_json(args) else print(describe_leases(payload))
         elif command == "stall":
             from .board_stall import describe
 

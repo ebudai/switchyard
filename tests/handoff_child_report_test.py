@@ -649,14 +649,14 @@ def candidate(after: dict) -> None:
     pid = after["children"]["vm_a"]
     check(vm.startswith("app was handed PGU-641 with background work still running in its pane from earlier work: ")
           and f"pid {pid} (process group {pid}), running for " in vm and "its ticket is not known" in vm
-          and "PGU-248" not in vm and "`bash -c ./resume-vm.sh pgu627 8 16384 > pgu627.qemu.log" in vm and "pgu-248-vm" in vm
+          and "PGU-248" not in vm and "`bash -c [redacted]`" in vm and "pgu-248-vm" in vm
           and "Nothing was stopped." in vm and f"run `sh -c 'g={pid};" in vm and "never the provider" in vm,
           f"a VM's report: pid, group, age, command, directory, no guessed ticket, nothing stopped, the checked stop: {vm}")
     sweep = per["sweep"][0] if per["sweep"] else ""
-    check("started for PGU-627, which is now done (unassigned)" in sweep and "exit 0 # sweep" in sweep,
+    check("started for PGU-627, which is now done (unassigned)" in sweep and "`bash -c [redacted]`" in sweep,
           f"the sweep from PGU-627's worktree names PGU-627: {sweep}")
     overdue = per["overdue"][0] if per["overdue"] else ""
-    check("timeout -s CONT 2" in overdue, f"a run past its own timeout is no longer bounded work: {overdue}")
+    check("`timeout -s [redacted] [redacted] " in overdue, f"a run past its own timeout is no longer bounded work: {overdue}")
     check(all(handoff["alive"].values()) and handoff["providers_alive"],
           f"nothing is stopped, the providers least of all: {handoff['alive']}")
     check(sorted(row[2] for row in handoff["records"]) == ["PGU-641"] * 4

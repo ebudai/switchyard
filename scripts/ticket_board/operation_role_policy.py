@@ -75,6 +75,9 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
     # SYRD-537: deferring optional reminders is less than holding the ticket.
     "snooze_reminders": {"director"},
     "clear_reminder_snooze": {"director"},
+    # SYRD-616: moving a role's command's deadline, or stopping it, is the Director's.
+    "extend_lease": {"director"},
+    "interrupt_lease": {"director"},
     "set_report_intake": {"director"},
     # SYRD-541: the integrator's bounded size decisions.
     "approve_size_exception": {"director"},
@@ -127,6 +130,10 @@ COMPOSED_OPERATION_CAPABILITIES = {
     # set_manually_controlled itself (SYRD-537).
     "snooze_reminders": frozenset({"set_manually_controlled"}),
     "clear_reminder_snooze": frozenset({"set_manually_controlled"}),
+    # Deciding a role's command may run on, or must stop, is the same hold over
+    # its work; the database checks set_manually_controlled itself (SYRD-616).
+    "extend_lease": frozenset({"set_manually_controlled"}),
+    "interrupt_lease": frozenset({"set_manually_controlled"}),
     # Approving growth into main, or turning the review on, is the integrator's
     # decision: the capability that closes reviewed work into main (SYRD-541).
     "approve_size_exception": frozenset({"merge"}),

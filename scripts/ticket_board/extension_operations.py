@@ -8,12 +8,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import (context_continuation, documentation_candidate, pull_queue, reminder_snooze, report_intake, router_role,
-               size_review, uat_instructions, ui_delegation)
+from . import (context_continuation, documentation_candidate, execution_lease_ops, pull_queue, reminder_snooze,
+               report_intake, router_role, size_review, uat_instructions, ui_delegation)
 
 OPERATIONS = (reminder_snooze.OPERATIONS | size_review.OPERATIONS | report_intake.OPERATIONS
               | router_role.OPERATIONS | ui_delegation.OPERATIONS | context_continuation.OPERATIONS
-              | uat_instructions.OPERATIONS)
+              | uat_instructions.OPERATIONS | execution_lease_ops.OPERATIONS)
 
 
 def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: str,
@@ -32,6 +32,8 @@ def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: s
         return context_continuation.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
     if operation in uat_instructions.OPERATIONS:  # SYRD-629
         return uat_instructions.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
+    if operation in execution_lease_ops.OPERATIONS:  # SYRD-616
+        return execution_lease_ops.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
     if operation in ui_delegation.OPERATIONS:  # SYRD-598
         return ui_delegation.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
     return size_review.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
@@ -101,6 +103,12 @@ def context_recovery(app: Any, role: str) -> dict[str, Any]:
 
 def reminder_snoozes(app: Any) -> list[dict[str, Any]]:
     return reminder_snooze.batches(app)
+
+
+def execution_lease_status(app: Any, query: dict[str, list[str]]) -> dict[str, Any]:
+    """SYRD-616: GET /api/execution-leases[?role=R&all=1], read-only."""
+    return execution_lease_ops.status(app, role=(query.get("role") or [""])[0],
+                                      include_ended=(query.get("all") or [""])[0] in ("1", "true"))
 
 
 def board_stall_status(app: Any) -> dict[str, Any]:

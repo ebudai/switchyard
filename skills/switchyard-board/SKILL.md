@@ -232,6 +232,17 @@ background command an end, and finish it before you move the ticket on.
   One ran for eighteen hours and held the next ticket back the whole time.
 - **Always set a deadline, and stop only what you started when it passes.**
   Check that it really stopped.
+- **Run tests, mutation plans and comparisons through `switchyard-bounded`.**
+  `switchyard-bounded --deadline 20m -- <command>` stops the command's own
+  process group at the deadline (SIGINT, then SIGTERM, then SIGKILL) and exits
+  124, never 0; `--run NAME --total 45m` gives a run of commands one shared
+  budget. A command that may legitimately run longer than 15 minutes and must
+  not be stopped declares it: `--expect 2h`.
+- **The Director hears of a long command, not you.** Any command under your
+  pane still running after 15 minutes, or past the budget it declared, is
+  reported to the director once, with your ticket, its pid and how to inspect,
+  extend or interrupt it. Nothing is stopped for you. If the director
+  interrupts it, you are told who and why; take that as a failed run.
 - **Shut down VMs and long-lived services before you submit the ticket that
   started them.** A VM, a database or a server started for a comparison has no
   deadline of its own. Stop it cleanly once its results are in (a VM's own

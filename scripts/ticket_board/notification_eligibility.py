@@ -407,9 +407,12 @@ WHERE id = %s
         # A pull policy's idle-capacity alert is about the ready queue and is
         # for the Director: current while its ticket still waits there, which
         # the state and assignee checks above already establish (SYRD-539).
-        if kind in {"pull_idle_capacity", "ticket_context", "delivery_proof", "background_hold",
-                    "composer_hold", "background_child", "blocked_pane", "uat_question"}:  # SYRD-539, 540, 565, 557, 570, 583, 633, 629
+        if kind in {"pull_idle_capacity", "ticket_context", "delivery_proof", "background_hold", "composer_hold",
+                    "background_child", "blocked_pane", "uat_question", "execution_lease"}:  # SYRD-539, 540, 565, 557, 570, 583, 633, 629, 616
             return target_role == "director"
+        # SYRD-616: a role is told its own command was interrupted, whatever its ticket has done since.
+        if kind == "execution_lease_interrupted":
+            return target_role != "director"
         # SYRD-637: the board stall digest is the Director's, and only while its episode is still open.
         if kind == board_stall.NOTICE_KIND:
             return target_role == "director" and board_stall.notice_is_current(conn, payload)

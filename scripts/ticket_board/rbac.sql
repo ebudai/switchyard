@@ -437,4 +437,30 @@ GRANT EXECUTE ON FUNCTION ticket_board.board_stall_status(timestamptz) TO ticket
 REVOKE ALL ON FUNCTION ticket_board.note_handoff_child(text, text, text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION ticket_board.note_handoff_child(text, text, text, text) TO ticket_board_listener;
 
+-- SYRD-616: execution leases: the listener records and alerts; the Director extends and interrupts.
+REVOKE ALL ON ticket_board.execution_leases FROM PUBLIC;
+REVOKE ALL ON SEQUENCE ticket_board.execution_leases_id_seq FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.observe_execution_lease(text, text, integer, integer, bigint, timestamptz, text, text,
+    timestamptz, timestamptz, text, boolean, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.observe_execution_lease_again(ticket_board.execution_leases, timestamptz,
+    timestamptz, text, boolean, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.clear_execution_lease_alert(bigint, text, boolean) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.note_execution_lease_turn(bigint, timestamptz) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.note_execution_lease_alert(bigint, text, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.end_execution_lease(bigint, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.extend_execution_lease(bigint, integer, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.request_execution_lease_interrupt(bigint, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.record_execution_lease_interrupt(bigint, text, text, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.prune_execution_leases() FROM PUBLIC;
+GRANT SELECT ON ticket_board.execution_leases TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.observe_execution_lease(text, text, integer, integer, bigint, timestamptz, text,
+    text, timestamptz, timestamptz, text, boolean, jsonb) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.note_execution_lease_turn(bigint, timestamptz) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.note_execution_lease_alert(bigint, text, text, text) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.end_execution_lease(bigint, text, text) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.record_execution_lease_interrupt(bigint, text, text, text, text) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.prune_execution_leases() TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.extend_execution_lease(bigint, integer, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.request_execution_lease_interrupt(bigint, text) TO ticket_board_service;
+
 COMMIT;

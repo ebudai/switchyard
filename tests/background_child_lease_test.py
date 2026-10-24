@@ -620,7 +620,9 @@ def candidate(after: dict) -> None:
           and len(escalated[0][1]) == 1
           and escalated[0][1][0]["ticket"] == {"id": "PGU-579", "state": "done", "assignee": "app"}
           and escalated[0][1][0]["finished_turn"] is True and escalated[0][1][0]["cwd"].endswith("/node-18-scratch")
-          and "pgu-579-app" in escalated[0][1][0]["command"],
+          # What is recorded of its command is a summary (SYRD-616); its ticket and its endless wait were read off the
+          # raw command line, which is never kept.
+          and escalated[0][1][0]["command"] == "bash -c [redacted]" and escalated[0][1][0]["endless"] is True,
           f"both deliveries are recorded against the child they went past, and the ticket its command names: {escalated}")
     told = [m for m in three["director"] if "went out past background work" in m]
     holder = escalated[0][1][0] if escalated else {}
@@ -675,7 +677,7 @@ def candidate(after: dict) -> None:
     build_told = [m for m in lapsed["told"] if "started for PGU-590, which is now in_progress (assigned to main)" in m]
     check(lapsed["held"] == [] and len(lapsed["sent"]) == 1 and [e[0] for e in lapsed["escalations"]] == ["completed_ticket_child"]
           and len(lapsed["told"]) == 2 and len(waiter_told) == len(build_told) == 1 and "can never end by itself" in waiter_told[0]
-          and "while :; do :; done" in build_told[0] and "can never end by itself" not in build_told[0]
+          and "`bash -c [redacted]`" in build_told[0] and "can never end by itself" not in build_told[0]
           and lapsed["build_alive"] and lapsed["lapsed_alive"],
           f"once PGU-590 is main's, its build -- known only by its directory -- lets PGU-595 go at once; each child named once: {lapsed}")
     check([row[2] for row in after["background_child_alerts"]] == ["PGU-579", "PGU-590", "PGU-595", "PGU-595"],

@@ -45,6 +45,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tarfile
@@ -295,10 +296,20 @@ def scenario(root: Path, prefix: str) -> dict:
 
         migration = root / "scripts/ticket_board/migrations/pgu1009_syrd619_recorded_dependency_answers_turn.sql"
         if migration.exists():
+            # An upgrade runs every later migration after it too: one that replaces a function this one defines
+            # is run again after it, so the board ends as an upgraded one does (SYRD-675).
+            defined = set(re.findall(r"FUNCTION (ticket_board\.\w+)\(", migration.read_text()))
+            later = sorted((m for m in migration.parent.glob("pgu*.sql")
+                            if int(re.match(r"pgu(\d+)", m.name).group(1)) > 1009
+                            and defined & set(re.findall(r"FUNCTION (ticket_board\.\w+)\(", m.read_text()))),
+                           key=lambda m: int(re.match(r"pgu(\d+)", m.name).group(1)))
+
             def upgrade(ticket: str) -> None:
                 """The migration as an upgrade runs it over a board whose wait predates the column."""
                 sql(f"UPDATE ticket_board.ticket_notification_state SET wait_recorded_at = NULL WHERE ticket_id = '{ticket}';")
                 fixture.psql(admin, migration.read_text())
+                for tail in later:
+                    fixture.psql(admin, tail.read_text())
 
             # app takes one ticket at a time (serial focus); H's is finished with.
             act("PGU-610", "cancel", "director")

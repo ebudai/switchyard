@@ -306,10 +306,14 @@ REVOKE ALL ON ticket_board.role_stall_episodes FROM PUBLIC;
 GRANT SELECT ON ticket_board.role_stall_episodes TO ticket_board_service;
 REVOKE EXECUTE ON FUNCTION ticket_board.close_role_stall(bigint, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION ticket_board.role_generation_at(text, timestamptz) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION ticket_board.note_role_stall(jsonb, integer, interval, timestamptz) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.note_role_stall(jsonb, integer, interval, timestamptz, interval) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION ticket_board.role_stall_notice_is_current(text, text, jsonb) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION ticket_board.note_role_stall(jsonb, integer, interval, timestamptz) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.note_role_stall(jsonb, integer, interval, timestamptz, interval) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.role_stall_notice_is_current(text, text, jsonb) TO ticket_board_listener;
+-- SYRD-675: the listener names why a stall escalation it drops no longer holds; the clock is read inside.
+REVOKE EXECUTE ON FUNCTION ticket_board.role_progress_at(text, text, timestamptz) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.role_stall_escalation_stale_reason(jsonb, timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ticket_board.role_stall_escalation_stale_reason(jsonb, timestamptz) TO ticket_board_listener;
 
 -- SYRD-599: Router's two operations, its read, and the predicate the stage and
 -- notification helpers the service calls directly now ask.

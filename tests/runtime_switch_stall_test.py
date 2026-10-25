@@ -44,6 +44,8 @@ WORKER = "pgu-main:0.0"
 DIRECTOR = "pgu-director:0.0"
 #: Production's idle grace (45 s) and unresolved-turn grace (600 s), a thirtieth of each.
 GRACE, UNRESOLVED = 1.5, 20
+#: The board's stall threshold (1800 s), a thirtieth: how long a busy pane may go without progress (SYRD-675).
+BUSY = 60
 ATTEMPTS = 3
 CHECKS = 0
 
@@ -254,7 +256,7 @@ def scenario(root: Path) -> dict:
 
         # 2. The provider takes the work and its hook says busy from then on, nothing moving on screen.
         start("PGU-961", "Work whose provider stopped mid-turn", "stuck")
-        run_for(UNRESOLVED + 8.0)
+        run_for(BUSY + 8.0)
         seen["stuck"] = {"told": told("PGU-961"), "episodes": episodes("PGU-961"), "trace": json.loads(sql(
             "SELECT coalesce(json_agg(json_build_array(target_role, kind, event, coalesce(busy_reason, '')) ORDER BY id), "
             "'[]')::text FROM ticket_board.notification_trace WHERE ticket_id = 'PGU-961' AND event <> 'gate_defer';"))[:12]}
@@ -511,7 +513,7 @@ def function_cases(fixture, admin, base, sql, nl, psycopg, listener_url, registe
         fixture.post_json(base, "/api/tickets/PGU-974/actions/force_move", {"state": "done", "assignee": "unassigned"},
                           caller="director")
     # Who may run it, and a board built from schema.sql alone installs the same.
-    functions = ("note_role_stall(jsonb, integer, interval, timestamp with time zone)",
+    functions = ("note_role_stall(jsonb, integer, interval, timestamp with time zone, interval)",
                  "role_stall_notice_is_current(text, text, jsonb)", "close_role_stall(bigint, text)",
                  "role_generation_at(text, timestamp with time zone)", "redeliver_replaced_work(jsonb, timestamp with time zone)")
     try:
@@ -547,7 +549,7 @@ def schema_parity(root: Path) -> dict:
     from assigned_implementation_queue_test import build_board
     from temporary_cluster import temporary_cluster
 
-    functions = ("note_role_stall(jsonb, integer, interval, timestamp with time zone)",
+    functions = ("note_role_stall(jsonb, integer, interval, timestamp with time zone, interval)",
                  "role_stall_notice_is_current(text, text, jsonb)", "close_role_stall(bigint, text)",
                  "role_generation_at(text, timestamp with time zone)", "redeliver_replaced_work(jsonb, timestamp with time zone)")
     digest = (" || ".join(f"md5(pg_get_functiondef('ticket_board.{f}'::regprocedure))" for f in functions)
@@ -647,6 +649,7 @@ def main() -> int:
     for key in [k for k in os.environ if k.startswith(PANE_ENV_PREFIXES)]:
         os.environ.pop(key)
     os.environ["TICKET_BOARD_STALL_MAX_ATTEMPTS"] = str(ATTEMPTS)
+    os.environ["TICKET_BOARD_BOARD_STALL_SECONDS"] = str(BUSY)  # the listener's board stall pass records it
     if len(sys.argv) == 3 and sys.argv[1] == "--scenario":
         print(json.dumps(scenario(Path(sys.argv[2])), default=str))
         return 0
@@ -713,13 +716,14 @@ def main() -> int:
                                                                            "attempts_exhausted"],
           f"one episode, its phases recorded: owner, Director, owner again on the new runtime, Director: {a['episodes']}")
 
-    # 2. A hook left busy: main tells nobody; here the Director once, after the grace.
+    # 2. A hook left busy: main tells nobody; here the Director once, after the board's stall threshold.
     check(director(before["stuck"]["told"]) == [] and len(role(before["stuck"]["told"])) == 1,
           f"main: the stuck provider is handed the work and nobody hears anything again: {before['stuck']}")
     stuck = after["stuck"]["told"]
     check(len(role(stuck)) == 1 and len(director(stuck)) == 1 and "busy since" in director(stuck)[0][3]
-          and director(stuck)[0][0] >= UNRESOLVED,
-          f"here: the Director is told once, after the grace, that the pane has said busy since: {stuck}")
+          and director(stuck)[0][0] >= BUSY,
+          f"here: the Director is told once, after the board's stall threshold, that the pane has said busy since: "
+          f"{stuck}")
     check([e["closed"] for e in after["stuck"]["after_done"]] == ["moved"],
           f"its episode closes when the ticket moves on: {after['stuck']['after_done']}")
 

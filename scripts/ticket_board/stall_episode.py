@@ -16,9 +16,9 @@ or a replaced runtime cannot fan one episode out to both recipients:
 * **Escalated.** After `max_attempts()` prompts reached the pane and the turn
   after the last one ended unresolved too (or never came within the grace), or
   once the pane has said busy since it took the work with nothing moving on
-  screen past the grace: one message to the Director -- role, ticket, runtime
-  generation, what the pane shows, and the attempts -- and no automatic prompt
-  to the owner after it.
+  screen, and no progress for the board's stall threshold (SYRD-675): one
+  message to the Director -- role, ticket, runtime generation, what the pane
+  shows, and the attempts -- and no automatic prompt to the owner after it.
 * **Handed back.** A Director comment on the ticket starts a new `role` phase.
 * **Closed** when the ticket moves or changes hands, or its owner writes on
   it; or, opened on a prompt that then never went, as withdrawn. A prompt left
@@ -28,6 +28,10 @@ or a replaced runtime cannot fan one episode out to both recipients:
 
 Delivery asks the board too (`notice_is_current`), so what the phase does not
 allow is never typed: never the owner and the Director about one stall at once.
+An escalation carries the progress clock it saw (`ticket_board.role_progress_at`);
+delivery adds the owner's hook as it is now, and drops it once anything since
+says the work moved -- progress, a bounded child, a replaced runtime, the hook --
+naming why (`stale_reason`) in the drop's trace (SYRD-675).
 """
 
 from __future__ import annotations
@@ -37,6 +41,8 @@ import os
 import subprocess
 from datetime import datetime, timezone
 from typing import Any
+
+from . import board_stall
 
 DEFAULT_MAX_ATTEMPTS = 3
 MAX_ATTEMPTS_ENV = "TICKET_BOARD_STALL_MAX_ATTEMPTS"
@@ -113,14 +119,42 @@ def report(gate: Any, grace_seconds: float, watched: set[str]) -> dict[str, dict
     return seen
 
 
+def owner_hook(gate: Any, role: str) -> dict | None:
+    """The role's own turn as its hook says it now, in the report's form; None when it cannot be read."""
+    target = gate.role_targets.get(role)
+    try:
+        state = gate.state_store.read(target) if target else None
+    except OSError:
+        return None
+    if state is None:
+        return None
+    return {"state": state.state, "updated_at": _iso(state.updated_at), "turn_started_at": _iso(state.turn_started_at)}
+
+
+def _with_owner_hook(holder: Any, payload: str) -> str:
+    """A stall escalation asked about at delivery, with its owner's hook as it is now (SYRD-675)."""
+    read = getattr(holder, "stall_owner_hook", None)
+    try:
+        parsed = json.loads(payload)
+    except ValueError:
+        return payload
+    if not callable(read) or not isinstance(parsed, dict) or parsed.get("kind") != "stall_escalation":
+        return payload
+    hook = read(str(parsed.get("role") or ""))
+    return payload if hook is None else json.dumps({**parsed, "owner_hook": hook}, ensure_ascii=False)
+
+
 def _present(holder: Any, conn: Any) -> bool:
     """Whether this board has the episodes yet: a listener can be newer than its board's migrations."""
     present = getattr(holder, "_role_stall_present", None)
     if present is None:
         row = conn.execute("SELECT to_regprocedure('ticket_board.note_role_stall(jsonb, integer, interval, "
-                           "timestamptz)') IS NOT NULL AS present").fetchone()
-        present = bool(row and (row["present"] if isinstance(row, dict) else row[0]))
+                           "timestamptz, interval)') IS NOT NULL AS threshold, to_regprocedure('ticket_board."
+                           "note_role_stall(jsonb, integer, interval, timestamptz)') IS NOT NULL AS plain").fetchone()
+        takes = bool(row and (row["threshold"] if isinstance(row, dict) else row[0]))
+        present = takes or bool(row and (row["plain"] if isinstance(row, dict) else row[1]))
         holder._role_stall_present = present
+        holder._role_stall_takes_threshold = takes
     return present
 
 
@@ -143,14 +177,25 @@ def run(listener: Any, conn: Any) -> int:
             return 0
         watched = {_text(_first(row)) for row in conn.execute(
             "SELECT owner_role FROM ticket_board.role_stall_episodes WHERE closed_at IS NULL").fetchall()}
+        # Delivery asks about an escalation with its owner's hook as it is then: the gate reads it (SYRD-675).
+        eligibility = getattr(listener, "eligibility", None)
+        if eligibility is not None:
+            eligibility.stall_owner_hook = lambda role: owner_hook(gate, role)
         grace = float(listener.unresolved_turn_grace_seconds)
         roles = report(gate, grace, watched)
         if not roles:
             return 0
-        queued = int(_first(conn.execute(
-            "SELECT ticket_board.note_role_stall(%s::jsonb, %s, %s::interval)",
-            # Raw text, not \u escapes: a board whose database is SQL_ASCII cannot translate those.
-            (json.dumps(roles, sort_keys=True, ensure_ascii=False), max_attempts(), f"{grace} seconds")).fetchone()) or 0)
+        # Raw text, not \u escapes: a board whose database is SQL_ASCII cannot translate those.
+        args = (json.dumps(roles, sort_keys=True, ensure_ascii=False), max_attempts(), f"{grace} seconds")
+        if getattr(listener, "_role_stall_takes_threshold", False):
+            # The stall threshold this listener is configured with, authoritative from its first pass: the board
+            # stall pass that records it runs after this one (SYRD-675).
+            queued = int(_first(conn.execute(
+                "SELECT ticket_board.note_role_stall(%s::jsonb, %s, %s::interval, clock_timestamp(), %s::interval)",
+                (*args, f"{board_stall.threshold_seconds()} seconds")).fetchone()) or 0)
+        else:
+            queued = int(_first(conn.execute("SELECT ticket_board.note_role_stall(%s::jsonb, %s, %s::interval)",
+                                             args).fetchone()) or 0)
     except Exception as exc:  # logged; the notices this pass delivers matter more
         listener.logger.warning("Role stall pass failed: %s", exc)
         return 0
@@ -164,5 +209,24 @@ def notice_is_current(holder: Any, conn: Any, ticket_id: str, target_role: str, 
     if not _present(holder, conn):
         return True
     row = conn.execute("SELECT ticket_board.role_stall_notice_is_current(%s, %s, %s::jsonb) AS current",
-                       (ticket_id, target_role, payload)).fetchone()
+                       (ticket_id, target_role, _with_owner_hook(holder, payload))).fetchone()
     return row is not None and bool(_first(row))
+
+
+def stale_reason(holder: Any, conn: Any, payload: str) -> str | None:
+    """Why a stall escalation dropped at delivery no longer held: stable trace text, or None (SYRD-675)."""
+    if not _present(holder, conn) or not _present_reason(holder, conn):
+        return None
+    row = conn.execute("SELECT ticket_board.role_stall_escalation_stale_reason(%s::jsonb) AS reason",
+                       (_with_owner_hook(holder, payload),)).fetchone()
+    reason = _first(row)
+    return None if reason is None else _text(reason)
+
+
+def _present_reason(holder: Any, conn: Any) -> bool:
+    present = getattr(holder, "_stall_reason_present", None)
+    if present is None:
+        present = bool(_first(conn.execute("SELECT to_regprocedure('ticket_board.role_stall_escalation_stale_reason("
+                                           "jsonb, timestamptz)') IS NOT NULL").fetchone()))
+        holder._stall_reason_present = present
+    return present

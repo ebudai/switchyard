@@ -235,9 +235,12 @@ WHERE q.id = %s AND q.ticket_id = %s
         self.logger.info("Dropping stale notification %s for %s%s: %s", notification_id, ticket_id,
                          f" at {phase}" if phase else "", payload)
         safe = self.ledger.safe_json_payload(payload)
+        # SYRD-675: a stall escalation's drop names what has happened since it was queued.
+        premise = stall_episode.stale_reason(self, conn, payload) if kind == "stall_escalation" else None
         self.ledger.trace(conn, notification_id=notification_id, ticket_id=ticket_id, target_role=target_role,
                           kind=kind, event="drop", busy_reason="stale_notification",
-                          detail={"payload": safe, **({"phase": phase} if phase else {})})
+                          detail={"payload": safe, **({"phase": phase} if phase else {}),
+                                  **({"stall_premise": premise} if premise else {})})
         self.ledger.trace(conn, notification_id=notification_id, ticket_id=ticket_id, target_role=target_role,
                           kind=kind, event="listener_ack",
                           detail={"reason": "stale_notification", **({"phase": phase} if phase else {})})

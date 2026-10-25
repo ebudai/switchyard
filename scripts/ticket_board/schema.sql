@@ -16381,6 +16381,79 @@ RETURNS bigint LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ticket_boa
     LIMIT 1;
 $$;
 
+-- The one progress clock for a role's work on a ticket: when anything last showed that work moving (SYRD-675).
+-- Durable progress is the board stall alert's own record (board_progress_events: a stage, an assignee, a
+-- candidate, a blocker, a dependency, a delivered hand-over, a checkpoint by the owner), with the round's
+-- assignment, the owner's own comments on any board, a hand-over delivered to the owner, and the owner's runtime
+-- registering (a recovery or a replacement). A bounded child the owner runs for the ticket (SYRD-616's execution
+-- leases) counts while it is seen running, and only up to its deadline: one that never ends cannot hold an alert
+-- off for ever. Nothing later than p_now counts. PL/pgSQL: schema.sql defines it before the tables it reads.
+CREATE OR REPLACE FUNCTION ticket_board.role_progress_at(p_ticket text, p_role text,
+                                                         p_now timestamptz DEFAULT clock_timestamp())
+RETURNS timestamptz LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+BEGIN
+    RETURN greatest(
+        (SELECT ns.current_assignment_at FROM ticket_board.ticket_notification_state ns
+          WHERE ns.ticket_id = p_ticket AND ns.current_assignment_at <= p_now),
+        (SELECT max(e.at) FROM ticket_board.board_progress_events e WHERE e.ticket_id = p_ticket AND e.at <= p_now),
+        (SELECT max(c.ts) FROM ticket_board.ticket_comments c
+          WHERE c.ticket_id = p_ticket AND lower(c.who) = p_role AND c.ts <= p_now),
+        (SELECT max(tr.ts) FROM ticket_board.notification_trace tr
+          WHERE tr.ticket_id = p_ticket AND tr.target_role = p_role AND tr.event IN ('send', 'send_unconfirmed')
+            AND tr.kind IN ('transition', 'awaiting_role', 'publication') AND tr.ts <= p_now),
+        (SELECT a.registered_at FROM ticket_board.role_runtime_assignments a
+          WHERE a.role = p_role AND a.registered_at <= p_now),
+        (SELECT max(least(coalesce(l.ended_at, l.last_seen_at), l.deadline, p_now))
+           FROM ticket_board.execution_leases l
+          WHERE l.role = p_role AND l.ticket_id = p_ticket AND l.state <> 'stale' AND l.first_seen_at <= p_now));
+END;
+$$;
+
+-- Why a Director stall escalation no longer says what is true, or NULL while it does (SYRD-675). It was bound,
+-- when it was queued, to its episode's phase and to the progress clock it saw (`progress_at`); delivery asks
+-- again, and the listener adds the owner's hook as it is now (`owner_hook`). The reasons are stable trace text.
+CREATE OR REPLACE FUNCTION ticket_board.role_stall_escalation_stale_reason(p_payload jsonb,
+                                                                          p_now timestamptz DEFAULT clock_timestamp())
+RETURNS text LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+DECLARE
+    ep ticket_board.role_stall_episodes%ROWTYPE;
+    seen timestamptz;
+    hook jsonb := p_payload->'owner_hook';
+BEGIN
+    SELECT * INTO ep FROM ticket_board.role_stall_episodes e WHERE e.id = (p_payload->>'episode')::bigint;
+    IF NOT FOUND OR ep.closed_at IS NOT NULL OR ep.phase <> 'director'
+       OR ep.phase_no IS DISTINCT FROM (p_payload->>'phase_no')::integer THEN
+        RETURN 'episode_closed';
+    END IF;
+    seen := nullif(p_payload->>'progress_at', '')::timestamptz;
+    IF seen IS NULL THEN
+        RETURN NULL;  -- queued before SYRD-675: its episode alone decides, as it did
+    END IF;
+    IF EXISTS (SELECT FROM ticket_board.role_runtime_assignments a
+               WHERE a.role = ep.owner_role AND a.registered_at > seen
+                 AND a.generation IS DISTINCT FROM nullif(p_payload->>'generation', '')::bigint) THEN
+        RETURN 'runtime_replaced';
+    END IF;
+    IF EXISTS (SELECT FROM ticket_board.execution_leases l
+               WHERE l.role = ep.owner_role AND l.ticket_id = ep.ticket_id AND l.state <> 'stale'
+                 AND least(coalesce(l.ended_at, l.last_seen_at), l.deadline, p_now) > seen) THEN
+        RETURN 'execution_lease';
+    END IF;
+    IF ticket_board.role_progress_at(ep.ticket_id, ep.owner_role, p_now) > seen THEN
+        RETURN 'progress';
+    END IF;
+    IF jsonb_typeof(hook) = 'object' AND (
+           nullif(hook->>'updated_at', '')::timestamptz > seen
+           OR nullif(hook->>'turn_started_at', '')::timestamptz > seen
+           OR (p_payload->>'reason' = 'busy_no_progress' AND hook->>'state' IS DISTINCT FROM 'busy')) THEN
+        RETURN 'hook_activity';
+    END IF;
+    RETURN NULL;
+EXCEPTION WHEN invalid_text_representation OR invalid_datetime_format OR datetime_field_overflow THEN
+    RETURN NULL;  -- a hook instant nobody can read is "cannot tell", not activity
+END;
+$$;
+
 -- One listener pass's report: role -> {state, updated_at, turn_started_at,
 -- busy_still, condition}. The first three are the owner's own turn as its CLI
 -- hook recorded it; busy_still says the hook has said busy for longer than the
@@ -16391,7 +16464,8 @@ CREATE OR REPLACE FUNCTION ticket_board.note_role_stall(
     p_report jsonb,
     p_max_attempts integer,
     p_grace interval,
-    p_now timestamptz DEFAULT clock_timestamp()
+    p_now timestamptz DEFAULT clock_timestamp(),
+    p_busy_threshold interval DEFAULT NULL
 )
 RETURNS integer
 LANGUAGE plpgsql
@@ -16424,6 +16498,13 @@ DECLARE
     replaced_from text;
     counted_from timestamptz;
     queued integer := 0;
+    clock timestamptz;
+    stale text;
+    -- How long the pane may say busy with nothing moving: the board's configured stall threshold, never less
+    -- than the grace (SYRD-675). The listener passes the one it is configured with, so the first pass after
+    -- a start or a change uses it too; a caller that does not falls back to what the board stall pass recorded.
+    busy_threshold interval := greatest(p_grace, coalesce(p_busy_threshold, make_interval(secs => coalesce(
+        (SELECT s.threshold_seconds FROM ticket_board.board_stall_state s WHERE s.id), 1800))));
 BEGIN
     PERFORM ticket_board.require_ticket_board_listener('note_role_stall');
     IF jsonb_typeof(p_report) IS DISTINCT FROM 'object' OR coalesce(p_max_attempts, 0) < 1 THEN
@@ -16581,6 +16662,30 @@ BEGIN
         END IF;
 
         IF ep.phase = 'director' THEN
+            -- Not delivered yet: asked again, as delivery asks (SYRD-675). Progress since what it saw, or a drop at
+            -- delivery, ends the episode, so the owner is not left without its prompts by an alert nobody read.
+            IF NOT EXISTS (SELECT FROM ticket_board.notification_trace tr
+                           WHERE tr.notification_id = ep.escalation_notification_id
+                             AND tr.event IN ('send', 'send_unconfirmed')) THEN
+                SELECT ticket_board.role_stall_escalation_stale_reason(
+                           q.payload || jsonb_build_object('owner_hook', item.v), p_now)
+                INTO stale
+                FROM ticket_board.ticket_notification_queue q
+                WHERE q.id = ep.escalation_notification_id AND q.dead_lettered_at IS NULL;
+                IF stale IS NOT NULL THEN
+                    PERFORM ticket_board.record_notification_trace(
+                        q.ticket_id, q.id, q.target_role, q.kind, 'discard', NULL, 'stall_premise_' || stale, NULL,
+                        jsonb_build_object('reason', 'stall_premise_' || stale, 'episode', ep.id,
+                                           'progress_at', q.payload->'progress_at'))
+                    FROM ticket_board.ticket_notification_queue q WHERE q.id = ep.escalation_notification_id;
+                    DELETE FROM ticket_board.ticket_notification_queue WHERE id = ep.escalation_notification_id;
+                END IF;
+                IF stale IS NOT NULL OR NOT EXISTS (SELECT FROM ticket_board.ticket_notification_queue q
+                                                    WHERE q.id = ep.escalation_notification_id) THEN
+                    PERFORM ticket_board.close_role_stall(ep.id, 'progress');
+                    CONTINUE;
+                END IF;
+            END IF;
             -- Handed back: a Director comment since the escalation starts a new phase for the owner.
             SELECT max(c.ts) INTO rearm_at FROM ticket_board.ticket_comments c
             WHERE c.ticket_id = cur.id AND lower(c.who) = 'director' AND c.ts > ep.escalated_at;
@@ -16596,20 +16701,28 @@ BEGIN
             CONTINUE;
         END IF;
 
-        -- When the work last reached the pane: the latest notice for this ticket sent to it in this phase.
+        -- When the work last reached the pane: the latest notice for this ticket sent to it in this round. Not
+        -- only in this phase: an episode the owner's checkpoint closed opens again later, and the work it was
+        -- handed is still the work (SYRD-675); a later phase restarts the clock below instead.
         SELECT max(tr.ts) INTO handed_at FROM ticket_board.notification_trace tr
         WHERE tr.ticket_id = cur.id AND tr.target_role = item.role
-          AND tr.event IN ('send', 'send_unconfirmed') AND tr.ts >= ep.phase_started_at;
+          AND tr.event IN ('send', 'send_unconfirmed') AND tr.ts >= coalesce(cur.round_at, ep.phase_started_at);
         SELECT min(en.ts) INTO handed_enqueued FROM ticket_board.notification_trace sent_tr
         JOIN ticket_board.notification_trace en ON en.notification_id = sent_tr.notification_id AND en.event = 'enqueue'
         WHERE sent_tr.ticket_id = cur.id AND sent_tr.target_role = item.role
           AND sent_tr.event IN ('send', 'send_unconfirmed') AND sent_tr.ts = handed_at;
 
+        -- The one progress clock (SYRD-675), with the hand-over and the hook's own word: the latest of them is
+        -- what an escalation is bound to, and delivery drops it once anything is later.
+        -- A later phase -- the Director's hand-back, a replaced runtime -- is a recovery, and starts it again.
+        clock := greatest(handed_at, hook_updated, ticket_board.role_progress_at(cur.id, item.role, p_now),
+                          CASE WHEN ep.phase_no > 1 THEN ep.phase_started_at END);
         why := NULL;
         IF busy_still AND hook_state IS DISTINCT FROM 'idle' AND handed_at IS NOT NULL
            AND turn_started IS NOT NULL AND turn_started >= coalesce(handed_enqueued, handed_at)
-           AND p_now >= greatest(handed_at, coalesce(hook_updated, handed_at)) + p_grace THEN
-            -- It took the work and has said busy since, with nothing moving: it cannot be prompted again.
+           AND p_now >= clock + busy_threshold THEN
+            -- It took the work and has said busy since, with nothing moving and no progress for the board's stall
+            -- threshold: it cannot be prompted again.
             why := 'busy_no_progress';
         ELSIF sent >= p_max_attempts AND (
                   (hook_state = 'idle' AND turn_started IS NOT NULL AND turn_started >= last_sent - interval '5 seconds'
@@ -16655,6 +16768,8 @@ BEGIN
                                'assignee', cur.assignee, 'target_role', 'director', 'role', item.role,
                                'reason', why, 'condition', condition_text, 'episode', ep.id, 'phase_no', ep.phase_no,
                                'attempts', attempts, 'generation', generation_now, 'runtime', runtime_now,
+                               'progress_at', clock, 'round_at', cur.round_at,
+                               'threshold_seconds', extract(epoch FROM busy_threshold)::integer,
                                'message', message),
             'stall-escalation:' || ep.id || ':' || ep.phase_no);
         UPDATE ticket_board.role_stall_episodes
@@ -16674,10 +16789,9 @@ $$;
 CREATE OR REPLACE FUNCTION ticket_board.role_stall_notice_is_current(p_ticket_id text, p_target_role text, p_payload jsonb)
 RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
     SELECT CASE
-        WHEN p_payload->>'kind' = 'stall_escalation' THEN EXISTS (
-            SELECT FROM ticket_board.role_stall_episodes e
-            WHERE e.id = (p_payload->>'episode')::bigint AND e.closed_at IS NULL AND e.phase = 'director'
-              AND e.phase_no = (p_payload->>'phase_no')::integer AND p_target_role = 'director')
+        -- Its episode still escalated, and nothing since what it saw (SYRD-675).
+        WHEN p_payload->>'kind' = 'stall_escalation' THEN p_target_role = 'director'
+             AND ticket_board.role_stall_escalation_stale_reason(p_payload, clock_timestamp()) IS NULL
         ELSE NOT coalesce((
             -- About a turn of a provider that has since been replaced: the one running now never had it.
             SELECT CASE p_payload->>'kind'
@@ -16730,8 +16844,10 @@ $$;
 REVOKE ALL ON ticket_board.role_stall_episodes FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION ticket_board.close_role_stall(bigint, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION ticket_board.role_generation_at(text, timestamptz) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION ticket_board.note_role_stall(jsonb, integer, interval, timestamptz) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.note_role_stall(jsonb, integer, interval, timestamptz, interval) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION ticket_board.role_stall_notice_is_current(text, text, jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.role_progress_at(text, text, timestamptz) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.role_stall_escalation_stale_reason(jsonb, timestamptz) FROM PUBLIC;
 
 -- SYRD-599: the Router role. A low-cost role whose only job is to choose the
 -- implementation owner for work the Director has already admitted to
@@ -19942,9 +20058,11 @@ BEGIN
         -- enqueue as before: a hold that outlasts the grace is still news. And
         -- the grace is the owner's time NOT working on it: a turn the owner
         -- started after the prompt cancels this wave while it runs, and once
-        -- it ends unresolved the grace runs again from that end. Turns are read
-        -- from the owner's CLI hooks alone, so a background child left running
-        -- holds nothing here. An undeliverable prompt is still reported at once.
+        -- it ends unresolved the grace runs again from that end. And it runs
+        -- from the owner's latest progress, on the one clock every stall alert
+        -- reads (SYRD-675): a checkpoint, a delivered hand-over, a recovery, or
+        -- a bounded child the owner runs -- which holds only up to its lease's
+        -- deadline. An undeliverable prompt is still reported at once.
         IF NOT escalate.undeliverable THEN
             grace_from := coalesce(escalate.delivered_at, escalate.prompted_at);
             owner_turn := p_owner_turns -> escalate.owner_role;
@@ -19960,6 +20078,7 @@ BEGIN
                 CONTINUE WHEN owner_turn ->> 'state' IS DISTINCT FROM 'idle';
                 grace_from := greatest(grace_from, owner_idle_at);
             END IF;
+            grace_from := greatest(grace_from, ticket_board.role_progress_at(escalate.id, escalate.owner_role, p_now));
             CONTINUE WHEN grace_from > p_now - p_grace;
         END IF;
         identity := replace(escalate.repair_key, 'repair:', '');

@@ -343,6 +343,75 @@ def _session_start_record(payload: object, *, pid: int | None = None, proc_root:
     return record
 
 
+#: Claude Code's turn ended by an API error (SYRD-644): it runs this instead of Stop.
+PROVIDER_FAILURE_SOURCES = frozenset({"claude.StopFailure"})
+PROVIDER_MESSAGE_CHARS = 240
+TRANSCRIPT_TAIL_BYTES = 256 * 1024
+
+
+def _last_api_error(transcript_path: object) -> dict:
+    """The last API-error record in the session transcript, read from its tail only, and only its limit fields."""
+    try:
+        path = Path(str(transcript_path))
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            handle.seek(max(size - TRANSCRIPT_TAIL_BYTES, 0))
+            tail = handle.read().decode("utf-8", errors="replace")
+    except (OSError, ValueError):
+        return {}
+    for line in reversed(tail.splitlines()):
+        if '"isApiErrorMessage":true' not in line.replace(" ", ""):
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and record.get("isApiErrorMessage") is True:
+            quota = record.get("quotaLimits") if isinstance(record.get("quotaLimits"), dict) else {}
+            return {key: quota[key] for key in ("status", "resetsAt", "rateLimitType") if key in quota}
+    return {}
+
+
+def _record_provider_failure(state_dir: str | Path, target: str, source: str, payload: object) -> Path | None:
+    """Add what ended the turn to the pane's record, leaving its state as it was (SYRD-644).
+
+    Facts only, for the listener to judge: the provider's error class, its own
+    error line (bounded), the transcript's limit fields, the session, the time,
+    and the pane process it came from. Never a prompt. Not carried by the next
+    write, so any later hook leaves no stale failure behind.
+    """
+    payload = payload if isinstance(payload, dict) else {}
+    path = _target_path(Path(state_dir).expanduser(), target)
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        record = {"target": target, "state": "busy", "updated_at": time.time(), "source": source}
+    if not isinstance(record, dict):
+        return None
+    identity = _pane_root_identity(os.getpid())
+    quota = _last_api_error(payload.get("transcript_path"))
+    # An exhausted quota leaves the provider at its prompt, waiting: said as
+    # idle, from a source no turn-end reminder trusts, so the hold's one fresh
+    # attempt can reach it. Any other API error leaves the state as it was, and
+    # keeps the handling it had.
+    if payload.get("error") == "rate_limit" and quota.get("status") == "rejected":
+        record.update({"state": "idle", "source": source, "updated_at": time.time()})
+    record["provider_error"] = {
+        "source": source,
+        "error": str(payload.get("error") or "unknown")[:64],
+        "observed_at": time.time(),
+        "session_id": str(payload.get("session_id") or "")[:128],
+        "quota": quota,
+        "message": " ".join(str(payload.get("last_assistant_message") or "").split())[:PROVIDER_MESSAGE_CHARS],
+        **({"pane_pid": identity[0], "pane_start_time": identity[1]} if identity else {}),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+    return path
+
+
 def _write_state(state_dir: str | Path, target: str, state: str, *, source: str = "",
                  background_work: dict | None = None, session_start: dict | None = None,
                  checkout: dict | None = None, hermes_runs: dict | None = None) -> Path:
@@ -368,8 +437,13 @@ def _write_state(state_dir: str | Path, target: str, state: str, *, source: str 
     # even if the turn has already ended when it looks. Same rule as
     # notify_listener.hook_turn_started_at; a test holds the two together
     # (SYRD-268).
+    # The provider process that took the turn (SYRD-644): what the screen shows
+    # after it is that process's answer, never a replacement's.
     if normalized_state == "busy" and source.rsplit(".", 1)[-1] in TURN_START_EVENTS:
         payload["turn_started_at"] = written_at
+        identity = _pane_root_identity(os.getpid())
+        if identity is not None:
+            payload["turn_process"] = {"pane_pid": identity[0], "pane_start_time": identity[1]}
     elif isinstance(previous, dict) and previous.get("turn_started_at") is not None:
         payload["turn_started_at"] = previous["turn_started_at"]
     # Never carried: every write is a fresh statement of what is in flight, so
@@ -1044,6 +1118,9 @@ def main(argv: list[str] | None = None) -> int:
                      session_start=_session_start_record(payload) if source == "copilot.sessionStart" else None,
                      checkout={**_checkout(payload), "at": time.time()} if source == "copilot.agentStop" else None)
         args.state = state
+    elif args.source in PROVIDER_FAILURE_SOURCES:
+        payload = _read_stdin_json(timeout=max(args.stdin_timeout, 1.0))
+        _record_provider_failure(state_dir, target, args.source, payload)
     elif args.source in BACKGROUND_WORK_SOURCES:
         # Read first: this turn end's input says whether the session is done or
         # paused on background work, and the state written must say which.

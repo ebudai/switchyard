@@ -84,6 +84,8 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
     "record_cohort_change": {"director"},
     "begin_cohort_drain": {"director"},
     "end_cohort_drain": {"director"},
+    # SYRD-644: ending a provider quota hold early is the Director's.
+    "clear_provider_hold": {"director"},
     "set_report_intake": {"director"},
     # SYRD-541: the integrator's bounded size decisions.
     "approve_size_exception": {"director"},
@@ -147,6 +149,7 @@ COMPOSED_OPERATION_CAPABILITIES = {
     "record_cohort_change": frozenset({"set_manually_controlled"}),
     "begin_cohort_drain": frozenset({"set_manually_controlled"}),
     "end_cohort_drain": frozenset({"set_manually_controlled"}),
+    "clear_provider_hold": frozenset({"set_manually_controlled"}),
     # Approving growth into main, or turning the review on, is the integrator's
     # decision: the capability that closes reviewed work into main (SYRD-541).
     "approve_size_exception": frozenset({"merge"}),

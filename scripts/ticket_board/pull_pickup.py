@@ -73,6 +73,16 @@ def _scalar(row: Any) -> Any:
     return next(iter(row.values())) if isinstance(row, dict) else row[0]
 
 
+def _held(listener: Any, conn: Any) -> set[str]:
+    """Roles whose provider is held for quota now; empty on a board older than holds."""
+    if not getattr(listener, "_provider_quota_holds_present", False):
+        return set()
+    rows = conn.execute("SELECT h.role FROM ticket_board.provider_quota_holds h "
+                        "WHERE ticket_board.role_provider_hold_is_current(h.role, clock_timestamp())").fetchall()
+    decode = lambda value: value.decode() if isinstance(value, (bytes, bytearray, memoryview)) else str(value)  # noqa: E731
+    return {decode(row["role"] if isinstance(row, dict) else row[0]) for row in rows}
+
+
 def run(listener: Any, conn: Any) -> int:
     """One pickup pass; returns how many tickets were claimed."""
     policy = _scalar(conn.execute("SELECT ticket_board.declared_scheduling()").fetchone())
@@ -88,7 +98,10 @@ def run(listener: Any, conn: Any) -> int:
         return 0
     claimed = 0
     idle: dict[str, str] = {}
+    held = _held(listener, conn)
     for role in pull_claimant_pool(listener.workflow or {}):
+        if role in held:
+            continue  # its provider is out of quota (SYRD-644): it cannot work a ticket, and is not idle capacity
         reason = why_not_eligible(gate, role)
         if reason:
             if reason not in NOT_RUNNING:

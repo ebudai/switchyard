@@ -59,7 +59,10 @@ IDLE_TURN_END_SOURCES = frozenset(
         "copilot.sessionEnd",
     }
 )
-TRUSTED_IDLE_SOURCES = IDLE_TURN_END_SOURCES | frozenset({"claude.Notification.idle_prompt", "listener.stale_codex_busy_recovery"})
+#: claude.StopFailure is written idle only for an exhausted quota, its provider waiting at its prompt (SYRD-644): idle,
+#: but not a turn end any reminder acts on.
+TRUSTED_IDLE_SOURCES = IDLE_TURN_END_SOURCES | frozenset({"claude.Notification.idle_prompt", "listener.stale_codex_busy_recovery",
+                                                          "claude.StopFailure"})
 DEFAULT_ROLE_RUNTIMES = {
     "director": "claude",
     "main": "codex",

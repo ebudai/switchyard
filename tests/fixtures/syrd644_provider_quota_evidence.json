@@ -1,0 +1,297 @@
+{
+ "source": "Measured for SYRD-644 on 2026-10-25. Claude Code 2.1.288 (/opt/claude-code) and Codex CLI 0.163.0 (/usr/lib/openai-codex), each in bwrap with no network, against a local fake API. Claude: a 429 rate_limit_error under an API key fires the StopFailure hook (payload below) and no Stop hook. Its subscription usage limit cannot be produced offline: the two subscription records are this host's own live transcript records (2026-09-29 and 2026-10-08), reduced to the error record's limit fields and its own text. Codex: the TUI in a private tmux, 160x45, TZ=America/Toronto, its provider answering HTTP 429 usage_limit_reached with the plan_type and resets_at/resets_in_seconds shown. No Stop hook ran for any errored Codex turn (hook state stays busy codex.UserPromptSubmit).",
+ "claude": {
+  "stopfailure_payload_api_key": {
+   "session_id": "4b784235-d251-43d2-8f8b-469bf24afec8",
+   "transcript_path": "<transcript>",
+   "cwd": "<cwd>",
+   "prompt_id": "514dff73-bd25-404a-9ced-aa041a38cc56",
+   "effort": {
+    "level": "medium"
+   },
+   "hook_event_name": "StopFailure",
+   "error": "rate_limit",
+   "last_assistant_message": "API Error: Request rejected (429) · This request would exceed your account's rate limit."
+  },
+  "transcript_error_api_key": {
+   "type": "assistant",
+   "isApiErrorMessage": true,
+   "error": "rate_limit",
+   "apiErrorStatus": 429,
+   "timestamp": "2026-10-25T02:30:21.101Z",
+   "version": "2.1.306",
+   "message": {
+    "model": "<synthetic>",
+    "role": "assistant",
+    "content": [
+     {
+      "type": "text",
+      "text": "API Error: Request rejected (429) · This request would exceed your account's rate limit."
+     }
+    ]
+   }
+  },
+  "subscription_records": [
+   {
+    "type": "assistant",
+    "isApiErrorMessage": true,
+    "error": "rate_limit",
+    "apiErrorStatus": 429,
+    "quotaLimits": {
+     "status": "rejected",
+     "resetsAt": 1791426000,
+     "rateLimitType": "five_hour",
+     "unifiedRateLimitFallbackAvailable": false,
+     "overageStatus": "rejected"
+    },
+    "message": {
+     "model": "<synthetic>",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "You've hit your session limit · resets 10:20pm (America/Toronto)"
+      }
+     ]
+    },
+    "timestamp": "2026-10-08T00:05:29.041Z",
+    "version": "2.1.288"
+   },
+   {
+    "type": "assistant",
+    "isApiErrorMessage": true,
+    "error": "rate_limit",
+    "apiErrorStatus": 429,
+    "quotaLimits": {
+     "status": "rejected",
+     "resetsAt": 1791014400,
+     "rateLimitType": "seven_day",
+     "unifiedRateLimitFallbackAvailable": false,
+     "overageStatus": "rejected"
+    },
+    "message": {
+     "model": "<synthetic>",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "You've hit your weekly limit · resets Oct 3, 4am (America/Toronto)"
+      }
+     ]
+    },
+    "timestamp": "2026-09-29T16:58:08.756Z",
+    "version": "2.1.281"
+   }
+  ]
+ },
+ "codex": {
+  "tz": "America/Toronto",
+  "version": "0.163.0",
+  "screens": {
+   "plus-at": {
+    "resets_at": 1792902786,
+    "rows": [
+     "",
+     "  >_ OpenAI Codex (v0.163.0)",
+     "     /w/repo",
+     "",
+     "",
+     "› say hi",
+     "",
+     "",
+     "■ You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits or try again",
+     "at Oct 25th, 2026 12:33 AM.",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "› Ask Codex to do anything",
+     "",
+     "  GPT-6-Sol default · /w/repo",
+     "  ← for agents · ? for shortcuts",
+     ""
+    ]
+   },
+   "pro-at": {
+    "resets_at": 1792900986,
+    "rows": [
+     "",
+     "  >_ OpenAI Codex (v0.163.0)",
+     "     /w/repo",
+     "",
+     "",
+     "› say hi",
+     "",
+     "",
+     "■ You’ve hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits or try again at Oct 25th, 2026 12:03 AM.",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "› Ask Codex to do anything",
+     "",
+     "  GPT-6-Sol default · /w/repo",
+     "  ← for agents · ? for shortcuts",
+     ""
+    ]
+   },
+   "plus-in": {
+    "resets_at": null,
+    "rows": [
+     "",
+     "  >_ OpenAI Codex (v0.163.0)",
+     "     /w/repo",
+     "",
+     "",
+     "› say hi",
+     "",
+     "",
+     "■ You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits or try again",
+     "later.",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "› Ask Codex to do anything",
+     "",
+     "  GPT-6-Sol default · /w/repo",
+     "  ← for agents · ? for shortcuts",
+     ""
+    ]
+   },
+   "plus-none": {
+    "resets_at": null,
+    "rows": [
+     "",
+     "  >_ OpenAI Codex (v0.163.0)",
+     "     /w/repo",
+     "",
+     "",
+     "› say hi",
+     "",
+     "",
+     "■ You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits or try again",
+     "later.",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "",
+     "› Ask Codex to do anything",
+     "",
+     "  GPT-6-Sol default · /w/repo",
+     "  ← for agents · ? for shortcuts",
+     ""
+    ]
+   }
+  }
+ }
+}

@@ -49,7 +49,7 @@ from .pane_activity_gate import (
 )
 from .idle_nudges import IdleNudges
 from . import reminder_snooze
-from . import board_stall, blocked_pane, capacity_retry, delivery_proof, execution_lease_pass, handoff_children, publisher_pass, pull_pickup, replaced_delivery, stall_episode
+from . import board_stall, blocked_pane, capacity_retry, delivery_proof, execution_lease_pass, handoff_children, publisher_pass, pull_pickup, quota_hold, replaced_delivery, stall_episode
 from .notification_ledger import NotificationLedger
 from .notification_activity_hold import (
     NotificationActivityHold, ActivityTrace, SELF_REMINDER_KINDS,
@@ -835,7 +835,8 @@ WHERE (r.definition->>'active')::boolean
             # A reminder that an owner is idle or left a turn unresolved waits for
             # the background work that owner's turn ended on; nothing else is held
             # (SYRD-538). Afterwards the checks above decide it exactly as before.
-            if self._defer_for_background_work(conn, notification_id, attempts, kind, target_role, payload, "claim"):
+            if (self._defer_for_background_work(conn, notification_id, attempts, kind, target_role, payload, "claim")
+                    or quota_hold.hold_delivery(self, conn, notification_id, attempts, kind, target_role, ticket_id, payload, "claim")):  # SYRD-644: a held provider's notices wait
                 continue
             # Pane hook state can outlive its tmux pane. Probe the target once per
             # claimed notification before the activity gate so stale state files
@@ -1050,7 +1051,8 @@ WHERE (r.definition->>'active')::boolean
                                               phase="pre_send_recheck"):
                 continue
             # The owner can start background work while this waited (SYRD-538).
-            if self._defer_for_background_work(conn, notification_id, attempts, kind, target_role, payload, "pre_send_recheck"):
+            if (self._defer_for_background_work(conn, notification_id, attempts, kind, target_role, payload, "pre_send_recheck")
+                    or quota_hold.hold_delivery(self, conn, notification_id, attempts, kind, target_role, ticket_id, payload, "pre_send_recheck")):
                 continue
             # Last, deliberately: every gate above decides whether this role is
             # free to be handed this ticket at all, and a clear is only allowed
@@ -1124,7 +1126,7 @@ WHERE (r.definition->>'active')::boolean
             self.logger.info("LISTEN %s established", self.channel)
             self._log_missing_hook_state()
             while not self.stop_event.is_set():
-                self.refresh_workflow(conn)
+                self.refresh_workflow(conn); quota_hold.run(self, conn)  # SYRD-644: holds begin and end before anything is generated or sent
                 # SYRD-537: a due batch's notice is written before any producer runs, so it is the oldest optional row about its members.
                 self.process_reminder_snooze_due(conn)
                 blocked_pane.run(self, conn)  # SYRD-633: every blocked pane, before the reminders that then leave it alone

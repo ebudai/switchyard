@@ -63,6 +63,12 @@ class PaneHookState:
     #: source, at} -- or None (SYRD-540); read by session_context.
     last_session_start: object = None
     last_checkout: object = None
+    #: What ended the latest turn when it was an API error, as the provider's
+    #: failure hook recorded it (SYRD-644; quota_hold reads it), or None.
+    provider_error: object = None
+    #: The provider process that took the latest turn -- {pane_pid,
+    #: pane_start_time} -- as the hook stamped it (SYRD-644), or None.
+    turn_process: object = None
 
 
 #: Hook events that mean a turn STARTED in the pane: a prompt was taken and the
@@ -334,6 +340,8 @@ class PaneHookStateStore:
             background_work=parsed.get("background_work") if state == "idle" else None,
             last_session_start=parsed.get("last_session_start") if isinstance(parsed.get("last_session_start"), dict) else None,
             last_checkout=parsed.get("last_checkout") if isinstance(parsed.get("last_checkout"), dict) else None,
+            provider_error=parsed.get("provider_error") if isinstance(parsed.get("provider_error"), dict) else None,
+            turn_process=parsed.get("turn_process") if isinstance(parsed.get("turn_process"), dict) else None,
         )
 
     def write(self, target: str, state: str, *, source: str = "", now: float | None = None) -> Path:
@@ -358,6 +366,10 @@ class PaneHookStateStore:
         turn_started_at = listener.hook_turn_started_at(previous, normalized_state, source, written_at)
         if turn_started_at is not None:
             payload["turn_started_at"] = turn_started_at
+            # A carried turn keeps the process the hook said took it; this
+            # writer is not that process and names none of its own.
+            if turn_started_at != written_at and isinstance(previous, dict) and isinstance(previous.get("turn_process"), dict):
+                payload["turn_process"] = previous["turn_process"]
         tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
         tmp.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
         tmp.replace(path)

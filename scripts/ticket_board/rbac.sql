@@ -493,4 +493,27 @@ GRANT EXECUTE ON FUNCTION ticket_board.end_cohort_drain(text) TO ticket_board_se
 GRANT SELECT ON ticket_board.cohort_drains TO ticket_board_service, ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.note_cohort_quota_signal(text, text, integer, text, integer) TO ticket_board_listener;
 
+-- SYRD-644: provider quota holds: the listener observes and suppresses, the Director clears.
+REVOKE ALL ON ticket_board.provider_quota_holds FROM PUBLIC;
+REVOKE ALL ON SEQUENCE ticket_board.provider_quota_holds_id_seq FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.role_provider_hold_is_current(text, timestamptz) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.role_provider_hold_until(text, timestamptz) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.ticket_turn_terminal(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.provider_hold_anchor(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.provider_held_ticket_owner(text, timestamptz) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.end_provider_hold(bigint, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.release_provider_hold(bigint, timestamptz) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.note_provider_quota(text, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.reconcile_provider_quota_holds(jsonb, timestamptz) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.clear_provider_hold(text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.provider_hold_status(timestamptz) FROM PUBLIC;
+GRANT SELECT ON ticket_board.provider_quota_holds TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.role_provider_hold_until(text, timestamptz) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.role_provider_hold_is_current(text, timestamptz) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.provider_held_ticket_owner(text, timestamptz) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.note_provider_quota(text, jsonb) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.reconcile_provider_quota_holds(jsonb, timestamptz) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.provider_hold_status(timestamptz) TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.clear_provider_hold(text, text) TO ticket_board_service;
+
 COMMIT;

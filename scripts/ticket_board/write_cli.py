@@ -555,6 +555,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "clear-cohort-quota", help="remove the Director's quota record for a provider cohort (SYRD-628)")
     clear_quota.add_argument("runtime", help="the cohort's runtime")
     add_free_text_argument(clear_quota, "--reason", required=True, help="why the limit is over")
+    clear_hold = subparsers.add_parser(
+        "clear-provider-hold", help="end a role's provider quota hold at once, with a reason (SYRD-644)")
+    clear_hold.add_argument("role", help="the held role, from ticket-board-read holds")
+    add_free_text_argument(clear_hold, "--reason", required=True, help="why it should try again now")
     subparsers.add_parser(
         "claim-next",
         help="under a pull policy, claim your own next ready ticket; held work is returned instead (SYRD-539)",
@@ -877,6 +881,8 @@ def main(argv: list[str] | None = None) -> int:
                                                expires_minutes=args.expires_minutes)
         elif command == "clear_cohort_quota":
             response = client.clear_cohort_quota(args.runtime, reason=args.reason)
+        elif command == "clear_provider_hold":
+            response = client.clear_provider_hold(args.role, reason=args.reason)
         elif command == "extend_lease":
             response = client.extend_lease(args.lease, minutes=args.minutes, reason=args.reason)
         elif command == "interrupt_lease":
@@ -964,7 +970,8 @@ def main(argv: list[str] | None = None) -> int:
     if command in {"merge", "dismiss_notification", "verify_caller", "add_user_acceptance_relay",
                    "snooze_reminders", "clear_reminder_snooze", "claim_next", "approve_size_exception",
                    "enable_size_review", "measure_size", "set_report_intake", "force_fresh_context",
-                   "uat_instructions", "extend_lease", "interrupt_lease", "set_cohort_quota", "clear_cohort_quota"}:
+                   "uat_instructions", "extend_lease", "interrupt_lease", "set_cohort_quota", "clear_cohort_quota",
+                   "clear_provider_hold"}:
         print(json.dumps(response))
     else:
         print(json.dumps(_ticket_from_response(response)))

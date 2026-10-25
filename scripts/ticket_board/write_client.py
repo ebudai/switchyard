@@ -1183,6 +1183,10 @@ class TicketBoardWriteClient:
         """Remove the Director's quota record for a provider cohort (SYRD-628)."""
         return self._post("/actions/clear_cohort_quota", {"runtime": runtime, "reason": reason}, caller_role=caller_role)
 
+    def clear_provider_hold(self, role: str, *, reason: str, caller_role: str | None = None) -> dict[str, Any]:
+        """End a role's provider quota hold at once, with a reason (SYRD-644)."""
+        return self._post("/actions/clear_provider_hold", {"role": role, "reason": reason}, caller_role=caller_role)
+
     def claim_next(self, *, caller_role: str | None = None) -> dict[str, Any]:
         """Claim this worker's next ready ticket under a pull policy (SYRD-539)."""
         return self._post("/actions/claim_next", {}, caller_role=caller_role)

@@ -270,6 +270,21 @@ def _install_claude_hooks(home: Path, hook_bin: Path, permission_hook: Path) -> 
             )
         ],
     )
+    # Claude Code runs StopFailure instead of Stop when an API error ended the
+    # turn (rate limit, overload, auth...). It records what ended the turn and
+    # leaves the pane's state as it was (SYRD-644).
+    _merge_hook_entries(
+        config,
+        "StopFailure",
+        [
+            _hook_entry(
+                _shell_command(
+                    [hook_bin, "busy", "--source", "claude.StopFailure", "--state-dir", state_dir,
+                     "--session-dir", session_dir]
+                )
+            )
+        ],
+    )
     # No matcher: the prompt this exists for is a Bash removal, but a pane
     # launched in bypass mode must not stall on any tool's prompt, and the
     # helper decides by the mode in its own input rather than by tool.

@@ -8,12 +8,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import (cohort_ops, context_continuation, documentation_candidate, execution_lease_ops, pull_queue, reminder_snooze,
+from . import (cohort_ops, provider_hold_ops, context_continuation, documentation_candidate, execution_lease_ops, pull_queue, reminder_snooze,
                report_intake, router_role, size_review, uat_instructions, ui_delegation)
 
 OPERATIONS = (reminder_snooze.OPERATIONS | size_review.OPERATIONS | report_intake.OPERATIONS
               | router_role.OPERATIONS | ui_delegation.OPERATIONS | context_continuation.OPERATIONS
-              | uat_instructions.OPERATIONS | execution_lease_ops.OPERATIONS | cohort_ops.OPERATIONS)
+              | uat_instructions.OPERATIONS | execution_lease_ops.OPERATIONS | cohort_ops.OPERATIONS
+              | provider_hold_ops.OPERATIONS)
 
 
 def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: str,
@@ -34,6 +35,8 @@ def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: s
         return uat_instructions.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
     if operation in execution_lease_ops.OPERATIONS:  # SYRD-616
         return execution_lease_ops.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
+    if operation in provider_hold_ops.OPERATIONS:  # SYRD-644
+        return provider_hold_ops.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
     if operation in cohort_ops.OPERATIONS:  # SYRD-628
         return cohort_ops.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
     if operation in ui_delegation.OPERATIONS:  # SYRD-598
@@ -111,6 +114,11 @@ def execution_lease_status(app: Any, query: dict[str, list[str]]) -> dict[str, A
     """SYRD-616: GET /api/execution-leases[?role=R&all=1], read-only."""
     return execution_lease_ops.status(app, role=(query.get("role") or [""])[0],
                                       include_ended=(query.get("all") or [""])[0] in ("1", "true"))
+
+
+def provider_hold_status(app: Any) -> dict[str, Any]:
+    """SYRD-644: GET /api/provider-holds, read-only."""
+    return provider_hold_ops.status(app)
 
 
 def cohort_status(app: Any) -> dict[str, Any]:

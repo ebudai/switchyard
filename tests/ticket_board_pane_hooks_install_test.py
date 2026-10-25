@@ -275,12 +275,12 @@ def test_installer_writes_durable_cli_hook_configs_idempotently() -> None:
             "--record-session",
         ):
             assert required in all_commands
-        # SYRD-234 added a fifth idle-hook command: the permission_prompt
-        # notification that marks the pane blocked when nothing answered a
-        # prompt. The PermissionRequest hook it ships beside runs a different
-        # program, so this count does not see it -- asserted separately below,
-        # so a count that stayed at four cannot hide a missing hook.
-        assert _managed_command_count(claude) == 5
+        # SYRD-234 added a fifth idle-hook command (the permission_prompt notice
+        # that marks the pane blocked), SYRD-644 a sixth (StopFailure, run for an
+        # API-error turn end); each is asserted by name, and the PermissionRequest
+        # hook, a program this count does not see, below: no stale count hides one.
+        assert _managed_command_count(claude) == 6
+        assert any("--source claude.StopFailure" in command for command in _commands(claude)), _commands(claude)
         claude_commands = _commands(claude)
         assert any(
             "ticket-board-claude-permission-hook" in command for command in claude_commands

@@ -11,6 +11,7 @@ from .documentation_gate import validate_documentation_gate
 from .publisher_stage import validate_publisher
 from .router_role import router_holds, validate_router
 from .user_wait import validate_user_waits
+from .audit_return import advertise as advertise_audit_return
 
 SCHEMA = "switchyard.workflow.v1"
 NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -1184,17 +1185,18 @@ def advertised_transitions(cfg: dict[str, Any], ticket: dict[str, Any], actor: s
     refuse for want of that sign-off is not an action anyone can take, and
     advertising it is how MEFP-233's Director was offered a route to audit the
     board then refused. The same rule as ticket_board.enforce_declared_ticket_update.
+    Audit's kick-back also says where it returns this ticket, or why not (SYRD-673).
     """
     stages = {s["name"]: s for s in cfg.get("stages", [])}
     source = stages.get(ticket.get("state")) or {}
     signoff = source.get("signoff")
     if not signoff or _ticket_flag(cfg, ticket, signoff):
-        return available_transitions(cfg, ticket, actor)
+        return [advertise_audit_return(tr, ticket) for tr in available_transitions(cfg, ticket, actor)]
     # SYRD-629: the User may hand their review to the Director; no other review's work goes to a hold unsigned.
     handoff = director_hold_stage_names(cfg) if source.get("kind") == "review" and "user" in source.get("owners", []) else set()
     parking = set(parking_stage_names(cfg)) | handoff
     return [
-        tr for tr in available_transitions(cfg, ticket, actor)
+        advertise_audit_return(tr, ticket) for tr in available_transitions(cfg, ticket, actor)
         if tr["primitive"] in ("approve", "return", "reopen")
         or tr["to"] in parking
         or declared_review_return(cfg, tr["from"], tr["to"])

@@ -407,6 +407,10 @@ END $$;
         seen["unmeasured"] = approve("PGU-16")
         # Cancelling is not integration: an open finding never stops it.
         at_audit("PGU-17", grow)
+        # Seeded in Audit, it needs the producer its submission would have recorded for Audit to kick it back (SYRD-673).
+        t.psql(admin, "INSERT INTO ticket_board.ticket_audit_returns (ticket_id, producer_stage, producer_assignee, "
+                      "producer_action, producer_at, producer_commit, producer_exempt) VALUES ('PGU-17', 'in_progress', "
+                      f"'main', 'submit_to_audit', clock_timestamp(), '{grow}', false);")
         approve("PGU-17")  # refused: the finding is now open
         kicked = cli("audit", "audit-kick-back", "PGU-17", "--reason", "split edge.py first")[0]
         seen["cancel_with_finding"] = (kicked, state("PGU-17"), next((f[1] for f in findings("PGU-17")), None),

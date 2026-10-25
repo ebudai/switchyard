@@ -216,14 +216,15 @@ def needs_director(ticket: dict[str, Any], workflow: dict[str, Any] | None = Non
     anyone is the director's: that is what triage is.
 
     A wait on the User the board does not admit is the director's to repair
-    (SYRD-662): it hides the work from User Review and mutes its owner.
+    (SYRD-662): it hides the work from User Review and mutes its owner. So is
+    a ticket in Audit whose kick-back the board would refuse (SYRD-673).
     """
     state = str(ticket.get("state", ""))
     assignee = str(ticket.get("assignee", ""))
     awaiting = str(ticket.get("awaiting_role", ""))
     if state == "director_review" or awaiting == "director":
         return True
-    if (ticket.get("user_wait") or {}).get("valid") is False:
+    if (ticket.get("user_wait") or {}).get("valid") is False or (ticket.get("audit_return") or {}).get("valid") is False:
         return True
     if assignee == "director" and state in ACTIVE_STATES | {"backlog"}:
         return True
@@ -252,6 +253,7 @@ def format_ticket(ticket: dict[str, Any]) -> str:
         "",
         *format_queue_hold(ticket),
         *format_user_wait(ticket),
+        *format_audit_return(ticket),
         "Origin:",
         f"  origin_project: {ticket.get('origin_project', '') or '(none)'}",
         f"  external_source_ref: {ticket.get('external_source_ref', '') or '(none)'}",
@@ -277,6 +279,19 @@ def format_user_wait(ticket: dict[str, Any]) -> list[str]:
         return ["Waiting on the User:", f"  asked: {wait.get('request')}", f"  why: {wait.get('reason')}",
                 f"  by {wait.get('requested_by')} since {wait.get('since')}", ""]
     return ["Waiting on the User (not valid):", f"  problem: {wait.get('problem')}", f"  repair: {wait.get('repair')}", ""]
+
+
+def format_audit_return(ticket: dict[str, Any]) -> list[str]:
+    """Where Audit's kick-back returns it (SYRD-673): its revision's producer, or why it would be refused and the repair."""
+    status = ticket.get("audit_return")
+    if not isinstance(status, dict):
+        return []
+    entered = status.get("entered_from") or {}
+    came = f"  entered from: {entered.get('stage')}/{entered.get('assignee')} by {entered.get('action')}" if entered else None
+    if status.get("valid"):
+        by = f"recorded by {status['recorded_by']}: {status.get('reason')}" if status.get("recorded_by") else f"by {status.get('action')}"
+        return ["Kick-back returns to:", f"  {status.get('stage')}/{status.get('assignee')} ({by})", *filter(None, [came]), ""]
+    return ["Kick-back refused:", f"  problem: {status.get('problem')}", f"  repair: {status.get('repair')}", *filter(None, [came]), ""]
 
 
 def format_queue_hold(ticket: dict[str, Any]) -> list[str]:

@@ -606,6 +606,28 @@ idle without advancing, blocking or handing off produces one escalation to you
 per stall. Once, not once per wave -- if you see the same stall twice, something
 on the ticket changed in between.
 
+## Where Audit's kick-back returns work
+
+Audit's kick-back returns a ticket to the stage and owner that produced the
+revision Audit reviewed, which the board records. It is the
+implementer's submission, the Librarian's documentation commit, or the draft or
+implementation stage the ticket last left. Your stages and the review stages
+pass a ticket on without changing that, so a draft you released into triage and
+moved into Audit returns to its designer. The ticket's `audit_return` shows where
+the kick-back goes. When the board does not know who produced the revision (a
+ticket in Audit before the upgrade, or a revision your edit or override made),
+or the workflow no longer admits the return, the kick-back is refused, nothing
+moves, and the ticket shows in your queue. Record the return; it moves nothing,
+and Audit then kicks back as usual:
+
+```bash
+ticket-board-write set-audit-return <id> --stage <stage> --assignee <owner> --reason "why it goes there"
+```
+
+The stage must be live (not the one being left, a parking stage or a closed
+one), and the owner an active role that owns it. Use it as well to send Audit's
+findings somewhere other than the recorded producer.
+
 ## Last-resort overrides
 
 **Reach for the bounded move first.** `force-move` and `override-move` are not

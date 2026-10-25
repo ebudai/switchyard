@@ -588,6 +588,14 @@ def _build_parser() -> argparse.ArgumentParser:
     await_user.add_argument("ticket_id")
     add_free_text_argument(await_user, "--reason", required=True, help="why only the User can act or decide next")
     add_free_text_argument(await_user, "--request", required=True, help="the action or decision asked of the User")
+    audit_return = subparsers.add_parser(
+        "set-audit-return", help="Director: record where Audit's kick-back returns a ticket in review, when the board has "
+                                 "no valid record of who produced its revision; moves nothing (SYRD-673)",
+    )
+    audit_return.add_argument("ticket_id")
+    audit_return.add_argument("--stage", required=True, help="the stage it returns to: one that produces work")
+    audit_return.add_argument("--assignee", required=True, help="the active role, an owner of that stage, it returns to")
+    add_free_text_argument(audit_return, "--reason", required=True, help="why the return goes there")
     fresh_context = subparsers.add_parser(
         "force-fresh-context",
         help="Director: start a ticket in a fresh conversation at a package boundary, before its hand-off (SYRD-626)",
@@ -645,13 +653,15 @@ def _build_parser() -> argparse.ArgumentParser:
     clear_awaiting = subparsers.add_parser("clear-awaiting-role")
     clear_awaiting.add_argument("ticket_id")
 
-    audit_kick = subparsers.add_parser("audit-kick-back")
+    audit_kick = subparsers.add_parser(
+        "audit-kick-back", help="return the ticket to the stage and owner that produced the revision under review (SYRD-673); refused, "
+                                "moving nothing, while the board has no valid record of that: the Director's set-audit-return")
     audit_kick.add_argument("ticket_id")
     add_free_text_argument(audit_kick, "--reason", required=True)
     audit_kick.add_argument(
         "--target-assignee",
         default="",
-        help="optional confirmation: under a declared workflow a kick-back returns the ticket to its recorded implementer, so this must name that implementer; to hand it to someone else, the Director reassigns after the kick-back",
+        help="optional confirmation: under a declared workflow Audit's kick-back returns the ticket to the owner that produced its revision, so this must name that owner; to hand it to someone else, the Director reassigns after the kick-back",
     )
 
     dat_sign = subparsers.add_parser("director-dat-sign-off")
@@ -914,6 +924,8 @@ def main(argv: list[str] | None = None) -> int:
                                                    then_choose=args.then_choose or "", reconfirm=args.reconfirm)
         elif command == "await_user":
             response = client.await_user(args.ticket_id, reason=args.reason, request=args.request)
+        elif command == "set_audit_return":
+            response = client.set_audit_return(args.ticket_id, stage=args.stage, assignee=args.assignee, reason=args.reason)
         elif command == "withdraw_signoff":
             response = client.withdraw_signoff(args.ticket_id, signoff=args.signoff, reason=args.reason)
         elif command == "measure_size":
@@ -980,7 +992,7 @@ def main(argv: list[str] | None = None) -> int:
                    "snooze_reminders", "clear_reminder_snooze", "claim_next", "approve_size_exception",
                    "enable_size_review", "measure_size", "set_report_intake", "force_fresh_context",
                    "uat_instructions", "extend_lease", "interrupt_lease", "set_cohort_quota", "clear_cohort_quota",
-                   "clear_provider_hold", "await_user"}:
+                   "clear_provider_hold", "await_user", "set_audit_return"}:
         print(json.dumps(response))
     else:
         print(json.dumps(_ticket_from_response(response)))

@@ -171,7 +171,11 @@ refusal says which. If it holds:
 - **every later sign-off is cleared** - Inspection's, Audit's and the User's -
   so the ticket's reviews start again on the new commit, and Inspection and
   Audit review it in full: the implementer's work and the documentation
-  together.
+  together;
+- **the revision is yours**: if Audit kicks it back, it comes back to you in
+  Documentation, with your commit still the candidate (SYRD-673). Fix the
+  documentation with a new commit on top of it, or kick it back to the
+  implementer with findings if the problem is in their work.
 
 ### 3. Kick back with findings
 

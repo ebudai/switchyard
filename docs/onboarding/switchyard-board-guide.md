@@ -124,7 +124,14 @@ system working, not a bug to route around.
 
 **Audit**
 - `audit-sign-off` — audit → dat (or → director_review when the DAT gate is unset)
-- `audit-kick-back` — audit → in_progress
+- `audit-kick-back` — audit → the stage and owner that produced the revision Audit
+  reviewed (SYRD-673): the implementer who submitted it, the designer whose draft it is,
+  the Librarian whose documentation commit it carries. Review stages and the Director's
+  stages pass a ticket on without changing who produced it. The ticket's `audit_return`
+  says where the kick-back goes and how the ticket entered Audit. When the board does not
+  know who produced the revision, or the workflow no longer lets the work go back there,
+  the kick-back is refused and nothing moves: ask the Director with `request-dependency`,
+  who records the return with `set-audit-return`, then kick back as usual.
 - `file-bug` — create a defect ticket without going through the director. The new ticket
   is linked to the source ticket and lands in `analysis`.
 - Audit **cannot** re-assign or route. It is a gate, not an implementer, and it is

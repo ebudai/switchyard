@@ -93,7 +93,14 @@ ACTION_SEMANTICS: dict[str, ActionSemantics] = {
     ),
     "audit_sign_off": ActionSemantics("approve", False, False, (), "Audit sign-off", "shipped"),
     "audit_kick_back": ActionSemantics(
-        "return", False, True, ("audit_signoff", "user_signoff"), "Audit kick-back", "shipped"
+        "return", False, True, ("audit_signoff", "user_signoff"), "Audit kick-back", "shipped",
+        # SYRD-673: the declared board decides where it lands from its own record, which legacy has none of.
+        differs=(
+            "returns the work to the stage and owner that produced the revision Audit reviewed, as the board "
+            "records it from adoption on, where legacy returns it to the recorded implementer; a ticket already "
+            "in Audit at adoption has no such record, and its kick-back is refused, moving nothing, until the "
+            "Director records the return with set-audit-return"
+        ),
     ),
     "director_dat_sign_off": ActionSemantics("move", False, False, (), "DAT sign-off", "shipped"),
     "director_dat_kick_back": ActionSemantics(
@@ -340,7 +347,8 @@ def compose_legacy_workflow(
     # two agree whenever an implementer is recorded -- which is every ticket
     # that reached review through implementation -- and the differential test
     # shows exactly that; they diverge only for one that did not.
-    returns = sorted({t["action"] for t in transitions if t["primitive"] == "return"})
+    # Audit's kick-back returns to its revision's producer instead, declared with it above (SYRD-673).
+    returns = sorted({t["action"] for t in transitions if t["primitive"] == "return" and t["action"] != "audit_kick_back"})
     if returns:
         differences.append(
             f"{', '.join(returns)}: with no implementer on record, returns to the "

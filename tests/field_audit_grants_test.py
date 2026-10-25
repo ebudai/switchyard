@@ -294,11 +294,22 @@ def before(out: dict) -> None:
           f"main: a role user, the listener and a read-only pg_read_all_data member forge an audit row: {out['attempts']}")
 
 
+def on_main(acl: list[str], main_acl: list[str]) -> list[str]:
+    """The rows for objects main also has: an object a later ticket adds has no grants on main to compare
+    (SYRD-673); the checks below hold it to the rest."""
+    def name(row: str) -> str:
+        head, _, entries = row.rpartition(" ")
+        return head if "=" in entries else row
+    known = {name(row) for row in main_acl}
+    return [row for row in acl if name(row) in known]
+
+
 def candidate(out: dict, main: dict) -> None:
     first, second = out["first"], out["second"]
-    check(board_view(first["acl"]) == board_view(main["first"]["acl"]),
+    mine = board_view(on_main(first["acl"], main["first"]["acl"]))
+    check(mine == board_view(main["first"]["acl"]),
           "outside the SYRD-83 objects every board principal holds exactly what it holds on main's first tenant: "
-          f"{sorted(set(board_view(first['acl'])) ^ set(board_view(main['first']['acl'])))[:4]}")
+          f"{sorted(set(mine) ^ set(board_view(main['first']['acl'])))[:4]}")
     check(first["acl"] == second["acl"], "a host's first and second tenants have the same grants on every object: "
           f"{sorted(set(first['acl']) ^ set(second['acl']))[:4]}")
     check(first["strangers"] == [] and second["strangers"] == [] and out["second_migrated"]["strangers"] == [],

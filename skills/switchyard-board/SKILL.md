@@ -291,6 +291,12 @@ to be able to reconstruct the decision from the ticket alone.
 Sign off on what you actually verified. "Tests pass" is only true if you ran them
 and read the output; say what you ran and what it printed.
 
+Audit's kick-back returns the work to whoever produced the revision Audit
+reviewed: an implementer, a designer, the Librarian. The ticket's
+`audit_return` says who. When the board does not know, the kick-back is refused
+and moves nothing; ask the director with `request-dependency`, and kick back
+once the return is recorded.
+
 ## When you are told to act
 
 1. Read the whole ticket.

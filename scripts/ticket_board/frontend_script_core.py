@@ -229,6 +229,11 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-
       } else if (userWait) {
         alerts.push({ kind: 'blocked', title: 'Invalid wait on the User', text: `${userWait.problem}. Repair: ${userWait.repair}.` });
       }
+      // SYRD-673: Audit's kick-back would be refused: the board does not know who produced the revision.
+      const auditReturn = ticket.audit_return;
+      if (auditReturn && !auditReturn.valid) {
+        alerts.push({ kind: 'blocked', title: 'Kick-back would be refused', text: `${auditReturn.problem}. Repair: ${auditReturn.repair}.` });
+      }
       return alerts;
     }
 

@@ -213,9 +213,16 @@ SCENARIOS = [
              expect={"verdict": (True, False),
                      "state": ("analysis", "in_progress"),
                      "assignee": ("director", "main")}),
+    # SYRD-673: a declared board returns Audit's kick-back to the producer of the revision it reviewed, from
+    # its own record; with none (a ticket already in Audit at adoption), it refuses and moves nothing.
     Scenario("audit kick-back, no implementer on record",
              {"state": "audit", "assignee": "audit", "commit_hash": "e" * 40},
              "audit_kick_back", "audit", {"reason": "missing test"},
+             expect={"verdict": (True, False), "state": ("in_progress", "audit"), "assignee": ("ops", "audit"),
+                     "commit_hash": ("", "e" * 40)}),
+    Scenario("DAT kick-back, no implementer on record",
+             {"state": "dat", "assignee": "director", "audit_signoff": True, "commit_hash": "7" * 40},
+             "director_dat_kick_back", "director", {"reason": "found a defect"},
              expect={"assignee": ("ops", "main")}),
 ]
 
@@ -251,6 +258,13 @@ def seed(board: Board, ticket_id: str, spec: dict) -> None:
         t.psql(board.admin,
                "UPDATE ticket_board.ticket_notification_state "
                f"SET last_implementer_assignee='{implementer}' WHERE ticket_id='{ticket_id}';")
+        # ... and, on a declared board, the producer of the revision it carries, as its submission recorded it
+        # (SYRD-673). The legacy board never reads it.
+        t.psql(board.admin,
+               "INSERT INTO ticket_board.ticket_audit_returns (ticket_id, producer_stage, producer_assignee, "
+               "producer_action, producer_at, producer_commit, producer_exempt) VALUES "
+               f"('{ticket_id}', 'in_progress', '{implementer}', 'submit_to_audit', clock_timestamp(), "
+               f"'{spec.get('commit_hash', '')}', {str(spec.get('commit_exempt', False)).lower()});")
 
 
 def main() -> int:

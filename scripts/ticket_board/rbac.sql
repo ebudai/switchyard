@@ -533,6 +533,12 @@ REVOKE ALL ON FUNCTION ticket_board.require_uat_gates() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION ticket_board.await_user(text, text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.user_wait_status(text) TO ticket_board_service;
 
+-- SYRD-673: where Audit's kick-back returns a ticket, and the Director's record of it.
+-- The ticket read asks audit_return_status only of a ticket in a stage Audit's kick-back leaves.
+GRANT EXECUTE ON FUNCTION ticket_board.audit_return_transition(jsonb) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.audit_return_status(text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.set_audit_return(text, text, text, text) TO ticket_board_service;
+
 -- SYRD-668: last, after every grant above. The board's own principals are the
 -- role users this file creates and its service and listener, and nothing is
 -- granted to any other role. Migrations once granted to every role that passed

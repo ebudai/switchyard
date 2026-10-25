@@ -204,7 +204,9 @@ def main() -> int:
         confirm, elsewhere, plain = (after[f"{command} {label}"] for label in ("confirm", "elsewhere", "reason-only"))
         check(confirm["code"] == 0 and (confirm["state"], confirm["assignee"]) == ("in_progress", "ops"),
               f"{command} --target-assignee naming the recorded implementer returns it there: {confirm}")
-        check(elsewhere["code"] != 0 and "returns" in elsewhere["output"] and "recorded implementer, ops" in elsewhere["output"]
+        # SYRD-673: Audit's returns to the producer of the revision it reviewed, here the same implementer.
+        named = "the producer of its revision, ops" if command == "audit-kick-back" else "recorded implementer, ops"
+        check(elsewhere["code"] != 0 and "returns" in elsewhere["output"] and named in elsewhere["output"]
               and "cannot send it to main" in elsewhere["output"] and elsewhere["state"] == stage,
               f"{command} --target-assignee naming anyone else is refused, nothing moved: {elsewhere}")
         check(plain["code"] == 0 and (plain["state"], plain["assignee"]) == ("in_progress", "ops"),

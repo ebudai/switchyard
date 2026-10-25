@@ -104,6 +104,8 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
     "ask_director": {"user"},
     # SYRD-662: a wait on the User is the Director's decision.
     "await_user": {"director"},
+    # SYRD-673: where Audit's kick-back returns a ticket with no valid origin is the Director's record.
+    "set_audit_return": {"director"},
 }
 
 #: The two operations that exist to move a ticket the declared workflow will
@@ -174,6 +176,9 @@ COMPOSED_OPERATION_CAPABILITIES = {
     # Withdrawing an approval is the control role's: the capabilities that define it (SYRD-49). The
     # database checks role_controls_project itself (SYRD-598).
     "withdraw_signoff": frozenset({"set_manually_controlled", "merge"}),
+    # SYRD-673: recording where Audit's kick-back returns a ticket is the control role's, like withdrawing a
+    # sign-off; the database checks role_controls_project itself.
+    "set_audit_return": frozenset({"set_manually_controlled", "merge"}),
 }
 
 #: SYRD-93: publication is admitted by declared capability, never by role name.

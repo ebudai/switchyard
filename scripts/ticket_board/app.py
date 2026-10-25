@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import attachment_store, commit_cache, extension_operations, new_asset_files, ui_delegation, workflow_locking
+from . import attachment_store, audit_return, commit_cache, extension_operations, new_asset_files, ui_delegation, workflow_locking
 from .commit_cache import COMMIT_REFRESH_TIMEOUT_SECONDS, PUBLISHABLE_REF, PUBLISHED_REF_NAMESPACE
 from .commit_repos import commit_git_dirs_for_project
 from .image_asset_policy import (  # re-exported: callers import these from the app
@@ -351,12 +351,13 @@ WHERE (r.definition->>'active')::boolean
         if "recommendations" in payload and not str(payload.get("reason") or payload.get("text") or "").strip():
             payload["reason"] = payload["recommendations"]
         payload.pop("recommendations", None)
-        # A declared kick-back is a `return`: the executor sends the ticket to
-        # its recorded implementer and ignores any other request, so a target
-        # cannot be chosen -- and letting a reviewer choose one would be new
-        # authority. --target-assignee is therefore a confirmation: accepted
-        # when it names exactly where the return goes, refused before anything
-        # changes when it does not. Any other action has no target to name.
+        # A declared kick-back is a `return`: the executor decides who gets the
+        # ticket (Audit's, its revision's producer: SYRD-673) and ignores any
+        # other request, so a target cannot be chosen -- and letting a reviewer
+        # choose one would be new authority. --target-assignee is therefore a
+        # confirmation: accepted when it names exactly where the return goes,
+        # refused before anything changes when it does not. Any other action has
+        # no target to name.
         target = str(payload.pop("target_assignee", "") or "").strip().lower()
         if target:
             cfg = self.workflow_configuration()
@@ -366,21 +367,7 @@ WHERE (r.definition->>'active')::boolean
             if transition is None or transition.get("primitive") != "return":
                 raise ValueError(f"{action} takes no target assignee; the ticket goes where the workflow sends it")
             owners = next((s.get("owners") or [] for s in cfg["stages"] if s["name"] == transition["to"]), [])
-            with self._pg_connect() as conn:
-                row = conn.execute("SELECT last_implementer_assignee FROM ticket_board.ticket_notification_state "
-                                   "WHERE ticket_id = %s", (ticket_id,)).fetchone()
-            recorded = str((row["last_implementer_assignee"] if isinstance(row, dict) else row[0]) or "") if row else ""
-            if recorded in owners:
-                returns_to = recorded
-            elif ticket["assignee"] in owners:
-                returns_to = ticket["assignee"]
-            else:
-                returns_to = owners[0] if owners else ""
-            if target != returns_to:
-                raise ValueError(
-                    f"{action} returns {ticket_id} to its recorded implementer, {returns_to or 'nobody'}; it cannot "
-                    f"send it to {target}. Kick it back without --target-assignee, then have the Director reassign it"
-                )
+            audit_return.confirm_target(self, ticket, transition, owners, target)
         if set(payload) - {"target", "assignee", "commit_hash", "text", "reason"}:
             raise ValueError("unknown workflow action payload field")
         if "commit_hash" in payload:

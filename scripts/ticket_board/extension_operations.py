@@ -8,13 +8,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import (cohort_ops, provider_hold_ops, context_continuation, documentation_candidate, execution_lease_ops, pull_queue, reminder_snooze,
+from . import (audit_return, cohort_ops, provider_hold_ops, context_continuation, documentation_candidate, execution_lease_ops, pull_queue, reminder_snooze,
                report_intake, router_role, size_review, uat_instructions, ui_delegation, user_wait)
 
 OPERATIONS = (reminder_snooze.OPERATIONS | size_review.OPERATIONS | report_intake.OPERATIONS
               | router_role.OPERATIONS | ui_delegation.OPERATIONS | context_continuation.OPERATIONS
               | uat_instructions.OPERATIONS | execution_lease_ops.OPERATIONS | cohort_ops.OPERATIONS
-              | provider_hold_ops.OPERATIONS | user_wait.OPERATIONS)
+              | provider_hold_ops.OPERATIONS | user_wait.OPERATIONS | audit_return.OPERATIONS)
 
 
 def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: str,
@@ -35,6 +35,8 @@ def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: s
         return uat_instructions.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
     if operation in user_wait.OPERATIONS:  # SYRD-662
         return user_wait.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
+    if operation in audit_return.OPERATIONS:  # SYRD-673
+        return audit_return.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
     if operation in execution_lease_ops.OPERATIONS:  # SYRD-616
         return execution_lease_ops.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
     if operation in provider_hold_ops.OPERATIONS:  # SYRD-644
@@ -68,12 +70,14 @@ def ticket_fields(row: Any) -> dict[str, Any]:
     uat is the User's current UAT instructions and questions, null when there are
     none (SYRD-629); user_wait is its wait on the User -- the Director's request,
     or why it is not valid and the repair -- null when it waits on nobody of the
-    kind (SYRD-662).
+    kind (SYRD-662); audit_return is where Audit's kick-back would return it, or
+    why it would be refused and the repair -- null outside the stage that
+    kick-back leaves (SYRD-673).
     """
     return {"reminder_snooze": row.get("reminder_snooze"), "size_review": row.get("size_review"),
             "serial_queue": row.get("serial_queue"), "privileged_jobs": row.get("privileged_jobs") or [],
             "routing": row.get("routing"), "context_continuation": row.get("context_continuation"),
-            "uat": row.get("uat"), "user_wait": row.get("user_wait")}
+            "uat": row.get("uat"), "user_wait": row.get("user_wait"), "audit_return": row.get("audit_return")}
 
 
 def reservation_fields(app: Any) -> dict[str, Any]:

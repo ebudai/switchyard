@@ -8242,7 +8242,7 @@ DECLARE cfg jsonb:=ticket_board.declared_workflow(); doc jsonb:=to_jsonb(propose
         nullif(current_setting('ticket_board.workflow_actor',true),''),
         ticket_board.current_app_actor()); target text;
     reset text; flag record; owners text[]; fallback text; loops int:=0;
-    queued_for text; reserved_by text;
+    queued_for text; reserved_by text; origin jsonb;
 BEGIN
     IF actor IS NULL THEN RAISE EXCEPTION 'configured ticket writes require a registered actor' USING ERRCODE='42501'; END IF;
     -- A narrated override moves a ticket the declared workflow will not: that
@@ -8392,6 +8392,17 @@ BEGIN
     IF tr->>'action'='router_return'
        AND nullif(current_setting('ticket_board.router_ticket', true), '') IS DISTINCT FROM previous.id THEN
         RAISE EXCEPTION 'router_return is taken only through ticket_board.router_return' USING ERRCODE='42501'; END IF;
+    -- SYRD-673: Audit's kick-back returns the work to the stage and owner that
+    -- produced the revision under review, as the board recorded it -- never to
+    -- the declared `to`, the current assignee or a guess. With no valid record
+    -- it is refused, and nothing moves.
+    IF ticket_board.audit_return_transition(tr) THEN
+        origin:=ticket_board.audit_return_status(previous.id);
+        IF NOT coalesce((origin->>'valid')::boolean,false) THEN
+            RAISE EXCEPTION '% cannot be kicked back: %. Nothing was moved. Ask the Director (ticket-board-write request-dependency % --role director); the repair: %',
+                previous.id, coalesce(origin->>'problem','the board has no record of who produced its revision'), previous.id,
+                coalesce(origin->>'repair','the Director records where it returns with set-audit-return') USING ERRCODE='55000'; END IF;
+    END IF;
     SELECT x INTO source_stage FROM jsonb_array_elements(cfg->'stages') x WHERE x->>'name'=previous.state;
     IF (source_stage->>'terminal')::boolean AND tr->>'primitive'<>'reopen' THEN RAISE EXCEPTION 'terminal exit requires reopen'; END IF;
     -- A blocker stops work going FORWARD. Putting work down is not going
@@ -8459,7 +8470,10 @@ BEGIN
     FOR reset IN SELECT jsonb_array_elements_text(tr->'clear_signoffs') LOOP
         doc:=ticket_board.set_workflow_flag(doc,reset,false);
     END LOOP;
-    IF tr->>'primitive' IN ('return','reopen') THEN doc:=doc||jsonb_build_object('commit_hash','','commit_exempt',false); END IF;
+    -- A return hands work back to be redone, so the candidate goes -- except to
+    -- a review stage, whose owner produced it and reviews on top of it (SYRD-673).
+    IF tr->>'primitive' IN ('return','reopen') AND ticket_board.declared_stage_kind(origin->>'stage') IS DISTINCT FROM 'review' THEN
+        doc:=doc||jsonb_build_object('commit_hash','','commit_exempt',false); END IF;
     IF (tr->>'allow_no_code')::boolean THEN doc:=doc||jsonb_build_object('commit_hash','','commit_exempt',true); END IF;
     -- A sign-off is a review of one commit (SYRD-271). MEFP-4 was approved for
     -- one commit, routed back by a plain `move` that clears nothing, and
@@ -8481,11 +8495,12 @@ BEGIN
             END IF;
         END LOOP;
     END IF;
-    target:=proposed.state;
+    target:=coalesce(origin->>'stage',proposed.state);
     LOOP
         SELECT x INTO dest FROM jsonb_array_elements(cfg->'stages') x WHERE x->>'name'=target;
         IF dest IS NULL THEN RAISE EXCEPTION 'missing target stage'; END IF;
-        EXIT WHEN (dest->>'gate' IS NULL OR ticket_board.workflow_flag(doc,dest->>'gate',cfg))
+        -- The producer's stage is exact: no gate skips past it (SYRD-673).
+        EXIT WHEN origin IS NOT NULL OR (dest->>'gate' IS NULL OR ticket_board.workflow_flag(doc,dest->>'gate',cfg))
           AND NOT (dest->>'signoff' IS NOT NULL AND dest->>'skip_to' IS NOT NULL AND ticket_board.workflow_flag(doc,dest->>'signoff',cfg));
         target:=dest->>'skip_to'; loops:=loops+1;
         IF loops>jsonb_array_length(cfg->'stages') THEN RAISE EXCEPTION 'gate cycle'; END IF;
@@ -8506,7 +8521,9 @@ BEGIN
         proposed.assignee:='router';
     END IF;
     IF dest->>'signoff' IS NOT NULL THEN doc:=ticket_board.set_workflow_flag(doc,dest->>'signoff',false); END IF;
-    IF tr->>'primitive'='return' THEN
+    IF origin IS NOT NULL THEN
+        proposed.assignee:=origin->>'assignee';
+    ELSIF tr->>'primitive'='return' THEN
         SELECT last_implementer_assignee INTO fallback FROM ticket_board.ticket_notification_state WHERE ticket_id=previous.id;
         IF fallback=ANY(owners) THEN proposed.assignee:=fallback; END IF;
     END IF;
@@ -20857,3 +20874,270 @@ REVOKE ALL ON FUNCTION ticket_board.guard_user_wait() FROM PUBLIC;
 -- ticket read only probes that it exists.
 REVOKE ALL ON FUNCTION ticket_board.uat_missing_gates(jsonb, jsonb, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION ticket_board.require_uat_gates() FROM PUBLIC;
+
+-- SYRD-673: Audit's kick-back returns work to the producer of the revision it audited.
+--
+-- audit_kick_back always went to the declared Implementation stage, and the
+-- executor then picked an Implementation owner. A ticket that reached Audit
+-- from a designer's draft (pie's design-review loop) went to an implementer who
+-- never touched it, and the designer never saw the findings.
+--
+-- The board now records who produced each ticket's current revision: the stage
+-- and owner that made it. That is the holder whose own transition carried a new
+-- revision (a commit, or a no-code completion) -- an implementer's submission,
+-- the Librarian's documentation commit -- or the implementer or draft owner
+-- whose stage the ticket left. Review stages and the Director's and system
+-- stages produce nothing: the ticket passes through them with its producer
+-- unchanged. A new revision made any other way (an edit, an override) leaves
+-- the producer unknown. Each entry into Audit is recorded too, as evidence.
+-- Audit's kick-back returns to the producer, with the sign-off clearing its
+-- declaration names. When the producer is unknown, did not produce the
+-- revision now under review, or the workflow no longer admits it there, the
+-- kick-back is refused and moves nothing: the Director records the return with
+-- set_audit_return, and Audit kicks back as usual.
+CREATE TABLE IF NOT EXISTS ticket_board.ticket_audit_returns (
+    ticket_id text PRIMARY KEY REFERENCES ticket_board.tickets(id) ON DELETE CASCADE,
+    -- Who produced the revision (commit, or no-code completion) in producer_commit/exempt:
+    -- its stage and owner, by which action, or the Director's record of it
+    -- (recorded_by, reason). producer_stage is NULL when it was made otherwise.
+    producer_stage text,
+    producer_assignee text,
+    producer_action text NOT NULL,
+    producer_at timestamptz NOT NULL,
+    producer_commit text NOT NULL,
+    producer_exempt boolean NOT NULL,
+    recorded_by text NOT NULL DEFAULT '',
+    reason text NOT NULL DEFAULT '',
+    -- Its latest entry into the stage Audit's kick-back leaves: from where, by
+    -- which action, carrying which revision. Evidence; NULL outside that stage.
+    audit_stage text,
+    entered_from_stage text,
+    entered_from_assignee text,
+    entry_action text,
+    entered_at timestamptz,
+    entry_commit text,
+    entry_exempt boolean
+);
+
+-- The transition that returns work to its producer: the declared
+-- audit_kick_back, which stays declared as before so clients see the same
+-- action; only where it lands is the ticket's own.
+CREATE OR REPLACE FUNCTION ticket_board.audit_return_transition(tr jsonb)
+RETURNS boolean LANGUAGE sql IMMUTABLE AS $$
+    SELECT coalesce(tr->>'action' = 'audit_kick_back' AND tr->>'primitive' = 'return', false);
+$$;
+
+-- A stage that kick-back leaves.
+CREATE OR REPLACE FUNCTION ticket_board.audit_return_stage(p_stage text)
+RETURNS boolean LANGUAGE sql STABLE AS $$
+    SELECT EXISTS (SELECT FROM jsonb_array_elements(ticket_board.declared_workflow()->'transitions') x
+                    WHERE x->>'from' = p_stage AND ticket_board.audit_return_transition(x));
+$$;
+
+-- Whether p_role, holding a ticket in p_stage, produces its work there: an
+-- implementer or a draft owner (a designer) that the stage declares as an
+-- owner, outside review. Everyone else's stage is a connector.
+CREATE OR REPLACE FUNCTION ticket_board.producing_holder(p_stage text, p_role text)
+RETURNS boolean LANGUAGE sql STABLE AS $$
+    SELECT EXISTS (SELECT FROM jsonb_array_elements(ticket_board.declared_workflow()->'stages') s,
+                               jsonb_array_elements(ticket_board.declared_workflow()->'roles') r
+                    WHERE s->>'name' = p_stage AND s->>'kind' <> 'review' AND coalesce(s->'owners' ? p_role, false)
+                      AND r->>'name' = p_role AND r->>'kind' IN ('implementer', 'draft'));
+$$;
+
+-- Why work in p_audit_stage cannot be returned to p_stage and p_owner under the
+-- declared workflow, or NULL: back to a live stage that is not this one, to an
+-- active role that owns it.
+CREATE OR REPLACE FUNCTION ticket_board.audit_return_problem(p_audit_stage text, p_stage text, p_owner text)
+RETURNS text LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+DECLARE cfg jsonb := ticket_board.declared_workflow(); s jsonb; r jsonb;
+BEGIN
+    SELECT x INTO s FROM jsonb_array_elements(cfg->'stages') x WHERE x->>'name' = p_stage;
+    IF s IS NULL THEN
+        RETURN format('the workflow does not declare a stage %s', coalesce(nullif(p_stage, ''), '<none>'));
+    END IF;
+    IF p_stage = p_audit_stage OR coalesce((s->>'terminal')::boolean, false) OR ticket_board.declared_parking_stage(p_stage) THEN
+        RETURN format('%s is not a stage work is returned to: it is the stage being left, a parking stage or a closed one',
+                      p_stage);
+    END IF;
+    SELECT x INTO r FROM jsonb_array_elements(cfg->'roles') x WHERE x->>'name' = p_owner;
+    IF r IS NULL OR NOT coalesce((r->>'active')::boolean, false) THEN
+        RETURN format('%s is not an active role in the workflow', coalesce(nullif(p_owner, ''), '<nobody>'));
+    END IF;
+    IF NOT coalesce(s->'owners' ? p_owner, false) THEN
+        RETURN format('%s does not own %s (owners: %s)', p_owner, p_stage,
+                      coalesce((SELECT string_agg(o, ', ') FROM jsonb_array_elements_text(s->'owners') o), 'none'));
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+-- Every change of stage or revision. A new revision carried by its holder's own
+-- declared transition records that holder as its producer; a new revision made
+-- any other way records that nobody known produced it, even when the same
+-- update also leaves a producing stage (a Director's edit that changes the
+-- revision and moves the ticket is the Director's revision). Leaving a stage its
+-- holder produces work in, with the revision unchanged, records that holder.
+-- Clearing the revision (a return) records nothing. An entry into the stage
+-- Audit's kick-back leaves records where it came from.
+CREATE OR REPLACE FUNCTION ticket_board.record_audit_return()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+DECLARE
+    action_name text := nullif(current_setting('ticket_board.workflow_action', true), '');
+    how text;
+    revised boolean;
+    own boolean;
+    moved boolean := OLD.state IS DISTINCT FROM NEW.state;
+BEGIN
+    IF ticket_board.declared_workflow() IS NULL THEN
+        RETURN NULL;
+    END IF;
+    revised := (NEW.commit_hash IS DISTINCT FROM OLD.commit_hash OR NEW.commit_exempt IS DISTINCT FROM OLD.commit_exempt)
+               AND (btrim(coalesce(NEW.commit_hash, '')) <> '' OR NEW.commit_exempt);
+    IF NOT moved AND NOT revised THEN
+        RETURN NULL;
+    END IF;
+    own := action_name IS NOT NULL AND nullif(current_setting('ticket_board.workflow_actor', true), '') = OLD.assignee;
+    how := coalesce(action_name,
+                    CASE WHEN current_setting('ticket_board.force_move', true) = 'on' THEN 'force_move'
+                         WHEN nullif(current_setting('ticket_board.director_edit_target', true), '') = NEW.id THEN 'director_edit'
+                         WHEN nullif(current_setting('ticket_board.merge_source', true), '') = NEW.id THEN 'merge'
+                         WHEN nullif(current_setting('ticket_board.router_ticket', true), '') = NEW.id THEN 'router'
+                         ELSE 'update' END);
+    IF (revised AND own) OR (NOT revised AND moved AND ticket_board.producing_holder(OLD.state, OLD.assignee)) THEN
+        INSERT INTO ticket_board.ticket_audit_returns (ticket_id, producer_stage, producer_assignee, producer_action,
+                                                       producer_at, producer_commit, producer_exempt)
+        VALUES (NEW.id, OLD.state, OLD.assignee, how, clock_timestamp(), coalesce(NEW.commit_hash, ''), NEW.commit_exempt)
+        ON CONFLICT (ticket_id) DO UPDATE SET producer_stage = EXCLUDED.producer_stage,
+            producer_assignee = EXCLUDED.producer_assignee, producer_action = EXCLUDED.producer_action,
+            producer_at = EXCLUDED.producer_at, producer_commit = EXCLUDED.producer_commit,
+            producer_exempt = EXCLUDED.producer_exempt, recorded_by = '', reason = '';
+    ELSIF revised THEN
+        INSERT INTO ticket_board.ticket_audit_returns (ticket_id, producer_stage, producer_assignee, producer_action,
+                                                       producer_at, producer_commit, producer_exempt)
+        VALUES (NEW.id, NULL, NULL, how, clock_timestamp(), coalesce(NEW.commit_hash, ''), NEW.commit_exempt)
+        ON CONFLICT (ticket_id) DO UPDATE SET producer_stage = NULL, producer_assignee = NULL,
+            producer_action = EXCLUDED.producer_action, producer_at = EXCLUDED.producer_at,
+            producer_commit = EXCLUDED.producer_commit, producer_exempt = EXCLUDED.producer_exempt,
+            recorded_by = '', reason = '';
+    END IF;
+    IF moved AND ticket_board.audit_return_stage(NEW.state) THEN
+        -- A ticket whose producer the board never saw is entered with none.
+        INSERT INTO ticket_board.ticket_audit_returns (ticket_id, producer_action, producer_at, producer_commit,
+                                                       producer_exempt, audit_stage, entered_from_stage,
+                                                       entered_from_assignee, entry_action, entered_at, entry_commit,
+                                                       entry_exempt)
+        VALUES (NEW.id, 'unrecorded', clock_timestamp(), '', false, NEW.state, OLD.state, OLD.assignee, how,
+                clock_timestamp(), coalesce(NEW.commit_hash, ''), NEW.commit_exempt)
+        ON CONFLICT (ticket_id) DO UPDATE SET audit_stage = EXCLUDED.audit_stage,
+            entered_from_stage = EXCLUDED.entered_from_stage, entered_from_assignee = EXCLUDED.entered_from_assignee,
+            entry_action = EXCLUDED.entry_action, entered_at = EXCLUDED.entered_at,
+            entry_commit = EXCLUDED.entry_commit, entry_exempt = EXCLUDED.entry_exempt;
+    ELSIF moved THEN
+        UPDATE ticket_board.ticket_audit_returns SET audit_stage = NULL, entered_from_stage = NULL,
+            entered_from_assignee = NULL, entry_action = NULL, entered_at = NULL, entry_commit = NULL, entry_exempt = NULL
+         WHERE ticket_id = NEW.id AND audit_stage IS NOT NULL;
+    END IF;
+    RETURN NULL;
+END;
+$$;
+DROP TRIGGER IF EXISTS tickets_z_audit_return ON ticket_board.tickets;
+CREATE TRIGGER tickets_z_audit_return AFTER UPDATE ON ticket_board.tickets
+    FOR EACH ROW EXECUTE FUNCTION ticket_board.record_audit_return();
+
+-- Where Audit's kick-back would return a ticket, for its JSON and for the
+-- executor; NULL outside a stage that kick-back leaves. Valid only when the
+-- board knows who produced the revision the ticket carries now, and the
+-- workflow still admits returning work there; otherwise it says what is wrong
+-- and the repair.
+CREATE OR REPLACE FUNCTION ticket_board.audit_return_status(p_ticket text)
+RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+DECLARE
+    t ticket_board.tickets;
+    r ticket_board.ticket_audit_returns;
+    revision text;
+    problem text;
+BEGIN
+    SELECT * INTO t FROM ticket_board.tickets WHERE id = p_ticket;
+    IF NOT FOUND OR NOT ticket_board.audit_return_stage(t.state) THEN
+        RETURN NULL;
+    END IF;
+    SELECT * INTO r FROM ticket_board.ticket_audit_returns WHERE ticket_id = p_ticket;
+    revision := coalesce(nullif(t.commit_hash, ''), CASE WHEN t.commit_exempt THEN 'no code' ELSE 'none' END);
+    problem := CASE
+        WHEN r.producer_action IS DISTINCT FROM 'unrecorded' AND r.producer_commit = coalesce(t.commit_hash, '')
+             AND r.producer_exempt = t.commit_exempt AND r.producer_stage IS NULL
+        THEN format('its revision (%s) was made by %s, not by the holder of a stage that produces work', revision,
+                    r.producer_action)
+        WHEN r.producer_stage IS NULL OR r.producer_commit IS DISTINCT FROM coalesce(t.commit_hash, '')
+             OR r.producer_exempt IS DISTINCT FROM t.commit_exempt
+        THEN format('the board has no record of who produced the revision it carries (%s)', revision)
+        ELSE ticket_board.audit_return_problem(t.state, r.producer_stage, r.producer_assignee) END;
+    RETURN jsonb_build_object(
+        'valid', problem IS NULL, 'stage', r.producer_stage, 'assignee', r.producer_assignee,
+        'action', r.producer_action, 'since', ticket_board.utc_text(r.producer_at), 'commit', r.producer_commit,
+        'recorded_by', nullif(r.recorded_by, ''), 'reason', nullif(r.reason, ''),
+        'entered_from', CASE WHEN r.audit_stage = t.state THEN jsonb_build_object(
+            'stage', r.entered_from_stage, 'assignee', r.entered_from_assignee, 'action', r.entry_action,
+            'at', ticket_board.utc_text(r.entered_at), 'commit', r.entry_commit) END,
+        'problem', problem,
+        'repair', CASE WHEN problem IS NOT NULL THEN format(
+            'the Director records where it returns (ticket-board-write set-audit-return %s --stage STAGE --assignee ROLE '
+            '--reason TEXT), and Audit then kicks it back as usual', p_ticket) END);
+END;
+$$;
+
+-- The Director's record of where Audit's kick-back returns a ticket in that
+-- stage: for a revision with no known producer, or to send Audit's findings
+-- somewhere else. It moves and reassigns nothing, and holds only for the
+-- revision the ticket carries now.
+CREATE OR REPLACE FUNCTION ticket_board.set_audit_return(p_ticket text, p_stage text, p_assignee text, p_reason text)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+DECLARE
+    caller text := ticket_board.current_app_actor();
+    reason text := btrim(coalesce(p_reason, ''));
+    stage text := lower(btrim(coalesce(p_stage, '')));
+    owner text := lower(btrim(coalesce(p_assignee, '')));
+    t ticket_board.tickets;
+    problem text;
+BEGIN
+    IF ticket_board.current_actor_role() <> 'ticket_board_service'
+       OR NOT coalesce(ticket_board.role_controls_project(caller), false) THEN
+        RAISE EXCEPTION 'only the control role may record where a kick-back returns a ticket, not %', caller
+            USING ERRCODE = '42501';
+    END IF;
+    IF reason = '' THEN
+        RAISE EXCEPTION 'recording where a kick-back returns a ticket requires a reason';
+    END IF;
+    SELECT * INTO t FROM ticket_board.tickets WHERE id = p_ticket FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket % not found', p_ticket;
+    END IF;
+    IF NOT ticket_board.audit_return_stage(t.state) THEN
+        RAISE EXCEPTION '% is in %, which Audit''s kick-back does not leave; its return is recorded while it is there',
+            t.id, t.state;
+    END IF;
+    problem := ticket_board.audit_return_problem(t.state, stage, owner);
+    IF problem IS NOT NULL THEN
+        RAISE EXCEPTION 'set-audit-return refused for %: %', t.id, problem;
+    END IF;
+    INSERT INTO ticket_board.ticket_audit_returns (ticket_id, producer_stage, producer_assignee, producer_action, producer_at,
+                                                   producer_commit, producer_exempt, recorded_by, reason)
+    VALUES (t.id, stage, owner, 'set_audit_return', clock_timestamp(), coalesce(t.commit_hash, ''), t.commit_exempt,
+            caller, reason)
+    ON CONFLICT (ticket_id) DO UPDATE SET producer_stage = EXCLUDED.producer_stage,
+        producer_assignee = EXCLUDED.producer_assignee, producer_action = EXCLUDED.producer_action,
+        producer_at = EXCLUDED.producer_at, producer_commit = EXCLUDED.producer_commit,
+        producer_exempt = EXCLUDED.producer_exempt, recorded_by = EXCLUDED.recorded_by, reason = EXCLUDED.reason;
+    PERFORM ticket_board.append_ticket_comment(t.id, caller,
+        format('Audit''s kick-back now returns this ticket to %s/%s: %s', stage, owner, reason));
+    RETURN ticket_board.audit_return_status(t.id);
+END;
+$$;
+
+REVOKE ALL ON ticket_board.ticket_audit_returns FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.audit_return_problem(text, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.record_audit_return() FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.set_audit_return(text, text, text, text) FROM PUBLIC;
+-- audit_return_status is closed and granted in rbac.sql, like user_wait_status:
+-- the ticket read only probes that it exists.

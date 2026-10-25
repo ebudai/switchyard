@@ -270,6 +270,8 @@ def root_side(tree: Path) -> dict:
                                    ("plan.json", json.dumps({"project": "p", "owner_user": owner}) + "\n", 0o644),
                                    ("p-ticket-board.service", "[Service]\nExecStart=/bin/true\n", 0o644),
                                    ("49-p-role-control", "operator ALL=(root) NOPASSWD: /bin/true\n", 0o644),
+                                   ("root-provenance.json", json.dumps({"about": "what root ran", "files": {}}) + "\n",
+                                    0o644),
                                    ("operator-commands.sh", "#!/bin/sh\ntrue\n", 0o755)):
             (provision / record).write_text(text, encoding="utf-8")
             os.lchown(provision / record, 0, 0)
@@ -420,6 +422,42 @@ def root_side(tree: Path) -> dict:
         out["layout escape"] = {"handed": handed, "problems": problems, "unchanged": snapshot(host.base) == snap,
                                 "target_owner": aimed.lstat().st_uid}
 
+        # Audit of a2d1a858: the tenant's configuration names root's provenance record -- JSON, root's, one link, in
+        # the same directory -- as its layout. Root takes no path from the configuration, and refuses the whole step.
+        host, provision, config_path, config = pie(base, "layout redirect")
+        config_path.write_text(json.dumps({"project": "p", "layout": "root-provenance.json", "run_as_user": owner,
+                                           "roles": []}))
+        snap = snapshot(host.base)
+        handed, problems = projection_ownership.restore_projection_ownership(config, config_path, apply=True)
+        out["layout redirect"] = {"handed": handed, "problems": problems, "unchanged": snapshot(host.base) == snap,
+                                  "provenance_owner": (provision / "root-provenance.json").lstat().st_uid}
+        # Audit of cd51562b: a configuration with no `layout` -- valid, `load_project_config` defaults it to the
+        # generated one -- is repaired like any other, not taken to name the directory itself.
+        for label, value in (("no layout", None), ("an empty layout", "")):
+            host, provision, config_path, config = pie(base, label)
+            launcher_config = {"project": "p", "run_as_user": owner, "roles": [{"role": "ops"}]}
+            if value is not None:
+                launcher_config["layout"] = value
+            config_path.write_text(json.dumps(launcher_config))
+            handed, problems = projection_ownership.restore_projection_ownership(config, config_path, apply=True)
+            out[label] = {"handed": [Path(p).name for p in handed], "problems": problems,
+                          "dir_owner": provision.lstat().st_uid,
+                          "workflow_owner": (provision / "workflow.json").lstat().st_uid}
+
+        # The generated layout itself, left root's: handed when it is one Switchyard generates, refused when not.
+        from scripts import team_launcher as launcher
+
+        for label, body in (("generated layout", launcher._new_project_layout_payload(2)),
+                            ("not a generated layout", {"Orientation": "Horizontal", "Widgets": [], "note": "x"})):
+            host, provision, config_path, config = pie(base, label)
+            layout = provision / "p-konsole-layout.json"
+            layout.write_text(json.dumps(body))
+            os.lchown(layout, 0, 0)
+            snap = snapshot(host.base)
+            handed, problems = projection_ownership.restore_projection_ownership(config, config_path, apply=True)
+            out[label] = {"handed": [Path(p).name for p in handed], "problems": problems,
+                          "unchanged": snapshot(host.base) == snap, "layout_owner": layout.lstat().st_uid}
+
         # Interrupted: the workflow handed, the plan and the directory not yet. The next run finishes it.
         host, provision, config_path, config = pie(base, "interrupted")
         os.lchown(provision / "workflow.json", owner_uid, owner_uid)
@@ -516,6 +554,24 @@ def root_checks(got: dict) -> None:
     check(escape["handed"] == [] and escape["unchanged"] and escape["target_owner"] == 0
           and any("outside 1500's roots" in p for p in escape["problems"]),
           f"a layout named outside the owner's roots: refused, nothing changed, root's copy root's: {escape}")
+    redirect = got["layout redirect"]
+    check(redirect["handed"] == [] and redirect["unchanged"] and redirect["provenance_owner"] == 0
+          and any("names it as its layout; root hands over only the generated p-konsole-layout.json" in p
+                  for p in redirect["problems"]),
+          f"a configuration naming root's provenance record as its layout: refused, nothing changed: {redirect}")
+    for label in ("no layout", "an empty layout"):
+        case = got[label]
+        check(case["handed"] == ["provision", "workflow.json", "plan.json"] and case["problems"] == []
+              and case["dir_owner"] == 1500 and case["workflow_owner"] == 1500,
+              f"{label} in the configuration: the generated layout is meant, and the repair goes on: {case}")
+    generated = got["generated layout"]
+    check(generated["handed"] == ["provision", "p-konsole-layout.json", "workflow.json", "plan.json"]
+          and generated["problems"] == [] and generated["layout_owner"] == 1500,
+          f"the generated layout left root's is handed with the rest: {generated}")
+    foreign_layout = got["not a generated layout"]
+    check(foreign_layout["handed"] == [] and foreign_layout["unchanged"] and foreign_layout["layout_owner"] == 0
+          and any("is not a layout Switchyard generates" in p for p in foreign_layout["problems"]),
+          f"a root-owned layout Switchyard did not generate: refused, nothing changed: {foreign_layout}")
     check(got["interrupted"]["handed"] == ["provision", "plan.json"] and got["interrupted"]["all_owner"],
           f"an interrupted repair is finished by the next run: {got['interrupted']}")
     partway = got["refused part-way"]

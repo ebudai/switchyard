@@ -34,13 +34,30 @@ if TYPE_CHECKING:
 REPAIR = "sudo switchyard upgrade {project} --only workflow-projection"
 
 
+#: Layouts this release generates, for any number of panes it lays out.
+LAYOUT_PANES = range(1, 13)
+
+
+def generated_layout(config_path: Path, project: str) -> Path:
+    """Where provisioning writes the layout: beside the configuration, named for the project. The configuration's own
+    `layout` value is the tenant's to write, so root never takes a path from it (Audit of a2d1a858)."""
+    return config_path.parent / f"{project}-konsole-layout.json"
+
+
 def projection_paths(raw: dict[str, Any], config_path: Path) -> list[tuple[Path, str]]:
     """(path, kind) for the directory and every file the declared workflow is projected into -- the set
-    `assign_projection_owner` hands over at provisioning, directory first."""
-    layout = Path(str(raw.get("layout") or f"{raw['project']}-konsole-layout.json"))
-    if not layout.is_absolute():
-        layout = config_path.parent / layout
+    `assign_projection_owner` hands over at provisioning, directory first -- plus, when the configuration names a
+    layout anywhere else, that path, to be judged and never handed."""
+    layout = generated_layout(config_path, raw["project"])
+    # An absent or empty `layout` is the generated one, as `load_project_config` reads it -- and never `Path("")`,
+    # which is "." and would name the directory itself (Audit of cd51562b).
+    value = raw.get("layout")
+    named = Path(value) if isinstance(value, str) and value.strip() else layout
+    if not named.is_absolute():
+        named = config_path.parent / named
+    elsewhere = [(named, "named layout")] if named != layout else []
     return [
+        *elsewhere,
         (config_path.parent, "directory"),
         (config_path, "config"),
         (layout, "layout"),
@@ -79,6 +96,12 @@ def _accepts(kind: str, project: str, content: bytes) -> str:
         return ""
     if kind in ("config", "plan") and document.get("project") != project:
         return f"names project {document.get('project')!r}, not {project!r}"
+    if kind == "layout":
+        from scripts import team_launcher as launcher
+
+        # As SYRD-657 hands a layout over: only one this release generates, for some number of panes.
+        if not any(document in launcher._known_generated_project_layout_payloads(count) for count in LAYOUT_PANES):
+            return "is not a layout Switchyard generates"
     return ""
 
 
@@ -143,6 +166,11 @@ def restore_projection_ownership(
                 problems.append(f"{display} has {status.st_nlink} links; root hands over only a file it alone names")
                 continue
             if status.st_uid == account.pw_uid:
+                continue
+            if kind == "named layout":
+                # A layout the configuration names elsewhere is the tenant's choice; root's file there is not its.
+                problems.append(f"{display} is root's, and the configuration names it as its layout; root hands over "
+                                f"only the generated {generated_layout(config_path, project).name}")
                 continue
             if status.st_uid != 0:
                 problems.append(f"{display} is uid {status.st_uid}'s, neither root's nor {owner}'s; root leaves it")

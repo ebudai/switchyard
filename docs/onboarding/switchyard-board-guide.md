@@ -330,6 +330,36 @@ filed.
 - an upstream that is missing or unreachable;
 - a report board that is your own project's board.
 
+#### Following up on your own report
+
+A report your project filed can be followed up afterwards (SYRD-677): a comment, a
+correction, a request to withdraw it, or a note that a later finding supersedes it. A
+follow-up is added to that report as a comment attributed `reporter:<your project>`, and
+the upstream Director is told once. It changes nothing else on the ticket: a withdrawal or
+a supersession is a request for the upstream Director to act on, not a change.
+
+It takes the same two steps:
+
+```bash
+ticket-board-write report-follow-up --ticket SYRD-673 --kind supersession \
+  --text-file note.md
+# then the same command with --submit-upstream --expect <digest>
+```
+
+- **Kinds:** `comment` (the default), `correction`, `withdrawal_request`, `supersession`.
+  The text is up to 8000 characters; `--text-file -` reads it from standard input.
+- **Only your own reports.** Your project is read from your report credential, never from
+  an argument. A ticket that was not filed as a report, or was filed from another project,
+  is refused. So is a report whose source reference changed since the preview.
+- **Exactly once.** The digest binds the board, the ticket, your project, the report's
+  source reference, the kind and the literal text. The same confirmed follow-up sent again
+  adds nothing.
+- **Any state.** A follow-up is accepted on a report in any state, a finished one included,
+  so a correction is always possible.
+- **It needs the credential bound to your project.** The board's shared report token, which
+  credentials held before SYRD-677, files reports but cannot follow one up. The next upgrade,
+  or `sudo switchyard upgrade <project> --only upstream-report`, replaces it.
+
 **No one-step path exists, for anyone.** No automated reporter exists. A health or crash
 monitor that needs to report upstream must first be given its own declared, authorised
 path on the receiving board, one an ordinary tenant credential cannot claim.
@@ -384,7 +414,7 @@ the next launch carries `TICKET_BOARD_REPORT_URL`, `TICKET_BOARD_REPORT_ORIGIN_P
 and `TICKET_BOARD_TENANT_REPORT_TOKEN_FILE` to every pane.
 
 **The credential is refreshed on every upgrade, because it goes stale silently.** The
-board compares a submitted report token against one configured string, minted when that
+board checks a submitted report token against one configured secret, minted when that
 board's own environment file is first written — so a cutover mints a new one and every
 credential handed out before it stops working. Nothing notices, because the thing that
 would notice is a tenant trying to report that something is wrong. MEFP's copy was from
@@ -392,10 +422,23 @@ would notice is a tenant trying to report that something is wrong. MEFP's copy w
 
 Each upgrade -- and `upgrade --only upstream-report` with no URL, which reconnects the
 recorded board -- resolves the upstream board from the host registry, reads that board's
-current report token, and writes it into the tenant's credential file atomically, 0600 and
-owned by the tenant. Only the report token is ever copied: a write token sitting beside it
-in the board's environment does not travel, and the token value is never put in the
-launcher config, which every role can read. Running it again writes nothing.
+current report token, and writes the tenant's credential file atomically, 0600 and owned by
+the tenant. Only the report token is ever read: a write token sitting beside it in the
+board's environment does not travel, and the token value is never put in the launcher
+config, which every role can read. Running it again writes nothing.
+
+The tenant is given a credential **bound to its own project** (SYRD-677), derived from
+the upstream board's own binding key (`TICKET_BOARD_REPORT_BINDING_KEY`, in that board's
+environment file). The key is never given to any tenant, and it is not the report secret
+every tenant once held, so no tenant can make another project's credential. This happens
+when the upstream board says it reads such a credential. The board then reads the
+reporting project from the credential: a bound credential files reports from its own
+project only, and is the only one that can follow a report up. A board that does not say
+so is given its secret as before, and the next refresh asks again.
+
+A board provisioned before SYRD-677 has no binding key. Root's
+`sudo switchyard upgrade <board> --only accept-reports` gives it one, once, and it takes
+effect when that board next starts; each tenant's next upgrade then binds its credential.
 
 An upstream report lands in `analysis`, assigned to `unassigned`, unless it asks for Backlog
 and the board's Director allows that. `file-report --defer` asks for Backlog (deferred); the
@@ -412,9 +455,11 @@ part of the report, so it is part of the digest: preview and submit with it. Onl
 role holding the Director's `director_edit` capability may set the policy, and a report
 may ask for Backlog and nothing else. Directors identify it
 by the detail metadata: `Origin: <tenant>` and, when supplied,
-`External Source: <tenant-local-ref>`. The report token can only create this report; it
-cannot set `state`, `assignee`, blockers, signoff flags, commit fields, or mutate an
-existing ticket.
+`External Source: <tenant-local-ref>`. The report token can only create this report, and,
+bound to a project, add follow-ups to that project's own reports; it cannot set `state`,
+`assignee`, blockers, signoff flags, commit fields, or change any field of an existing
+ticket. A follow-up shows on the ticket as `Reporter (<tenant>, external)`, not as one of
+the board's roles.
 
 **Python:**
 

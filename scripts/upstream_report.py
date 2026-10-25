@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from scripts.host_accounts import home_dir_for_user
+from scripts.ticket_board.report_follow_up import bound_token, usable_binding_key
 
 if TYPE_CHECKING:
     from scripts.team_launcher import ProjectConfig
@@ -77,10 +78,11 @@ def upstream_report_credential_path(
     return home / ".config" / config.project / UPSTREAM_REPORT_CREDENTIAL_NAME
 
 
-def _board_env_report_token(path: Path, owner_user: str = "") -> tuple[str, str]:
+def _board_env_report_token(path: Path, owner_user: str = "", *, key: str = UPSTREAM_REPORT_TOKEN_KEY) -> tuple[str, str]:
     """The report token recorded in a board's own environment file.
 
-    Reads ONLY `TICKET_BOARD_TENANT_REPORT_TOKEN`. Everything else in that file
+    Reads ONLY `TICKET_BOARD_TENANT_REPORT_TOKEN` (or, for the board's own use, the one `key` named: the binding
+    key a tenant's credential is derived from, SYRD-677, never copied anywhere). Everything else in that file
     is the board's business and must not be copied into a credential a tenant
     holds -- the point of this credential is that it opens `file_report` and
     nothing else.
@@ -108,14 +110,14 @@ def _board_env_report_token(path: Path, owner_user: str = "") -> tuple[str, str]
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
-        key, _, value = line.partition("=")
-        if key.strip() != UPSTREAM_REPORT_TOKEN_KEY:
+        name, _, value = line.partition("=")
+        if name.strip() != key:
             continue
         token = value.strip().strip("\"'")
         if not token:
-            return "", f"{path} records an empty {UPSTREAM_REPORT_TOKEN_KEY}"
+            return "", f"{path} records an empty {key}"
         return token, ""
-    return "", f"{path} has no {UPSTREAM_REPORT_TOKEN_KEY}"
+    return "", f"{path} has no {key}"
 
 
 def upstream_report_board(
@@ -260,6 +262,73 @@ def record_upstream_report_link(
     ), []
 
 
+def _board_takes_bound_credentials(board_url: str, *, timeout: float = 5.0) -> bool:
+    """Whether the upstream board says it reads a report credential bound to a project (SYRD-677).
+
+    Read from the answer every board serves to anyone, which a connection already reads to know the board is
+    itself (`GET /api/runtime-assignments`), and nothing else: a board that does not answer, or does not say so,
+    is given its own report secret, as before, and the next refresh asks again."""
+    import urllib.error
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(board_url.strip().rstrip("/") + "/api/runtime-assignments",
+                                    timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+    return isinstance(payload, dict) and payload.get("report_credentials") == "bound"
+
+
+#: The board's own key for tenant credentials bound to a project (SYRD-677): in its environment file, read by
+#: its server and by this file's refresh, and never written into any tenant's credential.
+REPORT_BINDING_KEY = "TICKET_BOARD_REPORT_BINDING_KEY"
+
+
+def ensure_report_binding_key(
+    board_env: Path,
+    board_owner: str,
+    *,
+    slug: str,
+    dry_run: bool = False,
+    home_for_user: Callable[[str], Path | None] = home_dir_for_user,
+    print_func: Callable[[str], None] = print,
+) -> str:
+    """Give a board that takes tenant reports its binding key, once: "" or why not (SYRD-677).
+
+    A board provisioned before SYRD-677 has none: its environment file is written once, at provision. The key
+    is the board's own; its server reads it at start, and each tenant's next refresh derives that tenant's
+    credential from it."""
+    import secrets
+
+    from scripts import owner_writes
+
+    existing, _missing = _board_env_report_token(board_env, board_owner, key=REPORT_BINDING_KEY)
+    secret, problem = _board_env_report_token(board_env, board_owner)
+    if problem:
+        return problem
+    if usable_binding_key(secret, existing):
+        print_func(f"switchyard: {slug}'s board already holds its key for project-bound report credentials")
+        return ""
+    try:
+        data = owner_writes.read_owner_bytes(board_owner, board_env)
+        text = (data or b"").decode("utf-8")
+    except (OSError, SystemExit, UnicodeDecodeError) as exc:
+        return f"{board_env} cannot be read ({exc})"
+    kept = [line for line in text.splitlines() if line.partition("=")[0].strip() != REPORT_BINDING_KEY]
+    if dry_run:
+        print_func(f"switchyard: would give {slug}'s board a key for project-bound report credentials in "
+                   f"{board_env}; nothing written")
+        return ""
+    written = _write_owner_private_file(board_env, "\n".join([*kept, f"{REPORT_BINDING_KEY}={secrets.token_urlsafe(32)}"])
+                                        + "\n", owner_user=board_owner, home_for_user=home_for_user)
+    if written:
+        return written
+    print_func(f"switchyard: gave {slug}'s board a key for project-bound report credentials in {board_env}; it "
+               f"takes effect when {slug}'s board next starts, and each tenant's next upgrade then binds its credential")
+    return ""
+
+
 def refresh_upstream_report_credential(
     config: ProjectConfig,
     *,
@@ -270,8 +339,11 @@ def refresh_upstream_report_credential(
     # wrote test tokens into the live board's own credential file (SYRD-238).
     home_for_user: Callable[[str], Path | None] = home_dir_for_user,
     print_func: Callable[[str], None] = print,
+    # Whether the upstream board reads a credential bound to a project: asked of it over HTTP (SYRD-677). A
+    # test answers for it, so no case asks a live board.
+    takes_bound: Callable[[str], bool] | None = None,
 ) -> list[str]:
-    """Give this tenant the report-only token the upstream board accepts now.
+    """Give this tenant the report-only credential the upstream board accepts now, bound to this project.
 
     The board compares a submitted report token against one configured string,
     so rotating it -- which a cutover does, because the token is minted when
@@ -282,9 +354,16 @@ def refresh_upstream_report_credential(
     Nothing wrote this credential before: it was an operator-supplied path, so
     there was nothing to refresh. Ownership of it starts here.
 
-    Report-only by construction: the only value copied is the report token, and
-    the only thing that token opens is `file_report`, which the board forces to
-    `analysis`/`unassigned`. No write token is read, and none is written.
+    Report-only by construction: the only value read is the report token, and
+    the only things the credential opens are `file_report`, which the board
+    forces to `analysis`/`unassigned`, and a follow-up on a report this project
+    filed. No write token is read, and none is written.
+
+    Bound to this project (SYRD-677): the tenant is given a credential derived
+    from the board's binding key and its own project -- not the report secret,
+    which every tenant held before, and never the key -- so the board reads the
+    reporting project from the credential and no tenant can speak for another.
+    A credential handed out before this is replaced by the next refresh.
     """
     if not str(config.upstream_report_url or "").strip():
         return []
@@ -303,6 +382,13 @@ def refresh_upstream_report_credential(
     if problem:
         return [f"{config.project} cannot be given {upstream}'s report credential: {problem}"]
 
+    # Only for a board that reads it: one older than SYRD-677 accepts nothing but its own secret.
+    bound = (takes_bound or _board_takes_bound_credentials)(config.upstream_report_url)
+    if bound:
+        binding_key, _missing = _board_env_report_token(board_env, board_owner, key=REPORT_BINDING_KEY)
+        bound = bool(usable_binding_key(token, binding_key))  # a key this cannot read: the secret, as before
+    if bound:
+        token = bound_token(binding_key, config.project)
     desired = f"{UPSTREAM_REPORT_TOKEN_KEY}={token}\n"
     current, _ = _board_env_report_token(destination, owner)
     if current == token and _credential_is_private(destination, owner):
@@ -323,7 +409,8 @@ def refresh_upstream_report_credential(
     if written:
         return [f"{config.project}'s report credential was not written: {written}"]
     print_func(
-        f"switchyard: gave {config.project} {upstream}'s current report credential in "
+        f"switchyard: gave {config.project} {upstream}'s current report credential"
+        f"{', bound to ' + config.project if bound else ''} in "
         f"{destination}, so its panes can file reports without being handed a token"
     )
     return []
@@ -374,7 +461,7 @@ def connect_upstream_report(
     # A board that does not answer as itself is not connected to, whatever the records say (SYRD-674).
     from scripts import upstream_report_sinks
 
-    problem = upstream_report_sinks.board_answer(url, upstream)
+    problem, answered = upstream_report_sinks.board_reading(url, upstream)
     if problem:
         return config, [f"{config.project} cannot be connected for reports: {problem}"]
     linked, problems = launcher.record_upstream_report_link(
@@ -395,6 +482,8 @@ def connect_upstream_report(
             linked = replace(config, upstream_report_url=url, upstream_report_token_file=token_file)
     return linked, launcher.refresh_upstream_report_credential(
         linked, dry_run=dry_run, registry_dir=registry_dir, home_for_user=home_for_user, print_func=print_func,
+        # The board just said what it reads: it is not asked again (SYRD-677).
+        takes_bound=lambda _url: answered.get("report_credentials") == "bound",
     )
 
 

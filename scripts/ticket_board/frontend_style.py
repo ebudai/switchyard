@@ -922,6 +922,11 @@ STYLE = """    :root {
       background: rgba(255,255,255,0.02);
       border-radius: 0 8px 8px 0;
     }
+    /* SYRD-677: a reporting tenant's follow-up, not one of this board's roles. */
+    .comment-external-reporter {
+      border-left-color: rgba(125, 211, 252, 0.7);
+      border-left-style: dashed;
+    }
     .comment-urgent-marker {
       display: inline-block;
       margin-left: 8px;

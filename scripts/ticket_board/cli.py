@@ -60,6 +60,12 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("TICKET_BOARD_TENANT_REPORT_TOKEN", "").strip(),
         help="Enable tenant upstream report filing with this shared HTTP token. Default: TICKET_BOARD_TENANT_REPORT_TOKEN.",
     )
+    parser.add_argument(
+        "--tenant-report-binding-key",
+        default=os.environ.get("TICKET_BOARD_REPORT_BINDING_KEY", "").strip(),
+        help="The board's own key for tenant report credentials bound to a project (SYRD-677); never given to a "
+             "tenant. Default: TICKET_BOARD_REPORT_BINDING_KEY.",
+    )
     parser.add_argument("--open-browser", action="store_true", help="Open the board URL automatically.")
     parser.add_argument(
         "--board-ui-record",
@@ -99,6 +105,7 @@ def run_server(args: argparse.Namespace) -> int:
         events=event_hub,
         director_notifier=director_notifier,
         report_token=getattr(args, "tenant_report_token", ""),
+        report_binding_key=getattr(args, "tenant_report_binding_key", ""),
     )
     unix_server = None
     unix_thread = None

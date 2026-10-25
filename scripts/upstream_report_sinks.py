@@ -394,14 +394,20 @@ def record_report_outcome(
 
 
 def board_answer(url: str, slug: str, *, timeout: float = PROBE_SECONDS) -> str:
-    """"" when the board at `url` answers as `slug`, else what happened instead.
+    """"" when the board at `url` answers as `slug`, else what happened instead."""
+    return board_reading(url, slug, timeout=timeout)[0]
+
+
+def board_reading(url: str, slug: str, *, timeout: float = PROBE_SECONDS) -> tuple[str, dict]:
+    """("", its answer) when the board at `url` answers as `slug`, else (what happened instead, {}).
 
     The read every board serves to anyone (`GET /api/runtime-assignments`, as `board_socket_answer` asks
-    on the socket): HTTP 200, a JSON object naming `slug`. Nothing is written to the board.
+    on the socket): HTTP 200, a JSON object naming `slug`. Nothing is written to the board. The answer also
+    says what report credential the board reads (SYRD-677), so a connection asks it once.
     """
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme != "http" or not parsed.hostname:
-        return f"{url} is not an http:// board URL"
+        return f"{url} is not an http:// board URL", {}
     try:
         connection = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=timeout)
         try:
@@ -411,17 +417,18 @@ def board_answer(url: str, slug: str, *, timeout: float = PROBE_SECONDS) -> str:
         finally:
             connection.close()
     except (OSError, http.client.HTTPException) as exc:
-        return f"the board at {url} did not answer ({exc})"
+        return f"the board at {url} did not answer ({exc})", {}
     if response.status != 200:
-        return f"the board at {url} answered HTTP {response.status}"
+        return f"the board at {url} answered HTTP {response.status}", {}
     try:
-        named = json.loads(body).get("project")
+        answer = json.loads(body)
+        named = answer.get("project")
     except (ValueError, AttributeError):
-        return f"what answers at {url} is not a board (its answer is not a JSON object)"
+        return f"what answers at {url} is not a board (its answer is not a JSON object)", {}
     if named != slug:
-        return f"what answers at {url} is {named!r}, not {slug}'s board" if isinstance(named, str) else (
-            f"what answers at {url} names no project")
-    return ""
+        return (f"what answers at {url} is {named!r}, not {slug}'s board" if isinstance(named, str) else
+                f"what answers at {url} names no project"), {}
+    return "", answer
 
 
 def resolve_repair_board(
@@ -651,6 +658,17 @@ def declare_report_board(
             problem = board_answer(board.url, slug)
         if problem:
             print_func(f"switchyard: {slug} cannot take tenant reports: {problem}. Nothing was changed.")
+            return 1
+        # The board's own key for credentials bound to a tenant's project (SYRD-677), never given to a tenant.
+        from scripts import upstream_report
+
+        owners = {"home_for_user": home_for_user} if home_for_user else {}
+        _upstream, board_env, owner, problem = upstream_report.upstream_report_board_owner(
+            board.url, registry_dir=registry_dir, **owners)
+        problem = problem or upstream_report.ensure_report_binding_key(
+            board_env, owner, slug=slug, dry_run=dry_run, print_func=print_func, **owners)
+        if problem:
+            print_func(f"switchyard: {slug}'s board has no key for project-bound report credentials: {problem}")
             return 1
     if dry_run:
         print_func(f"switchyard: would record that {slug} {'takes' if accept else 'does not take'} tenant reports; "

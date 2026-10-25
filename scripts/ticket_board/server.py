@@ -66,7 +66,7 @@ from .operation_role_policy import (
     TASK_ROLES,
 )
 from .peer_identity import SessionIdentity
-from . import extension_operations, pull_queue, report_confirmation, ui_delegation
+from . import extension_operations, pull_queue, report_confirmation, report_follow_up, ui_delegation
 from .workflow_config import DIRECTOR_IDENTIFYING_CAPABILITIES, LEGACY_ASSIGNEE_SCOPED_OPERATIONS
 
 LOGGER = logging.getLogger(__name__)
@@ -291,14 +291,9 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         if not raw or not secrets.compare_digest(raw, self.write_token):
             raise PermissionError(f"missing or invalid {WRITE_TOKEN_HEADER}")
 
-    def require_http_report_token(self) -> None:
-        if self.role_authority is not None:
-            raise PermissionError("tenant report filing is only available over HTTP")
-        if not self.report_token:
-            raise PermissionError(f"{REPORT_TOKEN_HEADER} is not configured")
-        raw = self.headers.get(REPORT_TOKEN_HEADER, "")
-        if not raw or not secrets.compare_digest(raw, self.report_token):
-            raise PermissionError(f"missing or invalid {REPORT_TOKEN_HEADER}")
+    def require_http_report_token(self) -> str:
+        """'' for the board's shared report token, the project for one bound to it (SYRD-677)."""
+        return report_follow_up.authenticate(self)
 
     def handle_register_caller(self, payload: dict[str, object]) -> None:
         """Register a launcher pane once, or report its existing assignment.
@@ -983,6 +978,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/runtime-assignments":
             self.send_json({
                 "project": getattr(self.app, "project", "pgu"),
+                "report_credentials": "bound" if self.server.report_binding_key else "shared",  # SYRD-677
                 "authority_mode": (
                     "process"
                     if os.environ.get("TICKET_BOARD_PROCESS_AUTHORITY", "").strip() == "1"
@@ -1124,10 +1120,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length) if length > 0 else b""
-            if parsed.path == "/api/tickets/actions/file_report":
-                self.require_http_report_token()
-                payload = json.loads(body or b"{}")
-                self.handle_file_report(payload)
+            if parsed.path in ("/api/tickets/actions/file_report", "/api/tickets/actions/report_follow_up"):
+                report_follow_up.handle(self, parsed.path.rsplit("/", 1)[1], json.loads(body or b"{}"))  # SYRD-602/677
                 return
             self.require_http_write_token()
             if parsed.path == "/api/upload":
@@ -1187,6 +1181,7 @@ class TicketBoardServer(ThreadingHTTPServer):
         role_authority: LocalRoleAuthority | None = None,
         write_token: str | None = None,
         report_token: str | None = None,
+        report_binding_key: str | None = None,
     ) -> None:
         self.app = app
         self.events = events or TicketBoardEventHub(app)
@@ -1197,6 +1192,7 @@ class TicketBoardServer(ThreadingHTTPServer):
         self.build_id = board_build_id()
         self.write_token = write_token or secrets.token_urlsafe(32)
         self.report_token = (report_token or "").strip()
+        self.report_binding_key = report_follow_up.usable_binding_key(self.report_token, report_binding_key or "")
         super().__init__(address, TicketBoardHandler)
 
     def server_close(self) -> None:

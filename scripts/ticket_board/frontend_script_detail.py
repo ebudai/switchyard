@@ -671,6 +671,13 @@ SCRIPT_DETAIL = """    function selectedTicket() {
           const header = document.createElement('div');
           const who = document.createElement('strong');
           who.textContent = comment.who;
+          // SYRD-677: a reporting tenant's follow-up on its own report, not one of this board's roles.
+          const reporter = /^reporter:(.+)$/.exec(String(comment.who || ''));
+          if (reporter) {
+            item.classList.add('comment-external-reporter');
+            item.setAttribute('data-comment-origin', 'external-reporter');
+            who.textContent = `Reporter (${reporter[1]}, external)`;
+          }
           const ts = document.createElement('span');
           ts.className = 'meta';
           ts.textContent = ` ${formatWhen(comment.ts)}`;

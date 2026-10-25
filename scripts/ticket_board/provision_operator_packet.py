@@ -471,7 +471,9 @@ sudo -u {q_owner_user} -H env HOME={q_owner_home} TICKET_BOARD_OWNER_HOME={q_own
 {install_board_env_parent}
 if ! sudo -u {q_owner_user} test -s {q_board_env_file}; then
     report_token="$(/usr/bin/python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
-    printf 'TICKET_BOARD_TENANT_REPORT_TOKEN=%s\\n' "$report_token" | sudo -u {q_owner_user} tee {q_board_env_file} >/dev/null
+    # SYRD-677: the board's own key for credentials bound to a tenant's project; never given to a tenant.
+    binding_key="$(/usr/bin/python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+    printf 'TICKET_BOARD_TENANT_REPORT_TOKEN=%s\\nTICKET_BOARD_REPORT_BINDING_KEY=%s\\n' "$report_token" "$binding_key" | sudo -u {q_owner_user} tee {q_board_env_file} >/dev/null
     sudo -u {q_owner_user} chmod 0600 {q_board_env_file}
 fi
 sudo install -m 0644 "$system_unit_candidate" {q_board_unit}

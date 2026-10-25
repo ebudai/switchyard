@@ -152,6 +152,61 @@ def file_report_command(args: Any, client: Any, environ: Any) -> dict[str, Any] 
     return response
 
 
+def report_follow_up_command(args: Any, client: Any, environ: Any) -> dict[str, Any] | None:
+    """Preview a follow-up on a report this project filed upstream, or send exactly the previewed one (SYRD-677).
+
+    The project is the one this project's report credential is bound to, never an argument. Returns the board's
+    response for a submission, None for a preview (printed here). Nothing is sent until `--submit-upstream
+    --expect <digest>` names this follow-up's own digest.
+    """
+    from . import report_confirmation as rc
+    from . import report_follow_up as rf
+
+    if not (args.report_token.strip() or args.report_token_file.strip()) or not args.report_board_url.strip():
+        raise write_client.TicketBoardWriteError(not_connected_for_reports(environ))
+    if args.expect and not args.submit_upstream:
+        raise write_client.TicketBoardWriteError("report-follow-up: --expect only confirms a submission; add "
+                                                 "--submit-upstream, or leave both off to preview. Nothing was sent.")
+    project = rf.named_project(client.require_report_credential())
+    if not project:
+        raise write_client.TicketBoardWriteError(
+            "report-follow-up: this project's report credential is the upstream board's shared token, which files "
+            "reports but cannot follow one up. An operator gives it the credential bound to this project: `sudo "
+            "switchyard upgrade <project> --only upstream-report`. Nothing was sent.")
+    destination = rc.destination_identity(client.report_destination())
+    try:
+        ticket = rf.read_report(write_client._normalize_api_url(args.report_board_url), args.ticket,
+                                timeout=client.timeout)
+    except LookupError as exc:
+        raise write_client.TicketBoardWriteError(str(exc)) from exc
+    origin = str(ticket.get("origin_project") or "").strip()
+    if origin != project:
+        raise write_client.TicketBoardWriteError(
+            f"report-follow-up: {ticket['id']} was {'filed from ' + origin if origin else 'not filed as a report'}; "
+            f"a follow-up is only for a report {project} filed. Nothing was sent.")
+    source_ref = str(ticket.get("external_source_ref") or "").strip()
+    digest = rf.follow_up_digest(destination=destination, ticket_id=str(ticket["id"]), origin_project=project,
+                                 external_source_ref=source_ref, kind=args.kind, text=args.text)
+    if not args.submit_upstream:
+        print(rf.preview_text(destination=destination, board_url=args.report_board_url, ticket=ticket,
+                              origin_project=project, kind=args.kind, text=args.text, digest=digest,
+                              resubmit=f"--submit-upstream --expect {digest}"))
+        return None
+    if not args.expect:
+        raise write_client.TicketBoardWriteError("report-follow-up --submit-upstream needs --expect <digest> from "
+                                                 "this follow-up's preview. Nothing was sent.")
+    if args.expect.strip() != digest:
+        raise write_client.TicketBoardWriteError(
+            f"report-follow-up: this is not the follow-up that was previewed: its ticket, kind, text, destination "
+            f"or the report's source changed (its digest is now {digest}). Preview it again. Nothing was sent.")
+    response = client._post_report({"ticket_id": str(ticket["id"]), "kind": args.kind, "text": args.text,
+                                    "confirmation": digest}, action="report_follow_up")
+    if response.get("replayed"):
+        print(f"report-follow-up: this exact follow-up was already added to {ticket['id']}; nothing new was sent.",
+              file=sys.stderr)
+    return response
+
+
 def _records_report_request(response: dict[str, Any]) -> bool:
     """Whether the board wrote a report's Backlog request on the ticket it created (SYRD-548)."""
     ticket = response.get("ticket") if isinstance(response, dict) else None
@@ -396,6 +451,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "board's report-intake policy decides, and the request is written on the ticket (SYRD-548)"
         ),
     )
+    # SYRD-677: a follow-up on a report this project filed: previewed, then exactly that one, once.
+    follow_up = subparsers.add_parser("report-follow-up")
+    follow_up.add_argument("--ticket", required=True, help="the upstream report this project filed")
+    follow_up.add_argument("--kind", choices=["comment", "correction", "withdrawal_request", "supersession"],
+                           default="comment", help="what it is; a withdrawal or supersession is a request to the "
+                                                   "upstream Director, not a change")
+    add_free_text_argument(follow_up, "--text", required=True)
+    follow_up.add_argument("--submit-upstream", action="store_true",
+                           help="send the follow-up to the other project's board; needs --expect")
+    follow_up.add_argument("--expect", default="", help="the digest this follow-up's preview printed")
     report_intake = subparsers.add_parser(
         "set-report-intake",
         help="Director: where tenant reports that ask for Backlog land -- backlog, or triage (the default) (SYRD-548)",
@@ -740,7 +805,7 @@ def main(argv: list[str] | None = None) -> int:
         args = parser.parse_args(argv)
         resolve_free_text_arguments(args, parser)
         command = args.command.replace("-", "_")
-        if command != "file_report" and not args.caller_role.strip():
+        if command not in {"file_report", "report_follow_up"} and not args.caller_role.strip():
             raise write_client.TicketBoardWriteError(
                 "ticket board caller role required; pass --caller-role or set TICKET_BOARD_CALLER_ROLE"
             )
@@ -807,6 +872,10 @@ def main(argv: list[str] | None = None) -> int:
                     "it predates SYRD-548. It is in Triage like any report.",
                     file=sys.stderr,
                 )
+        elif command == "report_follow_up":
+            response = report_follow_up_command(args, client, os.environ)
+            if response is None:  # a preview: printed, and nothing sent
+                return 0
         elif command == "set_report_intake":
             response = client.set_report_intake(backlog_requests=args.backlog_requests, reason=args.reason)
         elif command == "route":
@@ -992,7 +1061,7 @@ def main(argv: list[str] | None = None) -> int:
                    "snooze_reminders", "clear_reminder_snooze", "claim_next", "approve_size_exception",
                    "enable_size_review", "measure_size", "set_report_intake", "force_fresh_context",
                    "uat_instructions", "extend_lease", "interrupt_lease", "set_cohort_quota", "clear_cohort_quota",
-                   "clear_provider_hold", "await_user", "set_audit_return"}:
+                   "clear_provider_hold", "await_user", "set_audit_return", "report_follow_up"}:
         print(json.dumps(response))
     else:
         print(json.dumps(_ticket_from_response(response)))

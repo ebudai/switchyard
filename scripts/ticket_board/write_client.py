@@ -525,14 +525,14 @@ class TicketBoardWriteClient:
                                             "holds no report token. Nothing was filed.")
         return token
 
-    def _post_report(self, payload: dict[str, Any], *, report_token: str | None = None) -> dict[str, Any]:
+    def _post_report(self, payload: dict[str, Any], *, report_token: str | None = None, action: str = "file_report") -> dict:
         token = self.require_report_credential(report_token)
         if not token:
             raise ValueError("report_token must be non-empty")
         _refuse_production_write_under_test(self.report_board_url or self.board_url, None)
         body = json.dumps(payload).encode("utf-8")
         req = request.Request(
-            f"{self.report_api_url}/actions/file_report",
+            f"{self.report_api_url}/actions/{action}",  # file_report, or SYRD-677's report_follow_up
             data=body,
             headers={"Content-Type": "application/json", REPORT_TOKEN_HEADER: token},
             method="POST",

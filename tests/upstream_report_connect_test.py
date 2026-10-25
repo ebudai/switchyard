@@ -91,8 +91,9 @@ def host(tmp: Path, *, token: str = TOKEN):
     asked: list[tuple[str, str]] = []
     try:
         with contextlib.ExitStack() as stack:
-            stack.enter_context(patch.object(upstream_report_sinks, "board_answer",
-                                             lambda url, slug, **_k: asked.append((url, slug)) or ""))
+            # The board's one public read (SYRD-674), which also says what credential it reads (SYRD-677).
+            stack.enter_context(patch.object(upstream_report_sinks, "board_reading",
+                                             lambda url, slug, **_k: asked.append((url, slug)) or ("", {})))
             stack.enter_context(patch.object(launcher, "switchyard_registry_dir", lambda: registry))
             for name in PHASES:
                 stack.enter_context(patch.object(launcher, name, fenced(name)))

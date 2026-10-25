@@ -211,6 +211,13 @@ and a digest; only the same command with `--submit-upstream --expect <digest>` f
 and only if nothing changed since the preview. No configured token, URL or flag is
 standing permission.
 
+A report your project filed can be followed up the same way, in two steps:
+`ticket-board-write report-follow-up --ticket <ID> --kind comment|correction|withdrawal_request|supersession
+--text-file -` previews, and `--submit-upstream --expect <digest>` sends exactly that. It
+adds one comment attributed `reporter:<your project>` and tells the upstream Director; it
+changes nothing else. A withdrawal or supersession is a request for that Director, not a
+change. Only your own project's reports, read from your credential, never an argument.
+
 ## A ticket that is not yours
 
 When a project runs a Router, an implementer can be handed work that belongs to

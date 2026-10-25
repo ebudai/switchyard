@@ -200,9 +200,11 @@ def test_a_board_environment_without_a_report_token_is_reported() -> None:
 
 
 def _refresh(config, registry: Path, resolver, printed: list[str], dry_run: bool = False):
+    # UPSTREAM is the live board's address: the case answers for it rather than ask that board whether it reads
+    # a project-bound credential (SYRD-677), and these cases are about the board's own secret.
     return team_launcher.refresh_upstream_report_credential(
         config, dry_run=dry_run, registry_dir=registry,
-        home_for_user=resolver, print_func=printed.append,
+        home_for_user=resolver, print_func=printed.append, takes_bound=lambda _url: False,
     )
 
 

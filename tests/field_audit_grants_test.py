@@ -306,10 +306,13 @@ def on_main(acl: list[str], main_acl: list[str]) -> list[str]:
 
 def candidate(out: dict, main: dict) -> None:
     first, second = out["first"], out["second"]
+    # Compared on the objects both have: a later ticket adds objects, and replaces some -- SYRD-675 dropped
+    # note_role_stall's four-argument form -- and neither is this comparison's to judge.
     mine = board_view(on_main(first["acl"], main["first"]["acl"]))
-    check(mine == board_view(main["first"]["acl"]),
+    theirs = board_view(on_main(main["first"]["acl"], first["acl"]))
+    check(mine == theirs,
           "outside the SYRD-83 objects every board principal holds exactly what it holds on main's first tenant: "
-          f"{sorted(set(mine) ^ set(board_view(main['first']['acl'])))[:4]}")
+          f"{sorted(set(mine) ^ set(theirs))[:4]}")
     check(first["acl"] == second["acl"], "a host's first and second tenants have the same grants on every object: "
           f"{sorted(set(first['acl']) ^ set(second['acl']))[:4]}")
     check(first["strangers"] == [] and second["strangers"] == [] and out["second_migrated"]["strangers"] == [],

@@ -330,7 +330,9 @@ def format_comments(ticket: dict[str, Any]) -> list[str]:
         who = comment.get("who", "?")
         ts = comment.get("ts", "?")
         text = str(comment.get("text", ""))
-        lines.append(f"  [{ts}] {who}:")
+        # SYRD-677: a reporting tenant's follow-up on its own report, not one of this board's roles.
+        origin = " (external reporter)" if str(who).startswith("reporter:") else ""
+        lines.append(f"  [{ts}] {who}{origin}:")
         lines.extend(wrap_text(text or "(empty)", "    "))
     return lines
 

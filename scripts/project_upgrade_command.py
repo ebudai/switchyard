@@ -53,6 +53,9 @@ def upgrade_project_command(
     # One narrow step instead of the upgrade (SYRD-548): `upstream-report`
     # connects the tenant for reports and runs no phase at all.
     only: str = "",
+    # Which board, or none, when no URL is given (SYRD-674).
+    upstream_report_board: str = "",
+    no_upstream_report: bool = False,
     # What a role keeps when its own session last ran another model than its
     # configuration: "running", "configured", or "" to refuse (SYRD-579).
     role_models: str = "",
@@ -79,7 +82,8 @@ def upgrade_project_command(
         return launcher.connect_upstream_report_command(
             only, config, config_path=config_path, dry_run=dry_run, registry_dir=registry_dir,
             upstream_report_url=upstream_report_url, upstream_report_token_file=upstream_report_token_file,
-            print_func=print_func,
+            print_func=print_func, upstream_report_board=upstream_report_board,
+            no_upstream_report=no_upstream_report, runner=runner,
         )
     # Before anything is stopped or written: a restart in any later phase would
     # put a role that chose another model back on its configuration (SYRD-579).

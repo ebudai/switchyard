@@ -639,12 +639,34 @@ def test_the_real_wrappers_run_the_dispatcher() -> None:
 # --- behaviour -----------------------------------------------------------------------------------------------------
 
 
+#: SYRD-674: the cases whose record the report-board options move, and nothing else.
+REPORT_BOARD_CASES = ("new, every option", "new, the defaults", "new, in capitals", "new, a bad option",
+                      "upgrade, every option", "upgrade, the defaults")
+
+
+def with_the_report_board(label: str, gold: dict) -> dict:
+    """SYRD-674, applied to the baseline's record by rule: `new` and `upgrade` dispatch --upstream-report-board
+    and --no-upstream-report (unset in every case), and new's usage ends on a line of its own for them."""
+    import copy
+
+    out = copy.deepcopy(gold)
+    for name, _args, kwargs in out["calls"]:
+        if name in ("switchyard_new_command", "upgrade_project_command"):
+            kwargs.update(upstream_report_board="", no_upstream_report=False)
+    if label == "new, a bad option":
+        out["stderr"][0] = "                      [--upstream-report-board SLUG] [--no-upstream-report]"
+    return out
+
+
 def test_every_answer_is_the_baselines() -> None:
     check(sorted(CASES) == sorted(GOLDEN), "every measured case is asserted, and nothing else")
+    check(sorted(label for label in GOLDEN if with_the_report_board(label, GOLDEN[label]) != GOLDEN[label])
+          == sorted(REPORT_BOARD_CASES), "the translation moves exactly the new and upgrade cases")
     for label, spec in CASES.items():
         for holder in (m, t):
             got = run(holder, spec)
-            check(got == GOLDEN[label], f"{label} ({holder.__name__}): the baseline's answer, every call in order: {got}")
+            check(got == with_the_report_board(label, GOLDEN[label]),
+                  f"{label} ({holder.__name__}): the baseline's answer, translated, every call in order: {got}")
 
 
 def test_the_rules_hold_in_the_measured_record() -> None:

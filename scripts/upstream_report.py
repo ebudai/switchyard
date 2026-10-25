@@ -37,7 +37,7 @@ import pwd
 import stat
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from scripts.host_accounts import home_dir_for_user
 
@@ -366,9 +366,17 @@ def connect_upstream_report(
     )
     if problem:
         return config, [f"{config.project} cannot be connected for reports: {problem}"]
+    if upstream == config.project:
+        return config, [f"{config.project} cannot be connected for reports: {url} is its own board"]
     _token, problem = _board_env_report_token(board_env, board_owner)
     if problem:
         return config, [f"{config.project} cannot be given {upstream}'s report credential: {problem}"]
+    # A board that does not answer as itself is not connected to, whatever the records say (SYRD-674).
+    from scripts import upstream_report_sinks
+
+    problem = upstream_report_sinks.board_answer(url, upstream)
+    if problem:
+        return config, [f"{config.project} cannot be connected for reports: {problem}"]
     linked, problems = launcher.record_upstream_report_link(
         config,
         config_path=config_path,
@@ -400,6 +408,9 @@ def connect_upstream_report_command(
     upstream_report_url: str,
     upstream_report_token_file: str,
     print_func: Callable[[str], None],
+    upstream_report_board: str = "",
+    no_upstream_report: bool = False,
+    runner: Callable[..., Any] | None = None,
 ) -> int:
     """`switchyard upgrade <project> --only upstream-report`: the report connection and nothing else (SYRD-548).
 
@@ -407,30 +418,75 @@ def connect_upstream_report_command(
     and no phase -- artifacts, tooling, identities, workflow, panes -- runs.
     Otto's Director could not get report access without an upgrade it had chosen
     not to run, and its dry run could not even finish the release phase.
+
+    No URL is needed (SYRD-674): the board is the one named, the one recorded, or the host's one declared
+    report board, and two are never guessed between. What became of it is recorded in the tenant's
+    registry record, and a link written while panes run says which of them need a relaunch.
+    `--only accept-reports` / `refuse-reports` is root's declaration that this project's board takes the
+    host's tenant reports.
     """
     from scripts import team_launcher as launcher
+    from scripts import upstream_report_sinks as sinks
 
+    if only in ("accept-reports", "refuse-reports"):
+        return sinks.declare_report_board(config, accept=only == "accept-reports", dry_run=dry_run,
+                                          registry_dir=registry_dir, print_func=print_func)
     if only != "upstream-report":
-        print_func(f"switchyard: --only takes upstream-report, not {only!r}. Nothing was changed.")
+        print_func(f"switchyard: --only takes upstream-report, accept-reports or refuse-reports, not {only!r}. "
+                   "Nothing was changed.")
         return 2
-    _connected, problems = launcher.connect_upstream_report(
-        config,
-        config_path=config_path,
-        upstream_report_url=upstream_report_url,
-        upstream_report_token_file=upstream_report_token_file,
-        dry_run=dry_run,
+    if no_upstream_report:
+        configured = str(config.upstream_report_url or "").strip()
+        if upstream_report_url.strip() or upstream_report_board.strip() or configured:
+            print_func(f"switchyard: --no-upstream-report records that {config.project} files no reports; "
+                       + (f"it files them to {configured}, and removing that link is not this step's"
+                          if configured else "it cannot be combined with a report board") + ". Nothing was changed.")
+            return 2 if not configured else 1
+        if dry_run:
+            print_func(f"switchyard: would record that {config.project} opted out of Switchyard reports; "
+                       "nothing written")
+            return 0
+        sinks.record_report_outcome(config.project, sinks.OPTED_OUT, registry_dir=registry_dir, print_func=print_func)
+        print_func(f"switchyard: {config.project} files no Switchyard reports, as its operator chose; connect it "
+                   f"at any time with `{sinks.repair_command(config.project)}`.")
+        return 0
+    url, problem = sinks.resolve_repair_board(
+        config, upstream_report_url=upstream_report_url, upstream_report_board=upstream_report_board,
         registry_dir=registry_dir,
-        print_func=print_func,
     )
+    problems = [f"{config.project} cannot be connected for reports: {problem}"] if problem else []
+    connected = config
+    if url:
+        connected, problems = launcher.connect_upstream_report(
+            config,
+            config_path=config_path,
+            upstream_report_url=url,
+            upstream_report_token_file=upstream_report_token_file,
+            dry_run=dry_run,
+            registry_dir=registry_dir,
+            print_func=print_func,
+        )
     for problem in problems:
         print_func(f"switchyard: {problem}")
     if problems:
+        # A refusal writes nothing, its record included: what was recorded before still stands.
         print_func(f"switchyard: {config.project} was not connected for reports, and no upgrade phase ran.")
         return 1
+    if not dry_run:
+        board = next((b.slug for b in sinks.report_boards(exclude=config.project, registry_dir=registry_dir)
+                      if b.url == url.rstrip("/")), "")
+        if sinks.recorded_outcome(config.project, registry_dir=registry_dir).get("state") == sinks.OPTED_OUT:
+            print_func(f"switchyard: {config.project} had opted out of Switchyard reports; this connection replaces "
+                       "that record")
+        sinks.record_report_outcome(config.project, sinks.CONNECTED, board=board, url=url,
+                                    registry_dir=registry_dir, print_func=print_func)
     print_func(
         f"switchyard: {config.project}'s report connection is {'checked' if dry_run else 'in place'}; no upgrade "
         "phase ran. Each pane carries it from its next launch."
     )
+    linked = (str(connected.upstream_report_url or ""), str(connected.upstream_report_token_file or ""))
+    if not dry_run and linked != (str(config.upstream_report_url or ""), str(config.upstream_report_token_file or "")):
+        print_func(sinks.running_panes_note(connected, url=linked[0], token_file=linked[1], runner=runner))
     return 0
 
 

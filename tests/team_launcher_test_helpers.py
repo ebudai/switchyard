@@ -95,6 +95,10 @@ os.environ["SWITCHYARD_SUDOERS_ROOT"] = str(TEST_SWITCHYARD_PUBLISH_ROOT / "sudo
 os.environ["SWITCHYARD_TENANT_CONTROL_ROOT"] = str(
     TEST_SWITCHYARD_SHARED_INSTALL_ROOT.parent.parent / "tenant-control"
 )
+# And the host's project registry: `switchyard new` asks it which board a new tenant reports to before anything
+# is created, so a suite that names no registry must not be answered by this host's tenants (SYRD-674).
+TEST_SWITCHYARD_REGISTRY_DIR = TEST_SWITCHYARD_SHARED_INSTALL_ROOT.parent.parent / "registry"
+os.environ.setdefault("SWITCHYARD_PROJECT_REGISTRY_DIR", str(TEST_SWITCHYARD_REGISTRY_DIR))
 os.environ.update(XDG_CURRENT_DESKTOP="GNOME", KDE_FULL_SESSION="")
 import fixture_displays  # noqa: E402,F401 -- displays here are fixtures, not the host's sockets (SYRD-621)
 

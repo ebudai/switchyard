@@ -288,7 +288,8 @@ def test_the_interface_and_the_result() -> None:
 def test_the_command_calls_it_and_returns_its_stops() -> None:
     body = command_def().body
     at = next(i for i, s in enumerate(body) if isinstance(s, ast.Assign) and ast.unparse(s.targets[0]) == "new_project_sign_in")
-    check(ast.unparse(body[at - 1]) == "config_path = new_project_board.config_path", "right after P3's read-backs")
+    # SYRD-674: P3's last read-back is now its report summary, which P5 says.
+    check(ast.unparse(body[at - 1]) == "report_summary = new_project_board.report_summary", "right after P3's read-backs")
     call = body[at].value
     check(ast.unparse(call.func) == "_run_new_project_sign_in" and not call.args
           and [(k.arg, ast.unparse(k.value)) for k in call.keywords] == [(n, n) for n in PARAMETERS + FROM_P0 + FROM_P3],
@@ -430,7 +431,8 @@ def earlier(tmp: Path, log: list) -> tuple:
     p0 = dataclasses.replace(p0, stages=Stages(log), owner_user=OWNER, project_dir=tmp / "project", resolved_slug="s373")
     p1 = m.NewProjectPreflight(**{f.name: object() for f in dataclasses.fields(m.NewProjectPreflight)})
     p2 = m.NewProjectAccounts(provision_dir=tmp / "provision")
-    p3 = m.NewProjectBoard(config=SimpleNamespace(project="s373-before"), config_path=tmp / "provision" / "s373.json")
+    p3 = m.NewProjectBoard(config=SimpleNamespace(project="s373-before"), config_path=tmp / "provision" / "s373.json",
+                           report_summary="")
     return p0, p1, p2, p3
 
 

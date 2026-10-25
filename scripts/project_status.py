@@ -592,6 +592,11 @@ def switchyard_status_command(
             payload["supervised_boards"] = [
                 supervised[slug] for slug in sorted(supervised) if not project or slug == project
             ]
+        from scripts import upstream_report_sinks
+
+        # SYRD-674: from root-owned registry records only -- no root, no configuration, no token.
+        payload["reports"] = upstream_report_sinks.report_status(
+            [status.slug for status in statuses], registry_dir=registry_dir)
         print_func(json.dumps(payload, indent=2))
         return 0
     rows = [("NAME", "SLUG", "STATE", "PANES", "VIEWER")]
@@ -643,6 +648,15 @@ def switchyard_status_command(
     if board_lines:
         print_func("")
         for line in board_lines:
+            print_func(line)
+    from scripts import upstream_report_sinks
+
+    # Whether each project can file Switchyard reports, and if not why and the repair (SYRD-674).
+    report_lines = upstream_report_sinks.report_status_lines([status.slug for status in statuses],
+                                                              registry_dir=registry_dir)
+    if report_lines:
+        print_func("")
+        for line in report_lines:
             print_func(line)
     unsafe = [status for status in statuses if status.root_windows]
     if unsafe:

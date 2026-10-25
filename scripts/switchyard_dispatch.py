@@ -76,6 +76,8 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             git_init=not args.no_git_init,
             upstream_report_url=args.upstream_report_url,
             upstream_report_token_file=args.upstream_report_token_file,
+            upstream_report_board=args.upstream_report_board,
+            no_upstream_report=args.no_upstream_report,
         )
     if argv[0].casefold() == "agy-credential":
         parser = argparse.ArgumentParser(prog="switchyard agy-credential")
@@ -215,6 +217,8 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             upstream_report_url=getattr(args, "upstream_report_url", "") or "",
             upstream_report_token_file=getattr(args, "upstream_report_token_file", "") or "",
             only=args.only,
+            upstream_report_board=args.upstream_report_board,
+            no_upstream_report=args.no_upstream_report,
             role_models=args.role_models,
             board_ui_users=args.board_ui_users,
         )

@@ -388,13 +388,97 @@ def test_the_launcher_reexports_the_twenty_one_and_builds_them_there() -> None:
 # --- behaviour -----------------------------------------------------------------------------------------------------
 
 
+#: SYRD-674: `new` and `upgrade` each gain --upstream-report-board and --no-upstream-report right after
+#: --upstream-report-token-file, and upgrade's --only gains accept-reports and refuse-reports. Applied to the
+#: baseline's record by rule, so nothing else about either parser can have moved.
+REPORT_PARSERS = {
+    "_build_switchyard_new_parser": "the host's one declared report board, else you are asked",
+    "_build_switchyard_upgrade_parser": "the URL or board already recorded, else the host's one declared report board",
+}
+ONLY_TAIL = ("; accept-reports / refuse-reports records, as root, whether this project's board is the one new "
+             "tenants on this host report to (SYRD-674)")
+
+
+def with_the_report_board(name: str, gold: dict) -> dict:
+    """The baseline's structure and parses for `name`, with SYRD-674's options added by rule."""
+    import copy
+
+    out = copy.deepcopy(gold)
+    if name not in REPORT_PARSERS:
+        return out
+    action = {"class": "_StoreAction", "nargs": None, "const": None, "type": None, "choices": None, "required": False,
+              "subcommands": None}
+    added = [
+        {**action, "option_strings": ["--upstream-report-board"], "dest": "upstream_report_board", "default": "",
+         "metavar": "SLUG", "help": f"the registered project whose board this project files reports to (default: "
+                                    f"{REPORT_PARSERS[name]})"},
+        {**action, "class": "_StoreTrueAction", "option_strings": ["--no-upstream-report"], "dest": "no_upstream_report",
+         "nargs": 0, "const": True, "default": False, "metavar": None,
+         "help": "file no Switchyard reports: recorded as a deliberate opt-out, with a warning naming the repair"},
+    ]
+    actions = out["structure"]["actions"]
+    at = next(i for i, a in enumerate(actions) if a["option_strings"] == ["--upstream-report-token-file"]) + 1
+    actions[at:at] = [{k: a[k] for k in actions[0]} for a in added]
+    only = next((a for a in actions if a["option_strings"] == ["--only"]), None)
+    if only is not None:
+        only["choices"] = ["upstream-report", "accept-reports", "refuse-reports"]
+        only["help"] += ONLY_TAIL
+    defaults = {"upstream_report_board": "", "no_upstream_report": False}
+    parsed = [out["no arguments"]] if "parsed" in out["no arguments"] else []
+    parsed += list(out["parses"].values())
+    for case in parsed:
+        case["parsed"].update(defaults)
+    if "--only" in out["parses"]:  # the sample is the last choice
+        case = out["parses"]["--only"]
+        case["argv"][case["argv"].index("--only") + 1] = case["parsed"]["only"] = "refuse-reports"
+    base = out["parses"]["required only"]
+    cases = list(out["parses"].items())
+    at = [label for label, _case in cases].index("--upstream-report-token-file") + 1
+    new_cases = [("--upstream-report-board", {"argv": [*base["argv"], "--upstream-report-board", "v411"],
+                                              "parsed": {**base["parsed"], "upstream_report_board": "v411"}}),
+                 ("--no-upstream-report", {"argv": [*base["argv"], "--no-upstream-report"],
+                                           "parsed": {**base["parsed"], "no_upstream_report": True}})]
+    out["parses"] = dict(cases[:at] + new_cases + cases[at:])
+    return out
+
+
+def without_the_report_board(text: str) -> str:
+    """Rendered help or usage with SYRD-674's options taken out again, whitespace folded: argparse reflows
+    around them, so the text is compared as words."""
+    kept, skipping = [], False
+    for line in text.splitlines():
+        if line.startswith(("  --upstream-report-board", "  --no-upstream-report")):
+            skipping = True
+            continue
+        if skipping and line.startswith("  ") and not line.startswith("  -"):
+            continue
+        skipping = False
+        kept.append(line)
+    words = " ".join(" ".join(kept).split())
+    for segment in (" [--upstream-report-board SLUG] [--no-upstream-report]", ",accept-reports,refuse-reports",
+                    " ".join(ONLY_TAIL.split())):
+        words = words.replace(segment, "")
+    return words
+
+
 def test_every_parser_is_the_baselines() -> None:
     check(sorted(PARSERS) == sorted(k for k in GOLDEN if k != "markers"), "every measured parser is asserted, and nothing else")
     for name in PARSERS:
         with contained():
             got = json.loads(json.dumps(parser_case(m, name)))  # as the golden file holds it
+        want = with_the_report_board(name, GOLDEN[name])
         for part in ("structure", "usage", "help", "no arguments", "parses"):
-            check(got.get(part) == GOLDEN[name][part], f"{name} {part}: the baseline's: {str(got.get(part, got))[:600]}")
+            if name in REPORT_PARSERS and isinstance(want[part], str) or (part == "no arguments" and "stderr" in want[part]
+                                                                           and name in REPORT_PARSERS):
+                g, w = (got.get(part), want[part]) if isinstance(want[part], str) else (got[part]["stderr"], want[part]["stderr"])
+                check("--upstream-report-board SLUG" in g and "--no-upstream-report" in g
+                      and without_the_report_board(g) == " ".join(w.split()),
+                      f"{name} {part}: the baseline's, with SYRD-674's options alone added: {g[:600]}")
+                continue
+            check(got.get(part) == want[part], f"{name} {part}: the baseline's: {str(got.get(part, got))[:600]}")
+    check(all(with_the_report_board(n, GOLDEN[n]) != GOLDEN[n] for n in REPORT_PARSERS)
+          and all(with_the_report_board(n, GOLDEN[n]) == GOLDEN[n] for n in PARSERS if n not in REPORT_PARSERS),
+          "the translation touches new's and upgrade's records, and no other parser's")
 
 
 def test_the_launcher_constants_and_the_catalogue_are_read_when_built() -> None:

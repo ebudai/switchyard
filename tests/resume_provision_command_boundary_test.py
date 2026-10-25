@@ -252,7 +252,14 @@ class Finish:
         kwargs.setdefault("config_path", None)
         kwargs.setdefault("completion", SimpleNamespace(problems=()))
         seams = kwargs.pop("seams", {})
-        with patched(t, **self.seams(**seams)):
+        from scripts import upstream_report_sinks
+
+        # SYRD-674: the report step, carried out before any role starts, is the report suite's; here it is logged.
+        def reports(config, *, config_path, registry_dir, print_func):
+            self.log.append(("reports", config.name, config_path, registry_dir))
+            return config
+
+        with patched(t, **self.seams(**seams)), patched(upstream_report_sinks, resume_report_connection=reports):
             return judged(t._finish_provision_after_packet, SLUG, Plan(), print_func=self.said.append, **kwargs)
 
     def kinds(self) -> list[str]:
@@ -279,7 +286,7 @@ def test_the_finish_step_registers_once_and_refuses_a_different_registration() -
     with tempfile.TemporaryDirectory() as tmp:
         fx = Finish(Path(tmp))
         check(fx.run(start_roles=False) == 0, f"registered and ready: {fx.said}")
-        check(fx.kinds() == ["uid", "verify", "record", "register", "ready"]
+        check(fx.kinds() == ["uid", "verify", "record", "register", "reports", "ready"]
               and fx.log[3] == ("register", fx.verified, Path(tmp) / "configs", fx.registry),
               f"verified, recorded, registered with the dirs it was given, then read back: {fx.log}")
         check(fx.said == [f"switchyard: registered {SLUG} at {fx.registry / f'{SLUG}.json'} from {fx.verified}",
@@ -324,18 +331,20 @@ def test_desktop_access_then_the_launch_then_readiness() -> None:
         got = fx.run(source_release=release, desktop_approval_path=approval, desktop_installer=installer, runner=runner,
                      launcher_script=Path("/fixture/team-launcher"), process_commands=["dead"], pane_liveness_states=["s"],
                      session_statuses=["r"], registration="w", runtime_wait_seconds=5.0)
-        check(got == 0 and fx.kinds() == ["uid", "verify", "record", "register", "desktop", "layout", "launch", "ready"],
+        # SYRD-674: the report connection, after registration and before desktop access and the launch.
+        check(got == 0 and fx.kinds() == ["uid", "verify", "record", "register", "reports", "desktop", "layout", "launch", "ready"]
+              and fx.log[4] == ("reports", "checked config", fx.verified, fx.registry),
               f"desktop access before the launch, the launch before readiness: {fx.kinds()}")
-        desktop = fx.log[4]
+        desktop = fx.log[5]
         check(desktop[1:3] == ("checked config", fx.verified) and desktop[3] == {"source_release": release, "approval_path": approval,
               "installer": installer, "runner": runner, "print_func": fx.said.append},
               f"the recovered desktop access, with everything it was given: {desktop}")
-        launch = fx.log[6]
+        launch = fx.log[7]
         check(launch[1] == "configured config" and launch[2] == {"config_path": fx.verified, "mode": "start", "script_path": Path("/fixture/team-launcher"),
               "runner": runner, "layout_output": Path("/fixture/layout.json"), "assign_layout_owner": True, "print_func": fx.said.append}
-              and fx.log[5] == ("layout", SLUG, Path(Plan().owner_home)),
+              and fx.log[6] == ("layout", SLUG, Path(Plan().owner_home)),
               f"the configured config is launched, start mode, the owner's layout: {launch}")
-        ready = fx.log[7]
+        ready = fx.log[8]
         check(ready[1:3] == ("configured config", fx.verified) and ready[3] == {
             "registry_path": fx.registry / f"{SLUG}.json", "runner": runner, "process_commands": ["dead"], "pane_liveness_states": ["s"],
             "session_statuses": ["r"], "completion": SimpleNamespace(problems=()), "registration": "w", "runtime_wait_seconds": 5.0,

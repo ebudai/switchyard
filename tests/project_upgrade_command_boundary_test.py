@@ -464,12 +464,35 @@ def test_the_launcher_reexports_it_and_both_dispatchers_reach_it_there() -> None
 # --- behaviour -----------------------------------------------------------------------------------------------------
 
 
+#: SYRD-674: the cases whose record the report-board options move, and nothing else.
+REPORT_BOARD_CASES = ("upgrade: only upstream-report", "switchyard upgrade", "switchyard upgrade, bare",
+                      "switchyard upgrade, U6 answers nonzero")
+
+
+def with_the_report_board(label: str, gold: dict) -> dict:
+    """SYRD-674, applied to the baseline's record by rule: `switchyard upgrade` dispatches
+    --upstream-report-board and --no-upstream-report (unset here) -- team-launcher's own `upgrade` has neither --
+    and the narrow step is handed them and the command's runner, which tells it whether running panes need a
+    relaunch."""
+    import copy
+
+    out = copy.deepcopy(gold)
+    for name, _args, kwargs in out["calls"]:
+        if name == "upgrade_project_command" and label.startswith("switchyard upgrade"):
+            kwargs.update(upstream_report_board="", no_upstream_report=False)
+        elif name == "connect_upstream_report_command":
+            kwargs.update(upstream_report_board="", no_upstream_report=False, runner="RUNNER recorder")
+    return out
+
+
 def test_every_answer_is_the_baselines() -> None:
     check(sorted(CASES) == sorted(GOLDEN), "every measured case is asserted, and nothing else")
+    check(sorted(label for label in GOLDEN if with_the_report_board(label, GOLDEN[label]) != GOLDEN[label])
+          == sorted(REPORT_BOARD_CASES), "the translation moves exactly the cases that reach the report options")
     for label, spec in CASES.items():
         for holder in (m, t):
             got = run(holder, spec)
-            check(got == GOLDEN[label], f"{label} ({holder.__name__}): the baseline's answer, every call in order: {got}")
+            check(got == with_the_report_board(label, GOLDEN[label]), f"{label} ({holder.__name__}): the baseline's answer, every call in order: {got}")
 
 
 def test_the_rules_hold_in_the_measured_record() -> None:

@@ -80,6 +80,7 @@ from typing import TYPE_CHECKING, Any, Callable, Sequence
 if TYPE_CHECKING:
     from scripts.team_launcher import FirstRunAuthReport, ProjectConfig, ProvisioningStages, _NoRunnerInjected
     from scripts.ticket_board.project_provision import ProjectBoardProvision
+    from scripts.upstream_report_sinks import ReportChoice
 
 
 @dataclass(frozen=True)
@@ -112,6 +113,8 @@ class NewProjectChoices:
     #: The documentation gate's record, or () for off (SYRD-624).
     selected_documentation: tuple[tuple[str, str], ...]
     stages: ProvisioningStages
+    #: Where its Switchyard reports go, decided before anything exists (SYRD-674).
+    upstream_report: ReportChoice
 
 
 def _resolve_new_project_choices(
@@ -138,6 +141,9 @@ def _resolve_new_project_choices(
     registry_dir: Path | None,
     input_func: Callable[[str], str],
     print_func: Callable[[str], None],
+    upstream_report_url: str,
+    upstream_report_board: str,
+    no_upstream_report: bool,
 ) -> NewProjectChoices:
     from scripts import team_launcher as launcher
 
@@ -294,6 +300,16 @@ def _resolve_new_project_choices(
     from scripts import documentation_onboarding
 
     print_func(documentation_onboarding.summary_line(selected_documentation))
+    # Where its reports go, decided before anything exists and said before the confirmation: an ambiguous
+    # host is asked, or refused under --yes, rather than guessed for (SYRD-674).
+    from scripts import upstream_report_sinks
+
+    upstream_report = upstream_report_sinks.choose_report_board(
+        resolved_slug, upstream_report_url=upstream_report_url, upstream_report_board=upstream_report_board,
+        no_upstream_report=no_upstream_report, yes=yes, registry_dir=registry_dir, input_func=input_func,
+        print_func=print_func,
+    )
+    print_func(upstream_report_sinks.choice_summary(resolved_slug, upstream_report, registry_dir=registry_dir))
     # The one confirmation, and it comes last: after every choice -- Router,
     # the final one, included -- and the whole review, and before P1, the
     # first step that can install or change anything. It used to come before
@@ -340,6 +356,7 @@ def _resolve_new_project_choices(
         selected_router=selected_router,
         selected_documentation=selected_documentation,
         stages=stages,
+        upstream_report=upstream_report,
     )
 
 
@@ -740,6 +757,8 @@ class NewProjectBoard:
 
     config: ProjectConfig
     config_path: Path
+    #: What the creation summary says about its reports (SYRD-674).
+    report_summary: str
 
 
 def _prepare_new_project_board(
@@ -767,10 +786,16 @@ def _prepare_new_project_board(
     upstream_report_url: str = "",
     upstream_report_token_file: str = "",
     board_ui_users: Sequence[str] = (),
+    upstream_report: ReportChoice | None = None,
 ) -> NewProjectBoard | int:
     from scripts import team_launcher as launcher
 
     stages.begin("database and board")
+    if upstream_report is not None:
+        from scripts import upstream_report_sinks
+
+        # Kept by root beside the plan before the packet runs, so a resumed provision honours it (SYRD-674).
+        upstream_report_sinks.record_report_decision(resolved_slug, upstream_report, print_func=print_func)
     result = launcher.new_project_command(
         resolved_slug,
         from_artifact=artifact_path,
@@ -810,52 +835,25 @@ def _prepare_new_project_board(
     for problem in record_board_ui_users(config, registry_dir=registry_dir, operator_users=board_ui_users,
                                          print_func=print_func):
         print_func(f"switchyard: {problem}")
-    if upstream_report_url.strip():
-        config = _connect_new_project_for_reports(
-            config, config_path=config_path, upstream_report_url=upstream_report_url,
-            upstream_report_token_file=upstream_report_token_file, registry_dir=registry_dir,
-            resolved_slug=resolved_slug, print_func=print_func,
+    report_summary = ""
+    if upstream_report is not None or upstream_report_url.strip():
+        from scripts import upstream_report_sinks
+
+        # Connected before the first launch (SYRD-548): each role's pane environment is computed when the
+        # configuration is loaded, so it is read again from what was written. A URL alone is a choice too.
+        config, report_summary = upstream_report_sinks.connect_chosen_report_board(
+            config, config_path=config_path,
+            choice=upstream_report or upstream_report_sinks.ReportChoice(
+                upstream_report_sinks.CONNECT, url=upstream_report_url.strip(), source="--upstream-report-url"),
+            upstream_report_token_file=upstream_report_token_file, registry_dir=registry_dir, print_func=print_func,
         )
     launcher._prepare_first_run_auth_worktrees(config, runner=runner)
     return NewProjectBoard(
         config=config,
         config_path=config_path,
+        report_summary=report_summary,
     )
 
-
-def _connect_new_project_for_reports(
-    config: ProjectConfig,
-    *,
-    config_path: Path,
-    upstream_report_url: str,
-    upstream_report_token_file: str,
-    registry_dir: Path | None,
-    resolved_slug: str,
-    print_func: Callable[[str], None],
-) -> ProjectConfig:
-    """`switchyard new --upstream-report-url`: connected before the first launch (SYRD-548).
-
-    Every pane can file a report from the start. Each role's pane environment
-    is computed when the configuration is loaded, so it is read again from what
-    was just written. A connection that fails does not undo the project; it
-    says which narrow step connects it later.
-    """
-    from scripts import team_launcher as launcher
-
-    _linked, problems = launcher.connect_upstream_report(
-        config, config_path=config_path, upstream_report_url=upstream_report_url,
-        upstream_report_token_file=upstream_report_token_file, registry_dir=registry_dir, print_func=print_func,
-    )
-    for problem in problems:
-        print_func(f"switchyard: {problem}")
-    if not problems:
-        return launcher.load_project_config(config.project, config_path)
-    print_func(
-        f"switchyard: {resolved_slug} is not connected for reports; once that is fixed, connect it with "
-        f"`sudo switchyard upgrade {resolved_slug} --only upstream-report --upstream-report-url "
-        f"{upstream_report_url.strip()}`, which runs no other upgrade phase."
-    )
-    return config
 
 
 @dataclass(frozen=True)
@@ -993,6 +991,7 @@ def _launch_new_project_panes(
     runner: Callable[..., subprocess.CompletedProcess[Any]],
     stages: ProvisioningStages,
     config_path: Path,
+    report_summary: str,
     config: ProjectConfig,
     first_run_auth_report: FirstRunAuthReport,
     launch_deferred: bool,
@@ -1060,5 +1059,8 @@ def _launch_new_project_panes(
             print_func("switchyard: maximize the designer pane during design with Konsole Ctrl+Shift+E; restore it when done")
         else:
             print_func("switchyard: design phase skipped; no designer pane configured")
+    if report_summary:
+        # Said again last, so a tenant that cannot file reports is not news to its first escalation (SYRD-674).
+        print_func(report_summary)
     stages.finish()
     return 0

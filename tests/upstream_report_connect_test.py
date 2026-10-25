@@ -41,6 +41,7 @@ for extra in (str(ROOT), str(ROOT / "tests")):
 
 from scripts import team_launcher as launcher  # noqa: E402
 from scripts import upstream_report  # noqa: E402
+from scripts import upstream_report_sinks  # noqa: E402
 from upstream_report_credential_test import UPSTREAM, _host, _tenant  # noqa: E402
 
 CHECKS = 0
@@ -86,13 +87,18 @@ def host(tmp: Path, *, token: str = TOKEN):
     defaults = upstream_report.connect_upstream_report.__kwdefaults__
     previous = defaults["home_for_user"]
     defaults["home_for_user"] = resolver
+    # UPSTREAM is the live board's port: whether a board answers there is stood in, never asked (SYRD-674).
+    asked: list[tuple[str, str]] = []
     try:
         with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(upstream_report_sinks, "board_answer",
+                                             lambda url, slug, **_k: asked.append((url, slug)) or ""))
             stack.enter_context(patch.object(launcher, "switchyard_registry_dir", lambda: registry))
             for name in PHASES:
                 stack.enter_context(patch.object(launcher, name, fenced(name)))
             yield SimpleNamespace(registry=registry, board_env=board_env, config_path=path, resolver=resolver,
-                                  credential=resolver(owner) / ".config" / "mefp" / "upstream-report.env")
+                                  credential=resolver(owner) / ".config" / "mefp" / "upstream-report.env",
+                                  asked=asked)
     finally:
         defaults["home_for_user"] = previous
 
@@ -122,10 +128,16 @@ def test_the_narrow_step_writes_the_link_and_the_credential_and_nothing_else() -
             changed = sorted(k for k in after if before.get(k) != after[k])
             rel_config = str(h.config_path.relative_to(tmp))
             rel_credential = str(h.credential.relative_to(tmp))
+            # And root's registry record says it is connected (SYRD-674).
+            rel_record = str((h.registry / "mefp.json").relative_to(tmp))
             # The credential's directory is created on the way, and the config replaced in place.
             created_dirs = sorted(k for k in changed if after[k][0] == stat.S_IFDIR and k not in before)
-            check(set(changed) - set(created_dirs) == {rel_config, rel_credential},
-                  f"only the configuration and the credential changed: {changed}")
+            check(set(changed) - set(created_dirs) == {rel_config, rel_credential, rel_record},
+                  f"only the configuration, the credential and the registry record changed: {changed}")
+            record = json.loads((h.registry / "mefp.json").read_text())
+            check(record["upstream_report"]["state"] == "connected" and TOKEN not in json.dumps(record),
+                  f"recorded connected, with no token in it: {record}")
+            check(h.asked == [(UPSTREAM, "syrd")], f"the board was asked whether it answers as itself: {h.asked}")
             check(all(rel_credential.startswith(d + "/") for d in created_dirs), created_dirs)
             check(not [k for k in before if k not in after], "nothing was removed")
             after_config = json.loads(h.config_path.read_text())
@@ -156,7 +168,7 @@ def test_a_refusal_writes_nothing() -> None:
     cases = (
         (dict(), ("--upstream-report-url", "http://127.0.0.1:1"), "no project registered on this host serves"),
         (dict(token=""), ("--upstream-report-url", UPSTREAM), "has no TICKET_BOARD_TENANT_REPORT_TOKEN"),
-        (dict(), (), "records no upstream report board"),
+        (dict(), (), "records no report board"),
     )
     for host_kwargs, argv, expected in cases:
         with tempfile.TemporaryDirectory(prefix="syrd548-refuse.") as raw:
@@ -223,7 +235,7 @@ def new_until_sign_in(h, tmp: Path, **kwargs) -> tuple[object, list[str]]:
         "include_audit", "include_designer", "owner_shell", "project_dir",
         "resolved_agy_credential_source", "resolved_project_name", "runner", "selected_audit_roles",
         "selected_desktop_policy", "selected_implementer_roles", "selected_role_clis", "selected_role_efforts",
-        "selected_role_models", "selected_router", "selected_documentation")}, resolved_slug="mefp", owner_user="mefp-agent", stages=SimpleNamespace(begin=lambda _name: None))
+        "selected_role_models", "selected_router", "selected_documentation", "upstream_report")}, resolved_slug="mefp", owner_user="mefp-agent", stages=SimpleNamespace(begin=lambda _name: None))
     preflight = SimpleNamespace(effective_source_repo=None, precheck_plan=None, selected_role_clis=None, selected_router=(), selected_documentation=(),
                                 worktree_branch=None)
 
@@ -269,14 +281,15 @@ def test_new_connects_before_the_first_launch() -> None:
         with host(Path(tempfile.mkdtemp(dir=raw))) as h:
             config, said = new_until_sign_in(h, tmp, upstream_report_url="http://127.0.0.1:1")
             check(not config.upstream_report_url, "a failed connection does not undo the project")
-            named = next((line for line in said if "is not connected for reports" in line and "`" in line), "")
+            named = next((line for line in said if "will not be able to file Switchyard reports" in line
+                          and "`" in line), "")
             check(named, f"the narrow step is named: {said[-3:]}")
-            remedy = named.split("`")[1]
+            remedy = named.split("`")[-2]
             argv = shlex.split(remedy)
             check(argv[:3] == ["sudo", "switchyard", "upgrade"], remedy)
             args = launcher._build_switchyard_upgrade_parser().parse_args(argv[3:])
-            check((args.project, args.only, args.upstream_report_url) == ("mefp", "upstream-report",
-                                                                          "http://127.0.0.1:1"), remedy)
+            # No URL to retype: the one that failed is recorded, and the repair resolves it (SYRD-674).
+            check((args.project, args.only, args.upstream_report_url) == ("mefp", "upstream-report", ""), remedy)
 
         with host(Path(tempfile.mkdtemp(dir=raw))) as h:
             before = tree(Path(h.config_path).parent)

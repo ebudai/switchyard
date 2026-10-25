@@ -56,8 +56,10 @@ FROM_P0 = ("artifact_path", "director_onboarding", "owner_user", "project_dir", 
 FROM_P2 = ("provision_dir",)
 #: SYRD-548: the report link `switchyard new --upstream-report-url` hands P3, defaulting to none.
 #: SYRD-598: the operator's `--board-ui-user`, recorded beside the registration, defaulting to none.
-FROM_COMMAND = ("upstream_report_url", "upstream_report_token_file", "board_ui_users")
-OUTPUTS = ("config", "config_path")
+#: SYRD-674: P0's report decision, carried out before any pane launches, defaulting to none.
+FROM_COMMAND = ("upstream_report_url", "upstream_report_token_file", "board_ui_users", "upstream_report")
+#: SYRD-674: and what the creation summary says about its reports.
+OUTPUTS = ("config", "config_path", "report_summary")
 OWNER = "syrd372-agent"
 
 
@@ -250,7 +252,11 @@ def test_the_seams_and_nothing_bound_read_through_the_launcher() -> None:
     bound = {a.arg for a in fn.args.kwonlyargs} | {n.id for n in ast.walk(fn) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
     check(not bound & set(through), f"nothing the phase binds is read through the launcher: {bound & set(through)}")
     check(ast.unparse(fn.body[1]) == "stages.begin('database and board')", "the stage begun first")
-    check(ast.unparse(fn.body[3]) == "if result != 0:\n    return result", "the early return, as it was, right after provisioning")
+    # SYRD-674: root keeps the report decision first, so a provision the packet stops can be resumed with it.
+    check(ast.unparse(fn.body[2]).startswith("if upstream_report is not None:\n    from scripts import upstream_report_sinks")
+          and "record_report_decision(resolved_slug, upstream_report" in ast.unparse(fn.body[2]),
+          "the report decision recorded, before provisioning")
+    check(ast.unparse(fn.body[4]) == "if result != 0:\n    return result", "the early return, as it was, right after provisioning")
 
 
 def test_the_interface_and_the_result() -> None:
@@ -259,12 +265,14 @@ def test_the_interface_and_the_result() -> None:
     check(not args.args and not args.posonlyargs and not args.vararg and not args.kwarg
           and tuple(a.arg for a in args.kwonlyargs) == PARAMETERS + FROM_P0 + FROM_P2 + FROM_COMMAND
           and all(d is None for d in args.kw_defaults[:-len(FROM_COMMAND)])
-          and [ast.literal_eval(d) for d in args.kw_defaults[-len(FROM_COMMAND):]] == ["", "", ()],
+          and [ast.literal_eval(d) for d in args.kw_defaults[-len(FROM_COMMAND):]] == ["", "", (), None],
           f"keyword-only: the command's parameters, P0's values, P2's; no defaults: {[a.arg for a in args.kwonlyargs]}")
     theirs = {a.arg: ast.unparse(a.annotation) for a in command_def().args.kwonlyargs}
     for cls in ("NewProjectChoices", "NewProjectAccounts"):
         node = next(n for n in module_tree().body if isinstance(n, ast.ClassDef) and n.name == cls)
         theirs.update({s.target.id: ast.unparse(s.annotation) for s in node.body if isinstance(s, ast.AnnAssign)})
+    # SYRD-674: P0's report decision, or none from a caller that has no P0.
+    theirs["upstream_report"] = f"{theirs['upstream_report']} | None"
     check(all(ast.unparse(a.annotation) == theirs[a.arg] for a in args.kwonlyargs), "each annotated as where it comes from")
     check(ast.unparse(fn.returns) == "NewProjectBoard | int", f"a board, or provisioning's status: {ast.unparse(fn.returns)}")
     fields = dataclasses.fields(m.NewProjectBoard)
@@ -272,7 +280,8 @@ def test_the_interface_and_the_result() -> None:
                                                             for f in fields) and m.NewProjectBoard.__dataclass_params__.frozen,
           "two frozen fields, no defaults")
     returns = sorted(ast.unparse(n) for n in ast.walk(fn) if isinstance(n, ast.Return))
-    check(returns == ["return NewProjectBoard(config=config, config_path=config_path)", "return result"],
+    check(returns == ["return NewProjectBoard(config=config, config_path=config_path, report_summary=report_summary)",
+                      "return result"],
           f"the status, or the board: {returns}")
 
 
@@ -286,8 +295,9 @@ def test_the_command_calls_it_and_returns_a_failed_status_itself() -> None:
           "called by the launcher's name, with the command's own values")
     check(ast.unparse(body[at + 1]) == "if not isinstance(new_project_board, NewProjectBoard):\n    return new_project_board",
           "a status is returned as it came, without comparing it again")
-    check([ast.unparse(s) for s in body[at + 2:at + 4]] == [f"{f} = new_project_board.{f}" for f in OUTPUTS], "both read back")
-    after = body[at + 4]
+    check([ast.unparse(s) for s in body[at + 2:at + 2 + len(OUTPUTS)]] == [f"{f} = new_project_board.{f}" for f in OUTPUTS],
+          "each read back")
+    after = body[at + 2 + len(OUTPUTS)]
     if ast.unparse(after) != "stages.begin('provider sign-in and folder trust', waits_for_you=True)":
         # SYRD-373: P4 is its own phase now, and that phase begins it first.
         sign_in = next(n for n in module_tree().body if isinstance(n, ast.FunctionDef) and n.name == "_run_new_project_sign_in")
@@ -415,8 +425,9 @@ def command_locals(exc: BaseException) -> dict:
 
 def earlier(tmp: Path, log: list) -> tuple:
     p0 = m.NewProjectChoices(**{f.name: object() for f in dataclasses.fields(m.NewProjectChoices)})
+    # SYRD-674: no report decision, as the baseline had none to carry out; its own cases are the report suite's.
     p0 = dataclasses.replace(p0, stages=Stages(log), owner_user=OWNER, project_dir=tmp / "project", resolved_slug="s372",
-                             runner=lambda *a, **k: None)
+                             runner=lambda *a, **k: None, upstream_report=None)
     p1 = m.NewProjectPreflight(**{f.name: object() for f in dataclasses.fields(m.NewProjectPreflight)})
     p2 = m.NewProjectAccounts(provision_dir=tmp / "project" / ".switchyard" / "provision")
     return p0, p1, p2
@@ -434,7 +445,7 @@ def test_the_command_hands_p3_its_values_and_reads_back_both() -> None:
         tmp = Path(tmp)
         log: list = []
         p0, p1, p2 = earlier(tmp, log)
-        answer = m.NewProjectBoard(config=object(), config_path=object())
+        answer = m.NewProjectBoard(config=object(), config_path=object(), report_summary=object())
         handed: list = []
         seen: list = []
         given = {name: object() for name in PARAMETERS}

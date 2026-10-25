@@ -68,7 +68,8 @@ def sandbox_home(resolver):
 
 def connect_tenant(tmp: Path, base: str) -> dict[str, str]:
     """The narrow step against a real board; returns the pane environment it gives the tenant."""
-    registry, board_env, _owner, resolver = _host(tmp, board_url=base)
+    # The board is a real one, and answers as its own project, which a connection checks (SYRD-674).
+    registry, board_env, _owner, resolver = _host(tmp, board_url=base, slug="cerulean")
     board_env.parent.mkdir(parents=True, exist_ok=True)
     board_env.write_text(f"TICKET_BOARD_TENANT_REPORT_TOKEN={t.TEST_REPORT_TOKEN}\n", encoding="utf-8")
     config, path = _tenant(tmp)

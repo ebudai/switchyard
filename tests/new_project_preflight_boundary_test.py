@@ -296,7 +296,8 @@ def test_the_interface_and_the_result() -> None:
 def test_the_command_calls_it_where_the_checks_were() -> None:
     body = command_def().body
     at = next(i for i, s in enumerate(body) if isinstance(s, ast.Assign) and ast.unparse(s.targets[0]) == "new_project_preflight")
-    check(ast.unparse(body[at - 1]) == "stages = new_project_choices.stages", "right after P0's read-backs")
+    # SYRD-674: P0's last read-back is now its report decision.
+    check(ast.unparse(body[at - 1]) == "upstream_report = new_project_choices.upstream_report", "right after P0's read-backs")
     call = body[at].value
     check(ast.unparse(call.func) == "_check_new_project_preflight" and not call.args
           and [(k.arg, ast.unparse(k.value)) for k in call.keywords] == [(n, n) for n in PARAMETERS + FROM_P0],

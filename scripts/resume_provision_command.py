@@ -138,6 +138,13 @@ def _finish_provision_after_packet(
             return 1
         print_func(f"switchyard: registered {slug} at {registry_path} from {verified}")
 
+    # Before any role starts, as `new` would have done it: each pane's environment is set at launch (SYRD-674).
+    from scripts import upstream_report_sinks
+
+    config = upstream_report_sinks.resume_report_connection(
+        config, config_path=verified, registry_dir=registry_dir, print_func=print_func,
+    )
+
     if start_roles:
         # Before the launch, because the launch only ever verifies. The
         # interrupted `switchyard new` never reached the install, so a recovery

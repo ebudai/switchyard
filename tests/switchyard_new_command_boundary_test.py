@@ -441,12 +441,44 @@ def test_the_launcher_reexports_it_and_its_dispatcher_reaches_it_there() -> None
 # --- behaviour -----------------------------------------------------------------------------------------------------
 
 
+def with_the_report_choice(label: str, gold: dict) -> dict:
+    """SYRD-674, applied to the baseline's record by rule rather than regenerated.
+
+    Where its reports go is decided in P0 now and carried out in P3, and the creation summary repeats it in
+    P5, so: `switchyard new` dispatches `--upstream-report-board` and `--no-upstream-report` (unset here);
+    P0 is handed the command's report URL and those two; P3 is handed P0's decision; P5 is handed P3's report
+    summary; and a `NewProjectBoard` built by a rebound type carries that summary too. Nothing else moves.
+    """
+    import copy
+
+    out = copy.deepcopy(gold)
+    dispatched = next((c[2] for c in out["calls"] if c[0] == "switchyard_new_command"), None)
+    given = dispatched if dispatched is not None else CASES[label].get("kwargs", {})
+    for name, _args, kwargs in out["calls"]:
+        if name == "switchyard_new_command":
+            kwargs.update(upstream_report_board="", no_upstream_report=False)
+        elif name == "_resolve_new_project_choices":
+            kwargs.update(upstream_report_url=given.get("upstream_report_url", ""), upstream_report_board="",
+                          no_upstream_report=False)
+        elif name == "_prepare_new_project_board":
+            kwargs.update(upstream_report="resolve_new_project_choices.upstream_report")
+        elif name in ("_launch_new_project_panes", "the rebound panes phase"):
+            kwargs.update(report_summary="prepare_new_project_board.report_summary")
+    if isinstance(out["result"], dict) and "NewProjectBoard" in out["result"]:
+        out["result"]["NewProjectBoard"]["report_summary"] = "prepare_new_project_board.report_summary"
+    return out
+
+
 def test_every_answer_is_the_baselines() -> None:
     check(sorted(CASES) == sorted(GOLDEN), "every measured case is asserted, and nothing else")
+    # SYRD-674: every case reaches P0, so every record moves, and only by the translation above.
+    check(all(with_the_report_choice(label, GOLDEN[label]) != GOLDEN[label] for label in GOLDEN),
+          "the translation touches every case, each of which reaches the choices phase")
     for label, spec in CASES.items():
         for holder in (m, t):
             got = run(holder, spec)
-            check(got == GOLDEN[label], f"{label} ({holder.__name__}): the baseline's answer, every call in order: {got}")
+            check(got == with_the_report_choice(label, GOLDEN[label]),
+                  f"{label} ({holder.__name__}): the baseline's answer, translated, every call in order: {got}")
 
 
 def test_the_rules_hold_in_the_measured_record() -> None:

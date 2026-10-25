@@ -85,6 +85,8 @@ def switchyard_new_command(
     agent_cli_sources: Sequence[str] | None = None,
     upstream_report_url: str = "",
     upstream_report_token_file: str = "",
+    upstream_report_board: str = "",
+    no_upstream_report: bool = False,
 ) -> int:
     from scripts import team_launcher as launcher
 
@@ -111,6 +113,9 @@ def switchyard_new_command(
         registry_dir=registry_dir,
         input_func=input_func,
         print_func=print_func,
+        upstream_report_url=upstream_report_url,
+        upstream_report_board=upstream_report_board,
+        no_upstream_report=no_upstream_report,
     )
     agy_source_origin = new_project_choices.agy_source_origin
     artifact_path = new_project_choices.artifact_path
@@ -135,6 +140,7 @@ def switchyard_new_command(
     selected_router = new_project_choices.selected_router
     selected_documentation = new_project_choices.selected_documentation
     stages = new_project_choices.stages
+    upstream_report = new_project_choices.upstream_report
     new_project_preflight = launcher._check_new_project_preflight(
         from_artifact=from_artifact,
         source_repo=source_repo,
@@ -229,11 +235,13 @@ def switchyard_new_command(
         upstream_report_url=upstream_report_url,
         upstream_report_token_file=upstream_report_token_file,
         board_ui_users=board_ui_users,
+        upstream_report=upstream_report,
     )
     if not isinstance(new_project_board, launcher.NewProjectBoard):
         return new_project_board
     config = new_project_board.config
     config_path = new_project_board.config_path
+    report_summary = new_project_board.report_summary
     new_project_sign_in = launcher._run_new_project_sign_in(
         home_base=home_base,
         euid_getter=euid_getter,
@@ -270,6 +278,7 @@ def switchyard_new_command(
         runner=runner,
         stages=stages,
         config_path=config_path,
+        report_summary=report_summary,
         config=config,
         first_run_auth_report=first_run_auth_report,
         launch_deferred=launch_deferred,

@@ -54,7 +54,7 @@ SEAMS = {"LAYOUT_MODE_VIEWER": 1, "TEAM_LAUNCHER_NAME": 1, "__file__": 1, "_owne
 PARAMETERS = ("home_base", "pane_state_dir", "session_record_timeout", "session_record_poll", "layout_mode", "layout_environ",
               "konsole_process_launcher", "print_func")
 FROM_P0 = ("include_designer", "owner_user", "resolved_slug", "runner", "stages")
-FROM_P3 = ("config_path",)
+FROM_P3 = ("config_path", "report_summary")  # SYRD-674 added the creation summary's report line
 FROM_P4 = ("config", "first_run_auth_report", "launch_deferred", "launch_runner")
 OWNER = "syrd374-agent"
 VIEWER_DESIGN = "switchyard: maximize the designer pane during design with Ctrl+a z; press it again to restore"
@@ -184,7 +184,7 @@ def inputs(tmp: Path, world: World, said: list, **overrides: object) -> dict:
                   layout_mode="auto", layout_environ={"XDG_SESSION_TYPE": "wayland"}, konsole_process_launcher=lambda *a, **k: None,
                   print_func=said.append, include_designer=True, owner_user=OWNER, resolved_slug="s374",
                   runner=lambda *a, **k: None, stages=Stages(world.log), config_path=tmp / "provision" / "s374.json",
-                  config=SimpleNamespace(project="s374", run_as_user=OWNER), first_run_auth_report=SimpleNamespace(name="report"),
+                  report_summary="", config=SimpleNamespace(project="s374", run_as_user=OWNER), first_run_auth_report=SimpleNamespace(name="report"),
                   launch_deferred=False, launch_runner=SimpleNamespace(name="launch runner"))
     values.update(overrides)
     return values
@@ -442,7 +442,7 @@ def earlier(tmp: Path, log: list) -> tuple:
     p0 = dataclasses.replace(p0, stages=Stages(log), owner_user=OWNER, resolved_slug="s374", include_designer=False)
     p1 = m.NewProjectPreflight(**{f.name: object() for f in dataclasses.fields(m.NewProjectPreflight)})
     p2 = m.NewProjectAccounts(provision_dir=tmp / "provision")
-    p3 = m.NewProjectBoard(config=object(), config_path=tmp / "provision" / "s374.json")
+    p3 = m.NewProjectBoard(config=object(), config_path=tmp / "provision" / "s374.json", report_summary="")
     p4 = m.NewProjectSignIn(config=SimpleNamespace(project="s374", run_as_user=OWNER), first_run_auth_report=object(),
                             launch_deferred=False, launch_runner=object())
     return p0, p1, p2, p3, p4

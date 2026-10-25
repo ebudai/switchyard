@@ -347,11 +347,29 @@ workflow, identity or pane change (SYRD-548):
 sudo switchyard upgrade <project> --only upstream-report --upstream-report-url http://127.0.0.1:23326
 ```
 
-A new project is connected from its first launch with
-`switchyard new ... --upstream-report-url <board URL>`. A full `switchyard upgrade
-<project> --upstream-report-url ...` still records the link as part of an upgrade, but no
-tenant needs one for this. A pane with no report credential is refused by `file-report`
-with the narrow command, never an upgrade.
+A new project is connected from its first launch by default (SYRD-674). Every board mints
+a report token, so which board takes this host's tenant reports is root's declaration, made
+once in that board's root-owned registry record:
+
+```bash
+sudo switchyard upgrade syrd --only accept-reports     # --only refuse-reports withdraws it
+```
+
+With exactly one board declared, `switchyard new` connects every new tenant to it before
+any pane starts, and says so before its confirmation and again at the end. Otherwise it
+asks which registered board (or none), and under `--yes` it refuses before creating
+anything. `--upstream-report-board <slug>` or `--upstream-report-url <board URL>` names
+one; `--no-upstream-report` creates the tenant unable to file, with a warning naming the
+repair. A board that does not answer at its URL as itself is never recorded as connected.
+What became of it -- connected, failed, opted out, or no board available -- is kept in the
+tenant's own registry record, and `switchyard status` shows it for every project.
+
+The repair needs no URL either: `--only upstream-report` connects the board already
+recorded, or the host's one declared board, and refuses rather than guess between two. When
+it writes a new link while panes are running, it names the panes that need a relaunch.
+A full `switchyard upgrade <project> --upstream-report-url ...` still records the link as part
+of an upgrade, but no tenant needs one for this. A pane with no report credential is refused
+by `file-report` with the narrow command, never an upgrade.
 
 That is stated once. The credential path defaults to
 `~/.config/<project>/upstream-report.env`, both are written into the tenant's config, and

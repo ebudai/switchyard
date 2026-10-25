@@ -137,6 +137,21 @@ def _build_switchyard_new_parser() -> argparse.ArgumentParser:
         default="",
         help="where the report-only credential belongs (default: ~/.config/<project>/upstream-report.env)",
     )
+    # SYRD-674: which registered board this project files reports to, or an explicit opt-out.
+    parser.add_argument(
+        "--upstream-report-board",
+        default="",
+        metavar="SLUG",
+        help=(
+            "the registered project whose board this project files reports to "
+            "(default: the host's one declared report board, else you are asked)"
+        ),
+    )
+    parser.add_argument(
+        "--no-upstream-report",
+        action="store_true",
+        help="file no Switchyard reports: recorded as a deliberate opt-out, with a warning naming the repair",
+    )
     return parser
 
 
@@ -237,11 +252,13 @@ def _build_switchyard_upgrade_parser() -> argparse.ArgumentParser:
     parser.add_argument("project", help="project name or slug")
     parser.add_argument(
         "--only",
-        choices=["upstream-report"],
+        choices=["upstream-report", "accept-reports", "refuse-reports"],
         default="",
         help=(
             "run this one narrow step and no upgrade phase: upstream-report connects the project to the "
-            "board it files reports to -- its report URL, its credential and nothing else (SYRD-548)"
+            "board it files reports to -- its report URL, its credential and nothing else (SYRD-548); "
+            "accept-reports / refuse-reports records, as root, whether this project's board is the one new "
+            "tenants on this host report to (SYRD-674)"
         ),
     )
     parser.add_argument("--dry-run", action="store_true", help="report what would change without writing files")
@@ -275,6 +292,21 @@ def _build_switchyard_upgrade_parser() -> argparse.ArgumentParser:
         "--upstream-report-token-file",
         default="",
         help="where the report-only credential belongs (default: ~/.config/<project>/upstream-report.env)",
+    )
+    # SYRD-674: which registered board this project files reports to, or an explicit opt-out.
+    parser.add_argument(
+        "--upstream-report-board",
+        default="",
+        metavar="SLUG",
+        help=(
+            "the registered project whose board this project files reports to "
+            "(default: the URL or board already recorded, else the host's one declared report board)"
+        ),
+    )
+    parser.add_argument(
+        "--no-upstream-report",
+        action="store_true",
+        help="file no Switchyard reports: recorded as a deliberate opt-out, with a warning naming the repair",
     )
     parser.add_argument(
         "--publish-remote",

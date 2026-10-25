@@ -67,12 +67,14 @@ SEAMS = {
 INPUTS = ("slug", "agent_name", "project_name", "project_path", "from_artifact", "role_clis", "yes", "desktop_policy",
           "headless", "desktop_gui_user", "desktop_approval_settings_path", "allow_existing_owner_user",
           "agy_credential_source", "no_agy_credential", "agy_credential_settings_path", "home_base", "euid_getter",
-          "runner", "config_dir", "registry_dir", "input_func", "print_func")
+          "runner", "config_dir", "registry_dir", "input_func", "print_func",
+          "upstream_report_url", "upstream_report_board", "no_upstream_report")  # SYRD-674 added the report choice
 OUTPUTS = ("agy_source_origin", "artifact_path", "design_document", "director_onboarding", "first_run_runner",
            "include_audit", "include_designer", "owner_shell", "owner_user", "project_dir",
            "resolved_agy_credential_source", "resolved_project_name", "resolved_slug", "runner",
            "selected_audit_roles", "selected_desktop_policy", "selected_implementer_roles", "selected_role_clis",
-           "selected_role_efforts", "selected_role_models", "selected_router", "selected_documentation", "stages")  # SYRD-599 added selected_router, SYRD-624 selected_documentation
+           "selected_role_efforts", "selected_role_models", "selected_router", "selected_documentation", "stages",
+           "upstream_report")  # SYRD-599 added selected_router, SYRD-624 selected_documentation, SYRD-674 upstream_report
 OWN = ("subprocess", "dataclass", "Path", "Any", "Callable", "Sequence")
 OWNER = "syrd369-agent"
 
@@ -204,7 +206,8 @@ def inputs(tmp: Path, **overrides: object) -> dict:
                   desktop_approval_settings_path=None, allow_existing_owner_user=False, agy_credential_source=None,
                   no_agy_credential=False, agy_credential_settings_path=None, home_base=tmp / "homes",
                   euid_getter=lambda: 0, runner=t.NO_RUNNER_INJECTED, config_dir=tmp / "config",
-                  registry_dir=tmp / "registry", input_func=refuse("the terminal"), print_func=said.append)
+                  registry_dir=tmp / "registry", input_func=refuse("the terminal"), print_func=said.append,
+                  upstream_report_url="", upstream_report_board="", no_upstream_report=False)
     values.update(overrides)
     return values
 
@@ -324,9 +327,12 @@ def test_the_seams_and_nothing_bound_read_through_the_launcher() -> None:
     summary = [i for i, s in enumerate(fn.body) if "router_onboarding.summary_line(" in ast.unparse(s)]
     # SYRD-624: and the documentation gate's, by its own module, imported right where it is used.
     gate_summary = [i for i, s in enumerate(fn.body) if "documentation_onboarding.summary_line(" in ast.unparse(s)]
+    # SYRD-674: and where its reports go, decided by its own module, imported right where it is used.
+    report_choice = [i for i, s in enumerate(fn.body) if "upstream_report_sinks.choose_report_board(" in ast.unparse(s)]
     check(local == [(0, "from scripts import team_launcher as launcher"), (decided[0] + 1, "from scripts.desktop_access import validate_policy"),
                     (summary[0] - 1, "from scripts import router_onboarding"),
-                    (gate_summary[0] - 1, "from scripts import documentation_onboarding")]
+                    (gate_summary[0] - 1, "from scripts import documentation_onboarding"),
+                    (report_choice[0] - 1, "from scripts import upstream_report_sinks")]
           and "validate_policy(" in ast.unparse(fn.body[decided[0] + 2]),
           f"the desktop validation is imported inside the phase, right after the policy is decided, then used: {local}")
 

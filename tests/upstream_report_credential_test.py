@@ -59,25 +59,28 @@ def _sandbox_home(tmp: Path):
     return home, resolver
 
 
-def _host(tmp: Path, *, board_url: str = UPSTREAM):
-    """A registry, an upstream project's artifact, and its board credential."""
+def _host(tmp: Path, *, board_url: str = UPSTREAM, slug: str = "syrd"):
+    """A registry, an upstream project's artifact, and its board credential.
+
+    `slug` is the upstream project's: a real board stood up for a case answers as its own project, and a
+    connection now asks it to (SYRD-674)."""
     owner = team_launcher.current_user_name()
     home, resolver = _sandbox_home(tmp)
     registry = tmp / "registry"
     registry.mkdir(parents=True, exist_ok=True)
     artifact = tmp / "upstream.json"
     artifact.write_text(
-        json.dumps({"project": "syrd", "board_url": board_url, "run_as_user": owner}),
+        json.dumps({"project": slug, "board_url": board_url, "run_as_user": owner}),
         encoding="utf-8",
     )
-    (registry / "syrd.json").write_text(
+    (registry / f"{slug}.json").write_text(
         json.dumps({
             "schema": "switchyard.project-registry.v1",
-            "slug": "syrd", "name": "Switchyard", "config_path": str(artifact),
+            "slug": slug, "name": "Switchyard", "config_path": str(artifact),
         }),
         encoding="utf-8",
     )
-    board_env = home / ".config" / "syrd" / "ticket-board.env"
+    board_env = home / ".config" / slug / "ticket-board.env"
     return registry, board_env, owner, resolver
 
 

@@ -646,7 +646,8 @@ def test_a_resumed_provision_carries_out_the_decision_before_its_roles() -> None
 
     for label, decision, declared, want in (
         ("new's decision honoured", sinks.ReportChoice(sinks.CONNECT, board="otto", url="", source="--upstream-report-board"), False, "otto"),
-        ("no decision, one declared board", None, True, "syrd"),
+        # Audit of 265dbd9b: no record is never the host's default now -- that would reverse an opt-out.
+        ("no decision, one declared board", None, True, ""),
         ("no decision, nothing to decide by", None, False, ""),
         ("new's opt-out honoured", sinks.ReportChoice(sinks.OPTED_OUT, source="--no-upstream-report"), True, "opted-out"),
     ):
@@ -668,13 +669,65 @@ def test_a_resumed_provision_carries_out_the_decision_before_its_roles() -> None
                 check(not config.upstream_report_url and h.record()["upstream_report"].get("state") == "opted-out",
                       f"{label}: {said}")
             else:
-                check(h.tree() == before and any("no report board was decided" in s and "naming one of: otto, syrd" in s
-                                                 for s in said), f"{label}: said, not guessed, nothing written: {said}")
+                check(h.tree() == before and any("root holds no record of the report board `switchyard new` chose" in s
+                                                 and "--only upstream-report" in s for s in said),
+                      f"{label}: said, not guessed, nothing written: {said}")
             if want in urls:
                 again = h.tree()
                 sinks.resume_report_connection(config, config_path=h.config_path, registry_dir=h.registry,
                                                print_func=said.append)
                 check(h.tree() == again, f"{label}: a resume run again writes nothing")
+
+
+def test_new_keeps_its_decision_before_anything_is_created() -> None:
+    """Audit of 265dbd9b: the decision was kept only in P3, so a provision interrupted in P2 resumed with the host's
+    default -- reversing an explicit opt-out. The real P0, its launcher seams the phase guard's fakes, root's record on
+    the documented provision-root seam; then the real resume with nothing between, as after an interruption anywhere
+    past P0."""
+    import new_project_phases_boundary_test as p0
+    from scripts import team_launcher as launcher
+    from scripts import upstream_report_sinks as sinks
+
+    clis = (("director", "claude"), ("main", "codex"))
+    for label, kwargs, want in (("an explicit opt-out", dict(no_upstream_report=True), "opted-out"),
+                                ("a board other than the declared one", dict(upstream_report_board="otto"), "otto")):
+        with host() as h, patch.dict(os.environ, {launcher.PRIVILEGED_PROVISION_ROOT_ENV: str(h.tmp / "provision")}):
+            h.add_board("syrd", declared=True)
+            otto = h.add_board("otto")
+            world = p0.World(h.tmp)
+            got = p0.run(world, p0.inputs(h.tmp, role_clis=clis, registry_dir=h.registry, yes=True, slug="mefp",
+                                          **kwargs))
+            check(isinstance(got, launcher.NewProjectChoices) and world.names()[-2:] == ["confirm", "stages"]
+                  and sinks.decision_path("mefp").is_file(),
+                  f"{label}: kept by P0 itself, once confirmed, before any later phase: {got!r} {world.names()[-3:]}")
+            info = sinks.decision_path("mefp").lstat()
+            check(stat.S_IMODE(info.st_mode) == 0o600 and stat.S_IMODE(info.st_mode) & 0o077 == 0,
+                  f"{label}: root-only: {oct(info.st_mode)}")
+            said: list[str] = []
+            config = sinks.resume_report_connection(launcher.load_project_config("mefp", h.config_path),
+                                                    config_path=h.config_path, registry_dir=h.registry,
+                                                    print_func=said.append)
+            outcome = h.record()["upstream_report"]
+            if want == "opted-out":
+                check(not config.upstream_report_url and outcome.get("state") == "opted-out" and not h.credential.exists(),
+                      f"{label}: survives the resume unchanged, not reversed to the declared board: {outcome} {said}")
+            else:
+                check(config.upstream_report_url == otto and outcome.get("board") == "otto",
+                      f"{label}: survives the resume unchanged, not swapped for the declared board: {outcome} {said}")
+    with host() as h, patch.dict(os.environ, {launcher.PRIVILEGED_PROVISION_ROOT_ENV: str(h.tmp / "provision")}):
+        world = p0.World(h.tmp, fail="confirm")
+        got = p0.run(world, p0.inputs(h.tmp, role_clis=clis, registry_dir=h.registry, yes=True, slug="mefp",
+                                      no_upstream_report=True))
+        check(isinstance(got, SystemExit) and not sinks.decision_path("mefp").exists(),
+              f"a declined confirmation keeps nothing: {got!r}")
+    with host() as h, patch.dict(os.environ, {launcher.PRIVILEGED_PROVISION_ROOT_ENV: str(h.tmp / "blocked")}):
+        (h.tmp / "blocked").write_text("not a directory", encoding="utf-8")
+        world = p0.World(h.tmp)
+        got = p0.run(world, p0.inputs(h.tmp, role_clis=clis, registry_dir=h.registry, yes=True, slug="mefp",
+                                      no_upstream_report=True))
+        check(isinstance(got, SystemExit) and "report decision could not be kept" in str(got)
+              and str(got).endswith("Nothing was created."),
+              f"a decision that cannot be kept stops new in P0, before anything is created: {got!r}")
 
 
 NS_ROUND_TRIP = r'''
@@ -686,7 +739,7 @@ assert os.geteuid() == 0
 os.environ[launcher.PRIVILEGED_PROVISION_ROOT_ENV] = sys.argv[2]
 choice = sinks.ReportChoice(sinks.CONNECT, board="syrd", url="http://127.0.0.1:1", source="--upstream-report-board")
 said = []
-sinks.record_report_decision("pie", choice, print_func=said.append)
+sinks.record_report_decision("pie", choice)
 path = sinks.decision_path("pie")
 info = path.lstat()
 back = sinks.recorded_report_decision("pie")

@@ -295,11 +295,16 @@ def decision_path(slug: str) -> Path:
     return launcher.privileged_baseline_plan_path(slug).with_name(DECISION_NAME)
 
 
-def record_report_decision(slug: str, choice: ReportChoice, *, print_func: Callable[[str], None] = print) -> None:
-    """Root's copy of `new`'s decision, root-only beside its plan, for `resume-provision` to honour."""
+def record_report_decision(slug: str, choice: ReportChoice) -> None:
+    """Root's copy of `new`'s decision, root-only beside its plan, for `resume-provision` to honour.
+
+    Written once the operator has confirmed and before anything is created, so wherever a provision is
+    interrupted after it, the resume carries out what was chosen; a decision that cannot be kept stops `new`
+    there, with nothing created (Audit of 265dbd9b). Root's, or the documented provision-root seam's.
+    """
     from scripts import team_launcher as launcher
 
-    if os.geteuid() != 0:
+    if os.geteuid() != 0 and not os.environ.get(launcher.PRIVILEGED_PROVISION_ROOT_ENV, "").strip():
         return
     path = decision_path(slug)
     payload = {"schema": DECISION_SCHEMA, "project": slug, "state": choice.state, "board": choice.board,
@@ -315,7 +320,8 @@ def record_report_decision(slug: str, choice: ReportChoice, *, print_func: Calla
             os.close(descriptor)
         staged.replace(path)
     except (OSError, SystemExit) as exc:
-        print_func(f"switchyard: {slug}'s report decision was not recorded for a resumed provision: {exc}")
+        raise SystemExit(f"switchyard: {slug}'s report decision could not be kept where a resumed provision reads "
+                         f"it ({exc}). Nothing was created.") from None
 
 
 def recorded_report_decision(slug: str) -> ReportChoice | None:
@@ -605,8 +611,9 @@ def resume_report_connection(
     """`resume-provision`'s report step, before it starts any role: what `new` decided, carried out.
 
     A recorded outcome other than a failure is left as it is. Otherwise root's record of `new`'s decision
-    is honoured; with none -- `new` stopped before it was kept -- only the host's one declared board, or
-    no board at all, decides it without the operator, and anything else is said, not guessed (SYRD-674).
+    is honoured. With none, nothing is chosen: `new` keeps it before it creates anything, so its absence is a
+    provision this release did not start, and the host's default now is not what its operator chose then --
+    an opt-out or another board would be silently reversed (Audit of 265dbd9b). It is said, with the repair.
     """
     slug = config.project
     held = str(recorded_outcome(slug, registry_dir=registry_dir).get("state") or "")
@@ -614,17 +621,9 @@ def resume_report_connection(
         return config
     choice = recorded_report_decision(slug)
     if choice is None:
-        boards = report_boards(exclude=slug, registry_dir=registry_dir)
-        default, why = declared_default(boards, registry_dir=registry_dir)
-        if default is not None:
-            choice = ReportChoice(CONNECT, board=default.slug, url=default.url,
-                                  source="the host's declared report board")
-        elif not boards:
-            choice = ReportChoice(UNAVAILABLE, source="no other board is registered on this host")
-        else:
-            print_func(unconnected_warning(slug, f"no report board was decided, and {why}",
-                                           repair=repair_hint(slug, registry_dir=registry_dir)))
-            return config
+        print_func(unconnected_warning(slug, "root holds no record of the report board `switchyard new` chose for it",
+                                       repair=repair_hint(slug, registry_dir=registry_dir)))
+        return config
     connected, _summary = connect_chosen_report_board(config, config_path=config_path, choice=choice,
                                                       registry_dir=registry_dir, print_func=print_func)
     return connected

@@ -252,11 +252,7 @@ def test_the_seams_and_nothing_bound_read_through_the_launcher() -> None:
     bound = {a.arg for a in fn.args.kwonlyargs} | {n.id for n in ast.walk(fn) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
     check(not bound & set(through), f"nothing the phase binds is read through the launcher: {bound & set(through)}")
     check(ast.unparse(fn.body[1]) == "stages.begin('database and board')", "the stage begun first")
-    # SYRD-674: root keeps the report decision first, so a provision the packet stops can be resumed with it.
-    check(ast.unparse(fn.body[2]).startswith("if upstream_report is not None:\n    from scripts import upstream_report_sinks")
-          and "record_report_decision(resolved_slug, upstream_report" in ast.unparse(fn.body[2]),
-          "the report decision recorded, before provisioning")
-    check(ast.unparse(fn.body[4]) == "if result != 0:\n    return result", "the early return, as it was, right after provisioning")
+    check(ast.unparse(fn.body[3]) == "if result != 0:\n    return result", "the early return, as it was, right after provisioning")
 
 
 def test_the_interface_and_the_result() -> None:

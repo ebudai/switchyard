@@ -324,6 +324,9 @@ def _resolve_new_project_choices(
         input_func=input_func,
         print_func=print_func,
     )
+    # Kept by root once confirmed and before P1, the first phase that can change anything, so a provision
+    # interrupted anywhere after this resumes with what was chosen -- or refused here, with nothing created.
+    upstream_report_sinks.record_report_decision(resolved_slug, upstream_report)
 
     # Beneath the project directory as named, never resolved: a link the tenant left at `.switchyard` is refused
     # when root writes there, not followed to wherever it points (SYRD-611).
@@ -791,11 +794,6 @@ def _prepare_new_project_board(
     from scripts import team_launcher as launcher
 
     stages.begin("database and board")
-    if upstream_report is not None:
-        from scripts import upstream_report_sinks
-
-        # Kept by root beside the plan before the packet runs, so a resumed provision honours it (SYRD-674).
-        upstream_report_sinks.record_report_decision(resolved_slug, upstream_report, print_func=print_func)
     result = launcher.new_project_command(
         resolved_slug,
         from_artifact=artifact_path,

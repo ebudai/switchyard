@@ -428,12 +428,18 @@ def connect_upstream_report_command(
     from scripts import team_launcher as launcher
     from scripts import upstream_report_sinks as sinks
 
+    if only == "workflow-projection":
+        # The tenant's workflow projection, given back as `switchyard new` would have, and nothing else (SYRD-676).
+        from scripts import projection_ownership
+
+        return projection_ownership.restore_command(config, config_path=config_path, dry_run=dry_run,
+                                                    print_func=print_func)
     if only in ("accept-reports", "refuse-reports"):
         return sinks.declare_report_board(config, accept=only == "accept-reports", dry_run=dry_run,
                                           registry_dir=registry_dir, print_func=print_func)
     if only != "upstream-report":
-        print_func(f"switchyard: --only takes upstream-report, accept-reports or refuse-reports, not {only!r}. "
-                   "Nothing was changed.")
+        print_func(f"switchyard: --only takes upstream-report, accept-reports, refuse-reports or workflow-projection, "
+                   f"not {only!r}. Nothing was changed.")
         return 2
     if no_upstream_report:
         configured = str(config.upstream_report_url or "").strip()

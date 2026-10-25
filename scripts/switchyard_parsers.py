@@ -252,13 +252,14 @@ def _build_switchyard_upgrade_parser() -> argparse.ArgumentParser:
     parser.add_argument("project", help="project name or slug")
     parser.add_argument(
         "--only",
-        choices=["upstream-report", "accept-reports", "refuse-reports"],
+        choices=["upstream-report", "accept-reports", "refuse-reports", "workflow-projection"],
         default="",
         help=(
             "run this one narrow step and no upgrade phase: upstream-report connects the project to the "
             "board it files reports to -- its report URL, its credential and nothing else (SYRD-548); "
             "accept-reports / refuse-reports records, as root, whether this project's board is the one new "
-            "tenants on this host report to (SYRD-674)"
+            "tenants on this host report to (SYRD-674); workflow-projection gives the tenant back the workflow "
+            "projection a resumed provision left root's, so its Director can change its workflow (SYRD-676)"
         ),
     )
     parser.add_argument("--dry-run", action="store_true", help="report what would change without writing files")

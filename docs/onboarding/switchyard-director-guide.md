@@ -383,6 +383,19 @@ switchyard role-prompt clear ops
 multiline. Clearing removes the prompt rather than blanking it, so a role with no
 prompt falls back to whatever packaged remit file it was configured with.
 
+**If a write says the projection is not writable.** Every workflow change (a role
+prompt, `ticket-board-workflow apply`, the design stage, Router, the documentation
+gate, the Publisher) rewrites the project's own files in `.switchyard/provision/`.
+Those files are yours. A provision that `resume-provision` finished before SYRD-676
+left that directory, `plan.json` and `workflow.json` root's, so every such write was
+refused. A `--dry-run` still validates and asks the board, because it writes nothing.
+The refusal names the one step an operator runs to give them back. It changes nothing
+else, and root's own records beside them stay root's:
+
+```bash
+sudo switchyard upgrade <project> --only workflow-projection [--dry-run]
+```
+
 **When a live role sees a change.** Not immediately, and that is deliberate.
 The prompt is delivered at the start of a *fresh* conversation, so:
 

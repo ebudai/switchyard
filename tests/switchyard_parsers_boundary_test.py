@@ -396,7 +396,8 @@ REPORT_PARSERS = {
     "_build_switchyard_upgrade_parser": "the URL or board already recorded, else the host's one declared report board",
 }
 ONLY_TAIL = ("; accept-reports / refuse-reports records, as root, whether this project's board is the one new "
-             "tenants on this host report to (SYRD-674)")
+             "tenants on this host report to (SYRD-674); workflow-projection gives the tenant back the workflow "
+             "projection a resumed provision left root's, so its Director can change its workflow (SYRD-676)")
 
 
 def with_the_report_board(name: str, gold: dict) -> dict:
@@ -421,7 +422,7 @@ def with_the_report_board(name: str, gold: dict) -> dict:
     actions[at:at] = [{k: a[k] for k in actions[0]} for a in added]
     only = next((a for a in actions if a["option_strings"] == ["--only"]), None)
     if only is not None:
-        only["choices"] = ["upstream-report", "accept-reports", "refuse-reports"]
+        only["choices"] = ["upstream-report", "accept-reports", "refuse-reports", "workflow-projection"]  # SYRD-676
         only["help"] += ONLY_TAIL
     defaults = {"upstream_report_board": "", "no_upstream_report": False}
     parsed = [out["no arguments"]] if "parsed" in out["no arguments"] else []
@@ -430,7 +431,7 @@ def with_the_report_board(name: str, gold: dict) -> dict:
         case["parsed"].update(defaults)
     if "--only" in out["parses"]:  # the sample is the last choice
         case = out["parses"]["--only"]
-        case["argv"][case["argv"].index("--only") + 1] = case["parsed"]["only"] = "refuse-reports"
+        case["argv"][case["argv"].index("--only") + 1] = case["parsed"]["only"] = "workflow-projection"
     base = out["parses"]["required only"]
     cases = list(out["parses"].items())
     at = [label for label, _case in cases].index("--upstream-report-token-file") + 1
@@ -455,7 +456,8 @@ def without_the_report_board(text: str) -> str:
         skipping = False
         kept.append(line)
     words = " ".join(" ".join(kept).split())
-    for segment in (" [--upstream-report-board SLUG] [--no-upstream-report]", ",accept-reports,refuse-reports",
+    for segment in (" [--upstream-report-board SLUG] [--no-upstream-report]",
+                    ",accept-reports,refuse-reports,workflow-projection",
                     " ".join(ONLY_TAIL.split())):
         words = words.replace(segment, "")
     return words

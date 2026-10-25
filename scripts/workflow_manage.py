@@ -293,7 +293,12 @@ def assert_projection_writable(files: dict[Path, str]) -> None:
         if not os.access(parent, os.W_OK) or (
             path.exists() and not os.access(path, os.W_OK)
         ):
-            raise PermissionError(f"projection path is not writable: {path}")
+            # A provision finished by resume-provision left it root's; the remedy is one narrow step (SYRD-676).
+            raise PermissionError(
+                f"projection path is not writable: {path}. If root owns it, an operator gives the projection "
+                f"back with `sudo switchyard upgrade {_project_slug(next(iter(files)))} --only workflow-projection`; "
+                "nothing was written"
+            )
 
 
 def _project_slug(config_path: Path) -> str:
@@ -620,7 +625,6 @@ def main(argv=None):
         rollback_baseline = {**current, "document": baseline}
     cfg = _migrate_director_onboarding(args.config, cfg)
     files = projection_files(args.config, cfg)
-    assert_projection_writable(files)
     expected = (
         args.expected_revision
         if args.expected_revision is not None
@@ -640,6 +644,9 @@ def main(argv=None):
             rollback_baseline["document"], expected_revision=expected, dry_run=True
         )
     client.configure_workflow(cfg, expected_revision=expected, dry_run=True)
+    if not args.dry_run:
+        # After the board's own dry run, which needs no write access, and before anything is written (SYRD-676).
+        assert_projection_writable(files)
     if args.dry_run:
         print(
             json.dumps(

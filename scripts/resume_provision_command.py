@@ -144,6 +144,12 @@ def _finish_provision_after_packet(
     config = upstream_report_sinks.resume_report_connection(
         config, config_path=verified, registry_dir=registry_dir, print_func=print_func,
     )
+    # And the workflow projection, handed to the tenant as `switchyard new` hands it after its packet: a provision
+    # finished here left it root's, and its Director could not change its own workflow (SYRD-676).
+    from scripts import projection_ownership
+
+    for line in projection_ownership.resume_handoff(config, config_path=verified):
+        print_func(line)
 
     if start_roles:
         # Before the launch, because the launch only ever verifies. The

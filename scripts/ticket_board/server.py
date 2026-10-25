@@ -239,11 +239,12 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         tmp_path.replace(cache_path)
         return cache_path.read_bytes()
 
-    def send_json(self, payload: dict[str, object], status: HTTPStatus = HTTPStatus.OK) -> None:
+    def send_json(self, payload: dict[str, object], status: HTTPStatus = HTTPStatus.OK, *, session: bool = False) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_no_cache_headers()
+        if session: ui_delegation.renew_session(self)  # SYRD-669: a page kept open across a board restart
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -1033,7 +1034,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 # the board remains the one authority on which repository it
                 # actually reads.
                 "commit_repositories": [str(path) for path in getattr(self.app, "commit_git_dirs", ())],
-            })
+            }, session=True)
             return
         if parsed.path == "/events":
             self.serve_events()

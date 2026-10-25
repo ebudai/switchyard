@@ -133,7 +133,14 @@ def run_browser_check(playwright: object, server_port: int, app: ManualControlBo
         page.get_by_role("checkbox", name="Manual control").click()
         dialog.locator("[data-board-ui-confirm]").click()
         page.locator("#createStatus", has_text=REFUSAL).wait_for(timeout=5000)
-        assert not page.get_by_role("checkbox", name="Manual control").is_checked()
+        # The refusal is said first; the toggle is put back once the board has reloaded after it (SYRD-669: the
+        # page asks /api/client-config about a refused write first, so that takes a moment longer), and stays so.
+        toggle = page.get_by_role("checkbox", name="Manual control")
+        end = time.monotonic() + 5
+        while toggle.is_checked() and time.monotonic() < end:
+            page.wait_for_timeout(50)
+        page.wait_for_timeout(500)
+        assert not toggle.is_checked()
         assert app.update_calls == [] and app.tickets[0]["manually_controlled"] is False
     finally:
         browser.close()

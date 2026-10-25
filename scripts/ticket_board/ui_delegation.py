@@ -11,8 +11,9 @@ Director-only checks accept the User only for the operation that grant names.
 "Came from the UI" rests on all of these, never on one of them alone:
 
 * a board session the server issues with the page (an HttpOnly, SameSite=Strict
-  cookie) and keeps in memory, so a restarted server knows none and every page
-  must be reloaded;
+  cookie) and keeps in memory, so a restarted server knows none: a page gets one
+  from the new process when it reloads, or when it asks /api/client-config for
+  the new process's write token (SYRD-669);
 * the request's Host and Origin naming this server, and Sec-Fetch-Site, when the
   browser sends it, saying same-origin -- which also stops cross-site requests;
 * the caller being the User, over HTTP (never the Unix socket, whose callers are
@@ -87,6 +88,15 @@ def issue_session(handler: Any) -> None:
     if handler.role_authority is None and not ui_user_identity.refusal(handler.connection):
         token = _sessions(handler.server).issue()
         handler.send_header("Set-Cookie", f"{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/")
+
+
+def renew_session(handler: Any) -> None:
+    """With /api/client-config, which a page kept open asks when the board refuses its write token: a session
+    from this process for a page that holds none it issued, as the page itself would bring (SYRD-669)."""
+    try:
+        _session(handler)
+    except PermissionError:
+        issue_session(handler)
 
 
 def _session(handler: Any) -> str:

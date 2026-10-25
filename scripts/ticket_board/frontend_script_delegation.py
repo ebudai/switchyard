@@ -31,18 +31,10 @@ SCRIPT_DELEGATION = r"""
       document.head.appendChild(style);
     })();
 
+    // As the User, through the page's one write path: a board restarted since the page loaded is asked for its
+    // new token and the request sent once more (SYRD-669).
     async function boardUiRequest(body) {
-      const response = await fetch('/api/ui/delegations', {
-        method: 'POST',
-        headers: ticketWriteHeaders(),
-        credentials: 'same-origin',
-        body: JSON.stringify(body),
-      });
-      const text = await response.text();
-      if (!response.ok) {
-        throw new Error(text || `The board refused this (${response.status}).`);
-      }
-      return JSON.parse(text);
+      return sendBoardWrite('/api/ui/delegations', body);
     }
 
     async function describeBoardUiActions(ticketId) {
@@ -228,13 +220,13 @@ SCRIPT_DELEGATION = r"""
       }
       const path = `/api/tickets/${encodeURIComponent(ticket.id)}/actions/${encodeURIComponent(op.operation)}`;
       try {
-        let options = { skipFreshCheck: true, skipReloadReplay: true };
+        const options = { skipFreshCheck: true, skipReloadReplay: true };
         if (op.mode === 'delegated') {
-          const grant = await boardUiRequest({
+          // Minted for the request that carries it, and again if that request finds the board restarted.
+          options.delegation = async () => (await boardUiRequest({
             ticket_id: ticket.id, operation: op.operation, payload: decision.payload,
             ticket_version: decision.prepared.ticket_version,
-          });
-          options = { ...options, delegation: grant.token, retriedToken: true };
+          })).token;
         }
         const result = await postTicketAction(path, decision.payload, 'user', options);
         setCreateStatus(`${op.label}: done for ${ticket.id}.`);

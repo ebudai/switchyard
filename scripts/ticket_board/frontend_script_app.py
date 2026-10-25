@@ -414,6 +414,32 @@ SCRIPT_APP = """    function ticketBoardWriteToken() {
       return status === 403 || (/write[- ]token/i.test(text || '') && /(invalid|missing)/i.test(text || ''));
     }
 
+    // SYRD-669: every write the page sends, its board UI requests included, as the User with the board's write
+    // token. A board restarted since the page loaded has a new token: refused for the old one, the page asks
+    // /api/client-config once and, if the token changed, sends the request once more. `delegation`, given, is
+    // a function that mints the confirmation the request carries -- again for the second try, since one minted
+    // by the old process is bound to a session the new one never issued.
+    async function sendBoardWrite(path, payload, options = {}) {
+      const send = async () => fetch(path, {
+        method: 'POST',
+        headers: ticketWriteHeaders('user', options.delegation ? await options.delegation() : ''),
+        credentials: 'same-origin',
+        body: JSON.stringify(payload || {}),
+      });
+      let response = await send();
+      let text = await response.text();
+      if (!response.ok && isStaleWriteTokenError(response.status, text) && (await refreshClientConfig()).tokenChanged) {
+        response = await send();
+        text = await response.text();
+      }
+      if (!response.ok) {
+        const refused = new Error(text || `The board refused this (${response.status}).`);
+        refused.boardRefused = true;
+        throw refused;
+      }
+      return JSON.parse(text);
+    }
+
     async function postTicketAction(path, payload, callerRole, options = {}) {
       if (!options.skipFreshCheck) {
         const config = await refreshClientConfig();
@@ -421,26 +447,14 @@ SCRIPT_APP = """    function ticketBoardWriteToken() {
           return reloadAndReplayWrite(path, payload, callerRole);
         }
       }
-      const response = await fetch(path, {
-        method: 'POST',
-        headers: ticketWriteHeaders(callerRole, options.delegation || ''),
-        credentials: 'same-origin',
-        body: JSON.stringify(payload || {}),
-      });
-      if (!response.ok) {
-        const text = await response.text();
-        if (isStaleWriteTokenError(response.status, text) && !options.retriedToken) {
-          const config = await refreshClientConfig();
-          if (config.tokenChanged) {
-            return postTicketAction(path, payload, callerRole, { ...options, skipFreshCheck: true, retriedToken: true });
-          }
-        }
-        if (state.refreshRequired && !options.skipReloadReplay) {
+      try {
+        return await sendBoardWrite(path, payload, options);
+      } catch (failure) {
+        if (failure.boardRefused && state.refreshRequired && !options.skipReloadReplay) {
           return reloadAndReplayWrite(path, payload, callerRole);
         }
-        throw new Error(text);
+        throw failure;
       }
-      return response.json();
     }
 
     async function replayPendingWriteAfterRefresh() {

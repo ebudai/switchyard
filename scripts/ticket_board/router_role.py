@@ -27,6 +27,8 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from .role_kinds import IMPLEMENTER, has_kind, scope_flag
+
 ROUTER_ROLE = "router"
 ROUTER_KIND = "router"
 ASSIGN = "router_assign"
@@ -57,11 +59,21 @@ def router_holds(cfg: dict[str, Any] | None, stage: str | None, assignee: str | 
 
 
 def assignable_roles(cfg: dict[str, Any] | None) -> list[str]:
-    """ticket_board.router_assignable_roles: the active implementers that own Implementation."""
+    """ticket_board.router_assignable_roles: the active Implementation owners that do implementation work."""
     impl = implementation_stage(cfg) or {}
     roles = {r["name"]: r for r in (cfg or {}).get("roles", [])}
     return sorted(o for o in impl.get("owners", [])
-                  if roles.get(o, {}).get("active") and roles[o].get("kind") == "implementer")
+                  if roles.get(o, {}).get("active") and has_kind(roles[o], IMPLEMENTER))
+
+
+def out_of_scope(cfg: dict[str, Any] | None, ticket: dict[str, Any], role: str) -> str | None:
+    """Why Router may not give `ticket` to `role` (SYRD-678): its routing_scope's flag is not set; else None."""
+    flag = scope_flag(next((r for r in (cfg or {}).get("roles", []) if r.get("name") == role), None))
+    # A declared flag is in workflow_flags; a builtin gate (needs_inspection, ...) is the ticket's own field.
+    if flag is None or (ticket.get("workflow_flags") or {}).get(flag, ticket.get(flag)) is True:
+        return None
+    return (f"router gives {role} only work flagged {flag}, and {ticket.get('id')} is not; choose another owner, "
+            f"or return it to the Director, who may flag it or assign {role} directly")
 
 
 def validate_router(cfg: dict[str, Any], need: Callable[[bool, str], None]) -> None:
@@ -135,6 +147,9 @@ def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: s
     if operation == ASSIGN and value not in assignable_roles(cfg):
         raise PermissionError(f"router may assign only to an active owner of Implementation "
                               f"({', '.join(assignable_roles(cfg))}), not {value or '<empty>'}")
+    refusal = out_of_scope(cfg, ticket, value) if operation == ASSIGN else None
+    if refusal:
+        raise PermissionError(refusal)
     if operation == ASSIGN and cfg.get("scheduling"):
         held = (app.serial_reservations() or {}).get(value)
         if held and held.get("ticket") != ticket_id:

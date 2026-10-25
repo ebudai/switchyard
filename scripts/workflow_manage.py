@@ -161,6 +161,19 @@ def _document_with_router(current: dict, args: argparse.Namespace, parser: argpa
         parser.error(str(exc))
 
 
+def _document_with_designer_implementation(current: dict, args: argparse.Namespace,
+                                           parser: argparse.ArgumentParser) -> dict:
+    """SYRD-678: the tenant's own document with its designer also an Implementation owner."""
+    from scripts.ticket_board.designer_implementation import with_designer_implementation
+
+    if not current.get("document"):
+        parser.error("no workflow configuration is active for this board")
+    try:
+        return with_designer_implementation(current["document"], routing_flag=args.routing_flag)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+
 def _document_with_documentation_gate(current: dict, args: argparse.Namespace, parser: argparse.ArgumentParser) -> dict:
     """SYRD-624: the tenant's own document with the documentation gate on (Librarian or Director) or off."""
     from scripts.ticket_board.documentation_gate import with_documentation_gate, without_documentation_gate
@@ -371,6 +384,7 @@ TENANT_WRITES = frozenset({
     "add-design-stage", "enable-router", "disable-router",
     "enable-documentation-gate", "disable-documentation-gate",  # SYRD-624
     "enable-publisher", "disable-publisher",  # SYRD-625
+    "enable-designer-implementation",  # SYRD-678
 })
 
 
@@ -413,6 +427,7 @@ def main(argv=None):
             "disable-documentation-gate",
             "enable-publisher",
             "disable-publisher",
+            "enable-designer-implementation",
         ],
     )
     parser.add_argument("--document", type=Path)
@@ -448,6 +463,8 @@ def main(argv=None):
                                           "the agent CLI the Librarian runs on (without it the Director decides)")
     parser.add_argument("--template-role", help="enable-router / enable-documentation-gate: the role whose launcher "
                                                 "model Router or the Librarian starts from")
+    parser.add_argument("--routing-flag", help="enable-designer-implementation: a gate flag Router requires before it "
+                                               "gives the designer a ticket (design work only)")
     parser.add_argument("--prompt", help="onboarding prompt text for set-role-prompt")
     parser.add_argument(
         "--prompt-file",
@@ -608,6 +625,10 @@ def main(argv=None):
     elif args.operation in {"enable-publisher", "disable-publisher"}:
         # And for the Publisher's publication stage (SYRD-625).
         cfg = _document_with_publisher(current, args, parser)
+        files = projection_files(args.config, cfg)
+    elif args.operation == "enable-designer-implementation":
+        # And for the designer as an Implementation owner (SYRD-678).
+        cfg = _document_with_designer_implementation(current, args, parser)
         files = projection_files(args.config, cfg)
     else:
         if not args.document:

@@ -43,7 +43,7 @@ When the board tells you a ticket is assigned to you, read it once:
 
     ticket-board-read ticket <ID> --json
 
-Its `routing` field gives the `revision` you are classifying and the `assignable` owners. Choose from those using the ticket's content, origin, the components and paths it names, and what each owner is known to own. Then make exactly one write:
+Its `routing` field gives the `revision` you are classifying and the `assignable` owners. Choose from those using the ticket's content, origin, the components and paths it names, and what each owner is known to own. An owner listed under `scopes` with `eligible: false` cannot take this ticket, and `assignable` already leaves it out. Then make exactly one write:
 
     ticket-board-write router-assign <ID> --assignee <owner> --revision <revision>
     ticket-board-write router-return <ID> --reason "<one or two sentences>" --revision <revision>

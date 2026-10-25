@@ -470,6 +470,33 @@ waiting. Root's recorded workflow is not refreshed by this or any workflow
 write until SYRD-561 and SYRD-562 land. Details:
 [SYRD-567](../syrd-567-design-stage.md).
 
+## A designer that also implements
+
+To run design work through the ordinary loop instead, let the designer own
+Implementation work too. It stays the designer: it owns Draft, releases drafts,
+and keeps its onboarding, pane and name. It can also be assigned Implementation
+work, hold its one serial slot, submit to Audit with a commit or without one,
+and get Audit's findings back, because it produced the revision Audit reviewed.
+
+```bash
+ticket-board-workflow enable-designer-implementation --board-url <board> --config <tenant config> \
+    --routing-flag design_work --dry-run   # review the document it would apply
+ticket-board-workflow enable-designer-implementation --board-url <board> --config <tenant config> \
+    --routing-flag design_work
+```
+
+It marks the designer `additional_kinds: ["implementer"]` (its `kind` stays
+`draft`). It adds the designer to Implementation's owners and to every move its
+fellow owners take into or out of that stage, except a pull claim. With Router,
+`--routing-flag` declares that gate flag and gives the designer
+`routing_scope: {"flag": "design_work"}`. Router then gives the designer only
+tickets you have flagged (`ticket-board-write set-workflow-flags <id>
+--patch-json '{"design_work": true}'`), and lists it under the ticket's
+`routing.scopes`.
+Assigning it directly stays yours, flagged or not. A designer with a scope
+cannot also claim pulled work. Details:
+[SYRD-678](../syrd-678-designer-implementer.md).
+
 ## Host health the board depends on
 
 Every board on a host shares one PostgreSQL cluster, one filesystem and one journal. When

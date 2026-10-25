@@ -11,6 +11,7 @@ from .documentation_gate import validate_documentation_gate
 from .publisher_stage import validate_publisher
 from .router_role import router_holds, validate_router
 from .user_wait import validate_user_waits
+from .role_kinds import IMPLEMENTER, has_kind, validate_role_kinds
 from .audit_return import advertise as advertise_audit_return
 
 SCHEMA = "switchyard.workflow.v1"
@@ -271,7 +272,7 @@ def pull_claimant_pool(cfg: dict[str, Any]) -> list[str]:
     owners = {owner for stage in cfg.get("stages", []) if stage.get("kind") == "implementation"
               for owner in stage.get("owners") or []}
     return sorted(role["name"] for role in cfg.get("roles", [])
-                  if role.get("kind") == "implementer" and role.get("active") is True
+                  if has_kind(role, IMPLEMENTER) and role.get("active") is True
                   and role.get("ephemeral") is True and role["name"] in owners)
 
 
@@ -280,11 +281,11 @@ def _is_claim(cfg: dict[str, Any], tr: dict[str, Any]) -> bool:
     policy = cfg.get("scheduling")
     if not isinstance(policy, dict):
         return False
-    kinds = {role["name"]: role.get("kind") for role in cfg.get("roles", [])}
+    roles = {role["name"]: role for role in cfg.get("roles", [])}
     implementation = next((stage["name"] for stage in cfg.get("stages", [])
                            if stage.get("kind") == "implementation"), None)
     return (tr["from"] == policy.get("ready_stage") and tr["to"] == implementation and tr["primitive"] == "move"
-            and bool(tr["actors"]) and all(kinds.get(actor) == "implementer" for actor in tr["actors"]))
+            and bool(tr["actors"]) and all(has_kind(roles.get(actor), IMPLEMENTER) for actor in tr["actors"]))
 
 
 def transition_allows_actor(cfg: dict[str, Any], tr: dict[str, Any], actor: str) -> bool:
@@ -373,7 +374,7 @@ def _validate_scheduling(cfg: dict[str, Any], stages: dict[str, Any], roles: dic
     implementation = next(name for name, stage in stages.items() if stage["kind"] == "implementation")
     claims = [tr for tr in cfg["transitions"] if tr["from"] == ready["stage"] and tr["to"] == implementation
               and tr["primitive"] == "move" and tr["actors"]
-              and all(roles[actor]["kind"] == "implementer" for actor in tr["actors"])]
+              and all(has_kind(roles[actor], IMPLEMENTER) for actor in tr["actors"])]
     need(len(claims) == 1, "scheduling needs exactly one implementer move from the ready stage into implementation")
     # The claim is taken for a worker by the board itself, which has no reason
     # to give and no owner to match (admitted work is unassigned). A claim the
@@ -529,6 +530,8 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
                 "ephemeral",
                 "presentation_label",
                 "serial",
+                "additional_kinds",  # SYRD-678
+                "routing_scope",
             },
             "unknown role field",
         )
@@ -711,7 +714,7 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
         )
         if stage["kind"] == "implementation":
             need(
-                bool(owners) and all(roles[r]["kind"] == "implementer" for r in owners),
+                bool(owners) and all(has_kind(roles[r], IMPLEMENTER) for r in owners),  # SYRD-678
                 "implementation owners must be implementers",
             )
         for field, kind in (("gate", "gate"), ("signoff", "signoff")):
@@ -1099,6 +1102,7 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
     validate_documentation_gate(cfg, need)
     validate_publisher(cfg, need)  # SYRD-625
     validate_user_waits(cfg, need)  # SYRD-662
+    validate_role_kinds(cfg, need)  # SYRD-678
     return cfg
 
 

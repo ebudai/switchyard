@@ -7765,6 +7765,15 @@ BEGIN
 END;
 $$;
 
+-- SYRD-678: what a role may do is its kind plus the additional kinds it
+-- declares (a designer that also implements). Its kind alone stays its
+-- identity. workflow_config.role_kinds.has_kind asks the same question.
+CREATE OR REPLACE FUNCTION ticket_board.role_has_kind(r jsonb, p_kind text)
+RETURNS boolean LANGUAGE sql IMMUTABLE AS $$
+    SELECT coalesce(r->>'kind' = p_kind
+        OR (jsonb_typeof(r->'additional_kinds') = 'array' AND r->'additional_kinds' ? p_kind), false);
+$$;
+
 CREATE OR REPLACE FUNCTION ticket_board.validate_declared_workflow(cfg jsonb)
 RETURNS void LANGUAGE plpgsql AS $$
 DECLARE r jsonb; s jsonb; tr jsonb; f record; cursor_name text; visited text[];
@@ -7826,6 +7835,21 @@ BEGIN
         IF r ? 'presentation_label' AND (jsonb_typeof(r->'presentation_label') <> 'string'
             OR btrim(r->>'presentation_label') = '' OR r->>'presentation_label' LIKE E'%\n%') THEN
             RAISE EXCEPTION 'presentation_label must be non-empty single-line text: %', r->>'name'; END IF;
+        -- SYRD-678: a draft role (a designer) may also implement, and nothing
+        -- else may be combined; a routing scope names a declared gate flag and
+        -- narrows Router's choice of an Implementation owner.
+        IF r ? 'additional_kinds' AND (jsonb_typeof(r->'additional_kinds') <> 'array'
+            OR jsonb_array_length(r->'additional_kinds') = 0
+            OR EXISTS (SELECT FROM jsonb_array_elements(r->'additional_kinds') k WHERE jsonb_typeof(k) <> 'string')
+            OR (SELECT count(DISTINCT k) FROM jsonb_array_elements_text(r->'additional_kinds') k) <> jsonb_array_length(r->'additional_kinds')
+            OR r->>'kind' <> 'draft' OR r->'additional_kinds' <> '["implementer"]'::jsonb) THEN
+            RAISE EXCEPTION 'invalid additional_kinds: only a draft role may also be an implementer: %', r->>'name'; END IF;
+        IF r ? 'routing_scope' AND (jsonb_typeof(r->'routing_scope') <> 'object'
+            OR (SELECT array_agg(k) FROM jsonb_object_keys(r->'routing_scope') k) <> ARRAY['flag']
+            OR jsonb_typeof(r->'routing_scope'->'flag') <> 'string'
+            OR cfg->'flags'->(r->'routing_scope'->>'flag')->>'kind' IS DISTINCT FROM 'gate'
+            OR NOT ticket_board.role_has_kind(r, 'implementer')) THEN
+            RAISE EXCEPTION 'invalid routing_scope: it names a declared gate flag, on a role that implements: %', r->>'name'; END IF;
     END LOOP;
     IF EXISTS (SELECT x->>'slot' FROM jsonb_array_elements(cfg->'roles') x
        WHERE x->>'slot' IS NOT NULL GROUP BY x->>'slot' HAVING count(*) > 1)
@@ -7866,7 +7890,7 @@ BEGIN
            OR (s->>'gate' IS NULL) <> (s->>'skip_to' IS NULL) THEN
             RAISE EXCEPTION 'invalid gate/signoff'; END IF;
         IF s->>'kind'='implementation' AND (jsonb_array_length(s->'owners')=0 OR EXISTS (
-            SELECT FROM jsonb_array_elements(cfg->'roles') x WHERE (s->'owners') ? (x->>'name') AND x->>'kind'<>'implementer')) THEN
+            SELECT FROM jsonb_array_elements(cfg->'roles') x WHERE (s->'owners') ? (x->>'name') AND NOT ticket_board.role_has_kind(x, 'implementer'))) THEN
             RAISE EXCEPTION 'implementation owner must be implementer'; END IF;
         IF NOT (s->'notify') ?& ARRAY['kind','role'] OR s->'notify'->>'kind' NOT IN ('none','assignee','fixed_role','stage_owner_fallback')
            OR (s->'notify'->>'kind'='fixed_role' AND NOT coalesce(s->'notify'->>'role'=ANY(active_roles),false))
@@ -10356,7 +10380,7 @@ RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
  IF ticket_board.declared_workflow() IS NOT NULL THEN
   IF NEW.awaiting_role<>'' AND NOT EXISTS(SELECT FROM ticket_board.workflow_roles WHERE name=NEW.awaiting_role) THEN RAISE EXCEPTION 'unknown awaited role'; END IF;
-  IF NEW.last_implementer_assignee<>'' AND NOT EXISTS(SELECT FROM ticket_board.workflow_roles WHERE name=NEW.last_implementer_assignee AND definition->>'kind'='implementer') THEN RAISE EXCEPTION 'unknown implementation owner'; END IF;
+  IF NEW.last_implementer_assignee<>'' AND NOT EXISTS(SELECT FROM ticket_board.workflow_roles WHERE name=NEW.last_implementer_assignee AND ticket_board.role_has_kind(definition,'implementer')) THEN RAISE EXCEPTION 'unknown implementation owner'; END IF;
  END IF;
  RETURN NEW;
 END;
@@ -13554,7 +13578,7 @@ RETURNS SETOF jsonb LANGUAGE sql IMMUTABLE AS $$
        AND x->>'primitive'='move' AND jsonb_array_length(x->'actors')>0
        AND NOT EXISTS (SELECT FROM jsonb_array_elements_text(x->'actors') a
                        WHERE NOT EXISTS (SELECT FROM jsonb_array_elements(cfg->'roles') r
-                                         WHERE r->>'name'=a AND r->>'kind'='implementer'));
+                                         WHERE r->>'name'=a AND ticket_board.role_has_kind(r, 'implementer')));
 $$;
 
 -- Who may claim (SYRD-573): every active, ephemeral implementer that owns the
@@ -13571,7 +13595,7 @@ CREATE OR REPLACE FUNCTION ticket_board.pull_claimant_pool(cfg jsonb)
 RETURNS SETOF text LANGUAGE sql IMMUTABLE AS $$
     SELECT r->>'name' FROM jsonb_array_elements(cfg->'roles') r
      WHERE nullif(cfg->'scheduling','null'::jsonb) IS NOT NULL
-       AND r->>'kind'='implementer' AND r->'active'='true'::jsonb AND r->'ephemeral'='true'::jsonb
+       AND ticket_board.role_has_kind(r, 'implementer') AND r->'active'='true'::jsonb AND r->'ephemeral'='true'::jsonb
        AND EXISTS (SELECT FROM jsonb_array_elements(cfg->'stages') s
                    WHERE s->>'kind'='implementation' AND s->'owners' ? (r->>'name'))
      ORDER BY r->>'name';
@@ -13619,6 +13643,10 @@ BEGIN
     SELECT x->>'name' INTO implementation FROM jsonb_array_elements(cfg->'stages') x WHERE x->>'kind'='implementation';
     SELECT count(*) INTO claims FROM ticket_board.scheduling_claim_transitions(cfg);
     IF claims<>1 THEN RAISE EXCEPTION 'scheduling needs exactly one implementer move from the ready stage into implementation'; END IF;
+    -- SYRD-678: a claimant takes pulled work of any kind, which a routing scope says it must not.
+    IF EXISTS (SELECT FROM jsonb_array_elements(cfg->'roles') r
+               WHERE r ? 'routing_scope' AND r->'ephemeral'='true'::jsonb AND ticket_board.role_has_kind(r, 'implementer')) THEN
+        RAISE EXCEPTION 'a role with a routing_scope would claim pulled work of any kind: make it non-ephemeral or drop the scope'; END IF;
     IF EXISTS (SELECT FROM ticket_board.scheduling_claim_transitions(cfg) x
                WHERE coalesce((x->>'require_reason')::boolean,false) OR coalesce((x->>'owner_scoped')::boolean,false)) THEN
         RAISE EXCEPTION 'the claim transition cannot require a reason or be owner-scoped: a pulled claim has neither'; END IF;
@@ -16782,8 +16810,21 @@ RETURNS text[] LANGUAGE sql STABLE AS $$
          jsonb_array_elements_text(s->'owners') o
     WHERE s->>'kind' = 'implementation'
       AND EXISTS (SELECT FROM jsonb_array_elements(ticket_board.declared_workflow()->'roles') r
-                  WHERE r->>'name' = o AND (r->>'active')::boolean AND r->>'kind' = 'implementer');
+                  WHERE r->>'name' = o AND (r->>'active')::boolean AND ticket_board.role_has_kind(r, 'implementer'));
 $$;
+
+-- SYRD-678: why Router may not give this ticket to p_role, or NULL. A role's
+-- routing_scope names a gate flag the ticket must carry (a designer takes
+-- design work only). It limits Router alone: the Director assigns anyone.
+CREATE OR REPLACE FUNCTION ticket_board.router_scope_refusal(p_ticket jsonb, p_role text)
+RETURNS text LANGUAGE sql STABLE AS $$
+    SELECT format('router gives %s only work flagged %s, and %s is not; choose another owner, or return it to the '
+                  'Director, who may flag it or assign %s directly', p_role, r->'routing_scope'->>'flag', p_ticket->>'id', p_role)
+      FROM jsonb_array_elements(ticket_board.declared_workflow()->'roles') r
+     WHERE r->>'name' = p_role AND r ? 'routing_scope'
+       AND NOT ticket_board.workflow_flag(p_ticket, r->'routing_scope'->>'flag', ticket_board.declared_workflow());
+$$;
+REVOKE ALL ON FUNCTION ticket_board.router_scope_refusal(jsonb, text) FROM PUBLIC;
 
 -- Who may call a Router operation, and on what. Both checks are the database's
 -- own: the HTTP layer asks the same questions, and neither trusts the other.
@@ -16834,6 +16875,10 @@ BEGIN
         RAISE EXCEPTION 'router may assign only to an active owner of Implementation (%), not %',
             array_to_string(ticket_board.router_assignable_roles(), ', '), coalesce(nullif(target, ''), '<empty>')
             USING ERRCODE = '42501';
+    END IF;
+    message := ticket_board.router_scope_refusal(to_jsonb(ticket_row), target);  -- SYRD-678
+    IF message IS NOT NULL THEN
+        RAISE EXCEPTION '%', message USING ERRCODE = '42501';
     END IF;
     PERFORM set_config('ticket_board.router_ticket', ticket_row.id, true);
     PERFORM set_config('ticket_board.router_action', 'assign', true);
@@ -16952,8 +16997,16 @@ RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ticket_boar
             'holder', CASE WHEN ticket_board.router_holds(t.state, t.assignee) THEN t.assignee END,
             'revision', CASE WHEN ticket_board.router_holds(t.state, t.assignee)
                              THEN ticket_board.router_ticket_revision(t.id) END,
+            -- SYRD-678: the owners Router may give THIS ticket; a scoped owner
+            -- whose flag it does not carry is listed under scopes instead.
             'assignable', CASE WHEN ticket_board.router_holds(t.state, t.assignee)
-                               THEN to_jsonb(ticket_board.router_assignable_roles()) END,
+                               THEN to_jsonb(ARRAY(SELECT a FROM unnest(ticket_board.router_assignable_roles()) a
+                                                   WHERE ticket_board.router_scope_refusal(to_jsonb(t), a) IS NULL)) END,
+            'scopes', CASE WHEN ticket_board.router_holds(t.state, t.assignee) THEN (
+                SELECT jsonb_object_agg(r->>'name', jsonb_build_object('flag', r->'routing_scope'->>'flag',
+                           'eligible', ticket_board.router_scope_refusal(to_jsonb(t), r->>'name') IS NULL))
+                  FROM jsonb_array_elements(ticket_board.declared_workflow()->'roles') r
+                 WHERE r ? 'routing_scope' AND r->>'name' = ANY(ticket_board.router_assignable_roles())) END,
             'decisions', history.decisions))
     END
     FROM t, history;

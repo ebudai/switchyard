@@ -162,6 +162,10 @@ you. It is a usability tool, not a delegate: everything else stays yours.
 - Routing directly stays yours: `--assignee <owner>` (the UI's "Assign
   directly") is an ordinary route with the usual queue rules, for a decision
   you have already made or for recovery. It records no Router decision.
+- An owner with a `routing_scope` (a designer that also implements) gets only
+  tickets carrying the scope's flag from Router. Set the flag with
+  `set-workflow-flags <id> --patch-json '{"<flag>": true}'`. The ticket's
+  `routing.scopes` shows it. Your direct route is not limited by it.
 - It makes exactly one write per ticket: `router-assign` to an active
   Implementation owner (the owner's queue then applies as usual), or
   `router-return` to `analysis` with a reason, which reaches you as one

@@ -174,26 +174,12 @@ def write_desktop_layout(
         return _write_crossing_desktop_layout(
             path, payload, gui_user=gui_user, uid=uid, project=project
         )
-    created = [parent for parent in reversed(path.parents) if not parent.exists()]
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        launcher._write_private_json_atomic(path, payload)
+        # The file 0600 and a missing directory 0700, but an existing directory as it is: when the desktop account
+        # is the project's owner this is the project state directory, which holds the control repository too, and
+        # `repair-boundary` gives the board service a named ACL traverse there. A chmod to 0700 set the ACL mask to
+        # nothing, and the board could not verify a commit until somebody repaired it by hand (SYRD-682).
+        launcher._write_private_json_atomic(path, payload, private_parent=False)
     except OSError as exc:
         return f"cannot write the presentation layout {path}: {exc}"
-    if not crossing:
-        return ""
-    try:
-        gid = pwd.getpwnam(gui_user).pw_gid
-    except KeyError:
-        gid = -1
-    try:
-        # Every directory this call had to create, not just the last one: a
-        # root-owned directory inside somebody's home is one they cannot
-        # remove and did not ask for.
-        for target in (*created, path):
-            os.chown(target, uid, gid)
-        path.parent.chmod(0o700)
-        path.chmod(0o600)
-    except OSError as exc:
-        return f"cannot give {gui_user} the presentation layout {path}: {exc}"
     return ""

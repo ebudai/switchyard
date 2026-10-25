@@ -94,6 +94,7 @@ def refusal(operation: Any) -> str:
 def bare_app(dirs: tuple[Path, ...]) -> TicketBoardApp:
     app = TicketBoardApp.__new__(TicketBoardApp)
     app.commit_git_dirs = dirs
+    app.project = "pgu"  # as __init__ always sets it; a refusal for a closed repository names it (SYRD-682)
     return app
 
 
@@ -125,7 +126,8 @@ def test_surface_keeps_two_app_methods_and_moves_the_rest() -> None:
     imported = {
         node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
     } | {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
-    assert imported == {"__future__", "re", "subprocess", "pathlib"}, imported
+    # The standard library only; os and pwd say which directory the board may not search (SYRD-682).
+    assert imported == {"__future__", "os", "pwd", "re", "subprocess", "pathlib"}, imported
     assert "://" not in source and "git@" not in source
 
 

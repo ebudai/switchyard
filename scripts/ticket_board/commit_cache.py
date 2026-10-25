@@ -9,6 +9,8 @@ authority and every database transaction.
 
 from __future__ import annotations
 
+import os
+import pwd
 import re
 import subprocess
 from pathlib import Path
@@ -37,6 +39,50 @@ def commit_repo_git_args(commit_git_dir: Path) -> list[str]:
     if not commit_git_dir.exists():
         raise ValueError(f"commit_hash verification repository not found: {commit_git_dir}")
     return ["git", f"--git-dir={commit_git_dir}"]
+
+
+def denied_at(commit_git_dir: Path) -> Path | None:
+    """The directory this process may not search on the way to `commit_git_dir`, if that is why it cannot see it.
+
+    `Path.exists()` says False for a repository behind a directory the board's account cannot search, exactly as
+    for one that is not there, so "not found" was all a tenant was told when a chmod of its project state directory
+    set the ACL mask to nothing and took the board service's traverse away (SYRD-682). Read from the walk itself,
+    as this account, along the path every link it can reach leads to, so the directory named is the one refused.
+    """
+    walked = Path(os.path.realpath(commit_git_dir))
+    current = Path(walked.anchor)
+    for part in walked.parts[1:]:
+        child = current / part
+        try:
+            os.lstat(child)
+        except PermissionError:
+            return current
+        except OSError:
+            return None
+        current = child
+    return None
+
+
+def missing_repository_refusal(missing: list[Path], *, project: str) -> str:
+    """Why no configured repository could be opened: absent, or there and closed to this board."""
+    denied = [(path, denied_at(path)) for path in missing]
+    closed = [f"{path} (this board's account, {_account()}, may not search {where})"
+              for path, where in denied if where is not None]
+    if not closed:
+        return f"commit_hash verification repository not found: {', '.join(str(path) for path in missing)}"
+    return (
+        f"commit_hash verification repository cannot be reached: {'; '.join(closed)}. This is a permission "
+        "problem, not a missing repository. A chmod of the project state directory can take away the board "
+        "service's ACL traverse there (its mask becomes ---); "
+        f"`pkexec switchyard repair-boundary {project}` shows the repair, and `--apply` makes it."
+    )
+
+
+def _account() -> str:
+    try:
+        return pwd.getpwuid(os.geteuid()).pw_name
+    except KeyError:
+        return f"uid {os.geteuid()}"
 
 
 def readable_commit_repos(commit_git_dirs: tuple[Path, ...]) -> bool:

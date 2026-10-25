@@ -1723,8 +1723,7 @@ SELECT EXISTS (
             if resolved:
                 return resolved
         if missing_repos and len(missing_repos) == len(self.commit_git_dirs):
-            missing = ", ".join(str(path) for path in missing_repos)
-            raise ValueError(f"commit_hash verification repository not found: {missing}")
+            raise ValueError(commit_cache.missing_repository_refusal(missing_repos, project=self.project))
         raise ValueError(
             f"unknown commit_hash: {value}. It is not in this board's copy of the project "
             "repository, even after refreshing it -- push the commit to the project remote "

@@ -110,7 +110,8 @@ class UnresolvedBoard(FakeConnection):
 
     def execute(self, statement, params=None):
         text = str(statement)
-        if "ticket_turn_is_resolved" in text or "current_assignment_at" in text:
+        # SYRD-619: delivery asks ticket_turn_end_is_resolved for the unresolved-turn notices.
+        if "ticket_turn_is_resolved" in text or "ticket_turn_end_is_resolved" in text or "current_assignment_at" in text:
             self.executed.append((statement, params))
             return FakeResult([(False,)])
         if "to_regprocedure('ticket_board.ticket_reminders_snoozed" in text:

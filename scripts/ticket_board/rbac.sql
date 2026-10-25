@@ -463,4 +463,8 @@ GRANT EXECUTE ON FUNCTION ticket_board.prune_execution_leases() TO ticket_board_
 GRANT EXECUTE ON FUNCTION ticket_board.extend_execution_lease(bigint, integer, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.request_execution_lease_interrupt(bigint, text) TO ticket_board_service;
 
+-- SYRD-619: the listener asks whether a turn end is resolved before it delivers a repair prompt or its escalation.
+REVOKE ALL ON FUNCTION ticket_board.ticket_turn_end_is_resolved(text, timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ticket_board.ticket_turn_end_is_resolved(text, timestamptz) TO ticket_board_listener;
+
 COMMIT;

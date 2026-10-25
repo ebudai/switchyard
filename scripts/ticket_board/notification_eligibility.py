@@ -488,9 +488,13 @@ WHERE q.ticket_id = %s AND q.implementer = %s
         # ticket_turn_is_resolved before it enqueues; delivery now asks the
         # same question, so the two cannot disagree. Dropping the stale row
         # loses nothing: once the hold is lifted, the next unresolved turn
-        # is prompted afresh.
+        # is prompted afresh. SYRD-619: for the unresolved-turn notices a
+        # recorded dependency counts however long it has waited, as it does
+        # for their generator.
         if kind in UNRESOLVED_TURN_KINDS or kind == "stall_escalation":
             resolved = conn.execute(
+                "SELECT ticket_board.ticket_turn_end_is_resolved(%s, clock_timestamp()) AS resolved"
+                if kind in UNRESOLVED_TURN_KINDS else
                 "SELECT ticket_board.ticket_turn_is_resolved(%s, clock_timestamp()) AS resolved",
                 (ticket_id,),
             ).fetchone()

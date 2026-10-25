@@ -739,6 +739,11 @@ def test_switchyard_upgrade_uses_selected_history_for_immutable_release_onboardi
         target_dir.joinpath(newer_name).write_text(newer_snapshot, encoding="utf-8")
         output: list[str] = []
         git_calls: list[list[str]] = []
+        from scripts import onboarding_provenance
+
+        # The caches are this suite's own: the proof starts at its directory and trusts its account (SYRD-683).
+        onboarding_provenance.TRUST = (str(tmp_path), os.getuid())
+        tmp_path.chmod(0o755)
 
         def recording_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
             git_calls.append(list(args))
@@ -762,11 +767,13 @@ def test_switchyard_upgrade_uses_selected_history_for_immutable_release_onboardi
         assert any(f"onboarding doc {edited_name}: skipped, edited since source commit {old_commit}" in line for line in output)
         assert target_dir.joinpath(newer_name).read_text(encoding="utf-8") == newer_snapshot
         assert any(f"onboarding doc {newer_name}: skipped, installed copy is newer than this checkout" in line for line in output)
+        # SYRD-683: a cache is read only when it is root's -- here the suite's own -- with replace refs off.
         assert any(
-            call[:2] == ["git", f"--git-dir={missing_history_cache}"] and "cat-file" in call
+            call[:3] == ["git", "--no-replace-objects", f"--git-dir={missing_history_cache}"] and "cat-file" in call
             for call in git_calls
         )
-        assert any(call[:2] == ["git", f"--git-dir={selected_cache}"] and "show" in call for call in git_calls)
+        assert any(call[:3] == ["git", "--no-replace-objects", f"--git-dir={selected_cache}"] and "show" in call
+                   for call in git_calls)
         assert not any(call[:3] == ["git", "-C", str(immutable_release)] and "show" in call for call in git_calls)
 
         missing_project = tmp_path / "missing-project"
@@ -797,6 +804,7 @@ def test_switchyard_upgrade_uses_selected_history_for_immutable_release_onboardi
                 f"onboarding doc {name}: skipped, cannot verify source commit {old_commit}" in line
                 for line in missing_output
             )
+        onboarding_provenance.TRUST = ("/", 0)
 
 def test_switchyard_upgrade_refuses_to_downgrade_onboarding_docs_from_stale_checkout() -> None:
     current_user = team_launcher.current_user_name()

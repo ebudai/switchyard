@@ -6,7 +6,9 @@ This module covers:
   director's seeded remit. They are written at `switchyard new` and refreshed
   at upgrade. Each installed doc is stamped with the Switchyard source commit
   it came from, so an upgrade replaces only docs nobody edited; that check
-  reads the doc's history at its stamped commit.
+  reads the doc at its stamped commit -- from a source checkout's history, or,
+  from an installed release, the installed release of that commit or a source
+  cache root keeps (`onboarding_provenance`, SYRD-683).
 - **Director onboarding.** Whether a declared workflow's director onboarding
   has migrated (`director_onboarding_state`), and that migration
   (`migrate_declarative_director_onboarding`).
@@ -32,11 +34,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
+from scripts import onboarding_provenance
 from scripts.ticket_board.workflow_config import (
     DIRECTOR_ONBOARDING_MIGRATION,
     DIRECTOR_ROLE,
@@ -362,45 +366,41 @@ def _parse_onboarding_snapshot(text: str) -> tuple[str, str] | None:
     return match.group("commit").strip(), match.group("source").strip()
 
 
-def _onboarding_history_git_args(
-    *,
-    source_repo: Path,
-    commit_git_dir: str | None,
-    source_commit: str,
-    current_source_commit: str,
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-) -> list[str] | None:
+def _source_is_immutable_release(source_repo: Path) -> bool:
+    """Whether the source is an installed release, which carries no Git history of its own."""
     from scripts import team_launcher as launcher
 
     direct_release = launcher._read_switchyard_release_marker(source_repo)
     shared_release = launcher.shared_switchyard_release_for_path(source_repo)
-    immutable_release = bool(
+    return bool(
         (direct_release is not None and direct_release.marker_commit)
         or (shared_release is not None and shared_release.marker_commit)
     )
-    selected = str(commit_git_dir or "").strip()
-    if not immutable_release or not selected:
-        return ["git", "-C", str(source_repo)]
 
-    required_commits = tuple(dict.fromkeys((source_commit, current_source_commit)))
-    for raw_path in selected.split(os.pathsep):
-        if not raw_path.strip():
-            continue
-        git_dir = Path(raw_path.strip()).expanduser()
-        git_args = ["git", f"--git-dir={git_dir}"]
-        for commit in required_commits:
-            proc = launcher.run_owner_correct_git(
-                [*git_args, "cat-file", "-e", f"{commit}^{{commit}}"],
-                runner=runner,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            if proc.returncode != 0:
-                break
-        else:
-            return git_args
-    return None
+
+def _replace_onboarding_doc(owner_user: str, path: Path, text: str, *, runner) -> None:
+    """A refreshed doc, replaced whole. As root, by descriptor with the replaced file's mode; as its owner, through a
+    sibling renamed over it, with its mode, so nothing ever reads half of one (SYRD-683)."""
+    from scripts import owner_writes
+    from scripts import team_launcher as launcher
+
+    if owner_writes.root_writes_for(owner_user):
+        owner_writes.write_owner_file(owner_user, path, text, mode=None, new_mode=0o644)
+        return
+    mode = stat.S_IMODE(os.lstat(path).st_mode)
+    staged = path.with_name(f".{path.name}.switchyard-{os.getpid()}")
+    fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(text.encode("utf-8"))
+            os.fchmod(handle.fileno(), mode)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(staged, path)
+    except BaseException:
+        staged.unlink(missing_ok=True)
+        raise
+    launcher._chown_project_file(owner_user=owner_user, path=path, runner=runner)
 
 
 def _read_source_onboarding_doc_at_commit(
@@ -489,6 +489,7 @@ def upgrade_switchyard_onboarding_docs(
         return
 
     current_source_commit = _switchyard_source_commit(source_repo, runner=runner)
+    immutable_release = _source_is_immutable_release(source_repo)
     if not dry_run:
         install = runner(_onboarding_docs_dir_args(owner_user, target_dir))
         if install.returncode != 0:
@@ -516,6 +517,9 @@ def upgrade_switchyard_onboarding_docs(
                 continue
             print_func(f"switchyard: onboarding doc {name}: {'would install' if dry_run else 'installed'}")
             continue
+        if not owner_writes.root_writes_for(owner_user) and target_path.is_symlink():
+            print_func(f"switchyard: onboarding doc {name}: skipped, installed copy is a symbolic link")
+            continue
         try:
             # As root, by descriptor: a link at the installed copy, or above it, is refused, never read (SYRD-611).
             raw = owner_writes.read_owner_bytes(owner_user, target_path)
@@ -525,6 +529,10 @@ def upgrade_switchyard_onboarding_docs(
         except (OSError, SystemExit, UnicodeDecodeError) as exc:
             print_func(f"switchyard: onboarding doc {name}: skipped, cannot read installed copy: {exc}")
             continue
+        if existing == current_snapshot:
+            # Already this release's copy: nothing to prove or write, so a repeated upgrade changes nothing.
+            print_func(f"switchyard: onboarding doc {name}: current at {current_source_commit}")
+            continue
         provenance = _parse_onboarding_snapshot(existing)
         if provenance is None:
             print_func(f"switchyard: onboarding doc {name}: skipped, no provenance header")
@@ -533,48 +541,59 @@ def upgrade_switchyard_onboarding_docs(
         if source_name != name:
             print_func(f"switchyard: onboarding doc {name}: skipped, provenance names {source_name}")
             continue
-        history_git_args = _onboarding_history_git_args(
-            source_repo=source_repo,
-            commit_git_dir=commit_git_dir,
-            source_commit=source_commit,
-            current_source_commit=current_source_commit,
-            runner=runner,
-        )
-        if history_git_args is None:
-            print_func(f"switchyard: onboarding doc {name}: skipped, cannot verify source commit {source_commit}")
-            continue
-        old_body = _read_source_onboarding_doc_at_commit(
-            source_repo=source_repo,
-            git_args=history_git_args,
-            source_commit=source_commit,
-            source_name=source_name,
-            runner=runner,
-        )
-        if old_body is None:
-            print_func(f"switchyard: onboarding doc {name}: skipped, cannot verify source commit {source_commit}")
-            continue
-        if existing != _stamp_onboarding_doc(source_name=name, source_commit=source_commit, body=old_body):
-            print_func(f"switchyard: onboarding doc {name}: skipped, edited since source commit {source_commit}")
-            continue
-        source_commit_is_ancestor = _source_onboarding_commit_is_ancestor(
-            source_repo=source_repo,
-            git_args=history_git_args,
-            source_commit=source_commit,
-            current_source_commit=current_source_commit,
-            runner=runner,
-        )
-        if source_commit_is_ancestor is False:
-            print_func(f"switchyard: onboarding doc {name}: skipped, installed copy is newer than this checkout")
-            continue
-        if source_commit_is_ancestor is None:
-            print_func(
-                f"switchyard: onboarding doc {name}: skipped, cannot verify ancestry from "
-                f"source commit {source_commit} to release commit {current_source_commit}"
+        if immutable_release:
+            # An installed release has no history: the installed release of the stamped commit, or a cache root
+            # keeps, says what that commit shipped -- never the tenant's own repository (SYRD-683).
+            shipped = onboarding_provenance.shipped_body(name, source_commit, current_commit=current_source_commit,
+                                                         commit_git_dir=commit_git_dir, runner=runner)
+            if shipped.body is None:
+                print_func(f"switchyard: onboarding doc {name}: skipped, cannot verify source commit {source_commit}: "
+                           f"{'; '.join(shipped.problems)}")
+                continue
+            old_body, history_git_args, checked = shipped.body, shipped.git_args, shipped.source
+        else:
+            history_git_args = ("git", "-C", str(source_repo))
+            checked = f"source checkout {source_repo} at {source_commit}"
+            old_body = _read_source_onboarding_doc_at_commit(
+                source_repo=source_repo,
+                git_args=history_git_args,
+                source_commit=source_commit,
+                source_name=source_name,
+                runner=runner,
             )
+            if old_body is None:
+                print_func(f"switchyard: onboarding doc {name}: skipped, cannot verify source commit {source_commit} "
+                           f"in source checkout {source_repo}")
+                continue
+        if existing != _stamp_onboarding_doc(source_name=name, source_commit=source_commit, body=old_body):
+            print_func(f"switchyard: onboarding doc {name}: skipped, edited since source commit {source_commit} "
+                       f"(compared with {checked})")
             continue
+        if history_git_args is not None:
+            # With history, a copy from a commit the selected source does not contain is newer than it; the
+            # installed release itself carries no history, and its docs follow the release being deployed.
+            source_commit_is_ancestor = onboarding_provenance.is_ancestor(
+                history_git_args, source_commit, current_source_commit, runner,
+            ) if immutable_release else _source_onboarding_commit_is_ancestor(
+                source_repo=source_repo,
+                git_args=history_git_args,
+                source_commit=source_commit,
+                current_source_commit=current_source_commit,
+                runner=runner,
+            )
+            if source_commit_is_ancestor is False:
+                print_func(f"switchyard: onboarding doc {name}: skipped, installed copy is newer than this checkout")
+                continue
+            if source_commit_is_ancestor is None:
+                print_func(
+                    f"switchyard: onboarding doc {name}: skipped, cannot verify ancestry from "
+                    f"source commit {source_commit} to release commit {current_source_commit}"
+                )
+                continue
         if not dry_run:
-            _write_onboarding_doc(owner_user, target_path, current_snapshot, runner=runner, exclusive=False)
-        print_func(f"switchyard: onboarding doc {name}: {'would refresh' if dry_run else 'refreshed'}")
+            _replace_onboarding_doc(owner_user, target_path, current_snapshot, runner=runner)
+        print_func(f"switchyard: onboarding doc {name}: {'would refresh' if dry_run else 'refreshed'} to "
+                   f"{current_source_commit}, unedited since {source_commit} (checked against {checked})")
 
 
 def _install_switchyard_onboarding_docs(

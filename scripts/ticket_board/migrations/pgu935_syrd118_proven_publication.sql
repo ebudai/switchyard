@@ -164,24 +164,17 @@ BEGIN
 END;
 $$;
 
--- The writer's grant follows the new signature. As in pgu930 the writer role
--- cannot be spelled -- each project board runs under its own generated name --
--- so it is found by the privilege that already identifies it.
+-- The writer's grant follows the new signature.
+-- Granted by name: provisioning refuses any other writer role, and rbac.sql
+-- grants the same. A privilege test cannot find the writer here, before
+-- rbac.sql runs: every function still carries PostgreSQL's default PUBLIC
+-- EXECUTE, so every role in the cluster passed it (SYRD-668).
 DO $grants$
-DECLARE writer text;
 BEGIN
-    FOR writer IN
-        SELECT rolname FROM pg_roles
-        WHERE NOT rolsuper
-          AND has_function_privilege(
-                  rolname, 'ticket_board.force_move(text, text, text, boolean)', 'EXECUTE')
-    LOOP
-        EXECUTE format(
-            'GRANT EXECUTE ON FUNCTION ticket_board.require_publication_control() TO %I', writer);
-        EXECUTE format(
-            'GRANT EXECUTE ON FUNCTION ticket_board.resolve_publication(bigint, text, text, text) TO %I',
-            writer);
-    END LOOP;
+    IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'ticket_board_service') THEN
+        GRANT EXECUTE ON FUNCTION ticket_board.require_publication_control() TO ticket_board_service;
+        GRANT EXECUTE ON FUNCTION ticket_board.resolve_publication(bigint, text, text, text) TO ticket_board_service;
+    END IF;
 END $grants$;
 
 COMMIT;

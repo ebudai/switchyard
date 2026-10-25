@@ -668,25 +668,17 @@ END $migration$;
 -- nothing granted here is a credential, and the program that holds one runs as
 -- another account entirely.
 --
--- Which role the writer is cannot be spelled -- a per-project board runs under
--- its own generated role name -- so the grant follows the privilege that
--- already identifies it: execute on force_move, which rbac.sql gives to the
--- writer and to nobody else.
+-- Granted by name: provisioning refuses any other writer role, and rbac.sql
+-- grants the same. A privilege test cannot find the writer here, before
+-- rbac.sql runs: every function still carries PostgreSQL's default PUBLIC
+-- EXECUTE, so every role in the cluster passed it (SYRD-668).
 DO $grants$
-DECLARE writer text;
 BEGIN
-    FOR writer IN
-        SELECT rolname FROM pg_roles
-        WHERE NOT rolsuper
-          AND has_function_privilege(
-                  rolname, 'ticket_board.force_move(text, text, text, boolean)', 'EXECUTE')
-    LOOP
-        EXECUTE format(
-            'GRANT EXECUTE ON FUNCTION ticket_board.request_publication(text, text, text, text) TO %I', writer);
-        EXECUTE format(
-            'GRANT EXECUTE ON FUNCTION ticket_board.resolve_publication(bigint, text, text) TO %I', writer);
-        EXECUTE format('GRANT SELECT ON ticket_board.publication_requests TO %I', writer);
-    END LOOP;
+    IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'ticket_board_service') THEN
+        GRANT EXECUTE ON FUNCTION ticket_board.request_publication(text, text, text, text) TO ticket_board_service;
+        GRANT EXECUTE ON FUNCTION ticket_board.resolve_publication(bigint, text, text) TO ticket_board_service;
+        GRANT SELECT ON ticket_board.publication_requests TO ticket_board_service;
+    END IF;
 END $grants$;
 
 COMMIT;

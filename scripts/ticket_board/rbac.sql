@@ -49,6 +49,10 @@ REVOKE ALL ON ticket_board.workflow_transition_rbac_shadow_log FROM director, "u
 REVOKE ALL ON SEQUENCE ticket_board.ticket_comments_id_seq FROM director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
 REVOKE ALL ON SEQUENCE ticket_board.ticket_notification_queue_id_seq FROM director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
 REVOKE ALL ON SEQUENCE ticket_board.notification_trace_id_seq FROM director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
+-- SYRD-668: director_edit writes the field audit with definer rights; no
+-- principal writes it, or draws its ids, directly.
+REVOKE ALL ON ticket_board.ticket_field_audit FROM director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
+REVOKE ALL ON SEQUENCE ticket_board.ticket_field_audit_id_seq FROM director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
 REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA ticket_board FROM director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
 
 GRANT SELECT ON ALL TABLES IN SCHEMA ticket_board TO director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
@@ -79,14 +83,13 @@ GRANT EXECUTE ON FUNCTION ticket_board.file_bug(text, text, text, text, text[], 
 GRANT EXECUTE ON FUNCTION ticket_board.release_draft(text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.route(text, text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.force_move(text, text, text, boolean) TO ticket_board_service;
--- SYRD-83: the Director's generic edit and the audit record it writes. Nothing
--- granted here lets the writer raise a sign-off: it reaches the tickets table
--- only through definer-rights functions, and the one added here refuses to.
+-- SYRD-83: the Director's generic edit. Nothing granted here lets the writer
+-- raise a sign-off: it reaches the tickets table only through definer-rights
+-- functions, and the one added here refuses to. That function writes the field
+-- audit itself, and only definer-rights functions call signoff_fields and
+-- role_controls_project, so the writer holds neither those nor any write on the
+-- audit (SYRD-668).
 GRANT EXECUTE ON FUNCTION ticket_board.director_edit(text, jsonb, text) TO ticket_board_service;
-GRANT EXECUTE ON FUNCTION ticket_board.signoff_fields() TO ticket_board_service;
-GRANT EXECUTE ON FUNCTION ticket_board.role_controls_project(text) TO ticket_board_service;
-GRANT SELECT, INSERT ON ticket_board.ticket_field_audit TO ticket_board_service;
-GRANT USAGE, SELECT ON SEQUENCE ticket_board.ticket_field_audit_id_seq TO ticket_board_service;
 -- SYRD-93: the two halves of publication. The writer may record an ask and
 -- record a decision; it cannot push anything, because nothing here is a
 -- credential and the program that holds one runs as another account entirely.
@@ -529,5 +532,40 @@ REVOKE ALL ON FUNCTION ticket_board.uat_missing_gates(jsonb, jsonb, text) FROM P
 REVOKE ALL ON FUNCTION ticket_board.require_uat_gates() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION ticket_board.await_user(text, text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.user_wait_status(text) TO ticket_board_service;
+
+-- SYRD-668: last, after every grant above. The board's own principals are the
+-- role users this file creates and its service and listener, and nothing is
+-- granted to any other role. Migrations once granted to every role that passed
+-- a privilege test while PostgreSQL's default PUBLIC EXECUTE still stood --
+-- PostgreSQL's predefined roles on every database, and the role users on a
+-- host's second and later -- so whatever any other role holds on the schema or
+-- anything in it is taken away here, on every provision and every deploy. The
+-- object's owner keeps its own.
+DO $strangers$
+DECLARE
+    principals text[] := ARRAY['director', 'user', 'ops', 'app', 'audit', 'inspector', 'perf', 'research', 'main',
+                               'ticket_board_service', 'ticket_board_listener'];
+    held record;
+BEGIN
+    FOR held IN
+        SELECT DISTINCT 'SCHEMA' AS kind, 'ticket_board' AS object, a.grantee
+          FROM pg_namespace n, aclexplode(n.nspacl) a
+         WHERE n.nspname = 'ticket_board' AND a.grantee NOT IN (0, n.nspowner)
+        UNION
+        SELECT DISTINCT CASE WHEN c.relkind = 'S' THEN 'SEQUENCE' ELSE 'TABLE' END, c.oid::regclass::text, a.grantee
+          FROM pg_class c, aclexplode(c.relacl) a
+         WHERE c.relnamespace = 'ticket_board'::regnamespace AND a.grantee NOT IN (0, c.relowner)
+        UNION
+        SELECT DISTINCT CASE WHEN p.prokind = 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END, p.oid::regprocedure::text,
+               a.grantee
+          FROM pg_proc p, aclexplode(p.proacl) a
+         WHERE p.pronamespace = 'ticket_board'::regnamespace AND a.grantee NOT IN (0, p.proowner)
+    LOOP
+        IF NOT pg_get_userbyid(held.grantee) = ANY(principals) THEN
+            EXECUTE format('REVOKE ALL ON %s %s FROM %I', held.kind, held.object, pg_get_userbyid(held.grantee));
+        END IF;
+    END LOOP;
+END;
+$strangers$;
 
 COMMIT;

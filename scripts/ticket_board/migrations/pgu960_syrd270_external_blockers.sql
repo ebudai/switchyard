@@ -320,18 +320,4 @@ $$;
 
 GRANT EXECUTE ON FUNCTION ticket_board.release_external_blocker(text, text, text, text) TO ticket_board_service;
 
-DO $grants$
-DECLARE writer text;
-BEGIN
-    FOR writer IN
-        SELECT rolname FROM pg_roles
-        WHERE NOT rolsuper
-          AND has_function_privilege(
-                  rolname, 'ticket_board.force_move(text, text, text, boolean)', 'EXECUTE')
-    LOOP
-        EXECUTE format(
-            'GRANT EXECUTE ON FUNCTION ticket_board.release_external_blocker(text, text, text, text) TO %I', writer);
-    END LOOP;
-END $grants$;
-
 COMMIT;

@@ -869,37 +869,19 @@ BEGIN
     PERFORM pg_notify('ticket_board_state_transition', jsonb_build_object('kind', 'workflow', 'revision', rev)::text);
 END $migration$;
 
--- The board's writer needs the new function and the audit table; it reaches the
--- tickets table only through definer-rights functions, and the one added here
--- refuses to raise a sign-off.
---
--- Which role that writer is cannot be spelled: a per-project board runs under
--- its own generated role name. So the grant follows the privilege that already
--- identifies the writer -- execute on force_move, which rbac.sql gives to it
--- and to nobody else -- rather than a name this file would have to guess, and
--- a board whose roles are not created yet is simply left alone.
+-- The board's writer needs the new function. It reaches the tickets table only
+-- through definer-rights functions, and the one added here refuses to raise a
+-- sign-off; that function writes the field audit itself, so the writer is
+-- granted nothing on it. A board whose roles are not created yet is left alone.
+-- Granted by name: provisioning refuses any other writer role, and rbac.sql
+-- grants the same. A privilege test cannot find the writer here, before
+-- rbac.sql runs: every function still carries PostgreSQL's default PUBLIC
+-- EXECUTE, so every role in the cluster passed it (SYRD-668).
 DO $grants$
-DECLARE writer text;
 BEGIN
-    FOR writer IN
-        SELECT rolname FROM pg_roles
-        WHERE NOT rolsuper
-          AND has_function_privilege(
-                  rolname,
-                  'ticket_board.force_move(text, text, text, boolean)',
-                  'EXECUTE')
-    LOOP
-        EXECUTE format(
-            'GRANT EXECUTE ON FUNCTION ticket_board.director_edit(text, jsonb, text) TO %I', writer);
-        EXECUTE format(
-            'GRANT EXECUTE ON FUNCTION ticket_board.signoff_fields() TO %I', writer);
-        EXECUTE format(
-            'GRANT EXECUTE ON FUNCTION ticket_board.role_controls_project(text) TO %I', writer);
-        EXECUTE format(
-            'GRANT SELECT, INSERT ON ticket_board.ticket_field_audit TO %I', writer);
-        EXECUTE format(
-            'GRANT USAGE, SELECT ON SEQUENCE ticket_board.ticket_field_audit_id_seq TO %I', writer);
-    END LOOP;
+    IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'ticket_board_service') THEN
+        GRANT EXECUTE ON FUNCTION ticket_board.director_edit(text, jsonb, text) TO ticket_board_service;
+    END IF;
 END $grants$;
 
 COMMIT;

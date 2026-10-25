@@ -345,7 +345,7 @@ def _validate_scheduling(cfg: dict[str, Any], stages: dict[str, Any], roles: dic
     """The opt-in pull policy (SYRD-539): where admitted work waits, how it is
     claimed, and the review stage whose approval releases the author."""
     policy = cfg["scheduling"]
-    need(isinstance(policy, dict) and set(policy) <= {"mode", "ready_stage", "release_after", "idle_alert_seconds"}
+    need(isinstance(policy, dict) and set(policy) <= {"mode", "ready_stage", "release_after", "idle_alert_seconds", "cohorts"}
          and {"mode", "ready_stage", "release_after"} <= set(policy), "invalid scheduling policy")
     need(policy["mode"] in SCHEDULING_MODES, "invalid scheduling mode")
     # One authoritative reservation policy: pull releases at release_after,
@@ -393,6 +393,9 @@ def _validate_scheduling(cfg: dict[str, Any], stages: dict[str, Any], roles: dic
     need(isinstance(seconds, int) and not isinstance(seconds, bool)
          and IDLE_ALERT_SECONDS_RANGE[0] <= seconds <= IDLE_ALERT_SECONDS_RANGE[1],
          "scheduling idle_alert_seconds must be an integer from 60 to 86400")
+    if "cohorts" in policy:
+        from .scheduling_cohorts import validate_cohorts  # SYRD-628
+        validate_cohorts(policy["cohorts"], need, runtimes=RUNTIMES)
 
 
 def _review_hands_back(transitions: list[Any], stages: dict[str, Any], review: str, work: str) -> bool:

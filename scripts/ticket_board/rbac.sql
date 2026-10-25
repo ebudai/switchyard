@@ -467,4 +467,30 @@ GRANT EXECUTE ON FUNCTION ticket_board.request_execution_lease_interrupt(bigint,
 REVOKE ALL ON FUNCTION ticket_board.ticket_turn_end_is_resolved(text, timestamptz) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION ticket_board.ticket_turn_end_is_resolved(text, timestamptz) TO ticket_board_listener;
 
+-- SYRD-628: provider cohorts: the service reads and records, the Director sets quota, the listener signals.
+REVOKE ALL ON ticket_board.cohort_quota FROM PUBLIC;
+REVOKE ALL ON ticket_board.cohort_events FROM PUBLIC;
+REVOKE ALL ON SEQUENCE ticket_board.cohort_events_id_seq FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.cohort_effective_ceiling(text, timestamptz) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.cohort_holders(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.cohort_claim_refusal(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.require_declared_cohort(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.set_cohort_quota(text, integer, text, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.clear_cohort_quota(text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.note_cohort_quota_signal(text, text, integer, text, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.record_cohort_change(text, text, text, text, text, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.cohort_status(timestamptz) FROM PUBLIC;
+REVOKE ALL ON ticket_board.cohort_drains FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.begin_cohort_drain(text, text, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.end_cohort_drain(text) FROM PUBLIC;
+GRANT SELECT ON ticket_board.cohort_quota, ticket_board.cohort_events TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.cohort_status(timestamptz) TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.set_cohort_quota(text, integer, text, integer) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.clear_cohort_quota(text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.record_cohort_change(text, text, text, text, text, jsonb) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.begin_cohort_drain(text, text, integer) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.end_cohort_drain(text) TO ticket_board_service;
+GRANT SELECT ON ticket_board.cohort_drains TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.note_cohort_quota_signal(text, text, integer, text, integer) TO ticket_board_listener;
+
 COMMIT;

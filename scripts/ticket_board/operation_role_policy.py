@@ -78,6 +78,12 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
     # SYRD-616: moving a role's command's deadline, or stopping it, is the Director's.
     "extend_lease": {"director"},
     "interrupt_lease": {"director"},
+    # SYRD-628: a provider cohort's quota, and the record of convergence, are the Director's.
+    "set_cohort_quota": {"director"},
+    "clear_cohort_quota": {"director"},
+    "record_cohort_change": {"director"},
+    "begin_cohort_drain": {"director"},
+    "end_cohort_drain": {"director"},
     "set_report_intake": {"director"},
     # SYRD-541: the integrator's bounded size decisions.
     "approve_size_exception": {"director"},
@@ -134,6 +140,13 @@ COMPOSED_OPERATION_CAPABILITIES = {
     # its work; the database checks set_manually_controlled itself (SYRD-616).
     "extend_lease": frozenset({"set_manually_controlled"}),
     "interrupt_lease": frozenset({"set_manually_controlled"}),
+    # Holding a cohort's claims back, or recording which of its workers run, is
+    # the same hold over work; the database checks set_manually_controlled (SYRD-628).
+    "set_cohort_quota": frozenset({"set_manually_controlled"}),
+    "clear_cohort_quota": frozenset({"set_manually_controlled"}),
+    "record_cohort_change": frozenset({"set_manually_controlled"}),
+    "begin_cohort_drain": frozenset({"set_manually_controlled"}),
+    "end_cohort_drain": frozenset({"set_manually_controlled"}),
     # Approving growth into main, or turning the review on, is the integrator's
     # decision: the capability that closes reviewed work into main (SYRD-541).
     "approve_size_exception": frozenset({"merge"}),

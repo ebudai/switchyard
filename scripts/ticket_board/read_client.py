@@ -403,6 +403,8 @@ def _build_parser() -> argparse.ArgumentParser:
     leases.add_argument("--role", default="", help="only this role's")
     leases.add_argument("--all", action="store_true", help="include ended leases the board still keeps")
     leases.add_argument("--json", action="store_true", help="print JSON")
+    cohorts = subparsers.add_parser("cohorts", help="show provider cohorts: ceilings, quota, holders, changes (SYRD-628)")
+    cohorts.add_argument("--json", action="store_true", help="print JSON")
     stall = subparsers.add_parser("stall", help="show why the board stall alert has or has not fired (SYRD-637)")
     stall.add_argument("--json", action="store_true", help="print the stall state JSON")
 
@@ -468,6 +470,11 @@ def main(argv: list[str] | None = None) -> int:
                                             if value})
             payload = client._get_json(client.root_url + "/api/execution-leases" + (f"?{query}" if query else ""))
             print_json(payload) if command_wants_json(args) else print(describe_leases(payload))
+        elif command == "cohorts":
+            from .cohort_ops import describe as describe_cohorts
+
+            payload = client._get_json(client.root_url + "/api/cohorts")
+            print_json(payload) if command_wants_json(args) else print(describe_cohorts(payload))
         elif command == "stall":
             from .board_stall import describe
 

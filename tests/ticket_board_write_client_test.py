@@ -35,6 +35,12 @@ CLIENT_PARITY_EXCEPTIONS = {
     "crop_attachment": "UI-only crop payload: it depends on browser drag geometry and has no sensible CLI shape.",
     "ask_director": "The User's question from the UAT panel (SYRD-629): it refuses every caller but the User, "
                     "who has no pane, so no role's client could make it.",
+    # SYRD-628: convergence's own writes, made by `switchyard worker-pool converge` (and start/stop/restart of a
+    # cohort member) through cohort_client.CohortWriter. A drain by hand would hold claims back from a worker
+    # nothing then stops, and a record by hand would claim a start or stop nobody made.
+    "record_cohort_change": "convergence's record, written by worker-pool through CohortWriter (SYRD-628)",
+    "begin_cohort_drain": "brackets a convergence stop; worker-pool's, through CohortWriter (SYRD-628)",
+    "end_cohort_drain": "brackets a convergence stop; worker-pool's, through CohortWriter (SYRD-628)",
 }
 
 

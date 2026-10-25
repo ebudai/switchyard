@@ -298,6 +298,10 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             force=args.force,
             out=args.out,
             journal=args.journal,
+            # Only the cohort verbs (SYRD-628) take these, so every other verb's call is as it was.
+            **{key: value for key, value in (("dry_run", args.dry_run), ("watch", args.watch),
+                                             ("interval", max(args.interval, 10.0)))
+               if args.action in ("cohorts", "converge")},
         )
     if argv[0].casefold() == "add-role":
         args = launcher._build_switchyard_add_role_parser().parse_args(argv[1:])

@@ -427,6 +427,9 @@ def switchyard_worker_pool_command(
     board_snapshot_reader: Callable[[ProjectConfig], Mapping[str, Any] | None] | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
+    dry_run: bool = False,
+    watch: bool = False,
+    interval: float = 60.0,
 ) -> int:
     """One pool's whole life, from what it would cost to which worker is holding what.
 
@@ -601,6 +604,12 @@ def switchyard_worker_pool_command(
         readiness = _worker_pool_readiness(
             config, pool, document=document, board_snapshot_reader=board_snapshot_reader, runner=runner
         )
+        from scripts import worker_cohorts
+
+        # A cohort member's start or stop is a cohort change, recorded as the operator's (SYRD-628).
+        record = worker_cohorts.operator_change(config, document, member, action, print_func=print_func)
+        for kind in (("stop", "start") if action == "restart" else (action,)) if record else ():
+            record(kind, "intended")
         if action == "stop":
             results = [pool_module.stop_worker(config, member, runner=runner)]
         else:
@@ -612,10 +621,26 @@ def switchyard_worker_pool_command(
             results = outcome if isinstance(outcome, list) else [outcome]
         for result in results:
             print_func(result.describe())
+            if record:
+                kind = "stop" if "stop" in result.action else "start"
+                record(kind if result.succeeded else f"{kind}_failed", "done" if result.succeeded else "failed",
+                       result.describe())
         # A worker that was asked for and did not come up is a failure, and so
         # is a restart whose stop worked and whose start did not: "not started"
         # exiting 0 read as done to every caller that checks (SYRD-278).
         return 0 if all(result.succeeded for result in results) else 1
+
+    if action in {"cohorts", "converge"}:  # SYRD-628
+        from scripts import worker_cohorts
+
+        return worker_cohorts.run_command(
+            config, pool, document=document, action=action, config_path=entry.config_path, dry_run=dry_run,
+            watch=watch, interval=interval, runner=runner, print_func=print_func,
+            read_readiness=lambda: _worker_pool_readiness(config, pool, document=document,
+                                                          board_snapshot_reader=board_snapshot_reader, runner=runner),
+            read_snapshot=lambda: (board_snapshot_reader or _read_board_snapshot)(config),
+            read_status=lambda: _board_get_json(f"{str(config.board_url or '').rstrip('/')}/api/cohorts")
+            if config.board_url else None)
 
     if action == "attach":
         from scripts import presentation_controller
@@ -761,6 +786,9 @@ WORKER_POOL_ACTIONS: dict[str, bool] = {
     "stop": True,
     "restart": True,
     "attach": True,
+    # SYRD-628: provider cohorts -- status with the dry-run plan, and drain-safe convergence.
+    "cohorts": False,
+    "converge": False,
 }
 
 
@@ -788,7 +816,9 @@ def _build_switchyard_worker_pool_parser() -> argparse.ArgumentParser:
             "apply: declare the pool in the tenant's workflow document. "
             "retire/replace: take one worker out of service, keeping its identity forever. "
             "start/stop/restart: one worker's session. attach: watch one worker. "
-            "rollback: undo an apply from its journal."
+            "rollback: undo an apply from its journal. "
+            "cohorts: each provider cohort's target, ceiling, live/busy/idle workers and the convergence plan. "
+            "converge: carry out one pass of that plan (--watch: keep converging), recording every change."
         ),
     )
     parser.add_argument("member", nargs="?", default="", help="the worker a verb acts on, e.g. impl-3")
@@ -805,4 +835,7 @@ def _build_switchyard_worker_pool_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--out", type=Path, help="write the proposed workflow document here for review")
     parser.add_argument("--journal", type=Path, help="the apply journal a rollback reverses")
+    parser.add_argument("--dry-run", action="store_true", help="converge: show the plan and change nothing")
+    parser.add_argument("--watch", action="store_true", help="converge: keep converging, one pass per --interval")
+    parser.add_argument("--interval", type=float, default=60.0, help="converge --watch: seconds between passes (min 10)")
     return parser

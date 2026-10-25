@@ -545,6 +545,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "interrupt-lease", help="interrupt only a live execution lease's process group, with a reason (SYRD-616)")
     interrupt_lease.add_argument("lease", type=int, help="the lease number, from ticket-board-read leases")
     add_free_text_argument(interrupt_lease, "--reason", required=True, help="why it is stopped; the role is told")
+    cohort_quota = subparsers.add_parser(
+        "set-cohort-quota", help="limit a provider cohort's held tickets; 0 is exhausted, with a reason (SYRD-628)")
+    cohort_quota.add_argument("runtime", help="the cohort's runtime, from ticket-board-read cohorts")
+    cohort_quota.add_argument("--ceiling", type=int, required=True, help="how many tickets it may hold at once")
+    cohort_quota.add_argument("--expires-minutes", type=int, help="end the limit by itself after this long")
+    add_free_text_argument(cohort_quota, "--reason", required=True, help="why, e.g. the provider's usage")
+    clear_quota = subparsers.add_parser(
+        "clear-cohort-quota", help="remove the Director's quota record for a provider cohort (SYRD-628)")
+    clear_quota.add_argument("runtime", help="the cohort's runtime")
+    add_free_text_argument(clear_quota, "--reason", required=True, help="why the limit is over")
     subparsers.add_parser(
         "claim-next",
         help="under a pull policy, claim your own next ready ticket; held work is returned instead (SYRD-539)",
@@ -862,6 +872,11 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif command == "claim_next":
             response = client.claim_next()
+        elif command == "set_cohort_quota":
+            response = client.set_cohort_quota(args.runtime, ceiling=args.ceiling, reason=args.reason,
+                                               expires_minutes=args.expires_minutes)
+        elif command == "clear_cohort_quota":
+            response = client.clear_cohort_quota(args.runtime, reason=args.reason)
         elif command == "extend_lease":
             response = client.extend_lease(args.lease, minutes=args.minutes, reason=args.reason)
         elif command == "interrupt_lease":
@@ -949,7 +964,7 @@ def main(argv: list[str] | None = None) -> int:
     if command in {"merge", "dismiss_notification", "verify_caller", "add_user_acceptance_relay",
                    "snooze_reminders", "clear_reminder_snooze", "claim_next", "approve_size_exception",
                    "enable_size_review", "measure_size", "set_report_intake", "force_fresh_context",
-                   "uat_instructions", "extend_lease", "interrupt_lease"}:
+                   "uat_instructions", "extend_lease", "interrupt_lease", "set_cohort_quota", "clear_cohort_quota"}:
         print(json.dumps(response))
     else:
         print(json.dumps(_ticket_from_response(response)))

@@ -1172,6 +1172,17 @@ class TicketBoardWriteClient:
         """Ask for a live execution lease's process group to be interrupted (SYRD-616)."""
         return self._post("/actions/interrupt_lease", {"lease": lease, "reason": reason}, caller_role=caller_role)
 
+    def set_cohort_quota(self, runtime: str, *, ceiling: int, reason: str, expires_minutes: int | None = None,
+                         caller_role: str | None = None) -> dict[str, Any]:
+        """Limit a provider cohort to `ceiling` held tickets (0: exhausted), with a reason (SYRD-628)."""
+        payload = {"runtime": runtime, "ceiling": ceiling, "reason": reason}
+        payload.update({} if expires_minutes is None else {"expires_minutes": expires_minutes})
+        return self._post("/actions/set_cohort_quota", payload, caller_role=caller_role)
+
+    def clear_cohort_quota(self, runtime: str, *, reason: str, caller_role: str | None = None) -> dict[str, Any]:
+        """Remove the Director's quota record for a provider cohort (SYRD-628)."""
+        return self._post("/actions/clear_cohort_quota", {"runtime": runtime, "reason": reason}, caller_role=caller_role)
+
     def claim_next(self, *, caller_role: str | None = None) -> dict[str, Any]:
         """Claim this worker's next ready ticket under a pull policy (SYRD-539)."""
         return self._post("/actions/claim_next", {}, caller_role=caller_role)

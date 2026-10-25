@@ -96,6 +96,11 @@ def test_server_keeps_identical_aliases_and_no_reverse_import() -> None:
         # SYRD-616: letting a role's command run on, or stopping it, takes the hold's authority.
         "extend_lease": frozenset({"set_manually_controlled"}),
         "interrupt_lease": frozenset({"set_manually_controlled"}),
+        "set_cohort_quota": frozenset({"set_manually_controlled"}),
+        "clear_cohort_quota": frozenset({"set_manually_controlled"}),
+        "record_cohort_change": frozenset({"set_manually_controlled"}),
+        "begin_cohort_drain": frozenset({"set_manually_controlled"}),
+        "end_cohort_drain": frozenset({"set_manually_controlled"}),
     }
 
 
@@ -122,7 +127,9 @@ def test_default_environment() -> None:
     assert table["set_uat_instructions"] == ["director"] and table["ask_director"] == ["user"]
     # SYRD-616: extending or interrupting a role's execution lease is the Director's.
     assert table["extend_lease"] == ["director"] and table["interrupt_lease"] == ["director"]
-    assert len(table) == 51, len(table)  # SYRD-548: set_report_intake; SYRD-598: withdraw_signoff; SYRD-626; SYRD-629; SYRD-616: extend_lease, interrupt_lease
+    assert all(table[op] == ["director"] for op in ("set_cohort_quota", "clear_cohort_quota", "record_cohort_change",
+                                                           "begin_cohort_drain", "end_cohort_drain"))
+    assert len(table) == 56, len(table)  # SYRD-548: set_report_intake; SYRD-598: withdraw_signoff; SYRD-626; SYRD-629; SYRD-616: extend_lease, interrupt_lease; SYRD-628: five cohort operations
 
 
 def test_role_environment_is_read_at_import() -> None:

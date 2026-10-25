@@ -102,6 +102,8 @@ def test_server_keeps_identical_aliases_and_no_reverse_import() -> None:
         "begin_cohort_drain": frozenset({"set_manually_controlled"}),
         "end_cohort_drain": frozenset({"set_manually_controlled"}),
         "clear_provider_hold": frozenset({"set_manually_controlled"}),
+        # SYRD-662: a wait on the User is await_role and its sentence, and only the control role's.
+        "await_user": frozenset({"add_comment", "await_role", "merge", "set_blockers", "set_manually_controlled"}),
     }
 
 
@@ -131,7 +133,8 @@ def test_default_environment() -> None:
     assert all(table[op] == ["director"] for op in ("set_cohort_quota", "clear_cohort_quota", "record_cohort_change",
                                                            "begin_cohort_drain", "end_cohort_drain"))
     assert table["clear_provider_hold"] == ["director"]
-    assert len(table) == 57, len(table)  # SYRD-548: set_report_intake; SYRD-598: withdraw_signoff; SYRD-626; SYRD-629; SYRD-616: extend_lease, interrupt_lease; SYRD-628: five cohort operations; SYRD-644: clear_provider_hold
+    assert table["await_user"] == ["director"]
+    assert len(table) == 58, len(table)  # SYRD-548: set_report_intake; SYRD-598: withdraw_signoff; SYRD-626; SYRD-629; SYRD-616: extend_lease, interrupt_lease; SYRD-628: five cohort operations; SYRD-644: clear_provider_hold; SYRD-662: await_user
 
 
 def test_role_environment_is_read_at_import() -> None:

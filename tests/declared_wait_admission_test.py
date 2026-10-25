@@ -31,6 +31,11 @@ database on the same cluster carries no declared workflow, for the legacy
 cases.
 
 It runs on main, from a git archive in a child process, and on this tree.
+
+SYRD-662 later made a wait on the User the Director's alone (`await-user`, in a
+stage the workflow's `user_waits` lists): the designer's and the database's
+waits on the User are refused here now, and the clearing and stale-escalation
+cases wait on pane roles instead.
 """
 
 from __future__ import annotations
@@ -210,10 +215,11 @@ def scenario(root: Path, prefix: str, before_root: Path | None = None) -> dict:
         service = fixture.conninfo(cluster.socket_dir, cluster.port, "board", fixture.SERVICE_ROLE)
         seen["sql_scribe"] = as_role(service, "scribe", "SELECT ticket_board.set_awaiting_role('PGU-4', 'app');")
         seen["sql_uiux_user"] = as_role(service, "uiux", "SELECT ticket_board.set_awaiting_role('PGU-7', 'user');")
+        seen["sql_uiux_app"] = as_role(service, "uiux", "SELECT ticket_board.set_awaiting_role('PGU-7', 'app');")
         seen["pgu7"] = {"waiting": waiting(admin, "PGU-7"), "queued": queued(admin, "PGU-7")}
         # Clearing a wait, and the User acting on the board, as for any wait.
-        seen["designer_clears"] = cli(server, "designer", "clear-awaiting-role", "PGU-1")
-        seen["pgu1_cleared"] = waiting(admin, "PGU-1")
+        seen["designer_clears"] = cli(server, "designer", "clear-awaiting-role", "PGU-2")
+        seen["pgu1_cleared"] = waiting(admin, "PGU-2")
         seen["scribe_clears"] = cli(server, "scribe", "clear-awaiting-role", "PGU-7")
         seen["pgu7_after_scribe"] = waiting(admin, "PGU-7")
         seen["user_comments"] = cli(server, "user", "add-comment", "PGU-7", "--text", "Use the second layout.")
@@ -284,8 +290,8 @@ def scenario(root: Path, prefix: str, before_root: Path | None = None) -> dict:
         one_pass()
         seen["designer_prompt"] = prompts("PGU-5", "designer")
         seen["scribe_prompt"] = prompts("PGU-4", "scribe")
-        seen["designer_waits"] = cli(server, "designer", "request-dependency", "PGU-5", "--role", "user",
-                                     "--reason", "Waiting on the User's five decisions.")
+        seen["designer_waits"] = cli(server, "designer", "request-dependency", "PGU-5", "--role", "director",
+                                     "--reason", "Waiting on the Director's five decisions.")
         seen["pgu5_waiting"] = waiting(admin, "PGU-5")
         start = time.time()
         while time.time() - start < GRACE + 3:
@@ -373,25 +379,28 @@ def main() -> int:
           and "continue work" in before["designer_prompt"][0] and "request-dependency" in before["scribe_prompt"][0],
           f"main: the prompt offers a blocker the designer cannot set, continue work, which nothing reaches, and a "
           f"request-dependency the scribe cannot make: {before['designer_prompt']} {before['scribe_prompt']}")
-    check(before["designer_waits"].startswith(refused_user) and len(before["pgu5_escalations"]) == 1,
-          f"main: the designer cannot record that it waits on the User, so the Director is escalated at grace "
+    check(before["designer_waits"].startswith("active ticket not found for awaiting_role: PGU-5")
+          and len(before["pgu5_escalations"]) == 1,
+          f"main: the designer cannot record that it waits, so the Director is escalated at grace "
           f"expiry: {before['pgu5_escalations']}")
 
     # This tree.
-    check(after["designer_awaits_user_in_draft"] == "ok" and after["pgu1"] == {"waiting": "user", "comments": 1,
-                                                                              "queued": [["designer", "transition"]]},
-          f"the designer records, in Draft, that it waits on the User, with its reason, and nothing is handed to "
-          f"anyone: {after['designer_awaits_user_in_draft']} {after['pgu1']}")
+    check("the Director's operator:<name> blocker CONTEXT: PL/pgSQL function set_awaiting_role"  # the CLI keeps the tail
+          in after["designer_awaits_user_in_draft"]
+          and after["pgu1"] == {"waiting": "", "comments": 0, "queued": [["designer", "transition"]]},
+          f"SYRD-662: the designer's wait on the User is refused, and nothing is recorded: "
+          f"{after['designer_awaits_user_in_draft']} {after['pgu1']}")
     check(after["designer_awaits_director_in_draft"] == "ok"
           and after["pgu2"]["queued"] == [["designer", "transition"], *[["director", "awaiting_role"]] * 4],
           f"in Draft, a wait on a pane role is recorded and handed over on the usual schedule: {after['pgu2']}")
     check(after["uiux_awaits_app"] == "ok"
           and after["pgu3"]["queued"] == [["uiux", "transition"], *[["app", "awaiting_role"]] * 3, ["director", "awaiting_role"]],
           f"a custom-named implementer awaits a pane role, which is handed the wait: {after['pgu3']}")
-    check(after["sql_uiux_user"] == "ok" and after["pgu7"] == {"waiting": "user", "queued": []}
+    check(after["sql_uiux_user"].startswith("ERROR: a dependency cannot name the User: PGU-7 is in Implementation")
+          and after["pgu7"] == {"waiting": "app", "queued": [*[["app", "awaiting_role"]] * 3, ["director", "awaiting_role"]]}
           and after["user_queue"] == 0 and after["to_user"] == [],
-          f"the database alone records a wait on the User, sends it nothing, and nothing is ever addressed to the "
-          f"User: {after['sql_uiux_user']} {after['pgu7']} {after['user_queue']}")
+          f"SYRD-662: the database alone refuses a wait on the User too, and nothing is ever addressed to the User: "
+          f"{after['sql_uiux_user']} {after['pgu7']} {after['user_queue']}")
     check(after["scribe_awaits_app"] == "scribe cannot call await_role"
           and after["sql_scribe"].startswith("ERROR: role scribe cannot call set_awaiting_role")
           and after["perf_awaits_app"] == "invalid caller role: perf" and after["pgu4"] == "",
@@ -410,8 +419,8 @@ def main() -> int:
     check(after["no_move_text"] == "No move on it from this stage is yours to make: say in a comment what it needs.",
           f"an owner with no move is told so, not offered one it cannot make: {after['no_move_text']}")
     check(after["designer_clears"] == "ok" and after["pgu1_cleared"] == ""
-          and after["scribe_clears"] == "scribe cannot call clear_awaiting_role" and after["pgu7_after_scribe"] == "user",
-          f"the owner clears its wait on the User; a role without the capability cannot: {after['scribe_clears']}")
+          and after["scribe_clears"] == "scribe cannot call clear_awaiting_role" and after["pgu7_after_scribe"] == "app",
+          f"the owner clears its wait; a role without the capability cannot: {after['scribe_clears']}")
     legacy = ("legacy_app_awaits_director", "legacy_pgu1", "legacy_app_awaits_user", "legacy_user_awaits_app",
               "legacy_pgu2", "legacy_cleared", "legacy_pgu1_cleared")
     def said(value):  # a refusal without its CONTEXT, whose line numbers move with any edit to the function
@@ -421,14 +430,15 @@ def main() -> int:
           and after["legacy_pgu1"]["waiting"] == "director" and after["legacy_app_awaits_user"].startswith(refused_user),
           f"a board with no declared workflow answers exactly as main: {[after[k] for k in legacy]}")
     check(len(after["designer_prompt"]) == 1 and "transition it if the work is done" in after["designer_prompt"][0]
-          and "`request-dependency` if it is waiting on another role or on the User" in after["designer_prompt"][0]
+          and "`request-dependency` if it is waiting on another role." in after["designer_prompt"][0]
+          and "on the User" not in after["designer_prompt"][0]
           and "blocker" not in after["designer_prompt"][0] and "continue" not in after["designer_prompt"][0],
           f"the designer's prompt names the moves it can make in Draft and no others: {after['designer_prompt']}")
     check(len(after["scribe_prompt"]) == 1 and "Do this: transition it if the work is done." in after["scribe_prompt"][0]
           and "request-dependency" not in after["scribe_prompt"][0],
           f"a role without await_role is not told to request a dependency: {after['scribe_prompt']}")
-    check(after["designer_waits"] == "ok" and after["pgu5_waiting"] == "user" and after["pgu5_escalations"] == [],
-          f"a wait on the User recorded within the grace keeps the Director from a stale escalation: "
+    check(after["designer_waits"] == "ok" and after["pgu5_waiting"] == "director" and after["pgu5_escalations"] == [],
+          f"a wait recorded within the grace keeps the Director from a stale escalation: "
           f"{after['pgu5_escalations']}")
     check(after["designer_resumes"] == "ok" and after["designer_prompts_after_resume"] == 2,
           f"once the wait is cleared, the next unresolved turn is the owner's to answer again: "

@@ -409,7 +409,7 @@ WHERE id = %s
         # the state and assignee checks above already establish (SYRD-539).
         if kind in {"pull_idle_capacity", "ticket_context", "delivery_proof", "background_hold", "composer_hold",
                     "background_child", "blocked_pane", "uat_question", "execution_lease",
-                    "provider_quota_hold"}:  # SYRD-539, 540, 565, 557, 570, 583, 633, 629, 616, 644
+                    "provider_quota_hold", "invalid_user_wait"}:  # SYRD-539, 540, 565, 557, 570, 583, 633, 629, 616, 644, 662
             return target_role == "director"
         # SYRD-616: a role is told its own command was interrupted, whatever its ticket has done since.
         if kind == "execution_lease_interrupted":

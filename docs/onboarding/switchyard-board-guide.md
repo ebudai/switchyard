@@ -194,6 +194,15 @@ system working, not a bug to route around.
   until this board's own repository resolves it. The release moves nothing. A
   `blocked_reason` with an empty `blocked_by` is a note, not a wait: it suppresses no
   reminder, and `set-blockers` refuses it (SYRD-285).
+- The User is never a dependency (SYRD-662). `request-dependency`, `await-role` and every
+  other write refuse to name the User, and say what to do instead: finish the stage through
+  its declared transition, with the UAT steps on the ticket, so it reaches User Review after
+  every gate it owes. Entering User Review itself needs every sign-off the ticket owes, the
+  Director's override included. The one wait on the User is the Director's
+  `await-user <id> --reason "..." --request "..."`, in a stage the workflow lists in its
+  optional `user_waits`; the request shows on the ticket's card. A wait on the User the board
+  does not admit is reported on the ticket (`user_wait`), put in the Director's queue, and
+  repaired the ordinary way: `clear-awaiting-role`, or the owner finishes the stage.
 - `await-role` / `clear-awaiting-role` — mark or clear an active ticket as waiting on a
   role. Use it when the next action is genuinely someone else's and there is no ticket to
   point `blocked_by` at (that field takes this board's ticket IDs, or another board's as

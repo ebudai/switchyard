@@ -20,14 +20,16 @@ The grace is a few seconds and passes for real. A wait's four hours are the one
 thing not waited out: once it is recorded, its start (awaiting_since_at) is
 moved back four hours and a minute. The cases:
 
-- **U, SYRD-609's shape:** a director_review ticket waits on the User, past four
-  hours, through several unresolved Director turns. The Director then clears the
-  wait.
+- **U, SYRD-609's shape:** a director_review ticket waits on another role, past
+  four hours, through several unresolved Director turns. The Director then clears
+  the wait. (SYRD-609 waited on the User; since SYRD-662 nobody's dependency may
+  name the User, and work only a person outside the board can do is an
+  `operator:` blocker. A recorded wait answers the prompt whoever it names.)
 - **H, delivery:** an implementer's prompt is held behind a menu while the owner
   records a wait on another role (ops), which then passes four hours. The pane
   comes back, and later the owner clears the wait.
-- **C, inside four hours:** a wait on the User is recorded after the prompt and
-  cleared after the prompt's grace.
+- **C, inside four hours:** a wait on another role is recorded after the prompt
+  and cleared after the prompt's grace.
 - **E, inside the grace:** a wait recorded and cleared within the prompt's
   grace; the next unresolved turn is prompted.
 - **X, the upgrade (this tree only):** the migration's backfill keeps a wait
@@ -227,7 +229,7 @@ def scenario(root: Path, prefix: str) -> dict:
         turn("director")
         one_pass()
         seen["u_prompted"] = prompts(T, "director")
-        act(T, "request_dependency", "director", role="user",
+        act(T, "request_dependency", "director", role="ops",
             reason="Approve the pending polkit authentication dialog.")
         seen["u_waiting"] = waiting(T)
         age_wait(T)
@@ -271,7 +273,7 @@ def scenario(root: Path, prefix: str) -> dict:
         turn("main")
         one_pass()
         seen["c_prompted"] = prompts(T, "main")
-        act(T, "request_dependency", "main", role="user", reason="Which of the two layouts does the User want?")
+        act(T, "request_dependency", "main", role="ops", reason="Which of the two layouts does Ops want?")
         watch(1.5 * GRACE)
         seen["c_while_waiting"] = escalations(T)
         act(T, "clear_awaiting_role", "main")
@@ -285,7 +287,7 @@ def scenario(root: Path, prefix: str) -> dict:
         turn("ops")
         one_pass()
         seen["e_prompted"] = prompts(T, "ops")
-        act(T, "request_dependency", "ops", role="user", reason="A quick question for the User.")
+        act(T, "request_dependency", "ops", role="app", reason="A quick question for App.")
         act(T, "clear_awaiting_role", "ops")
         turn("ops")
         one_pass()
@@ -310,7 +312,7 @@ def scenario(root: Path, prefix: str) -> dict:
             turn("app")
             one_pass()
             seen["x1_prompted"] = prompts(T, "app")
-            act(T, "request_dependency", "app", role="user", reason="Waiting on the User's choice.")
+            act(T, "request_dependency", "app", role="ops", reason="Waiting on Ops' choice.")
             upgrade(T)
             seen["x1_backfilled"] = sql("SELECT (wait_recorded_at = awaiting_since_at)::text FROM "
                                         f"ticket_board.ticket_notification_state WHERE ticket_id = '{T}';")
@@ -327,7 +329,7 @@ def scenario(root: Path, prefix: str) -> dict:
             fixture.seed_postgres_ticket(admin, T, title=T, state="analysis", assignee="director", commit_exempt=True)
             act(T, "route", "director", state="in_progress", assignee="app")
             one_pass()
-            act(T, "request_dependency", "app", role="user", reason="Waiting on the User's sign-off.")
+            act(T, "request_dependency", "app", role="ops", reason="Waiting on Ops' sign-off.")
             age_wait(T)
             sql("SELECT ticket_board.enqueue_notification('PGU-614', 'unresolved_turn_repair', 'app', "
                 "'PGU-614 is still yours and this turn ended without resolving it.', jsonb_build_object("
@@ -377,10 +379,10 @@ def main() -> int:
                                    capture_output=True, text=True, env={**clean_env(), "PYTHONDONTWRITEBYTECODE": "1"})
             assert child.returncode == 0, child.stderr[-3000:]
             before = json.loads(child.stdout.strip().splitlines()[-1])
-        check(len(before["u_prompted"]) == 1 and before["u_waiting"] == "user" and before["u_still_waiting"] == "user"
+        check(len(before["u_prompted"]) == 1 and before["u_waiting"] == "ops" and before["u_still_waiting"] == "ops"
               and any("without resolving PGU-609 (director_review)" in m and "the grace period has passed" in m
                       for m in before["u_while_waiting"]),
-              f"main: past four hours, a ticket still recorded as waiting on the User told the Director its owner had "
+              f"main: past four hours, a ticket still recorded as waiting told the Director its owner had "
               f"not resolved it: {before['u_while_waiting']}")
         check(before["h_repair_events"].split()[:1] == ["send"],
               f"main: a prompt held while the owner recorded a wait was delivered once the wait passed four hours: "
@@ -400,9 +402,9 @@ def main() -> int:
               f"{key.upper()}: ordinary handling resumes -- the next unresolved turn prompts {role}, and a grace after "
               f"delivery the Director is told once: {a[f'{key}_resumed_prompts']} {a[f'{key}_resumed_escalations']} "
               f"{a[f'{key}_delivery_to_escalation']}")
-    check(a["u_waiting"] == "user" and a["u_still_waiting"] == "user" and a["u_while_waiting"] == []
+    check(a["u_waiting"] == "ops" and a["u_still_waiting"] == "ops" and a["u_while_waiting"] == []
           and a["u_enqueued_while_waiting"] == 0,
-          f"U: past four hours, through unresolved Director turns, a ticket waiting on the User queues and sends "
+          f"U: past four hours, through unresolved Director turns, a ticket waiting on another role queues and sends "
           f"nothing about an unresolved turn: {a['u_while_waiting']} ({a['u_enqueued_while_waiting']} queued)")
     check(a["h_held"] == [] and a["h_while_waiting"] == [] and a["h_repair_events"].split()[:1] == ["drop"],
           f"H: the prompt held when the wait was recorded is dropped, not delivered, once the pane is back, and "

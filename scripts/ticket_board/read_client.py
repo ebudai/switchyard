@@ -214,11 +214,16 @@ def needs_director(ticket: dict[str, Any], workflow: dict[str, Any] | None = Non
     them -- visible as cards on the board, absent from this list, and announced
     to nobody. Work in a stage the director owns that has not been handed to
     anyone is the director's: that is what triage is.
+
+    A wait on the User the board does not admit is the director's to repair
+    (SYRD-662): it hides the work from User Review and mutes its owner.
     """
     state = str(ticket.get("state", ""))
     assignee = str(ticket.get("assignee", ""))
     awaiting = str(ticket.get("awaiting_role", ""))
     if state == "director_review" or awaiting == "director":
+        return True
+    if (ticket.get("user_wait") or {}).get("valid") is False:
         return True
     if assignee == "director" and state in ACTIVE_STATES | {"backlog"}:
         return True
@@ -246,6 +251,7 @@ def format_ticket(ticket: dict[str, Any]) -> str:
         f"  blocked_reason: {ticket.get('blocked_reason', '') or '(none)'}",
         "",
         *format_queue_hold(ticket),
+        *format_user_wait(ticket),
         "Origin:",
         f"  origin_project: {ticket.get('origin_project', '') or '(none)'}",
         f"  external_source_ref: {ticket.get('external_source_ref', '') or '(none)'}",
@@ -260,6 +266,17 @@ def format_ticket(ticket: dict[str, Any]) -> str:
         *format_comments(ticket),
     ]
     return "\n".join(lines)
+
+
+def format_user_wait(ticket: dict[str, Any]) -> list[str]:
+    """Its wait on the User (SYRD-662): the Director's request, or why it is not valid and the repair."""
+    wait = ticket.get("user_wait")
+    if not isinstance(wait, dict):
+        return []
+    if wait.get("valid"):
+        return ["Waiting on the User:", f"  asked: {wait.get('request')}", f"  why: {wait.get('reason')}",
+                f"  by {wait.get('requested_by')} since {wait.get('since')}", ""]
+    return ["Waiting on the User (not valid):", f"  problem: {wait.get('problem')}", f"  repair: {wait.get('repair')}", ""]
 
 
 def format_queue_hold(ticket: dict[str, Any]) -> list[str]:

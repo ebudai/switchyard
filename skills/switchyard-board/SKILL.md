@@ -185,6 +185,12 @@ wait without a reason - prefer `request-dependency`, which is that plus the
 sentence the awaited role needs. Either way the wait clears when the awaited
 role *acts*, not when they reply.
 
+**The User is never a dependency.** `request-dependency` and `await-role` refuse
+the User: work reaches the User in User Review, after every gate it owes. Finish
+your stage through its declared transition, with the steps the User needs on the
+ticket. Work only a person outside the board can do is an `operator:<name>`
+blocker, which the director sets.
+
 **If you finish, transition.** A comment saying the work is done leaves the
 ticket exactly where it was. When the work produced no commit, the no-code
 submission is the action that ends your turn - see `allow_no_code` in

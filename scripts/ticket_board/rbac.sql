@@ -516,4 +516,18 @@ GRANT EXECUTE ON FUNCTION ticket_board.reconcile_provider_quota_holds(jsonb, tim
 GRANT EXECUTE ON FUNCTION ticket_board.provider_hold_status(timestamptz) TO ticket_board_service, ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.clear_provider_hold(text, text) TO ticket_board_service;
 
+-- SYRD-662: the Director's wait on the User, and how a ticket's wait on the User reads.
+REVOKE ALL ON ticket_board.ticket_user_wait_requests FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.user_wait_pending(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.workflow_user_wait_stage(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.user_wait_refusal(text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.user_wait_guidance(text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.await_user(text, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.guard_user_wait() FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.user_wait_status(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.uat_missing_gates(jsonb, jsonb, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.require_uat_gates() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ticket_board.await_user(text, text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.user_wait_status(text) TO ticket_board_service;
+
 COMMIT;

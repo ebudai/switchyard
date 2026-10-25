@@ -10,6 +10,7 @@ from typing import Any
 from .documentation_gate import validate_documentation_gate
 from .publisher_stage import validate_publisher
 from .router_role import router_holds, validate_router
+from .user_wait import validate_user_waits
 
 SCHEMA = "switchyard.workflow.v1"
 NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -446,6 +447,7 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
             "migrations",
             "reservation",
             "scheduling",
+            "user_waits",  # SYRD-662
         },
         "unknown workflow configuration field",
     )
@@ -1095,6 +1097,7 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
     validate_router(cfg, need)
     validate_documentation_gate(cfg, need)
     validate_publisher(cfg, need)  # SYRD-625
+    validate_user_waits(cfg, need)  # SYRD-662
     return cfg
 
 

@@ -581,6 +581,13 @@ def _build_parser() -> argparse.ArgumentParser:
     add_free_text_argument(uat, "--then-choose", help="what to choose then (default: Accept, or Send to Director)")
     uat.add_argument("--reconfirm", action="store_true",
                      help="restamp the current steps, unchanged, for the ticket as it is now")
+    await_user = subparsers.add_parser(
+        "await-user", help="Director: record that a ticket waits on the User, in a stage the workflow's user_waits "
+                           "lists; work otherwise reaches the User in User Review (SYRD-662)",
+    )
+    await_user.add_argument("ticket_id")
+    add_free_text_argument(await_user, "--reason", required=True, help="why only the User can act or decide next")
+    add_free_text_argument(await_user, "--request", required=True, help="the action or decision asked of the User")
     fresh_context = subparsers.add_parser(
         "force-fresh-context",
         help="Director: start a ticket in a fresh conversation at a package boundary, before its hand-off (SYRD-626)",
@@ -905,6 +912,8 @@ def main(argv: list[str] | None = None) -> int:
             response = client.set_uat_instructions(args.ticket_id, do_this=args.do_this or "",
                                                    you_should_see=args.you_should_see or "",
                                                    then_choose=args.then_choose or "", reconfirm=args.reconfirm)
+        elif command == "await_user":
+            response = client.await_user(args.ticket_id, reason=args.reason, request=args.request)
         elif command == "withdraw_signoff":
             response = client.withdraw_signoff(args.ticket_id, signoff=args.signoff, reason=args.reason)
         elif command == "measure_size":
@@ -971,7 +980,7 @@ def main(argv: list[str] | None = None) -> int:
                    "snooze_reminders", "clear_reminder_snooze", "claim_next", "approve_size_exception",
                    "enable_size_review", "measure_size", "set_report_intake", "force_fresh_context",
                    "uat_instructions", "extend_lease", "interrupt_lease", "set_cohort_quota", "clear_cohort_quota",
-                   "clear_provider_hold"}:
+                   "clear_provider_hold", "await_user"}:
         print(json.dumps(response))
     else:
         print(json.dumps(_ticket_from_response(response)))

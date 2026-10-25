@@ -779,10 +779,11 @@ def main() -> int:
     # 5. Not this error: no episode, nothing more said than before.
     # SYRD-595: once the owner is being prompted about an unresolved turn, its idle reminder ("is waiting in your
     # ... queue") is not a second prompt, and is not delivered; everything else it is told is as before.
+    # SYRD-662: the prompt no longer offers a dependency "or on the User".
     for mode in ("quotes", "quota"):
         check(after[mode]["episodes"] == [] and not retries(after[mode]["told"])
               and [m for _p, m, _a in after[mode]["told"]]
-              == [m for _p, m, _a in before[mode]["told"] if " is waiting in your " not in m],
+              == [m.replace(" or on the User", "") for _p, m, _a in before[mode]["told"] if " is waiting in your " not in m],
               f"{mode}: no capacity episode, and the pane told what it was before, idle reminders aside: {after[mode]}")
 
     # What a pass reports: the failed turn only while the hook says it is running and the screen ends on the

@@ -267,6 +267,14 @@ When the next action is genuinely another role's and there is no ticket to point
 at, `await-role` marks it and surfaces it to you. It clears when that role acts,
 not when they reply.
 
+A wait on the User is yours alone, and only in a stage the workflow's
+`user_waits` lists: `ticket-board-write await-user <id> --reason "..." --request
+"<what the User is asked to do or decide>"`. Nobody can name the User through
+`request-dependency` or `await-role`. Work ready for UAT goes through the gates
+into User Review instead, and operator work outside the board is an
+`operator:<name>` blocker. A wait on the User the board does not admit shows in
+your queue: clear it (`clear-awaiting-role`) or have its owner finish the stage.
+
 ## Roles, sessions and visible panes
 
 These reshape the running team rather than a ticket, so they belong to you:

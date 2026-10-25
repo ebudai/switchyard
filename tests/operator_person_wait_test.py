@@ -173,8 +173,9 @@ def scenario(root: Path, prefix: str, setting_only: bool = False, before_root: P
         seen["operator_acts"] = cli(server, "operator", "add-comment", "MEFP-9", "--text", "I am Eric.")
         # The gate it waits in still holds.
         seen["sign_off_while_blocked"] = cli(server, "director", "workflow-action", "MEFP-9", "director_dat_sign_off")
-        # A wait on the User (SYRD-549) is the other form: it lapses after its window, the blocker does not.
-        seen["user_wait"] = cli(server, "director", "request-dependency", "MEFP-11", "--role", "user", "--reason", REASON)
+        # A recorded wait is the other form: it lapses after its window, the blocker does not. (It named the User
+        # until SYRD-662, which leaves a wait on the User to the Director's await-user where a workflow allows one.)
+        seen["user_wait"] = cli(server, "director", "request-dependency", "MEFP-11", "--role", "main", "--reason", REASON)
 
         # Removing it any way but the release.
         for t in ("MEFP-10", "MEFP-12"):
@@ -253,7 +254,7 @@ def scenario(root: Path, prefix: str, setting_only: bool = False, before_root: P
         # The control: MEFP-13 waits on nothing recorded, in the same stage, for the same owner.
         seen["control_prompted"] = any(m.startswith("MEFP-13 is still yours") for _t, m in sent[before_watch:])
         # Three days on, with every notice delivered: the blocker still holds the
-        # ticket quiet, and a wait on the User has lapsed after its window.
+        # ticket quiet, and a recorded wait has lapsed after its window.
         sql(admin, "UPDATE ticket_board.ticket_notification_state SET awaiting_since_at = awaiting_since_at - interval '5 hours' "
                    "WHERE ticket_id = 'MEFP-11';")
         seen["held_later"] = {t: sql(admin, f"SELECT ticket_board.ticket_turn_is_resolved('{t}', clock_timestamp() + interval '3 days')::text;")
@@ -353,8 +354,8 @@ def main() -> int:
     check(after["control_prompted"] and after["watched"] == [] and before["watched"] == [],
           f"while the Director's turns end, again and again, past the grace, nothing is sent about MEFP-9 -- no prompt, "
           f"no escalation -- while MEFP-13, waiting on nothing recorded, is prompted: {after['watched_all']}")
-    check(before["held_later"] == after["held_later"] == {"MEFP-9": "true", "MEFP-11": "false"},
-          f"three days on, the blocker still holds the ticket quiet, where a wait on the User (SYRD-549) has lapsed "
+    check(after["user_wait"] == "ok" and before["held_later"] == after["held_later"] == {"MEFP-9": "true", "MEFP-11": "false"},
+          f"three days on, the blocker still holds the ticket quiet, where a recorded wait has lapsed "
           f"after its window: {after['held_later']}")
     check(before["replaced"] == before["cleared"] == before["legacy_cleared"] == "ok"
           and before["after_replaced"]["blocked_by"] == ["MEFP-11"] and before["after_cleared"]["blocked_by"] == []

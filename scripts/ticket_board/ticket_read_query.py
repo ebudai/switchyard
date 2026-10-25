@@ -47,12 +47,14 @@ def select_ticket_rows(conn: Any, ticket_id: str | None = None) -> list[dict[str
         "to_regprocedure('ticket_board.ticket_privileged_jobs(text)') IS NOT NULL AS privileged_jobs, "
         "to_regprocedure('ticket_board.ticket_routing(text)') IS NOT NULL AS routing, "
         "to_regprocedure('ticket_board.ticket_context_continuation(text)') IS NOT NULL AS continuation, "
-        "to_regprocedure('ticket_board.ticket_uat(text)') IS NOT NULL AS uat"
+        "to_regprocedure('ticket_board.ticket_uat(text)') IS NOT NULL AS uat, "
+        "to_regprocedure('ticket_board.user_wait_status(text)') IS NOT NULL AS user_wait"
     ).fetchone()
     present = (dict(probe) if isinstance(probe, dict)
                else {"snooze": probe[0], "size_review": probe[1], "serial_queue": probe[2],
                      "privileged_jobs": probe[3], "routing": probe[4],
-                     "continuation": len(probe) > 5 and probe[5], "uat": len(probe) > 6 and probe[6]}
+                     "continuation": len(probe) > 5 and probe[5], "uat": len(probe) > 6 and probe[6],
+                     "user_wait": len(probe) > 7 and probe[7]}
                if probe is not None else {})
     snooze_sql = (
         "ticket_board.ticket_reminder_snooze(t.id, clock_timestamp())" if present.get("snooze") else "NULL::jsonb"
@@ -65,6 +67,9 @@ def select_ticket_rows(conn: Any, ticket_id: str | None = None) -> list[dict[str
                         else "NULL::jsonb")
     # SYRD-629: the User's UAT instructions and questions; none on an older board.
     uat_sql = "ticket_board.ticket_uat(t.id)" if present.get("uat") else "NULL::jsonb"
+    # SYRD-662: a wait on the User, the Director's or not; asked only of a ticket that waits on somebody.
+    user_wait_sql = ("CASE WHEN COALESCE(notification_state.awaiting_role, '') <> '' "
+                     "THEN ticket_board.user_wait_status(t.id) END" if present.get("user_wait") else "NULL::jsonb")
     # SYRD-599: what Router classifies against, and the record of its decisions. Asked only of a
     # ticket Router holds or has decided, so a board read does not read the workflow once per ticket.
     routing_sql = ("CASE WHEN t.assignee = 'router' OR EXISTS (SELECT 1 FROM ticket_board.router_decisions d "
@@ -267,6 +272,7 @@ SELECT
     {routing_sql} AS routing,
     {continuation_sql} AS context_continuation,
     {uat_sql} AS uat,
+    {user_wait_sql} AS user_wait,
     COALESCE(
         (SELECT array_agg(b.blocker_ticket_id ORDER BY b.position)
          FROM ticket_board.ticket_blockers b

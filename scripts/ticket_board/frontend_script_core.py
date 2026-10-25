@@ -221,6 +221,14 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-
       if (blockedSummary) {
         alerts.push({ kind: 'blocked', title: 'Blocked', text: blockedSummary });
       }
+      // SYRD-662: the Director's request of the User, on the card wherever the ticket is; or a wait on the
+      // User the board does not admit, which is the Director's to repair.
+      const userWait = ticket.user_wait;
+      if (userWait && userWait.valid) {
+        alerts.push({ kind: 'blocked', title: 'Waiting on the User', text: `The Director asks: ${userWait.request}` });
+      } else if (userWait) {
+        alerts.push({ kind: 'blocked', title: 'Invalid wait on the User', text: `${userWait.problem}. Repair: ${userWait.repair}.` });
+      }
       return alerts;
     }
 

@@ -102,6 +102,8 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
     "force_fresh_context": {"director"},
     "set_uat_instructions": {"director"},
     "ask_director": {"user"},
+    # SYRD-662: a wait on the User is the Director's decision.
+    "await_user": {"director"},
 }
 
 #: The two operations that exist to move a ticket the declared workflow will
@@ -166,6 +168,9 @@ COMPOSED_OPERATION_CAPABILITIES = {
     # the User's question is a comment that also tells the Director.
     "set_uat_instructions": frozenset({"director_edit"}),
     "ask_director": frozenset({"add_comment"}),
+    # SYRD-662: a wait on the User is await_role and its sentence, as request_dependency is, and the Director's
+    # alone: the capabilities that identify the control role. The database checks both itself.
+    "await_user": frozenset({"add_comment", "await_role", "merge", "set_blockers", "set_manually_controlled"}),
     # Withdrawing an approval is the control role's: the capabilities that define it (SYRD-49). The
     # database checks role_controls_project itself (SYRD-598).
     "withdraw_signoff": frozenset({"set_manually_controlled", "merge"}),

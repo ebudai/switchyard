@@ -9,12 +9,12 @@ from __future__ import annotations
 from typing import Any
 
 from . import (cohort_ops, provider_hold_ops, context_continuation, documentation_candidate, execution_lease_ops, pull_queue, reminder_snooze,
-               report_intake, router_role, size_review, uat_instructions, ui_delegation)
+               report_intake, router_role, size_review, uat_instructions, ui_delegation, user_wait)
 
 OPERATIONS = (reminder_snooze.OPERATIONS | size_review.OPERATIONS | report_intake.OPERATIONS
               | router_role.OPERATIONS | ui_delegation.OPERATIONS | context_continuation.OPERATIONS
               | uat_instructions.OPERATIONS | execution_lease_ops.OPERATIONS | cohort_ops.OPERATIONS
-              | provider_hold_ops.OPERATIONS)
+              | provider_hold_ops.OPERATIONS | user_wait.OPERATIONS)
 
 
 def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: str,
@@ -33,6 +33,8 @@ def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: s
         return context_continuation.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
     if operation in uat_instructions.OPERATIONS:  # SYRD-629
         return uat_instructions.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
+    if operation in user_wait.OPERATIONS:  # SYRD-662
+        return user_wait.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
     if operation in execution_lease_ops.OPERATIONS:  # SYRD-616
         return execution_lease_ops.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
     if operation in provider_hold_ops.OPERATIONS:  # SYRD-644
@@ -64,12 +66,14 @@ def ticket_fields(row: Any) -> dict[str, Any]:
     whether its first hand-off continued its author's conversation and why, or
     the Director's request that it start fresh, null when neither (SYRD-626);
     uat is the User's current UAT instructions and questions, null when there are
-    none (SYRD-629).
+    none (SYRD-629); user_wait is its wait on the User -- the Director's request,
+    or why it is not valid and the repair -- null when it waits on nobody of the
+    kind (SYRD-662).
     """
     return {"reminder_snooze": row.get("reminder_snooze"), "size_review": row.get("size_review"),
             "serial_queue": row.get("serial_queue"), "privileged_jobs": row.get("privileged_jobs") or [],
             "routing": row.get("routing"), "context_continuation": row.get("context_continuation"),
-            "uat": row.get("uat")}
+            "uat": row.get("uat"), "user_wait": row.get("user_wait")}
 
 
 def reservation_fields(app: Any) -> dict[str, Any]:

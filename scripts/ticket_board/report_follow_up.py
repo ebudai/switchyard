@@ -69,6 +69,13 @@ def usable_binding_key(secret: str, binding_key: str) -> str:
     return binding_key if binding_key and not hmac.compare_digest(binding_key.encode(), secret.encode()) else ""
 
 
+def server_credentials(report_token: str | None, report_binding_key: str | None) -> tuple[str, str]:
+    """A board server's report secret and usable binding key. Every transport takes them, so each answers alike
+    (SYRD-684)."""
+    secret = str(report_token or "").strip()
+    return secret, usable_binding_key(secret, report_binding_key or "")
+
+
 def credential_project(secret: str, binding_key: str, token: str) -> str | None:
     """The project a credential is bound to; '' for the board's shared token; None for neither."""
     secret, token = str(secret or "").strip(), str(token or "").strip()

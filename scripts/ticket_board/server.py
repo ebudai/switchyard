@@ -1191,8 +1191,7 @@ class TicketBoardServer(ThreadingHTTPServer):
         self.role_authority = role_authority
         self.build_id = board_build_id()
         self.write_token = write_token or secrets.token_urlsafe(32)
-        self.report_token = (report_token or "").strip()
-        self.report_binding_key = report_follow_up.usable_binding_key(self.report_token, report_binding_key or "")
+        self.report_token, self.report_binding_key = report_follow_up.server_credentials(report_token, report_binding_key)
         super().__init__(address, TicketBoardHandler)
 
     def server_close(self) -> None:
@@ -1217,6 +1216,8 @@ class TicketBoardUnixServer(ThreadingUnixHTTPServer):
         events: TicketBoardEventHub,
         director_notifier: DirectorNotifier,
         role_authority: LocalRoleAuthority | None = None,
+        report_token: str | None = None,
+        report_binding_key: str | None = None,
     ) -> None:
         self.socket_path = socket_path
         self.app = app
@@ -1229,6 +1230,8 @@ class TicketBoardUnixServer(ThreadingUnixHTTPServer):
         )
         self.build_id = board_build_id()
         self.write_token = ""
+        # The same report credentials as the HTTP server: both answer GET /api/runtime-assignments (SYRD-684).
+        self.report_token, self.report_binding_key = report_follow_up.server_credentials(report_token, report_binding_key)
         socket_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             socket_path.unlink()

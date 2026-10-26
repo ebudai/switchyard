@@ -117,6 +117,8 @@ def run_server(args: argparse.Namespace) -> int:
                 events=event_hub,
                 director_notifier=director_notifier,
                 role_authority=role_authority,
+                report_token=getattr(args, "tenant_report_token", ""),
+                report_binding_key=getattr(args, "tenant_report_binding_key", ""),
             )
         except OSError as exc:
             print(f"[ticket-board] WARNING: local write socket disabled at {args.unix_socket}: {exc}", file=sys.stderr)

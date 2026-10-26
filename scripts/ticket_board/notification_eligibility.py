@@ -191,7 +191,7 @@ WHERE q.id = %s AND q.ticket_id = %s
         }
 
     def hold_for_delivery(self, conn: Any, connect: Callable[[], Any], ticket_id: str,
-                          target_role: str) -> "DeliveryHold | None":
+                          target_role: str, payload: str = "") -> "DeliveryHold | None":
         """Hold the row that decides whether this notice is current, from its last read through its send (SYRD-631).
 
         ticket_board.hold_for_delivery takes the ticket row FOR SHARE NOWAIT, in
@@ -211,11 +211,13 @@ WHERE q.id = %s AND q.ticket_id = %s
             held = connect()
             held.execute("BEGIN")
             row = held.execute("SELECT ticket_board.hold_for_delivery(%s, %s) AS held", (ticket_id, target_role)).fetchone()
+            # A deadline notice is current while any ticket its batch released as ready is: hold each (SYRD-679).
+            all_held = bool(row["held"] if isinstance(row, dict) else row[0]) and reminder_snooze.hold_due_members(held, payload)
         except Exception as exc:  # no hold, no send: the next pass asks again
             self.logger.warning("Could not hold %s for delivery: %s", ticket_id, exc)
             return None
         hold = DeliveryHold(held, conn)
-        if not bool(row["held"] if isinstance(row, dict) else row[0]):
+        if not all_held:
             hold.release()
             return None
         # Were a later step of the listener's own to need the held row, it would wait on itself where no
@@ -237,10 +239,12 @@ WHERE q.id = %s AND q.ticket_id = %s
         safe = self.ledger.safe_json_payload(payload)
         # SYRD-675: a stall escalation's drop names what has happened since it was queued.
         premise = stall_episode.stale_reason(self, conn, payload) if kind == "stall_escalation" else None
+        snooze = reminder_snooze.due_stale_reason(conn, payload)  # SYRD-679: why a deadline notice went stale
         self.ledger.trace(conn, notification_id=notification_id, ticket_id=ticket_id, target_role=target_role,
                           kind=kind, event="drop", busy_reason="stale_notification",
                           detail={"payload": safe, **({"phase": phase} if phase else {}),
-                                  **({"stall_premise": premise} if premise else {})})
+                                  **({"stall_premise": premise} if premise else {}),
+                                  **({"snooze_premise": snooze} if snooze else {})})
         self.ledger.trace(conn, notification_id=notification_id, ticket_id=ticket_id, target_role=target_role,
                           kind=kind, event="listener_ack",
                           detail={"reason": "stale_notification", **({"phase": phase} if phase else {})})
@@ -405,8 +409,9 @@ WHERE id = %s
         kind = str(parsed.get("kind") or "").strip().lower()
         # A snooze batch's deadline notice is about the batch, addressed to the
         # role that set it; the ticket it hangs on proves nothing (SYRD-537).
+        # Only while a ticket it calls ready is still the one snoozed (SYRD-679).
         if kind == reminder_snooze.REMINDER_SNOOZE_DUE:
-            return True
+            return reminder_snooze.due_stale_reason(conn, payload) is None
         # A pull policy's idle-capacity alert is about the ready queue and is
         # for the Director: current while its ticket still waits there, which
         # the state and assignee checks above already establish (SYRD-539).

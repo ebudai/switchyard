@@ -177,6 +177,8 @@ GRANT EXECUTE ON FUNCTION ticket_board.ticket_reminder_snooze(text, timestamptz)
 GRANT EXECUTE ON FUNCTION ticket_board.reminder_snoozes(timestamptz) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.ticket_reminders_snoozed(text, timestamptz) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.emit_due_reminder_snoozes(timestamptz) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.reminder_snooze_due_stale_reason(jsonb) TO ticket_board_listener;  -- SYRD-679
+GRANT EXECUTE ON FUNCTION ticket_board.hold_reminder_snooze_due(jsonb) TO ticket_board_listener;  -- SYRD-679
 -- SYRD-541: size review records, the Director's exception and enablement, and the packet read.
 GRANT EXECUTE ON FUNCTION ticket_board.size_review_enabled() TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.size_ceilings(text, text[]) TO ticket_board_service;

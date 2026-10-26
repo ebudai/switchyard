@@ -1075,7 +1075,7 @@ WHERE (r.definition->>'active')::boolean
             # does): from here to the send nothing of ours waits on it. A write in flight makes the notice wait a
             # pass; one made after this read and waiting is let in first; any later waits for the send.
             hold = self.eligibility.hold_for_delivery(
-                conn, lambda: self.connector(self.conninfo, **self._connector_kwargs()), ticket_id, target_role)
+                conn, lambda: self.connector(self.conninfo, **self._connector_kwargs()), ticket_id, target_role, payload)
             if hold is None:
                 self.ledger.requeue(conn, notification_id, attempts, DELIVERY_HOLD_REQUEUE_ERROR)
                 continue

@@ -64,6 +64,45 @@ def snoozed_reminder_detail(conn: Any, ticket_id: str, payload: str) -> dict[str
     return {"reason": REMINDER_SNOOZED, "snoozed_kind": str(parsed.get("kind") or "")}
 
 
+def due_stale_reason(conn: Any, payload: str) -> str | None:
+    """Why a queued deadline notice is no longer to be sent, or None: not one, or still current (SYRD-679).
+
+    Current while its batch closed with this one notice and a ticket it released
+    as ready is still the one that was snoozed, and not snoozed again since.
+    """
+    row = _ask_about_due(conn, payload, "reminder_snooze_due_stale_reason", "reason")
+    reason = None if row is None else (row["reason"] if isinstance(row, dict) else row[0])
+    if isinstance(reason, (bytes, bytearray, memoryview)):  # the listener's connection reads text as bytes
+        reason = bytes(reason).decode("utf-8", errors="replace")
+    return None if reason is None else str(reason)
+
+
+def hold_due_members(held: Any, payload: str) -> bool:
+    """Hold, in the delivery hold's own transaction, every ticket a deadline notice's batch released as ready (SYRD-679).
+
+    hold_for_delivery holds the anchor's row only, but the notice is current
+    while any of them is still the one snoozed, so a write to any of them must
+    wait for the send. False when one is being written now: the notice waits a
+    pass. True for any other notice, and on a board older than SYRD-679.
+    """
+    row = _ask_about_due(held, payload, "hold_reminder_snooze_due", "held")
+    return row is None or bool(row["held"] if isinstance(row, dict) else row[0])
+
+
+def _ask_about_due(conn: Any, payload: str, function: str, column: str) -> Any:
+    """ticket_board.<function>(payload) for a deadline notice, or None: another notice, or a board without it."""
+    try:
+        parsed = json.loads(payload)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict) or str(parsed.get("kind") or "").strip().lower() != REMINDER_SNOOZE_DUE:
+        return None
+    present = conn.execute(f"SELECT to_regprocedure('ticket_board.{function}(jsonb)') IS NOT NULL AS present").fetchone()
+    if present is None or not bool(present["present"] if isinstance(present, dict) else present[0]):
+        return None  # a board older than SYRD-679 has nothing to ask
+    return conn.execute(f"SELECT ticket_board.{function}(%s::jsonb) AS {column}", (payload,)).fetchone()
+
+
 def discard_if_snoozed(
     eligibility: Any, conn: Any, notification_id: int, ticket_id: str, target_role: str, kind: str, payload: str,
     phase: str,

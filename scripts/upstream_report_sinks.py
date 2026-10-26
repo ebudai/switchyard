@@ -9,7 +9,8 @@ decision instead, kept in that board's own root-owned registry record (`tenant_r
 - `report_boards` lists the registered boards a tenant could report to, read as root's records name them;
 - `choose_report_board` is `switchyard new`'s decision, made before anything is created: the one declared
   board, an operator's explicit choice, an explicit opt-out, or -- when no board is registered at all --
-  none available. Two candidates are never chosen between silently;
+  none available. Two candidates are never chosen between silently, and a board root has not declared is
+  never offered as one: with none or several declared, `new` stops with the repair (SYRD-686);
 - `record_report_decision` keeps that decision in root's provisioning directory, so `resume-provision`
   honours it after an interrupted `new`;
 - `record_report_outcome` writes what became of it into the tenant's root-owned registry record
@@ -176,14 +177,55 @@ def repair_command(slug: str, *, board: str = "") -> str:
     return f"sudo switchyard upgrade {slug} --only upstream-report{named}"
 
 
+def declare_command(board: str = "") -> str:
+    return f"sudo switchyard upgrade {board or '<board>'} --only accept-reports"
+
+
+def receiver_evidence(slugs: Sequence[str], *, registry_dir: Path | None = None) -> tuple[str, str]:
+    """(the one registered board root's records say this host's tenants are connected to, or "", what they say).
+
+    Read from each tenant's root-owned registry outcome, which root writes once it has connected that tenant,
+    never from a tenant's own configuration: that names whatever URL the tenant wrote, and the board it names
+    would become the target of the root command this recommends (Audit of 06da7b1b, SYRD-686)."""
+    registered = set(slugs)
+    connected: dict[str, list[str]] = {}
+    for slug in slugs:
+        outcome = recorded_outcome(slug, registry_dir=registry_dir)
+        board = str(outcome.get("board") or "")
+        if outcome.get("state") == CONNECTED and board in registered:
+            connected.setdefault(board, []).append(slug)
+    said = "; ".join(f"{', '.join(sorted(tenants))} connected to {board}" for board, tenants in sorted(connected.items()))
+    return (next(iter(connected)) if len(connected) == 1 else ""), f"root's records show {said}" if said else ""
+
+
+def undecided_repair(boards: Sequence[ReportBoard], *, registry_dir: Path | None = None) -> str:
+    """What root does when no single declared board is the default: the declaration it is missing, or the one of
+    several declared boards to name."""
+    declared = sorted(board.slug for board in boards if board.declared)
+    if len(declared) > 1:
+        return (f"Name one with --upstream-report-board <{'|'.join(declared)}>, or withdraw the others with "
+                f"`sudo switchyard upgrade <slug> --only refuse-reports`")
+    if declared:
+        return (f"Repair {declared[0]}'s board, or withdraw it with "
+                f"`sudo switchyard upgrade {declared[0]} --only refuse-reports`")
+    one, evidence = receiver_evidence([board.slug for board in boards], registry_dir=registry_dir)
+    return (f"{evidence[0].upper() + evidence[1:] + '. ' if evidence else ''}Declare the board that takes this "
+            f"host's tenant reports, once: `{declare_command(one)}`")
+
+
 def repair_hint(slug: str, *, registry_dir: Path | None = None) -> str:
     """The command that connects `slug`, as it can be run on this host now: plain when the host's declared
-    board or a recorded one resolves it, otherwise with the boards it may name."""
+    board or a recorded one resolves it, otherwise with the declared boards it may name or, with none declared,
+    after the declaration it needs. A board root has not declared is not offered (SYRD-686)."""
     boards = report_boards(exclude=slug, registry_dir=registry_dir)
     default, _why = declared_default(boards, registry_dir=registry_dir)
-    if default is not None or not boards:
+    declared = [b.slug for b in boards if b.declared]
+    if default is not None or not boards or len(declared) == 1:
         return f"`{repair_command(slug)}`"
-    return f"`{repair_command(slug, board='<slug>')}`, naming one of: {', '.join(b.slug for b in boards)}"
+    if declared:
+        return f"`{repair_command(slug, board='<slug>')}`, naming one of: {', '.join(declared)}"
+    one, _evidence = receiver_evidence([b.slug for b in boards], registry_dir=registry_dir)
+    return f"`{declare_command(one)}` once, then `{repair_command(slug)}`"
 
 
 def unconnected_warning(slug: str, why: str, *, repair: str) -> str:
@@ -202,18 +244,16 @@ def choose_report_board(
     upstream_report_url: str = "",
     upstream_report_board: str = "",
     no_upstream_report: bool = False,
-    yes: bool = False,
     registry_dir: Path | None = None,
     home_for_user: Callable[[str], Path | None] | None = None,
-    input_func: Callable[[str], str] = input,
-    print_func: Callable[[str], None] = print,
 ) -> ReportChoice:
     """Where `slug` will file reports, decided before anything of it exists. A refusal raises SystemExit.
 
     Named (`--upstream-report-url`, `--upstream-report-board`): it must be a registered board other than
     `slug`. `--no-upstream-report`: an explicit opt-out. Otherwise the one board root declared; with no
-    other board registered, none is available. Anything else is the operator's to choose: asked when
-    there is somebody to ask, refused under --yes.
+    other board registered, none is available. Anything else is refused, asked or not, with the repair: every
+    tenant's board mints a report token and answers at its URL, so offering each as a choice presented
+    ordinary tenant boards as report receivers (SYRD-686).
     """
     url = upstream_report_url.strip().rstrip("/")
     named = upstream_report_board.strip()
@@ -245,34 +285,11 @@ def choose_report_board(
                             source="the host's declared report board")
     if not boards:
         return ReportChoice(UNAVAILABLE, source="no other board is registered on this host")
-    listing = _listing(boards)
-    if yes:
-        raise SystemExit(
-            f"switchyard: {slug} needs a decision about Switchyard reports before it is created: {why}. "
-            f"Registered boards: {'; '.join(listing)}. Re-run with --upstream-report-board <slug>, or with "
-            "--no-upstream-report to create it unable to file reports. To make one board every new tenant's "
-            "default: `sudo switchyard upgrade <slug> --only accept-reports`. Nothing was created."
-        )
-    from scripts import team_launcher as launcher
-
-    print_func(f"switchyard: where should {slug} file Switchyard reports? {why[0].upper() + why[1:]}.")
-    for number, line in enumerate(listing, 1):
-        print_func(f"switchyard:   {number}. {line}")
-    print_func(f"switchyard:   none. create {slug} unable to file reports")
-    for _attempt in range(launcher.SWITCHYARD_PROMPT_MAX_ATTEMPTS):
-        answer = launcher._read_prompt(f"Report board [1-{len(boards)} or none]: ", input_func=input_func).strip()
-        if answer.lower() == "none":
-            return ReportChoice(OPTED_OUT, source="the operator's answer")
-        board = next((b for n, b in enumerate(boards, 1) if answer in (str(n), b.slug)), None)
-        if board is None:
-            print_func(f"switchyard: answer a number from 1 to {len(boards)}, a slug, or none")
-            continue
-        problem = board_problem(board, registry_dir=registry_dir, home_for_user=home_for_user)
-        if problem:
-            print_func(f"switchyard: {board.slug} cannot take {slug}'s reports: {problem}")
-            continue
-        return ReportChoice(CONNECT, board=board.slug, url=board.url, source="the operator's answer")
-    raise SystemExit(f"switchyard: no report board was chosen for {slug}. Nothing was created.")
+    raise SystemExit(
+        f"switchyard: {slug} needs a decision about Switchyard reports before it is created: {why}, and a board "
+        f"root has not declared is not offered as one. {undecided_repair(boards, registry_dir=registry_dir)}, then run this again; or re-run "
+        "with --no-upstream-report to create it unable to file reports. Nothing was created."
+    )
 
 
 def choice_summary(slug: str, choice: ReportChoice, *, registry_dir: Path | None = None) -> str:
@@ -526,7 +543,10 @@ def _recorded_hint(slug: str, *, registry_dir: Path | None) -> str:
     declared = [other for other in others if is_declared(_registry_record(other, registry_dir))]
     if len(declared) == 1 or not others:
         return f"`{repair_command(slug)}`"
-    return f"`{repair_command(slug, board='<slug>')}`, naming one of: {', '.join(others)}"
+    if declared:
+        return f"`{repair_command(slug, board='<slug>')}`, naming one of: {', '.join(declared)}"
+    one, _evidence = receiver_evidence(others, registry_dir=registry_dir)
+    return f"`{declare_command(one)}` once, then `{repair_command(slug)}`"
 
 
 def report_status_lines(slugs: Sequence[str], *, registry_dir: Path | None = None) -> list[str]:
@@ -681,6 +701,6 @@ def declare_report_board(
     others = [b.slug for b in report_boards(exclude=slug, registry_dir=registry_dir) if b.declared]
     print_func(f"switchyard: {slug} {'takes' if accept else 'does not take'} reports from this host's other tenants"
                + ("; `switchyard new` connects every new tenant to it by default" if accept and not others else "")
-               + (f"; with {', '.join(others)} also declared, `switchyard new` asks which"
+               + (f"; with {', '.join(others)} also declared, `switchyard new` refuses until one is named"
                   if accept and others else ""))
     return 0

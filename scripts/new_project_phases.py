@@ -300,14 +300,14 @@ def _resolve_new_project_choices(
     from scripts import documentation_onboarding
 
     print_func(documentation_onboarding.summary_line(selected_documentation))
-    # Where its reports go, decided before anything exists and said before the confirmation: an ambiguous
-    # host is asked, or refused under --yes, rather than guessed for (SYRD-674).
+    # Where its reports go, decided before anything exists and said before the confirmation (SYRD-674): a host
+    # with no single declared report board is refused with the repair, never guessed for or offered every board
+    # as a choice (SYRD-686).
     from scripts import upstream_report_sinks
 
     upstream_report = upstream_report_sinks.choose_report_board(
         resolved_slug, upstream_report_url=upstream_report_url, upstream_report_board=upstream_report_board,
-        no_upstream_report=no_upstream_report, yes=yes, registry_dir=registry_dir, input_func=input_func,
-        print_func=print_func,
+        no_upstream_report=no_upstream_report, registry_dir=registry_dir,
     )
     print_func(upstream_report_sinks.choice_summary(resolved_slug, upstream_report, registry_dir=registry_dir))
     # The one confirmation, and it comes last: after every choice -- Router,

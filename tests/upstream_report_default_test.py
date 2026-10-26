@@ -223,20 +223,21 @@ def test_discovery_finds_the_one_declared_board() -> None:
     with host() as h:
         h.add_board("syrd", declared=True)
         h.add_board("otto")
-        said: list[str] = []
-        choice = sinks.choose_report_board("pie", yes=True, registry_dir=h.registry, print_func=said.append)
+        choice, said = said_by(sinks.choose_report_board, "pie", registry_dir=h.registry)
         check(choice.state == sinks.CONNECT and choice.board == "syrd" and choice.url == h.boards["syrd"].url
-              and choice.source == "the host's declared report board" and said == [],
-              f"one declared board: the default, nothing asked even under --yes: {choice} {said}")
+              and choice.source == "the host's declared report board" and said == "",
+              f"one declared board: the default, nothing asked: {choice} {said}")
         summary = sinks.choice_summary("pie", choice, registry_dir=h.registry)
         check(f"pie files them to syrd at {h.boards['syrd'].url}" in summary and "before any pane starts" in summary,
               f"said before the confirmation: {summary}")
         h.register("mefp", h.config_path, declared=True)
-        choice, said = said_by(sinks.choose_report_board, "mefp", yes=True, registry_dir=h.registry)
+        choice, said = said_by(sinks.choose_report_board, "mefp", registry_dir=h.registry)
         check(getattr(choice, "board", "") == "syrd", f"a declared board is never its own default: {choice} {said}")
 
 
 def test_no_single_default_is_never_guessed() -> None:
+    """SYRD-686 replaced the menu SYRD-674 asked here, which offered every registered board: refused, with the
+    repair, and nothing written."""
     from scripts import upstream_report_sinks as sinks
 
     cases = {
@@ -244,46 +245,25 @@ def test_no_single_default_is_never_guessed() -> None:
         "two declared": dict(syrd=dict(declared=True), otto=dict(declared=True)),
         "declared without a token": dict(syrd=dict(declared=True, token=False), otto=dict()),
     }
-    reasons = {"none declared": "no board on this host is declared to take tenant reports",
-               "two declared": "2 boards are declared to take tenant reports (otto, syrd)",
-               "declared without a token": "syrd is declared to take tenant reports, but"}
+    reasons = {"none declared": ("no board on this host is declared to take tenant reports",
+                                 "`sudo switchyard upgrade <board> --only accept-reports`"),
+               "two declared": ("2 boards are declared to take tenant reports (otto, syrd)",
+                                "--upstream-report-board <otto|syrd>"),
+               "declared without a token": ("syrd is declared to take tenant reports, but",
+                                            "`sudo switchyard upgrade syrd --only refuse-reports`")}
     for label, boards in cases.items():
         with host() as h:
             for slug, kwargs in boards.items():
                 h.add_board(slug, **kwargs)
             before = h.tree()
-            choice, said = said_by(sinks.choose_report_board, "pie", yes=True, registry_dir=h.registry)
+            choice, said = said_by(sinks.choose_report_board, "pie", registry_dir=h.registry)
             exit_text = getattr(choice, "exit", "")
-            check(reasons[label] in exit_text and "syrd (SYRD)" in exit_text and "otto (OTTO)" in exit_text
-                  and "--upstream-report-board <slug>" in exit_text and "--no-upstream-report" in exit_text
-                  and "--only accept-reports" in exit_text and exit_text.endswith("Nothing was created."),
-                  f"{label}: refused under --yes, naming why, the boards and the flags: {exit_text}")
+            why, repair = reasons[label]
+            check(why in exit_text and repair in exit_text and "--no-upstream-report" in exit_text
+                  and "not offered" in exit_text and exit_text.endswith("Nothing was created.") and said == "",
+                  f"{label}: refused, naming why and the repair, nothing asked: {exit_text} {said}")
+            check("mefp" not in exit_text and "(OTTO)" not in exit_text, f"{label}: no board listed as a choice: {exit_text}")
             check(h.tree() == before, f"{label}: and nothing written: {said}")
-            answers = iter(["9", "nobody", "otto"])
-            prompts: list[str] = []
-            said_lines: list[str] = []
-            choice = sinks.choose_report_board("pie", registry_dir=h.registry, print_func=said_lines.append,
-                                               input_func=lambda prompt: prompts.append(prompt) or next(answers))
-            check(choice.state == sinks.CONNECT and choice.board == "otto" and choice.source == "the operator's answer"
-                  and len(prompts) == 3 and prompts[0] == "Report board [1-3 or none]: ",
-                  f"{label}: asked, re-asked on a wrong answer, and the operator's choice kept: {choice} {prompts}")
-            check([line.split(". ")[1].split(" ")[0] for line in said_lines if line.startswith("switchyard:   ")]
-                  == ["mefp", "otto", "syrd", "create"], f"{label}: every board offered, and none: {said_lines}")
-            check(any("none. create pie" in line for line in said_lines),
-                  f"{label}: every board offered, and none: {said_lines}")
-            choice = sinks.choose_report_board("pie", registry_dir=h.registry, print_func=lambda _l: None,
-                                               input_func=lambda _p: "none")
-            check(choice.state == sinks.OPTED_OUT, f"{label}: none is an opt-out: {choice}")
-    with host() as h:
-        h.add_board("syrd", token=False)
-        h.add_board("otto")
-        answers = iter(["syrd", "2"])  # mefp, otto, syrd
-        lines: list[str] = []
-        choice = sinks.choose_report_board("pie", registry_dir=h.registry, print_func=lines.append,
-                                           input_func=lambda _p: next(answers))
-        check(choice.board == "otto" and any("syrd cannot take pie's reports" in line and
-                                             "TICKET_BOARD_TENANT_REPORT_TOKEN" in line for line in lines),
-              f"a chosen board with no report token is refused and asked again: {choice} {lines}")
 
 
 def test_nothing_registered_is_unavailable_not_refused() -> None:
@@ -291,7 +271,7 @@ def test_nothing_registered_is_unavailable_not_refused() -> None:
 
     with host() as h:
         (h.registry / "mefp.json").unlink()
-        choice = sinks.choose_report_board("pie", yes=True, registry_dir=h.registry)
+        choice = sinks.choose_report_board("pie", registry_dir=h.registry)
         check(choice.state == sinks.UNAVAILABLE, f"no other board at all: unavailable, and creation goes on: {choice}")
         summary = sinks.choice_summary("pie", choice, registry_dir=h.registry)
         check(summary.startswith("switchyard: WARNING: pie will not be able to file Switchyard reports")
@@ -312,7 +292,7 @@ def test_an_explicit_choice_must_be_a_registered_board_not_its_own() -> None:
             (dict(upstream_report_url=url + "/"), ("connect", "otto", "--upstream-report-url")),
             (dict(no_upstream_report=True), ("opted-out", "", "--no-upstream-report")),
         ):
-            choice = sinks.choose_report_board("pie", yes=True, registry_dir=h.registry, **kwargs)
+            choice = sinks.choose_report_board("pie", registry_dir=h.registry, **kwargs)
             check((choice.state, choice.board, choice.source) == want, f"{kwargs}: {choice}")
         for kwargs, refusal in (
             (dict(upstream_report_board="nobody"), "--upstream-report-board nobody names no board registered"),
@@ -322,7 +302,7 @@ def test_an_explicit_choice_must_be_a_registered_board_not_its_own() -> None:
             (dict(upstream_report_board="otto", upstream_report_url=h.boards["syrd"].url), "names no board registered"),
             (dict(no_upstream_report=True, upstream_report_board="otto"), "cannot be combined"),
         ):
-            got, _said = said_by(sinks.choose_report_board, "pie", yes=True, registry_dir=h.registry, **kwargs)
+            got, _said = said_by(sinks.choose_report_board, "pie", registry_dir=h.registry, **kwargs)
             check(refusal in getattr(got, "exit", "") and "Nothing was created." in got.exit,
                   f"{kwargs}: refused before anything exists: {got}")
 
@@ -407,7 +387,7 @@ def test_the_default_is_connected_before_the_first_launch() -> None:
 
     with host() as h:
         url = h.add_board("syrd", declared=True)
-        choice = sinks.choose_report_board("mefp", yes=True, registry_dir=h.registry)
+        choice = sinks.choose_report_board("mefp", registry_dir=h.registry)
         config, said, board = new_until_sign_in(h, choice)
         check(config.upstream_report_url == url and all(role.env.get("TICKET_BOARD_REPORT_URL") == url
                                                         and role.env.get("TICKET_BOARD_TENANT_REPORT_TOKEN_FILE")

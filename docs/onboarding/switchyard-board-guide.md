@@ -394,9 +394,14 @@ sudo switchyard upgrade syrd --only accept-reports     # --only refuse-reports w
 
 With exactly one board declared, `switchyard new` connects every new tenant to it before
 any pane starts, and says so before its confirmation and again at the end. Otherwise it
-asks which registered board (or none), and under `--yes` it refuses before creating
-anything. `--upstream-report-board <slug>` or `--upstream-report-url <board URL>` names
-one; `--no-upstream-report` creates the tenant unable to file, with a warning naming the
+refuses before creating anything, asked or not, and says the repair: with none declared,
+the `--only accept-reports` to run, naming a board only when root's own registry records
+show this host's tenants connected to that one board (never from a tenant's configuration,
+which names whatever its tenant wrote); with several, the ones to choose between. Every tenant's
+board mints a report token, so an undeclared board is never offered as a receiver
+(SYRD-686). The declaration is kept in that board's registry record, which install never
+touches and every upgrade step rewrites with its other keys intact.
+`--upstream-report-board <slug>` or `--upstream-report-url <board URL>` names one; `--no-upstream-report` creates the tenant unable to file, with a warning naming the
 repair. A board that does not answer at its URL as itself is never recorded as connected.
 What became of it -- connected, failed, opted out, or no board available -- is kept in the
 tenant's own registry record, and `switchyard status` shows it for every project.

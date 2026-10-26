@@ -32,6 +32,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
@@ -354,6 +355,7 @@ def _switchyard_teardown_actions(
     remove_owner_home: bool,
     remove_owner_user: bool,
 ) -> tuple[SwitchyardTeardownAction, ...]:
+    from scripts import desktop_access
     from scripts import team_launcher as launcher
 
     owner_home = home_base / plan.owner_user
@@ -427,6 +429,13 @@ def _switchyard_teardown_actions(
         launcher.SwitchyardTeardownAction(
             f"remove switchyard registry entry {registry_path}",
             ("rm", "-f", str(registry_path)),
+        ),
+        # The tenant's desktop grant, on whichever desktop holds one: its
+        # owner's unit, its exposure and any legacy runtime entry (SYRD-687).
+        # While the tenant account still exists, so its uid can be found.
+        launcher.SwitchyardTeardownAction(
+            f"withdraw any desktop grant to {plan.owner_user} for {plan.project}",
+            (sys.executable, str(Path(desktop_access.__file__).resolve()), "teardown", plan.project, plan.owner_user),
         ),
     ]
     from scripts import board_services

@@ -11,61 +11,36 @@ RUNBOOK="$REPO_ROOT/docs/pgu-wayland-clipboard-access.md"
 }
 bash -n "$SCRIPT"
 
-grep -q 'setfacl -m "u:${AGENT_USER}:x" "$runtime_dir"' "$SCRIPT" || {
-    echo "FAIL: helper must grant agent traverse ACL on Eric runtime dir" >&2
+# SYRD-687: a named ACL on the desktop owner's runtime directory makes it 0710,
+# which Qt, KDE and the XDG spec refuse. The helper grants nothing any more.
+if grep -Eq 'setfacl (-[a-z-]+ )*-m' "$SCRIPT"; then
+    echo "FAIL: helper must not add an ACL entry anywhere" >&2
+    exit 1
+fi
+for command in apply-acl install-eric-user-unit; do
+    if output="$(PGU_WAYLAND_GUI_USER=nobody-such PGU_WAYLAND_AGENT_USER=nobody-such "$SCRIPT" "$command" 2>&1)"; then
+        echo "FAIL: $command must refuse" >&2
+        exit 1
+    fi
+    grep -q 'is retired' <<<"$output" || {
+        echo "FAIL: $command must say it is retired: $output" >&2
+        exit 1
+    }
+done
+grep -q 'setfacl --no-mask -x "u:${AGENT_USER}" "$path"' "$SCRIPT" || {
+    echo "FAIL: retire must take the agent's entry off without recalculating the mask" >&2
     exit 1
 }
-grep -q 'setfacl -m "u:${AGENT_USER}:rw" "$socket_path"' "$SCRIPT" || {
-    echo "FAIL: helper must grant agent rw ACL on Wayland socket" >&2
+grep -q 'systemctl --user disable --now "$SERVICE_NAME"' "$SCRIPT" || {
+    echo "FAIL: retire must disable the login unit that re-applied the grant" >&2
     exit 1
 }
-grep -q 'After=graphical-session.target plasma-kwin_wayland.service' "$SCRIPT" || {
-    echo "FAIL: user unit must run after Eric graphical Wayland session starts" >&2
+grep -q 'scripts/pgu-wayland-clipboard-access.sh retire' "$RUNBOOK" || {
+    echo "FAIL: runbook must document the retire command" >&2
     exit 1
 }
-grep -q 'install -m 0755 "$(realpath "$0")" "$install_path"' "$SCRIPT" || {
-    echo "FAIL: installer must copy helper into Eric home for reboot persistence" >&2
-    exit 1
-}
-grep -q 'ExecStart=${install_path} apply-acl --wait' "$SCRIPT" || {
-    echo "FAIL: user unit must wait for the recreated Wayland socket" >&2
-    exit 1
-}
-grep -q 'WantedBy=graphical-session.target default.target' "$SCRIPT" || {
-    echo "FAIL: user unit must be enabled for future logins" >&2
-    exit 1
-}
-grep -q 'tmux setenv -g XDG_RUNTIME_DIR "$(gui_runtime_dir)"' "$SCRIPT" || {
-    echo "FAIL: helper must set pgu tmux XDG_RUNTIME_DIR to Eric runtime" >&2
-    exit 1
-}
-grep -q 'tmux setenv -g WAYLAND_DISPLAY "$WAYLAND_NAME"' "$SCRIPT" || {
-    echo "FAIL: helper must set pgu tmux WAYLAND_DISPLAY to wayland-0" >&2
-    exit 1
-}
-grep -q 'XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$WAYLAND_NAME" wl-paste --list-types' "$SCRIPT" || {
-    echo "FAIL: helper must verify the real wl-paste path" >&2
-    exit 1
-}
-
-grep -q 'scripts/pgu-wayland-clipboard-access.sh install-eric-user-unit' "$RUNBOOK" || {
-    echo "FAIL: runbook lacks Eric persistent install command" >&2
-    exit 1
-}
-grep -q '~/.local/bin/pgu-wayland-clipboard-access' "$RUNBOOK" || {
-    echo "FAIL: runbook must document the durable installed helper path" >&2
-    exit 1
-}
-grep -q 'scripts/pgu-wayland-clipboard-access.sh apply-agent-tmux-env' "$RUNBOOK" || {
-    echo "FAIL: runbook lacks agent tmux env command" >&2
-    exit 1
-}
-grep -q 'XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 wl-paste --list-types' "$RUNBOOK" || {
-    echo "FAIL: runbook lacks clipboard verification command" >&2
-    exit 1
-}
-grep -q 'Reboot verification is the acceptance test' "$RUNBOOK" || {
-    echo "FAIL: runbook must document reboot persistence verification" >&2
+grep -q '0710 instead of 0700' "$RUNBOOK" || {
+    echo "FAIL: runbook must say why the helper is retired" >&2
     exit 1
 }
 

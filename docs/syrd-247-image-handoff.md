@@ -78,12 +78,16 @@ echoed.
 
 ### Where it lands
 
-The image goes in `<gui runtime>/switchyard-paste/<project>/`:
+The image goes in the hand-off directory of the grant's exposure,
+`/var/lib/switchyard/desktop/<gui uid>-<tenant uid>-<project>/paste/`. Until
+SYRD-687 it went in `<gui runtime>/switchyard-paste/<project>/`, whose
+traverse entry on the owner's runtime directory made that directory 0710; see
+[desktop-access.md](desktop-access.md).
 
 | path | owner | mode and ACL | tenant may |
 |---|---|---|---|
-| `switchyard-paste/` | GUI owner | `0700` + `u:<tenant>:--x` | traverse |
-| `switchyard-paste/<project>/` | GUI owner | `0700` + `u:<tenant>:r-x` | list, open |
+| `<gui uid>-<tenant uid>-<project>/` | GUI owner | `0700` + `u:<tenant>:--x` | traverse |
+| `<gui uid>-<tenant uid>-<project>/paste/` | GUI owner | `0700` + `u:<tenant>:r-x` | list, open |
 | `paste-<32 hex>.<ext>` | GUI owner | `0600` + `u:<tenant>:r--` | read |
 | `paste-<32 hex>.handoff.json` | GUI owner | `0600` + `u:<tenant>:r--` | read |
 
@@ -98,12 +102,12 @@ incomplete.
 **Refusals:** `prepare_handoff_dir` refuses:
 - a symlink, a non-directory, a foreign owner, or a group/other write bit
   anywhere it would write;
-- a runtime where the approved grant's own traverse entry is not applied. In
-  that case the tenant could reach nothing, so nothing is handed over.
+- an exposure where the approved grant's own traverse entry is not applied, or
+  no exposure at all. In that case the tenant could reach nothing, so nothing is
+  handed over.
 
 **What the tenant can do there:** list the project's directory and read its
-handoffs. It cannot list the runtime or the parent directory, create anything,
-or delete anything. Another tenant, even one of the same owner's other
+handoffs. It cannot list the exposure, create anything, or delete anything. Another tenant, even one of the same owner's other
 projects, reaches nothing.
 
 **Same-UID roles:** every role of the tenant shares its UID, so any of them can
@@ -176,8 +180,7 @@ not stop the listener's notices.
   expired image leaves within about 5 s, without any further paste.
 - **Also removed:**
   - each `paste-image` sweeps before it writes;
-  - revoking the grant (`rollback`) removes the project's directory;
-  - the runtime directory itself goes when the owner's last session ends.
+  - revoking the grant (`rollback`) removes the hand-off directory.
 - **Before the upgrade:** until a tenant upgrade refreshes the owner's copy of
   the helper, the service does not sweep. Removal then falls to the next paste,
   to rollback, and to logout.

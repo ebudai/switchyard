@@ -1,8 +1,9 @@
 """The listener's half of an image handoff: tell a role where the owner left its image (SYRD-247).
 
 `switchyard paste-image`, run by the desktop owner, leaves one image and a
-manifest in `<gui runtime>/switchyard-paste/<project>/` and grants this tenant
-read on them. The owner cannot type into a tenant's pane; this account can,
+manifest in the hand-off directory of the grant's exposure
+(`/var/lib/switchyard/desktop/<grant>/paste/`, SYRD-687) and grants this
+tenant read on them. The owner cannot type into a tenant's pane; this account can,
 through the same `directorctl send` every notice uses. So the listener, on each
 pass of its loop:
 
@@ -50,7 +51,7 @@ DELIVERY_WINDOW_SECONDS = desktop.HANDOFF_TTL_SECONDS - MIN_RETAINED_AFTER_DELIV
 #: Where the project registry lives, as `team_launcher` resolves it.
 REGISTRY_DIR_ENV = "SWITCHYARD_PROJECT_REGISTRY_DIR"
 DEFAULT_REGISTRY_DIR = Path("/etc/switchyard/projects")
-#: How often the owner's runtime is looked up again: a logout and login moves it.
+#: How often the exposure is proven again: an upgrade or a withdrawn grant changes it.
 RELOCATE_SECONDS = 60.0
 MANIFEST_NAME = re.compile(r"(paste-[0-9a-f]{32})\.handoff\.json")
 MAX_MANIFEST_BYTES = 4096
@@ -112,7 +113,7 @@ class ImageHandoffs:
     project: str
     owner: str
     owner_uid: int
-    #: The GUI owner's runtime directory, asked again every RELOCATE_SECONDS.
+    #: The grant's exposure directory, proven again every RELOCATE_SECONDS.
     locate: Callable[[], Path]
     ledger_path: Path | None = None
     clock: Callable[[], float] = time.time
@@ -136,7 +137,7 @@ class ImageHandoffs:
         if now - self._located_at >= RELOCATE_SECONDS:
             self._located_at = now
             try:
-                self._directory = desktop.handoff_dir(self.locate(), self.project)
+                self._directory = desktop.handoff_dir(self.locate())
             except (desktop.DesktopAccessError, OSError):
                 self._directory = None
         return self._directory
@@ -266,7 +267,7 @@ def from_environment(
         project=project,
         owner=owner.pw_name,
         owner_uid=owner.pw_uid,
-        locate=lambda: desktop.runtime_for(owner),
+        locate=lambda: desktop.exposure_for(policy),
         ledger_path=Path(runtime) / f"switchyard-image-handoffs-{project}.json" if runtime else None,
     )
 

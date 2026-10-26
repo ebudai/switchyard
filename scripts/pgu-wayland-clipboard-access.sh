@@ -9,14 +9,17 @@ SERVICE_NAME="${PGU_WAYLAND_SERVICE_NAME:-pgu-agent-wayland-clipboard.service}"
 usage() {
     cat <<'EOF'
 Usage:
-  pgu-wayland-clipboard-access.sh apply-acl [--wait]
-  pgu-wayland-clipboard-access.sh install-eric-user-unit
+  pgu-wayland-clipboard-access.sh retire
   pgu-wayland-clipboard-access.sh apply-agent-tmux-env
   pgu-wayland-clipboard-access.sh print-agent-env
   pgu-wayland-clipboard-access.sh verify
 
-Restores pgu agent-pane image paste on Eric's Wayland session by granting the
-agent user access to Eric's Wayland socket and exporting the matching pane env.
+Retired (SYRD-687). This helper granted the agent user named ACL entries on
+Eric's XDG runtime directory, whose group bits then read 0710; Qt, KDE and
+the XDG spec require exactly 0700. `apply-acl` and `install-eric-user-unit`
+now refuse. `retire`, run as Eric, disables the login unit they installed and
+takes the agent's two entries off again. Desktop access for a Switchyard
+tenant is its desktop policy: switchyard upgrade <project> --desktop-policy FILE.
 
 Environment overrides:
   PGU_WAYLAND_GUI_USER=eric
@@ -52,71 +55,43 @@ require_setfacl() {
     }
 }
 
-wait_for_socket() {
-    local socket_path
-    socket_path="$(wayland_socket)"
-    for _ in $(seq 1 120); do
-        [[ -S "$socket_path" ]] && return 0
-        sleep 0.5
-    done
-    echo "error: timed out waiting for $socket_path" >&2
-    return 1
+refuse_runtime_acl() {
+    echo "error: $1 is retired: a named ACL on $(gui_runtime_dir) makes it 0710, and Qt, KDE and the XDG spec require 0700 (SYRD-687)." >&2
+    echo "error: give the tenant a Switchyard desktop policy instead: switchyard upgrade <project> --desktop-policy FILE" >&2
+    exit 1
 }
 
-apply_acl() {
-    local wait_flag="${1:-}"
-    local runtime_dir socket_path
+# Take one entry off without widening any other: --no-mask keeps the mask as
+# it is, and with no named entry left the mask goes, so the group bits are the
+# group entry's again.
+drop_agent_entry() {
+    local path="$1"
+    [[ -e "$path" ]] || return 0
+    getfacl -cpn "$path" 2>/dev/null | grep -q "^user:$(agent_uid):" || return 0
+    setfacl --no-mask -x "u:${AGENT_USER}" "$path"
+    if ! getfacl -cpn "$path" | grep -Eq '^(user|group):[^:]+:'; then
+        setfacl -x m:: "$path" 2>/dev/null || true
+    fi
+    echo "Removed ${AGENT_USER}'s entry from $path"
+}
+
+retire_access() {
+    local unit_path
     require_setfacl
-    if [[ "$wait_flag" == "--wait" ]]; then
-        wait_for_socket
-    fi
-    runtime_dir="$(gui_runtime_dir)"
-    socket_path="$(wayland_socket)"
-    [[ -d "$runtime_dir" ]] || {
-        echo "error: $runtime_dir does not exist; is $GUI_USER logged into Plasma?" >&2
-        exit 1
-    }
-    [[ -S "$socket_path" ]] || {
-        echo "error: $socket_path does not exist; is the Wayland session up?" >&2
-        exit 1
-    }
-    setfacl -m "u:${AGENT_USER}:x" "$runtime_dir"
-    setfacl -m "u:${AGENT_USER}:rw" "$socket_path"
-    echo "Granted ${AGENT_USER} access to $socket_path"
-}
-
-install_eric_user_unit() {
-    local install_path unit_dir unit_path
     if [[ "$(id -un)" != "$GUI_USER" ]]; then
-        echo "error: install-eric-user-unit must run as $GUI_USER" >&2
+        echo "error: retire must run as $GUI_USER" >&2
         exit 1
     fi
-    install_path="${HOME}/.local/bin/pgu-wayland-clipboard-access"
-    mkdir -p "$(dirname "$install_path")"
-    install -m 0755 "$(realpath "$0")" "$install_path"
-    unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-    unit_path="$unit_dir/$SERVICE_NAME"
-    mkdir -p "$unit_dir"
-    cat >"$unit_path" <<EOF
-[Unit]
-Description=Grant ${AGENT_USER} access to ${GUI_USER}'s Wayland clipboard socket for pgu panes
-After=graphical-session.target plasma-kwin_wayland.service
-PartOf=graphical-session.target
-
-[Service]
-Type=oneshot
-Environment=PGU_WAYLAND_GUI_USER=${GUI_USER}
-Environment=PGU_WAYLAND_AGENT_USER=${AGENT_USER}
-Environment=PGU_WAYLAND_DISPLAY=${WAYLAND_NAME}
-ExecStart=${install_path} apply-acl --wait
-RemainAfterExit=yes
-
-[Install]
-WantedBy=graphical-session.target default.target
-EOF
-    systemctl --user daemon-reload
-    systemctl --user enable --now "$SERVICE_NAME"
-    echo "Installed $install_path and started $unit_path"
+    unit_path="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$SERVICE_NAME"
+    if [[ -e "$unit_path" ]]; then
+        systemctl --user disable --now "$SERVICE_NAME" || true
+        rm -f "$unit_path" "${HOME}/.local/bin/pgu-wayland-clipboard-access"
+        systemctl --user daemon-reload
+        echo "Disabled and removed $unit_path"
+    fi
+    drop_agent_entry "$(wayland_socket)"
+    drop_agent_entry "$(gui_runtime_dir)"
+    stat -c '%a %n' "$(gui_runtime_dir)"
 }
 
 print_agent_env() {
@@ -155,11 +130,11 @@ verify_access() {
 }
 
 case "${1:-}" in
-    apply-acl)
-        apply_acl "${2:-}"
+    apply-acl|install-eric-user-unit)
+        refuse_runtime_acl "$1"
         ;;
-    install-eric-user-unit)
-        install_eric_user_unit
+    retire)
+        retire_access
         ;;
     apply-agent-tmux-env)
         apply_agent_tmux_env

@@ -65,7 +65,7 @@ SEAMS = {
     "_drop_database_command": {"sql_identifier": 1},
     "owner_removal_refusal": {"TEARDOWN_PROTECTED_USERS": 1, "current_user_name": 1, "read_host_desktop_approval": 1, "TEARDOWN_MINIMUM_OWNER_UID": 2},
     "_owner_removal_actions": {"SwitchyardTeardownAction": 4, "_bash_action": 4},
-    "_switchyard_teardown_actions": {"SwitchyardTeardownAction": 14, "_bash_action": 2, "tenant_control_helper_path": 2, "_drop_database_command": 1,
+    "_switchyard_teardown_actions": {"SwitchyardTeardownAction": 15, "_bash_action": 2, "tenant_control_helper_path": 2, "_drop_database_command": 1,
                                      "_owner_removal_actions": 1},
     "_confirm_teardown_project": {"_read_prompt": 1},
     "switchyard_teardown_command": {"_teardown_project_context": 1, "_ticket_board_existing_ticket_count": 1, "SwitchyardTeardownPlan": 1,
@@ -437,14 +437,18 @@ def test_every_teardown_action_in_order() -> None:
         "reload systemd manager configuration",
         "drop PostgreSQL database p367_board",
         "remove board release root /srv/p367/live",
-        "remove switchyard registry entry /fixture/registry/p367.json"], f"thirteen actions, in order: {[a.label for a in base]}")
+        "remove switchyard registry entry /fixture/registry/p367.json",
+        # SYRD-687: the tenant's desktop grant, while its account still exists.
+        "withdraw any desktop grant to syrd367-owner for p367"], f"fourteen actions, in order: {[a.label for a in base]}")
     commands = [a.command for a in base]
     check(commands[2:9] == [("rm", "-f", "/home/syrd367-owner/.config/systemd/user/p367-notify.service"), ("rm", "-f", "/etc/systemd/system/p367-ticket-board.service"),
                            ("rm", "-f", "/etc/tmpfiles.d/p367.conf"), ("rm", "-f", "/etc/sudoers.d/47-p367-control"),
                            ("rm", "-f", "/usr/local/lib/switchyard/p367/control-grant.json"), ("rm", "-f", "/usr/local/libexec/switchyard-control-p367"),
                            ("rm", "-f", "/etc/polkit-1/rules.d/50-p367.rules")]
           and commands[9] == ("systemctl", "daemon-reload") and commands[11] == ("rm", "-rf", "--", "/srv/p367/live")
-          and commands[12] == ("rm", "-f", "/fixture/registry/p367.json"), f"the exact removals: {commands}")
+          and commands[12] == ("rm", "-f", "/fixture/registry/p367.json")
+          and commands[13][1:] == (str(ROOT / "scripts" / "desktop_access.py"), "teardown", "p367", "syrd367-owner"),
+          f"the exact removals: {commands}")
     check(commands[10] == ("sudo", "-u", "postgres", "psql", "-X", "-v", "ON_ERROR_STOP=1", "postgresql:///postgres?host=/var/run/postgresql", "-c",
                            'DROP DATABASE IF EXISTS "p367_board" WITH (FORCE);'), f"the database drop: {commands[10]}")
     check(commands[0] == ("bash", "-lc", "if systemctl list-unit-files --no-legend p367-ticket-board.service | grep -q .; then "
@@ -452,10 +456,10 @@ def test_every_teardown_action_in_order() -> None:
           and "systemctl --user disable --now p367-notify.service || true" in commands[1][2] and "sudo -u syrd367-owner env" in commands[1][2],
           "the board service and the owner's listener, each only if present")
     full = actions_for(remove_owner_home=True, remove_owner_user=True)
-    check([a.label for a in full[13:]] == ["remove owner home directory /home/syrd367-owner", "disable linger for owner syrd367-owner",
+    check([a.label for a in full[14:]] == ["remove owner home directory /home/syrd367-owner", "disable linger for owner syrd367-owner",
                                            "stop the systemd user manager and session for syrd367-owner", "wait for syrd367-owner's remaining processes to exit",
                                            "remove owner user account syrd367-owner"]
-          and full[13].command == ("rm", "-rf", "--", "/home/syrd367-owner") and isinstance(full, tuple),
+          and full[14].command == ("rm", "-rf", "--", "/home/syrd367-owner") and isinstance(full, tuple),
           "the home, then the four owner steps, only when asked")
     check(base[0].command_display == "bash -lc 'if systemctl list-unit-files --no-legend p367-ticket-board.service | grep -q .; then "
                                      "systemctl disable --now p367-ticket-board.service; fi'", "the display is shlex.join")
@@ -588,12 +592,12 @@ def test_the_command_guards_dry_run_confirmation_and_residue() -> None:
                                                        "pass --drop-nonempty-board to confirm that data loss"), f"a non-empty board: {got!r}")
     fx = Teardown(); fx.count = 3
     check(fx.run(drop_nonempty_board=True, confirm="p367") == 0 and fx.kinds()[-2:] == ["confirm", "run"] and fx.log[-2] == ("confirm", SLUG, "p367")
-          and fx.log[-1] == ("run", 13) and fx.said[-1] == "switchyard: teardown complete for p367",
-          f"confirmed, then the thirteen actions run, and done: {fx.log}")
+          and fx.log[-1] == ("run", 14) and fx.said[-1] == "switchyard: teardown complete for p367",
+          f"confirmed, then the fourteen actions run, and done: {fx.log}")
     fx = Teardown(); fx.residue = ["the account still exists: o:x:1500"]
     got = fx.run(remove_owner_user=True, remove_owner_home=True, confirm="p367")
     check(isinstance(got, SystemExit) and str(got) == ("switchyard: teardown did NOT remove syrd367-owner; p367 is not safe to recreate under the same slug.\n"
-                                                       "  - the account still exists: o:x:1500") and fx.log[-2] == ("run", 18) and fx.kinds()[-1] == "residue",
+                                                       "  - the account still exists: o:x:1500") and fx.log[-2] == ("run", 19) and fx.kinds()[-1] == "residue",
           f"the account is read back after the actions: {got!r}")
     fx = Teardown()
     fx.run(dry_run=True, home_base=Path("/fixture/homes"))

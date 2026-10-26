@@ -194,7 +194,9 @@ def test_otto_shaped_teardown_dry_run_lists_its_actions() -> None:
     tenant.roll_back(*OTTO_MISSING)
     code, lines, calls = tenant.teardown_dry_run()
     actions = [line for line in lines if line.strip()[:1].isdigit() and ". " in line]
-    check(code == 0 and len(actions) == 13 and "switchyard: dry-run only; no changes made" in lines
+    # Fourteen since SYRD-687 added withdrawing the tenant's desktop grant.
+    check(code == 0 and len(actions) == 14 and "switchyard: dry-run only; no changes made" in lines
+          and any(f"withdraw any desktop grant to {ME} for otto" in line for line in actions)
           and any("drop PostgreSQL database otto_ticket_board" in line for line in actions)
           and any(f"remove board release root {tenant.home_base / ME / 'otto-ticketboard-live'}" in line for line in actions),
           f"teardown --dry-run of the otto-shaped tenant lists its actions, with no plan-field refusal: {code} {lines}")

@@ -125,6 +125,14 @@ class Desktop:
     def uninstall(self, policy: dict[str, object]) -> None:
         self.calls.append(("uninstall", policy.get("tag"), None))
 
+    def retire_legacy_access(self, policy: dict[str, object], *, helper: object = None) -> list[str]:
+        self.calls.append(("retire", policy.get("tag"), None))
+        return ["/run/user/1327 is 0700"]
+
+    def owner_action(self, policy: dict[str, object], action: str, *, helper: object = None) -> list[str]:
+        self.calls.append((action, policy.get("tag"), None))
+        return []
+
 
 def tenant(policy: object) -> Tenant:
     return Tenant("p327", "syrd327-owner", policy,
@@ -270,7 +278,8 @@ def test_configure_installs_prepares_records_and_puts_back_on_failure() -> None:
         fake = Desktop()
         out = io.StringIO()
         with patched(desktop_access, validate_policy=fake.validate_policy, install=fake.install,
-                     uninstall=fake.uninstall), patched(team_launcher, **seams), contextlib.redirect_stdout(out):
+                     uninstall=fake.uninstall, retire_legacy_access=fake.retire_legacy_access,
+                     owner_action=fake.owner_action), patched(team_launcher, **seams), contextlib.redirect_stdout(out):
             dry = project_desktop.configure_project_desktop(tenant(PREVIOUS), config_path=config_path,
                                                             policy_path=Path("headless"), dry_run=True)
             dry_calls = [call[0] for call in fake.calls]
@@ -278,6 +287,10 @@ def test_configure_installs_prepares_records_and_puts_back_on_failure() -> None:
                                                                    policy_path=None, runner=no_runner)
         check(dry.desktop_access == PREVIOUS and dry_calls == ["validate"] and "no access changed" in out.getvalue(),
               f"a dry run validates, says what it would record, and changes nothing: {dry_calls}")
+        # SYRD-687: the legacy runtime-directory entries come off only once the policy is prepared and recorded.
+        check([call[0] for call in fake.calls if call[0] != "validate"][-1:] == ["retire"]
+              and "desktop access for p327: /run/user/1327 is 0700" in out.getvalue(),
+              f"recorded, then the legacy grant retired and its outcome said: {fake.calls}")
         check(prepared == [PREVIOUS] and written == [
             ("p327.json", {"project": "p327", "desktop_access": PREVIOUS}, "syrd327-owner"),
             ("desktop-policy.json", PREVIOUS, "syrd327-owner")] and configured.desktop_access == PREVIOUS,
@@ -289,7 +302,8 @@ def test_configure_installs_prepares_records_and_puts_back_on_failure() -> None:
         fake = Desktop()
         written.clear()
         with patched(desktop_access, validate_policy=fake.validate_policy, install=fake.install,
-                     uninstall=fake.uninstall), \
+                     uninstall=fake.uninstall, retire_legacy_access=fake.retire_legacy_access,
+                     owner_action=fake.owner_action), \
                 patched(team_launcher, **{**seams, "prepare_project_desktop": fails_to_prepare}):
             new_policy = Path(raw) / "new.json"
             new_policy.write_text(json.dumps(WAYLAND), encoding="utf-8")
@@ -308,7 +322,8 @@ def test_configure_installs_prepares_records_and_puts_back_on_failure() -> None:
 
         fake = Desktop(fail_install=desktop_access.DesktopAccessError("syrd327 cannot reach the session"))
         with patched(desktop_access, validate_policy=fake.validate_policy, install=fake.install,
-                     uninstall=fake.uninstall), patched(team_launcher, **seams):
+                     uninstall=fake.uninstall, retire_legacy_access=fake.retire_legacy_access,
+                     owner_action=fake.owner_action), patched(team_launcher, **seams):
             try:
                 project_desktop.configure_project_desktop(tenant(None), config_path=config_path,
                                                           policy_path=None, runner=no_runner)

@@ -18,9 +18,10 @@ So the desktop owner hands over one image, never a capability:
 * One `image/*` type the clipboard offers, read with whichever tool reaches it
   (`wl-paste`, then `xclip` through XWayland), and refused past
   `MAX_IMAGE_BYTES` WHILE it is read.
-* Written into `<gui runtime>/switchyard-paste/<project>/`, a directory only
-  the owner can write. The tenant may traverse its parent, list it, and read
-  each file, through `desktop_access.grant`.
+* Written into the hand-off directory of the grant's exposure
+  (`/var/lib/switchyard/desktop/<grant>/paste/`, SYRD-687), a directory
+  only the owner can write. The tenant may traverse the exposure, list the
+  directory, and read each file, through `desktop_access.grant`.
 * The image first, then its manifest, renamed into place last, so the tenant's
   listener never sees a manifest for an image that is not complete.
 
@@ -220,7 +221,7 @@ def deposit(
     clipboard: Clipboard | None = None,
     uid: int | None = None,
     home: Path | None = None,
-    runtime_for: Callable[[Any], Path] = desktop.runtime_for,
+    locate: Callable[[dict[str, Any]], Path] = desktop.exposure_for,
     grant: Callable[[Path, int, str], Any] = desktop.grant,
     clock: Callable[[], float] = time.time,
     token: Callable[[], str] = lambda: secrets.token_hex(16),
@@ -235,7 +236,7 @@ def deposit(
     me = pwd.getpwuid(uid)
     policy = approved_policy(project, uid=uid, home=Path(me.pw_dir) if home is None else home)
     tenant_uid = pwd.getpwnam(policy["tenant_user"]).pw_uid
-    runtime = runtime_for(me)
+    exposure = locate(policy)
 
     board = clipboard or Clipboard()
     mime = chosen_image_type(board.types())
@@ -243,8 +244,8 @@ def deposit(
     if not payload:
         raise PasteImageError("switchyard: the clipboard's image was empty; nothing was written.")
 
-    leaf = desktop.prepare_handoff_dir(runtime, project, tenant_uid)
-    desktop.sweep_handoffs(runtime, project)
+    leaf = desktop.prepare_handoff_dir(exposure, tenant_uid)
+    desktop.sweep_handoffs(exposure)
     stem = f"paste-{token()}"
     image = leaf / f"{stem}.{IMAGE_TYPES[mime]}"
     staged = leaf / f".tmp-{stem}{MANIFEST_SUFFIX}"

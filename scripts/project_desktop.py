@@ -103,10 +103,17 @@ def configure_project_desktop(config: ProjectConfig, *, config_path: Path,
         payload["desktop_access"] = policy
         launcher._write_json_atomic(config_path, payload, owner_user=owner_user)
         launcher._write_json_atomic(config_path.parent / "desktop-policy.json", policy, owner_user=owner_user)
-        return configured
     except (Exception, SystemExit) as exc:
         if installed_new:
             desktop.uninstall(policy)
+        elif policy["mode"] == "wayland":
+            # The same policy, moved onto this release's helper: put the one it
+            # replaced back, legacy entries and all (SYRD-687).
+            try:
+                desktop.owner_action(policy, "revert-owner", helper=helper)
+            except desktop.DesktopAccessError as revert_failed:
+                print(f"switchyard: {config.project}'s previous desktop access helper could not be put back: "
+                      f"{revert_failed}")
         if previous and previous.get("mode") == "wayland" and previous != policy:
             desktop.install(previous, helper=helper or Path(__file__).resolve().with_name("desktop_access.py"))
         if isinstance(exc, desktop.DesktopAccessError):
@@ -120,3 +127,14 @@ def configure_project_desktop(config: ProjectConfig, *, config_path: Path,
                 "stopped before any phase, so no board, listener or role session was touched."
             ) from exc
         raise
+    if policy["mode"] == "wayland":
+        # Only now, with the exposure verified as the tenant, do the legacy
+        # entries come off the desktop owner's runtime directory (SYRD-687).
+        try:
+            for line in desktop.retire_legacy_access(policy, helper=helper):
+                print(f"switchyard: desktop access for {config.project}: {line}")
+        except desktop.DesktopAccessError as exc:
+            print(f"switchyard: {config.project} reaches the desktop through its exposure, but its legacy entries "
+                  f"on {policy['gui_user']}'s runtime directory were not retired: {exc}. As {policy['gui_user']}, "
+                  "run: python3 /opt/switchyard/current/scripts/desktop_access.py repair --apply")
+    return configured

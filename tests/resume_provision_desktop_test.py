@@ -214,15 +214,20 @@ def test_a_receipt_anybody_could_rewrite_is_refused() -> None:
         policy = wayland_policy()
         with _accounts():
             _gui, _tenant, name = desktop.names(policy)
-        receipt = gui_runtime / (name + ".json")
-        receipt.write_text(json.dumps({"policy_digest": "no"}), encoding="utf-8")
+        # The receipt lives in the grant's exposure (SYRD-687), proven by the
+        # exposure's own walk; here the walk is stood in for, the receipt is not.
+        exposure = tmp_path / "exposure"
+        exposure.mkdir()
+        receipt = exposure / desktop.EXPOSURE_RECEIPT
+        receipt.write_text(json.dumps({"policy_digest": "no", "form": desktop.EXPOSURE_FORM}), encoding="utf-8")
 
         runtimes = {GUI_USER: gui_runtime, TENANT: tenant_runtime}
 
         def attempt() -> str:
             with _accounts():
                 with patch.object(desktop.os, "geteuid", lambda: TENANT_UID):
-                    with patch.object(desktop, "runtime_for", lambda user: runtimes[user.pw_name]):
+                    with patch.object(desktop, "runtime_for", lambda user: runtimes[user.pw_name]), \
+                            patch.object(desktop, "exposure_dir", lambda gui, name: exposure):
                         try:
                             desktop.verify(policy)
                         except desktop.DesktopAccessError as exc:

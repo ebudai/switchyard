@@ -196,13 +196,13 @@ class Board:
 
 
 def _deposit_fixture(tmp: Path) -> tuple[Path, Path, list]:
-    home, runtime = tmp / "home", tmp / "runtime"
-    runtime.mkdir(mode=0o700)
+    home, exposure = tmp / "home", tmp / "exposure"
+    exposure.mkdir(mode=0o700)
     _install(home, _policy())
-    # The approved grant's traverse entry, as `apply` makes it.
-    desktop_access.grant(runtime, 0, "--x")
+    # The approved grant's traverse entry on its exposure, as `expose` makes it.
+    desktop_access.grant(exposure, 0, "--x")
     grants: list = []
-    return home, runtime, grants
+    return home, exposure, grants
 
 
 def test_a_deposit_writes_the_image_then_its_manifest_and_grants_each() -> None:
@@ -216,9 +216,9 @@ def test_a_deposit_writes_the_image_then_its_manifest_and_grants_each() -> None:
             return desktop_access.grant(path, uid, perms)
 
         result = paste_image.deposit("imgproj", "app", clipboard=Board(), uid=ME.pw_uid, home=home,
-                                     runtime_for=lambda _user: runtime, grant=grant, clock=lambda: 1000.0,
+                                     locate=lambda _policy: runtime, grant=grant, clock=lambda: 1000.0,
                                      token=lambda: "ab" * 16)
-        leaf = runtime / "switchyard-paste" / "imgproj"
+        leaf = runtime / "paste"
         stem = "paste-" + "ab" * 16
         assert sorted(os.listdir(leaf)) == [f"{stem}.handoff.json", f"{stem}.png"]
         assert grants == [(f"{stem}.png", 0, "r--"), (f".tmp-{stem}.handoff.json", 0, "r--")], grants
@@ -231,6 +231,7 @@ def test_a_deposit_writes_the_image_then_its_manifest_and_grants_each() -> None:
         assert (leaf / f"{stem}.png").read_bytes() == PNG
         assert oct((leaf / f"{stem}.png").stat().st_mode & 0o777) == "0o640"  # 0600 plus the tenant's read, as mask
         assert desktop_access.effective_acl(leaf, 0) == 5 and desktop_access.effective_acl(leaf.parent, 0) == 1
+        assert leaf.parent == runtime  # the exposure, never the owner's runtime directory (SYRD-687)
 
 
 def test_a_failed_grant_leaves_nothing_behind() -> None:
@@ -245,9 +246,9 @@ def test_a_failed_grant_leaves_nothing_behind() -> None:
             return desktop_access.grant(path, uid, perms)
 
         message = raises(paste_image.PasteImageError, paste_image.deposit, "imgproj", "app", clipboard=Board(),
-                         uid=ME.pw_uid, home=home, runtime_for=lambda _u: runtime, grant=grant)
+                         uid=ME.pw_uid, home=home, locate=lambda _policy: runtime, grant=grant)
         assert "nothing was left behind" in message and "setfacl refused" in message, message
-        assert os.listdir(runtime / "switchyard-paste" / "imgproj") == []
+        assert os.listdir(runtime / "paste") == []
 
 
 def test_nothing_is_read_or_written_for_a_bad_name_or_an_unapproved_caller() -> None:
@@ -256,13 +257,13 @@ def test_nothing_is_read_or_written_for_a_bad_name_or_an_unapproved_caller() -> 
         board = Board()
         for project, role in (("imgproj", "../app"), ("Img proj", "app"), ("imgproj", "")):
             raises(paste_image.PasteImageError, paste_image.deposit, project, role, clipboard=board,
-                   uid=ME.pw_uid, home=home, runtime_for=lambda _u: runtime)
+                   uid=ME.pw_uid, home=home, locate=lambda _policy: runtime)
         raises(paste_image.PasteImageError, paste_image.deposit, "unknown", "app", clipboard=board,
-               uid=ME.pw_uid, home=home, runtime_for=lambda _u: runtime)
+               uid=ME.pw_uid, home=home, locate=lambda _policy: runtime)
         empty = Board(data=b"")
         assert "was empty" in raises(paste_image.PasteImageError, paste_image.deposit, "imgproj", "app",
-                                     clipboard=empty, uid=ME.pw_uid, home=home, runtime_for=lambda _u: runtime)
-        assert board.reads == 0 and not (runtime / "switchyard-paste").exists()
+                                     clipboard=empty, uid=ME.pw_uid, home=home, locate=lambda _policy: runtime)
+        assert board.reads == 0 and not (runtime / "paste").exists()
 
 
 def test_the_command_entry_refuses_without_writing() -> None:
@@ -285,34 +286,34 @@ def test_the_command_entry_refuses_without_writing() -> None:
 
 def test_the_handoff_directory_refuses_what_is_not_the_owners_own() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        runtime = Path(tmp) / "runtime"
-        runtime.mkdir(mode=0o700)
-        message = raises(desktop_access.DesktopAccessError, desktop_access.prepare_handoff_dir, runtime, "imgproj", 0)
+        exposure = Path(tmp) / "exposure"
+        exposure.mkdir(mode=0o700)
+        message = raises(desktop_access.DesktopAccessError, desktop_access.prepare_handoff_dir, exposure, 0)
         assert "approved desktop grant is not applied" in message, message
-        desktop_access.grant(runtime, 0, "--x")
+        desktop_access.grant(exposure, 0, "--x")
         target = Path(tmp) / "elsewhere"
         target.mkdir(mode=0o700)
-        (runtime / "switchyard-paste").mkdir(mode=0o700)
-        (runtime / "switchyard-paste" / "imgproj").symlink_to(target)
+        (exposure / "paste").symlink_to(target)
         assert "not a private directory" in raises(desktop_access.DesktopAccessError,
-                                                   desktop_access.prepare_handoff_dir, runtime, "imgproj", 0)
-        (runtime / "switchyard-paste" / "imgproj").unlink()
-        (runtime / "switchyard-paste").chmod(0o770)
+                                                   desktop_access.prepare_handoff_dir, exposure, 0)
+        (exposure / "paste").unlink()
+        (exposure / "paste").mkdir(mode=0o770)
+        (exposure / "paste").chmod(0o770)
         assert "not a private directory" in raises(desktop_access.DesktopAccessError,
-                                                   desktop_access.prepare_handoff_dir, runtime, "imgproj", 0)
-        (runtime / "switchyard-paste").chmod(0o700)
+                                                   desktop_access.prepare_handoff_dir, exposure, 0)
+        (exposure / "paste").chmod(0o700)
         assert "owned by uid 4242" in raises(desktop_access.DesktopAccessError, desktop_access._owned_directory,
-                                             runtime / "switchyard-paste", 4242, create=False)
-        leaf = desktop_access.prepare_handoff_dir(runtime, "imgproj", 0)
-        assert leaf == runtime / "switchyard-paste" / "imgproj" and os.listdir(target) == []
+                                             exposure / "paste", 4242, create=False)
+        leaf = desktop_access.prepare_handoff_dir(exposure, 0)
+        assert leaf == exposure / "paste" and os.listdir(target) == []
+        assert desktop_access.effective_acl(leaf, 0) == 5
 
 
 def test_the_sweep_removes_only_expired_handoff_files() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        runtime = Path(tmp)
-        leaf = runtime / "switchyard-paste" / "imgproj"
-        leaf.mkdir(parents=True, mode=0o700)
-        (runtime / "switchyard-paste").chmod(0o700)
+        exposure = Path(tmp)
+        leaf = exposure / "paste"
+        leaf.mkdir(mode=0o700)
         stem = "paste-" + "cd" * 16
         for name in (f"{stem}.png", f"{stem}.handoff.json", f".tmp-{stem}.handoff.json", "notes.txt"):
             (leaf / name).write_bytes(b"x")
@@ -320,38 +321,53 @@ def test_the_sweep_removes_only_expired_handoff_files() -> None:
         (leaf / ("paste-" + "ef" * 16 + ".png")).symlink_to(leaf / "notes.txt")
         os.utime(leaf / ("paste-" + "ef" * 16 + ".png"), (1000.0, 1000.0), follow_symlinks=False)
         ttl = desktop_access.HANDOFF_TTL_SECONDS
-        assert desktop_access.sweep_handoffs(runtime, "imgproj", now=1000.0 + ttl - 1) == []
-        removed = desktop_access.sweep_handoffs(runtime, "imgproj", now=1000.0 + ttl)
+        assert desktop_access.sweep_handoffs(exposure, now=1000.0 + ttl - 1) == []
+        removed = desktop_access.sweep_handoffs(exposure, now=1000.0 + ttl)
         assert sorted(removed) == sorted([f"{stem}.png", f"{stem}.handoff.json", f".tmp-{stem}.handoff.json"]), removed
         assert sorted(os.listdir(leaf)) == ["notes.txt", "paste-" + "ef" * 16 + ".png"]
-        # And a project with no handoff directory is not an error.
-        assert desktop_access.sweep_handoffs(runtime, "elsewhere", now=10.0 ** 10) == []
+        # And an exposure with no handoff directory is not an error.
+        assert desktop_access.sweep_handoffs(Path(tmp) / "elsewhere", now=10.0 ** 10) == []
 
 
 def test_the_owners_access_service_sweeps_on_every_pass() -> None:
     """The reliable cleanup: the GUI owner's existing `watch` loop, not the next paste."""
     with tempfile.TemporaryDirectory() as tmp:
-        runtime = Path(tmp) / "runtime"
-        runtime.mkdir()
+        exposure = Path(tmp) / "exposure"
+        exposure.mkdir()
         policy_path = Path(tmp) / "policy.json"
-        policy_path.write_text(json.dumps(_policy()))
-        swept: list[tuple[Path, str]] = []
-        original = (desktop_access.apply, desktop_access.sweep_handoffs, desktop_access.time.sleep)
+        policy_path.write_text(json.dumps(_policy(tenant=ME.pw_name)))
+        swept: list[Path] = []
+        names = ("expose", "WaylandRelay", "refresh", "sweep_handoffs")
+        original = {name: getattr(desktop_access, name) for name in names}
+        original_sleep = desktop_access.time.sleep
 
         class Stop(Exception):
             pass
+
+        class Relay:
+            closed = False
+
+            def __init__(self, _policy, _leaf):
+                pass
+
+            def close(self):
+                Relay.closed = True
 
         def sleep(_seconds):
             raise Stop
 
         try:
-            desktop_access.apply = lambda _policy: runtime / "switchyard-desktop-x.json"
-            desktop_access.sweep_handoffs = lambda path, project: swept.append((path, project))
+            desktop_access.expose = lambda _policy: exposure
+            desktop_access.WaylandRelay = Relay
+            desktop_access.refresh = lambda *_a: None
+            desktop_access.sweep_handoffs = lambda path: swept.append(path)
             desktop_access.time.sleep = sleep
             raises(Stop, desktop_access.main, ["watch", str(policy_path)])
         finally:
-            desktop_access.apply, desktop_access.sweep_handoffs, desktop_access.time.sleep = original
-        assert swept == [(runtime, "imgproj")], swept
+            for name, value in original.items():
+                setattr(desktop_access, name, value)
+            desktop_access.time.sleep = original_sleep
+        assert swept == [exposure] and Relay.closed, swept
 
 
 # --- the listener's collector ----------------------------------------------------
@@ -380,8 +396,8 @@ def _handoff(leaf: Path, *, stem_hex: str = "12" * 16, role: str = "app", create
 
 
 def _collector(tmp: Path, clock: list[float], ledger: Path | None = None) -> tuple[image_handoff.ImageHandoffs, Path]:
-    runtime = tmp / "runtime"
-    leaf = runtime / "switchyard-paste" / "imgproj"
+    runtime = tmp / "exposure"
+    leaf = runtime / "paste"
     leaf.mkdir(parents=True)
     handoffs = image_handoff.ImageHandoffs(project="imgproj", owner=ME.pw_name, owner_uid=ME.pw_uid,
                                            locate=lambda: runtime, ledger_path=ledger, clock=lambda: clock[0])
@@ -409,7 +425,7 @@ def test_the_collector_delivers_each_handoff_once_when_the_pane_is_idle() -> Non
         assert handoffs.deliver(targets=TARGETS, is_working=working, send=lambda *a: sent.append(a), log=log.append) == []
         # A restarted listener reads what it delivered and does not send again.
         again = image_handoff.ImageHandoffs(project="imgproj", owner=ME.pw_name, owner_uid=ME.pw_uid,
-                                            locate=lambda: leaf.parent.parent, ledger_path=ledger, clock=lambda: clock[0])
+                                            locate=lambda: leaf.parent, ledger_path=ledger, clock=lambda: clock[0])
         assert again.deliver(targets=TARGETS, is_working=lambda _t: False, send=lambda *a: sent.append(a), log=log.append) == []
         assert len(sent) == 1
         # Nothing is removed by the tenant's side.
@@ -467,7 +483,7 @@ def test_the_collector_refuses_what_the_owner_did_not_make_for_this_role() -> No
         assert sum("refused" in line for line in log) == 7, log
         # Files the desktop owner did not make are refused, however well formed.
         stranger = image_handoff.ImageHandoffs(project="imgproj", owner="someone", owner_uid=ME.pw_uid + 1,
-                                               locate=lambda: leaf.parent.parent, clock=lambda: clock[0])
+                                               locate=lambda: leaf.parent, clock=lambda: clock[0])
         log.clear()
         assert stranger.deliver(targets=TARGETS, is_working=lambda _t: False, send=lambda *a: sent.append(a),
                                 log=log.append) == []
@@ -501,7 +517,7 @@ def test_a_failed_send_is_retried_and_never_stops_the_listener() -> None:
                 raise RuntimeError("gate broke")
 
         Listener.image_handoffs = image_handoff.ImageHandoffs(
-            project="imgproj", owner=ME.pw_name, owner_uid=ME.pw_uid, locate=lambda: leaf.parent.parent,
+            project="imgproj", owner=ME.pw_name, owner_uid=ME.pw_uid, locate=lambda: leaf.parent,
             clock=lambda: clock[0])
         _handoff(leaf, stem_hex="99" * 16)
         assert image_handoff.run(Listener) == []
@@ -512,12 +528,12 @@ def test_a_failed_send_is_retried_and_never_stops_the_listener() -> None:
 
 def test_the_message_stays_one_direct_line() -> None:
     """directorctl turns anything over 200 characters into a pointer to a file."""
-    short = image_handoff.Handoff(stem="s", role="app", image=Path("/run/user/1000/switchyard-paste/p/paste-" + "0" * 32 + ".png"),
+    short = image_handoff.Handoff(stem="s", role="app", image=Path("/var/lib/switchyard/desktop/1000-1018-pie/paste/paste-" + "0" * 32 + ".png"),
                                   created_at=0.0, expires_at=0.0, owner="eric")
     assert len(short.message()) <= image_handoff.DIRECT_MESSAGE_MAX and short.message().startswith("Image from eric's")
-    long = image_handoff.Handoff(stem="s", role="app", image=Path("/run/user/1000/switchyard-paste/" + "p" * 60 + "/paste-" + "0" * 32 + ".png"),
+    long = image_handoff.Handoff(stem="s", role="app", image=Path("/var/lib/switchyard/desktop/65534-65533-" + "p" * 40 + "/paste/paste-" + "0" * 32 + ".png"),
                                  created_at=0.0, expires_at=0.0, owner="desktop-operator")
-    assert len(long.message()) <= image_handoff.DIRECT_MESSAGE_MAX and long.message().startswith("Image: /run/user/")
+    assert len(long.message()) <= image_handoff.DIRECT_MESSAGE_MAX and long.message().startswith("Image: /var/lib/switchyard/desktop/")
     assert "\n" not in short.message() + long.message()
 
 

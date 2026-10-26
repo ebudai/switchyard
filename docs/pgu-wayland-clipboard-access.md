@@ -1,4 +1,30 @@
-# PGU Wayland Clipboard Access
+# PGU Wayland Clipboard Access (retired)
+
+**Retired by SYRD-687.** This helper granted `agent` named ACL entries on
+Eric's XDG runtime directory, `/run/user/1000`. A POSIX ACL's mask shows in the
+group bits, so the directory read `0710`, and Qt, KDE and the XDG spec require
+exactly `0700` (`QStandardPaths: wrong permissions on runtime directory
+/run/user/1000, 0710 instead of 0700`). `apply-acl` and
+`install-eric-user-unit` now refuse.
+
+To undo what it set, run this as Eric. It disables and removes the login unit
+and the installed copy, then takes `agent`'s two entries off without widening
+any other entry:
+
+```bash
+scripts/pgu-wayland-clipboard-access.sh retire
+```
+
+Desktop access for a Switchyard tenant is its desktop policy, which reaches the
+compositor through a confined exposure and leaves the runtime directory at
+`0700`; see [desktop-access.md](desktop-access.md):
+
+```bash
+switchyard upgrade <project> --desktop-policy FILE
+```
+
+What follows is the original runbook, kept for reference only.
+
 
 PGU Claude/Codex panes run as `agent`, but Eric's KDE Plasma Wayland session
 runs as `eric`. Image paste in the panes uses `wl-paste`, so the pane process

@@ -8,8 +8,10 @@ typed. This runs the whole crossing with separate accounts and real ACLs, in a
 user namespace (`unshare --map-auto --map-root-user --mount`) so nothing on the
 host is touched:
 
-* a tmpfs over `/run/user` and a namespace-only `/etc/passwd` naming a desktop
-  owner (uid 1000), the tenant (1019) and an unrelated tenant (1020);
+* a chroot whose `/` is the namespace root's, so the grant's exposure under
+  `/var/lib/switchyard/desktop` is proven by the shipped trust walk; a tmpfs
+  over `/run/user` and a namespace-only `/etc/passwd` naming a desktop owner
+  (uid 1000), the tenant (1019) and an unrelated tenant (1020);
 * the desktop owner installs its policy copy and runs the shipped
   `scripts/switchyard paste-image` wrapper, with only `wl-paste` and `loginctl`
   stubbed -- `setfacl`/`getfacl` and the kernel's ACL checks are real;
@@ -48,7 +50,9 @@ BEFORE = "3d410cadd9a81835fad9422bb9513707c4140ec9"  # main before SYRD-247's re
 PROJECT = "imgproj"
 GUI, TENANT, OTHER = ("deskowner", 1000), ("tenantacct", 1019), ("othertenant", 1020)
 RUNTIME = Path("/run/user/1000")
-LEAF = RUNTIME / "switchyard-paste" / PROJECT
+#: The grant's exposure (SYRD-687), outside the owner's runtime directory, and its hand-off directory.
+EXPOSURE = Path(f"/var/lib/switchyard/desktop/1000-1019-{PROJECT}")
+LEAF = EXPOSURE / "paste"
 TTL = 15 * 60
 
 failures: list[str] = []
@@ -88,7 +92,7 @@ printf '/run/user/%s\\n' "$(id -u "$2")"
 #: Like an agent CLI: the submitted line lands on screen (what directorctl waits
 #: for), then the image is opened a second later, as a model's tool call would.
 PROVIDER = r"""stty -echo; while IFS= read -r line; do printf 'got: %s\n' "$line"; printf '%s\n' "$line" >> "$RECEIVED"
-p=$(printf '%s' "$line" | grep -o '/run/user/[^ ]*\.png'); sleep 1
+p=$(printf '%s' "$line" | grep -o '/[^ ]*\.png'); sleep 1
 if [ -f "$p" ]; then printf 'opened %s %s\n' "$p" "$(sha256sum < "$p" | cut -d' ' -f1)" >> "$OPENED"
 else printf 'missing %s\n' "$p" >> "$OPENED"; fi; done"""
 
@@ -153,14 +157,32 @@ def py(user, code: str, *args: str, env: dict[str, str], tree: Path) -> subproce
     return as_user(user, [sys.executable, "-c", f"import sys; sys.path[:0] = [{str(tree)!r}]\n" + code, *args], env)
 
 
+def enter_root(base: Path) -> None:
+    """A `/` the namespace's root owns, as a host's is root's, with the host's /usr, /etc and /tmp bound in."""
+    root = base / "root"
+    root.mkdir(mode=0o755)
+    for top in ("usr", "etc", "dev", "proc", "sys", "tmp", "root"):
+        (root / top).mkdir()
+        subprocess.run(["mount", "--rbind", f"/{top}", str(root / top)], check=True)
+    for link in ("bin", "sbin", "lib", "lib64"):
+        if os.path.islink(f"/{link}"):
+            os.symlink(os.readlink(f"/{link}"), root / link)
+    (root / "run").mkdir()
+    (root / "var/lib/switchyard").mkdir(parents=True, mode=0o755)
+    subprocess.run(["mount", "-t", "tmpfs", "-o", "mode=0755", "tmpfs", str(root / "run")], check=True)
+    (root / "run/user").mkdir(mode=0o755)
+    for name in ("passwd", "group"):
+        subprocess.run(["mount", "--bind", str(base / name), str(root / "etc" / name)], check=True)
+    os.chroot(root)
+    os.chdir("/")
+
+
 def namespace(base: Path) -> dict:
-    subprocess.run(["mount", "-t", "tmpfs", "-o", "mode=0755", "tmpfs", "/run/user"], check=True)
     users = [GUI, TENANT, OTHER]
     (base / "passwd").write_text("root:x:0:0::/root:/bin/sh\n" + "".join(
         f"{name}:x:{uid}:{uid}::{base / 'home' / name}:/bin/sh\n" for name, uid in users))
     (base / "group").write_text("root:x:0:\n" + "".join(f"{name}:x:{uid}:\n" for name, uid in users))
-    for name in ("passwd", "group"):
-        subprocess.run(["mount", "--bind", str(base / name), f"/etc/{name}"], check=True)
+    enter_root(base)
     for name, uid in users:
         for path in (Path(f"/run/user/{uid}"), base / "home" / name):
             path.mkdir(parents=True, mode=0o700)
@@ -214,18 +236,23 @@ def namespace(base: Path) -> dict:
                    json.dumps(policy), env=gui_env, tree=base / "after")
     assert installed.returncode == 0, installed.stderr
 
-    # Before the approved grant is applied, the owner's command refuses: the
-    # tenant could not reach anything handed over.
+    # Before root has made the grant's exposure, the owner's command refuses:
+    # there is nowhere the tenant could reach anything handed over.
     unapplied = as_user(GUI, [sys.executable, "-c", "import runpy, sys; sys.argv = sys.argv[1:]; "
                               "runpy.run_path(sys.argv[0], run_name='__main__')",
                               str(base / "after" / "scripts" / "switchyard"), "paste-image", PROJECT, "app"], gui_env)
-    # The approved grant's runtime entry, exactly as the access service's
-    # `apply` makes it; the socket half needs a compositor and is not involved.
-    applied = py(GUI, f"from scripts import desktop_access as d; d.grant(__import__('pathlib').Path({str(RUNTIME)!r}), {TENANT[1]}, '--x')",
-                 env=gui_env, tree=base / "after")
+    exposed_before = os.path.exists(EXPOSURE)
+    # Root makes the exposure, as an install does; the owner's access service
+    # then gives the tenant its entries there (`expose`). The relay needs a
+    # compositor and is not involved.
+    sys.path[:0] = [str(base / "after")]
+    from scripts import desktop_access as made
+    made.exposure_dir(made.pwd.getpwnam(GUI[0]), f"switchyard-desktop-{GUI[1]}-{TENANT[1]}-{PROJECT}", create=True)
+    applied = py(GUI, "from scripts import desktop_access as d; import json; d.expose(json.loads(sys.argv[1]))",
+                 json.dumps(policy), env=gui_env, tree=base / "after")
     assert applied.returncode == 0, applied.stderr
     result: dict = {"unapplied": [unapplied.returncode, (unapplied.stdout + unapplied.stderr).strip()[-300:],
-                                  os.path.exists(LEAF.parent)]}
+                                  exposed_before]}
     for label in ("before", "after"):
         tree = base / label
         run: dict = {}
@@ -283,16 +310,16 @@ def namespace(base: Path) -> dict:
             run["restart"] = [again.returncode, received.read_text().splitlines() if received.exists() else []]
             created = run.get("created_at", 0.0)
             sweep = ("from scripts import desktop_access as d; import os, json\n"
-                     f"print(json.dumps([d.sweep_handoffs({str(RUNTIME)!r}, {PROJECT!r}, now=float(sys.argv[1])), sorted(os.listdir({str(LEAF)!r}))]))")
+                     f"print(json.dumps([d.sweep_handoffs({str(EXPOSURE)!r}, now=float(sys.argv[1])), sorted(os.listdir({str(LEAF)!r}))]))")
             run["sweep_early"] = json.loads(py(GUI, sweep, str(created + TTL - 2), env=gui_env, tree=tree).stdout)
             run["sweep_due"] = json.loads(py(GUI, sweep, str(created + TTL + 1), env=gui_env, tree=tree).stdout)
             # A second handoff, then the grant withdrawn: rollback removes it.
             second = as_user(GUI, [sys.executable, "-c", "import runpy, sys; sys.argv = sys.argv[1:]; "
                                    "runpy.run_path(sys.argv[0], run_name='__main__')",
                                    str(tree / "scripts" / "switchyard"), "paste-image", PROJECT, "app"], gui_env)
-            withdraw = py(GUI, "from scripts import desktop_access as d; import json, os\n"
+            withdraw = py(GUI, "from scripts import desktop_access as d; import json, os, subprocess\n"
                                "d.rollback(json.loads(sys.argv[1]))\n"
-                               f"print(json.dumps([os.path.exists({str(LEAF)!r}), os.path.exists({str(LEAF.parent)!r})]))",
+                               f"print(json.dumps([os.path.exists({str(LEAF)!r}), 'user:{TENANT[1]}:--x' in subprocess.run(['getfacl', '-cpn', {str(EXPOSURE)!r}], capture_output=True, text=True).stdout]))",
                           json.dumps(policy), env=gui_env, tree=tree)
             run["withdraw"] = [second.returncode, withdraw.returncode, withdraw.stdout.strip() or withdraw.stderr[-300:]]
         as_user(TENANT, ["tmux", "kill-server"], tenant_env)
@@ -337,7 +364,7 @@ def main() -> int:
         shutil.rmtree(base, ignore_errors=True)
     before, after = result["before"], result["after"]
     digest = hashlib.sha256(IMAGE).hexdigest()
-    check(result["unapplied"][0] != 0 and "approved desktop grant is not applied" in result["unapplied"][1]
+    check(result["unapplied"][0] != 0 and "does not exist; root makes it once" in result["unapplied"][1]
           and result["unapplied"][2] is False,
           f"with the approved grant not applied, nothing is handed over: {result['unapplied']}")
 
@@ -345,7 +372,8 @@ def main() -> int:
     check(before["tmux"] == 0 and before["tmux_socket_private"], "before: the tenant's tmux server is the test's own")
     check(before["paste"][0] != 0 and "paste-image" in before["paste"][1],
           f"before: main has no paste-image: {before['paste']}")
-    check(not isinstance(before["owner_view"], dict), f"before: nothing was handed over: {before['owner_view']}")
+    check(not isinstance(before["owner_view"], dict) or not any(path.startswith(str(LEAF) + "/") for path in before["owner_view"]),
+          f"before: nothing was handed over: {before['owner_view']}")
     check(before["listener"][0] == 0 and before["received"] == [] and before["opened"] == [],
           f"before: main's listener delivers nothing: {before['listener']} {before['received']}")
 
@@ -358,9 +386,9 @@ def main() -> int:
     parent, leaf = view[str(LEAF.parent)], view[str(LEAF)]
     files = {path: entry for path, entry in view.items() if path.startswith(str(LEAF) + "/")}
     check(parent[1] == 1000 and "user:1019:--x" in parent[2] and "other::---" in parent[2] and "group::---" in parent[2],
-          f"after: the parent is the owner's, the tenant may only traverse it: {parent}")
+          f"after: the exposure is the owner's, the tenant may only traverse it: {parent}")
     check(leaf[1] == 1000 and "user:1019:r-x" in leaf[2] and "other::---" in leaf[2] and "group::---" in leaf[2],
-          f"after: the project directory is the owner's, the tenant may list it: {leaf}")
+          f"after: the hand-off directory is the owner's, the tenant may list it: {leaf}")
     check(all(entry[1] == 1000 and "user:1019:r--" in entry[2] and "other::---" in entry[2] and "user::rw-" in entry[2]
               for entry in files.values()) and len(files) == 2,
           f"after: each file is the owner's, readable by the tenant alone: {files}")
@@ -379,7 +407,9 @@ def main() -> int:
     # The tenant's listener, from its shipped entry point.
     check(after["listener"][0] == 0 and after["listener"][1] == ['{"handoffs": "ImageHandoffs"}'],
           f"after: the listener's main() wires the handoffs from the tenant's own policy: {after['listener']}")
-    check(len(after["received"]) == 1 and after["received"][0].startswith("Image from deskowner's clipboard: /run/user/1000/switchyard-paste/imgproj/paste-")
+    # The exposure's path is longer than the runtime's was, so the line is the short form; either fits one line.
+    check(len(after["received"]) == 1 and after["received"][0].startswith((f"Image from deskowner's clipboard: {LEAF}/paste-",
+                                                                           f"Image: {LEAF}/paste-"))
           and len(after["received"][0]) <= 200,
           f"after: the role is told once, in one direct line, where its image is: {after['received']}")
     check(len(after["opened"]) == 1 and after["opened"][0].startswith("opened ") and after["opened"][0].endswith(digest),

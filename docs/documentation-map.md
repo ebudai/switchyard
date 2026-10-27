@@ -41,6 +41,7 @@ running. Do not copy a transition or option from a historical ticket record.
 | Configure desktop, clipboard or screenshots | [Desktop access](desktop-access.md) | `switchyard approve-desktop --help`; `switchyard paste-image --help` |
 | Configure User phone notifications | [User notifications](user-notifications.md) | the setup and UAT commands in that guide |
 | Change a role's agent or model | [Role runtime](role-runtime.md) | `switchyard set-role-runtime --help`; `switchyard reconcile-role-models --help` |
+| Install, qualify or stop the host's local model service, or see what holds the GPU | [Local model service](local-model-service.md) | `switchyard local-model --help`; `switchyard local-model status` |
 | Run or add tests | [Testing](testing.md) and [contributing](../CONTRIBUTING.md) | the repository's current test entry points |
 
 For a low-context route through authority, evidence and failure handling, use
@@ -87,6 +88,7 @@ changes.
 | [Fresh-machine install](fresh-machine-install.md) and [host dependencies](switchyard-new-host-dependencies.md) | Host preparation and installation |
 | [Role runtime](role-runtime.md), [runtime presentation](runtime-presentation.md), and [desktop access](desktop-access.md) | Agent runtime, display slots and desktop policy |
 | [User notifications](user-notifications.md) | User phone notification setup and operation |
+| [Local model service](local-model-service.md) | The opt-in host-wide local model service: approval, installation, GPU memory, idle stop, qualification and removal |
 | [Git update hook](git-update-hook.md), [testing](testing.md), and [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Repository policy and contribution checks |
 | [`examples/workflows/inspection.json`](../examples/workflows/inspection.json) | Executable example workflow; validate it as configuration, not prose |
 

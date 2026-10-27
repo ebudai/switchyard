@@ -570,7 +570,9 @@ def endpoint_problems(profile: LocalProfile, *, record: Mapping[str, Any] | None
         found.append(problem)
     problem, n_ctx = served(profile, get=get)
     if problem:
-        found.append(problem + "; start it with `switchyard local-model start` and read `switchyard local-model status`")
+        # SYRD-691: the service stops itself once idle, so a role can find it stopped; starting it is root's.
+        found.append(problem + "; start it with `sudo switchyard local-model start` (it stops itself once idle) and "
+                     "read `switchyard local-model status`")
     elif n_ctx != profile.context:
         found.append(f"{profile.base_url} holds a {n_ctx:,}-token context, not the declared {profile.context:,}; "
                      "re-pin the role")

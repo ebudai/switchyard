@@ -85,7 +85,7 @@ SEAMS = {
     'PaneActivityGate._untrusted_idle_source_trace': {'ActivityTrace': 3, 'MIN_RECOVERABLE_HOOK_EPOCH_SECONDS': 1, 'TRUSTED_IDLE_SOURCES': 1},  # SYRD-566: provider_starting
     # SYRD-594: asks the capacity_retry sibling, through notify_listener, whether the turn ended on Codex's capacity error.
     'PaneActivityGate._stale_codex_busy_trace': {'ActivityTrace': 3, 'LOGGER': 1, 'MIN_RECOVERABLE_HOOK_EPOCH_SECONDS': 1,
-                                                 'capacity_retry': 1},
+                                                 'capacity_retry': 1, 'stall_episode': 1},  # SYRD-695: tool activity
     'PaneActivityGate._anti_clobber_trace': {'ActivityTrace': 4},
     'PaneActivityGate._full_activity_trace': {'ActivityTrace': 2},
     'PaneActivityGate.permission_prompt_waits': {'PERMISSION_PROMPT_BLOCK_SOURCES': 1},

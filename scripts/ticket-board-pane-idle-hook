@@ -89,6 +89,8 @@ HOOK_SHELLS = frozenset({"sh", "bash", "dash", "zsh"})
 #: scripts/resume_history.py, which the launcher writes to the same file.
 RESUME_HISTORY_SUFFIX = ".resume.log"
 RESUME_HISTORY_MAX_BYTES = 256 * 1024
+#: A tool call of the turn in flight (SYRD-695): recorded beside the pane's state, never in it.
+TOOL_ACTIVITY_SOURCES = frozenset({"claude.PreToolUse", "claude.PostToolUse", "codex.PreToolUse", "codex.PostToolUse"})
 
 
 def _default_board_url(environ: dict[str, str]) -> str:
@@ -471,6 +473,29 @@ def _write_state(state_dir: str | Path, target: str, state: str, *, source: str 
         payload["hermes_runs"] = hermes_runs
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+    return path
+
+
+def _record_tool_activity(state_dir: str | Path, target: str, source: str, *, pid: int | None = None) -> Path | None:
+    """A tool call of the turn in flight, as the pane's own provider ran its hook (SYRD-695).
+
+    Written beside the pane's state, never into it: the state and the turn's
+    start are the turn hooks' alone, so a tool hook racing a Stop cannot leave a
+    finished turn busy. It names the process that ran it, which the listener
+    holds to the process that took the turn. A `claude -p` or `codex exec` run
+    from a tool shell is not the pane's provider, and records nothing.
+    """
+    pid = os.getpid() if pid is None else pid
+    identity = _pane_root_identity(pid)
+    if identity is None or not _started_by_pane_provider(pid):
+        return None
+    state_path = _target_path(Path(state_dir).expanduser(), target)
+    path = state_path.with_name(state_path.name.removesuffix(".json") + ".activity.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps({"target": target, "source": source, "at": time.time(), "pane_pid": identity[0],
+                               "pane_start_time": identity[1]}, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(path)
     return path
 
@@ -981,7 +1006,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Record a ticket-board pane idle/busy state for notification delivery when a pane target is given."
     )
-    parser.add_argument("state", choices=["idle", "busy", "blocked"], help="pane lifecycle state to record")
+    parser.add_argument("state", choices=["idle", "busy", "blocked", "activity"],
+                        help="pane lifecycle state to record, or `activity` for a tool call of the turn (SYRD-695)")
     parser.add_argument("--target", default="", help="explicit pane target, for example project-ops:0.0")
     parser.add_argument("--source", default="", help="hook source label stored for diagnostics")
     parser.add_argument("--state-dir", default="", help="state directory; defaults to the current project")
@@ -1102,6 +1128,15 @@ def main(argv: list[str] | None = None) -> int:
     if target is None or state_dir is None or session_dir is None:
         if args.source.startswith(COPILOT_SOURCE_PREFIX):
             print("{}")  # Copilot reads one JSON document from every hook
+        return 0
+    if args.state == "activity":
+        # A tool call is not a turn: nothing of the pane's state or its session is this hook's to write.
+        _read_stdin_json(timeout=args.stdin_timeout)
+        if args.source in TOOL_ACTIVITY_SOURCES:
+            try:
+                _record_tool_activity(state_dir, target, args.source)
+            except OSError:
+                pass  # never in the way of the tool: the turn hooks still say busy
         return 0
     session_path = _target_path(session_dir, target)
     existing_session_id = _session_id_from_file(session_path)

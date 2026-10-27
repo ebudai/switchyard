@@ -32,6 +32,12 @@ An escalation carries the progress clock it saw (`ticket_board.role_progress_at`
 delivery adds the owner's hook as it is now, and drops it once anything since
 says the work moved -- progress, a bounded child, a replaced runtime, the hook --
 naming why (`stale_reason`) in the drop's trace (SYRD-675).
+
+The hook's word includes the turn's tool calls (SYRD-695): Claude Code and
+Codex hooks write only a turn's start and end, so a long turn of short tool
+calls -- none long enough to earn a lease -- looked like a pane saying busy
+with nothing moving. A tool call its own provider's hook recorded during the
+turn is when the hook last spoke (`tool_activity`).
 """
 
 from __future__ import annotations
@@ -39,10 +45,11 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from datetime import datetime, timezone
 from typing import Any
 
-from . import board_stall
+from . import board_stall, tool_activity
 
 DEFAULT_MAX_ATTEMPTS = 3
 MAX_ATTEMPTS_ENV = "TICKET_BOARD_STALL_MAX_ATTEMPTS"
@@ -83,9 +90,21 @@ def condition(gate: Any, target: str) -> str | None:
     return said[-1][:CONDITION_CHARS] if said else None
 
 
+def hook_word_at(gate: Any, state: Any, now: float | None = None) -> float:
+    """When the hook last spoke about the pane: its own write, or a tool call of the turn in flight (SYRD-695)."""
+    return tool_activity.hook_word_at(state, getattr(gate, "wall_time", time.time)() if now is None else now)
+
+
+def _tool_activity(gate: Any, state: Any) -> dict:
+    """The turn's latest tool call, for the record, when there is one: a pane with none reads as it always has."""
+    activity = tool_activity.turn_tool_activity_at(state, getattr(gate, "wall_time", time.time)())
+    return {} if activity is None else {"tool_activity_at": _iso(activity)}
+
+
 def busy_still(gate: Any, target: str, state: Any, grace_seconds: float) -> bool:
-    """The hook has said busy for longer than the grace, nothing on the screen moves, and no question is open."""
-    if state.state != "busy" or state.turn_started_at is None or gate.wall_time() - state.updated_at < grace_seconds:
+    """The hook has said busy for longer than the grace, with no tool call since, nothing on the screen moves, and no
+    question is open."""
+    if state.state != "busy" or state.turn_started_at is None or gate.wall_time() - hook_word_at(gate, state) < grace_seconds:
         return False
     if gate._working_timer_trace(target, sample_delay_seconds=gate.idle_working_timer_sample_delay_seconds) is not None:
         return False
@@ -111,7 +130,9 @@ def report(gate: Any, grace_seconds: float, watched: set[str]) -> dict[str, dict
         still = busy_still(gate, target, state, grace_seconds)
         seen[role] = {
             "state": state.state,
-            "updated_at": _iso(state.updated_at),
+            # The board's clock and its stale reasons read the hook's latest word, tool calls included (SYRD-695).
+            "updated_at": _iso(hook_word_at(gate, state)),
+            **_tool_activity(gate, state),
             "turn_started_at": _iso(state.turn_started_at),
             "busy_still": still,
             "condition": condition(gate, target) if still or role in watched else None,
@@ -128,7 +149,8 @@ def owner_hook(gate: Any, role: str) -> dict | None:
         return None
     if state is None:
         return None
-    return {"state": state.state, "updated_at": _iso(state.updated_at), "turn_started_at": _iso(state.turn_started_at)}
+    return {"state": state.state, "updated_at": _iso(hook_word_at(gate, state)), "turn_started_at": _iso(state.turn_started_at),
+            **_tool_activity(gate, state)}
 
 
 def _with_owner_hook(holder: Any, payload: str) -> str:

@@ -1102,7 +1102,8 @@ class PaneActivityGate:
         if state.updated_at < listener.MIN_RECOVERABLE_HOOK_EPOCH_SECONDS:
             return None
         now = self.wall_time()
-        if now - state.updated_at < self.stale_codex_busy_hook_seconds:
+        # A tool call of the turn since is the turn moving, however long ago it started (SYRD-695).
+        if now - listener.stall_episode.hook_word_at(self, state, now) < self.stale_codex_busy_hook_seconds:
             return None
         working_trace = self._working_timer_trace(
             target,

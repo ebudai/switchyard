@@ -275,11 +275,10 @@ def test_installer_writes_durable_cli_hook_configs_idempotently() -> None:
             "--record-session",
         ):
             assert required in all_commands
-        # SYRD-234 added a fifth idle-hook command (the permission_prompt notice
-        # that marks the pane blocked), SYRD-644 a sixth (StopFailure, run for an
-        # API-error turn end); each is asserted by name, and the PermissionRequest
-        # hook, a program this count does not see, below: no stale count hides one.
-        assert _managed_command_count(claude) == 6
+        # SYRD-234 added a fifth idle-hook command (permission_prompt: blocked), SYRD-644 a sixth (StopFailure),
+        # SYRD-695 a seventh and eighth (PreToolUse and PostToolUse: the turn's tool calls, beside the state; named in
+        # tool_activity_evidence_test); the PermissionRequest hook, a program this count does not see, is below.
+        assert _managed_command_count(claude) == 8
         assert any("--source claude.StopFailure" in command for command in _commands(claude)), _commands(claude)
         claude_commands = _commands(claude)
         assert any(
@@ -288,7 +287,7 @@ def test_installer_writes_durable_cli_hook_configs_idempotently() -> None:
         assert any(
             "claude.Notification.permission_prompt" in command for command in claude_commands
         ), claude_commands
-        assert _managed_command_count(codex) == 4
+        assert _managed_command_count(codex) == 6  # SYRD-695: PreToolUse, PostToolUse
         assert _managed_command_count(gemini) == 4
         assert _managed_command_count(hermes) == 5
         assert "ticket-board-pane-state" in gemini
@@ -351,15 +350,15 @@ def test_installer_seeds_codex_hook_trust_for_fresh_owner_only() -> None:
         assert config_path.exists(), "fresh install with --seed-codex-hook-trust-if-new must create config.toml"
         config = _load_toml(config_path)
 
-    assert len(entries) == 4
-    assert "seeded Codex hook trust for 4 installed hooks" in proc.stdout
+    assert len(entries) == 6  # SYRD-695: PreToolUse, PostToolUse
+    assert "seeded Codex hook trust for 6 installed hooks" in proc.stdout
     assert "hooks" in config
     trusted_by_event = {event: trusted.get(hook_key) == current_hash for event, hook_key, current_hash in entries}
     assert trusted_by_event == {
         "session_start": True,
         "stop": True,
         "user_prompt_submit": True,
-        "permission_request": True,
+        "permission_request": True, "pre_tool_use": True, "post_tool_use": True,  # SYRD-695
     }
 
 
@@ -385,7 +384,7 @@ def test_installer_does_not_seed_codex_hook_trust_without_opt_in_flag() -> None:
         trusted = codex_trusted_hashes(home)
         config_exists = (home / ".codex" / "config.toml").exists()
 
-    assert len(entries) == 4
+    assert len(entries) == 6  # SYRD-695: PreToolUse, PostToolUse
     assert "seeded Codex hook trust" not in proc.stdout
     assert trusted == {}
     assert not config_exists
@@ -455,7 +454,7 @@ def test_installer_refuses_codex_hook_trust_seed_when_hooks_json_exists() -> Non
     assert "skipped Codex hook trust seed: existing hooks.json requires manual /hooks approval" in proc.stdout
     assert trusted == {}
     assert "printf foreign" in "\n".join(_commands(codex))
-    assert _managed_command_count(codex) == 4
+    assert _managed_command_count(codex) == 6  # SYRD-695: PreToolUse, PostToolUse
 
 
 def test_installer_migrates_legacy_agy_named_hook_without_removing_foreign_keys() -> None:

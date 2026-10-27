@@ -69,6 +69,10 @@ class PaneHookState:
     #: The provider process that took the latest turn -- {pane_pid,
     #: pane_start_time} -- as the hook stamped it (SYRD-644), or None.
     turn_process: object = None
+    #: The latest tool call a provider's hook recorded beside the state --
+    #: {at, source, pane_pid, pane_start_time} -- or None (SYRD-695). Read
+    #: through tool_activity, never alone.
+    tool_activity: object = None
 
 
 #: Hook events that mean a turn STARTED in the pane: a prompt was taken and the
@@ -325,6 +329,11 @@ class PaneHookStateStore:
             updated_at = float(parsed.get("updated_at"))
         except (TypeError, ValueError):
             return None
+        # The hook's tool-call record beside the state, as written (SYRD-695).
+        try:
+            activity = json.loads(path.with_name(path.name.removesuffix(".json") + ".activity.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            activity = None
         turn_started_at: float | None
         try:
             raw_turn = parsed.get("turn_started_at")
@@ -342,6 +351,7 @@ class PaneHookStateStore:
             last_checkout=parsed.get("last_checkout") if isinstance(parsed.get("last_checkout"), dict) else None,
             provider_error=parsed.get("provider_error") if isinstance(parsed.get("provider_error"), dict) else None,
             turn_process=parsed.get("turn_process") if isinstance(parsed.get("turn_process"), dict) else None,
+            tool_activity=activity if isinstance(activity, dict) else None,
         )
 
     def write(self, target: str, state: str, *, source: str = "", now: float | None = None) -> Path:

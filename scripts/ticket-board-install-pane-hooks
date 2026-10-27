@@ -172,6 +172,19 @@ def _install_hook_binary(source: Path, destination: Path) -> None:
     destination.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
+def _merge_tool_activity_hooks(config: dict[str, Any], cli: str, hook_bin: Path, state_dir: Path, session_dir: Path) -> None:
+    """Every tool call of a turn, recorded beside the pane's state and never in it (SYRD-695).
+
+    The turn hooks say only when a turn starts and ends, so a long turn of
+    short tool calls -- none long enough to earn an execution lease -- looked
+    like a pane busy with nothing moving. No matcher: every tool is the turn
+    moving.
+    """
+    for event in ("PreToolUse", "PostToolUse"):
+        _merge_hook_entries(config, event, [_hook_entry(_shell_command(
+            [hook_bin, "activity", "--source", f"{cli}.{event}", "--state-dir", state_dir, "--session-dir", session_dir]))])
+
+
 def _install_claude_hooks(home: Path, hook_bin: Path, permission_hook: Path) -> Path:
     path = home / ".claude" / "settings.json"
     config = _load_json(path)
@@ -293,6 +306,7 @@ def _install_claude_hooks(home: Path, hook_bin: Path, permission_hook: Path) -> 
         "PermissionRequest",
         [_hook_entry(_shell_command([permission_hook]))],
     )
+    _merge_tool_activity_hooks(config, "claude", hook_bin, state_dir, session_dir)
     _write_json(path, config)
     return path
 
@@ -356,6 +370,9 @@ def _install_codex_hooks(home: Path, hook_bin: Path) -> Path:
             )
         ],
     )
+    # New entries are new hook content to Codex: an owner whose trust records predate them approves them in `/hooks`,
+    # as for any hook-content change. A pane whose tool calls are not recorded is judged as it was before.
+    _merge_tool_activity_hooks(config, "codex", hook_bin, state_dir, session_dir)
     _write_json(path, config)
     return path
 

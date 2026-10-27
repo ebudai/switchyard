@@ -124,6 +124,9 @@ def load_project_config(
         roles.append(launcher._role_from_json(config_project, raw, base=base, default_workdir=default_workdir))
     if len(roles) != len(roles_raw):
         raise SystemExit(f"{path} roles must all be JSON objects")
+    # SYRD-689: in a projected config the declared workflow, not a field copied forward, decides whether a role's
+    # launch sets its conversation aside; a persistent Director marked fresh was started fresh on every restart.
+    roles = launcher.roles_as_declared(config, roles)
     slots = [role.slot for role in roles if role.slot is not None]
     if len(set(slots)) != len(slots):
         raise SystemExit(f"{path} contains duplicate role slot assignments")

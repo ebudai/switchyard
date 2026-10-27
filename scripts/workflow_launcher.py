@@ -44,8 +44,12 @@ def project_roles(raw: dict[str, Any], document: dict[str, Any]) -> dict[str, An
         # document actually removes it from the generated config instead of
         # leaving the previous answer behind.
         role.pop("ephemeral", None)
+        # SYRD-689: and the launcher's fresh-per-ticket start with it, from the declared role exactly. Copied
+        # forward from the existing entry or a template role, it once started MEFP's persistent Director fresh.
+        role.pop("fresh_session_per_ticket", None)
         if spec.get("ephemeral"):
             role["ephemeral"] = True
+            role["fresh_session_per_ticket"] = True
         # SYRD-141: the pane label is computed here, where the document's kind
         # and any explicit override are both in hand, and written out whole.
         # The launcher then reads a label rather than re-deriving one, so the

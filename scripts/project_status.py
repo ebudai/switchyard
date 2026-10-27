@@ -649,6 +649,16 @@ def switchyard_status_command(
         print_func("")
         for line in board_lines:
             print_func(line)
+    from scripts import role_ephemerality
+
+    # SYRD-689: a generated config whose fresh-per-ticket starts disagree with its workflow, and the repair.
+    stale_lines = [line for status in statuses if status.state != "unknown"
+                   for line in role_ephemerality.mismatch_lines(
+                       status.slug, role_ephemerality.read_document(status.config_path, status.slug)[0] or {})]
+    if stale_lines:
+        print_func("")
+        for line in stale_lines:
+            print_func(line)
     from scripts import upstream_report_sinks
 
     # Whether each project can file Switchyard reports, and if not why and the repair (SYRD-674).

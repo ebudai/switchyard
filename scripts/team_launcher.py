@@ -1555,6 +1555,11 @@ from scripts.role_state_restore import (
 from scripts.policy_hook_repair import (
     repair_repository_policy_hooks,
 )
+# SYRD-689: the declared workflow decides a projected role's fresh-per-ticket start; the loader reads it here.
+from scripts.role_ephemerality import (
+    report_projection_mismatches,
+    roles_as_declared,
+)
 from scripts.project_config_loader import (
     load_project_config,
 )

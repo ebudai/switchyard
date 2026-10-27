@@ -73,6 +73,9 @@ def launch_project(
     if unknown:
         raise SystemExit(f"team-launcher: {config.project} has no role {', '.join(unknown)}; "
                          f"nothing was discarded and nothing was launched")
+    # SYRD-689: a projection that disagrees with its workflow is said before anything starts; the loaded config
+    # already launches each role as declared.
+    launcher.report_projection_mismatches(config, config_path=config_path, print_func=print_func)
     if not dry_run and config.role_state_isolation:
         compatible, reason = launcher.process_authority_board_compatibility(config)
         if not compatible:

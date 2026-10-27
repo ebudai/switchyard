@@ -63,7 +63,8 @@ MOVED = ('load_project_config',)
 #: Measured on the baseline launcher: the moved body's call-time reads of launcher globals.
 SEAMS = {
     # SYRD-663: and, as root, whether the owner the configuration names is the one root's records name.
-    'load_project_config': {'DEFAULT_CONFIG_DIR': 1, 'ProjectConfig': 1, '_control_repository_boundary_error': 1, '_default_board_socket': 1, '_default_board_url': 1, '_expand_path': 6, '_load_json': 1, '_normalized_path': 2, '_role_from_json': 1, '_validate_project_slug': 2, '_with_project_board_env': 1, 'default_session_dir_for_user': 1, 'parse_worker_pool': 1, 'read_tenant_document_no_follow': 1, 'root_owner_refusal': 1, 'validate_ticket_prefix': 1},
+    # SYRD-689: and each projected role's fresh-per-ticket start as its workflow declares it.
+    'load_project_config': {'DEFAULT_CONFIG_DIR': 1, 'ProjectConfig': 1, '_control_repository_boundary_error': 1, '_default_board_socket': 1, '_default_board_url': 1, '_expand_path': 6, '_load_json': 1, '_normalized_path': 2, '_role_from_json': 1, '_validate_project_slug': 2, '_with_project_board_env': 1, 'default_session_dir_for_user': 1, 'parse_worker_pool': 1, 'read_tenant_document_no_follow': 1, 'roles_as_declared': 1, 'root_owner_refusal': 1, 'validate_ticket_prefix': 1},
 }
 #: Measured on the baseline launcher: every launcher definition outside it that names it, and how often.
 DISPATCH = {'_usable_switchyard_entry_for_project': {'load_project_config': 1}, 'switchyard_validate_models_command': {'load_project_config': 1}, 'main': {'load_project_config': 2}}
@@ -238,7 +239,7 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
     passed = ("_validate_project_slug", "validate_ticket_prefix", "_expand_path", "_normalized_path", "_load_json", "_role_from_json",
               "parse_worker_pool", "_default_board_socket", "ProjectConfig")
     stood = ("read_tenant_document_no_follow", "default_session_dir_for_user", "_default_board_url", "_with_project_board_env",
-             "_control_repository_boundary_error", "DEFAULT_CONFIG_DIR", "root_owner_refusal")
+             "_control_repository_boundary_error", "DEFAULT_CONFIG_DIR", "root_owner_refusal", "roles_as_declared")
     saved = {n: getattr(t, n) for n in (*FUNCTIONS, *passed, *stood)}
     saved_env = {k: os.environ.get(k) for k in ("HOME", "SYRD450_DIR")}
     saved_euid = os.geteuid
@@ -273,6 +274,10 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
             reached.add("root_owner_refusal")
             or ("owner_asked" in spec and spec["owner_asked"].append([project, run_as_user, norm(path)]))
             or spec.get("owner_refusal", ""))
+        # SYRD-689's read, after the baseline: the real function, unrecorded in `calls`, so every measured case -- none
+        # carries a workflow -- is the baseline's unchanged; what the loader does with it is asserted on its own below.
+        t.roles_as_declared = lambda config, roles: (reached.add("roles_as_declared")
+                                                     or saved["roles_as_declared"](config, roles))
         t._control_repository_boundary_error = lambda config, *, require_existing_user: note(
             "_control_repository_boundary_error", config.project, require_existing_user=require_existing_user) or spec.get("boundary")
         if spec.get("root"):
@@ -609,6 +614,24 @@ def test_root_is_refused_when_the_owner_is_not_roots_recorded_one() -> None:
     check([c[0] for c in got["calls"]] == [c[0] for c in GOLDEN["root: the no-follow reader answers"]["calls"]][:len(got["calls"])]
           and "_role_from_json" not in [c[0] for c in got["calls"]],
           f"and nothing past the owner is read: {[c[0] for c in got['calls']]}")
+
+
+def test_a_projected_role_is_loaded_as_its_workflow_declares_it() -> None:
+    """SYRD-689: a persistent role marked fresh-per-ticket in its generated entry is loaded persistent, an ephemeral
+    one fresh-per-ticket; a config no workflow projected keeps what its entries say."""
+    from scripts import project_config_loader as m
+
+    doc = json.loads(json.dumps(CASES["a minimal config"]["doc"]))
+    doc["roles"][0]["fresh_session_per_ticket"] = True
+    for label, workflow, want in (
+        ("projected", {"roles": [{"name": "director"}, {"name": "main", "ephemeral": True}]},
+         {"director": (False, False), "main": (True, True)}),
+        ("not projected", None, {"director": (True, False), "main": (False, False)}),
+    ):
+        spec = {"doc": {**doc, **({"workflow": workflow} if workflow else {})}}
+        got = run_case(t, m, spec, REACHED)["result"]
+        roles = {r["role"]: (r["fresh_session_per_ticket"], r["ephemeral"]) for r in got.get("roles", [])}
+        check(roles == want, f"{label}: {roles} {got.get('message', '')}")
 
 
 def test_every_launcher_seam_is_reached() -> None:

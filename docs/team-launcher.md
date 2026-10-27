@@ -1565,9 +1565,17 @@ Each role entry contains:
 - `extra_args`: optional additional argv entries appended after the yolo flag.
 - `fresh_session_per_ticket`: optional boolean, defaulting to false. When true,
   `start`/`reload` ignore a recorded session id for that role, move the previous
-  record to the `.superseded` sidecar, and launch a fresh CLI session. Use it
-  only for roles where carrying context between tickets is more dangerous than
-  losing continuity; it is a role policy, not a CLI policy.
+  record to the `.superseded` sidecar, and launch a fresh CLI session (since
+  SYRD-626, after asking the board whether the role's active ticket needs its
+  conversation). Use it only for roles where carrying context between tickets is
+  more dangerous than losing continuity; it is a role policy, not a CLI policy.
+  In a config the workflow projected (one carrying `workflow`) it is not set by
+  hand: it is projected from the declared role exactly, true for an `ephemeral`
+  role and absent for every other, and a file that disagrees is loaded as the
+  workflow declares it. `team-launcher` and `switchyard status` name such a role,
+  and the Director's `switchyard finish-upgrade <project>` rewrites the file
+  without restarting anything (SYRD-689: MEFP's persistent Director, marked
+  fresh, started without its conversation on every restart).
 - `ephemeral`: optional boolean, defaulting to false. Projected from the
   workflow document's role entry, so the document is where a director sets it
   and this generated file is where it is recorded. When true, the notify
@@ -1888,9 +1896,10 @@ platform executable behind `npm-loader.js`, and refuses a Node script with none.
 
 By default every role, including Hermes roles, resumes from the recorded session
 id when one is available and passes that id through
-`TICKET_BOARD_PANE_SESSION_ID`. A director can opt a specific role into
-`fresh_session_per_ticket` when the role should not inherit previous ticket
-context. That policy is deliberately explicit: Hermes `/clear` is available for
+`TICKET_BOARD_PANE_SESSION_ID`. A director opts a role into
+`fresh_session_per_ticket` by declaring it `ephemeral` in the workflow (a config
+with no workflow sets the flag on the role directly) when the role should not
+inherit previous ticket context. That policy is deliberately explicit: Hermes `/clear` is available for
 interactive use, but this ticket did not establish a reliable automatic
 ticket-boundary reset protocol that can be delivered to a pane mid-flight and
 verified as equivalent to launching without a recorded session id. Until such a

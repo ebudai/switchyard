@@ -57,7 +57,7 @@ CHECKS = 0
 MOVED = ('launch_project',)
 #: Measured on the baseline launcher: the moved body's call-time reads of launcher globals.
 SEAMS = {
-    'launch_project': {'WorkerStartup': 1, '_launch_runners_and_paths': 1, '_prepare_launch': 1, '_report_launch': 1, '_start_workers_and_present': 1, '_verify_pane_launcher_path': 1, '_write_layout_and_plan': 1, 'load_project_config': 2, 'migrate_declarative_director_onboarding': 1, 'prepare_project_desktop': 1, 'process_authority_board_compatibility': 1, 'refuse_restart_on_another_model': 1, 'report_kept_worktrees': 1, 'upgrade_generated_project_layout': 1},
+    'launch_project': {'WorkerStartup': 1, '_launch_runners_and_paths': 1, '_prepare_launch': 1, '_report_launch': 1, '_start_workers_and_present': 1, '_verify_pane_launcher_path': 1, '_write_layout_and_plan': 1, 'load_project_config': 2, 'migrate_declarative_director_onboarding': 1, 'prepare_project_desktop': 1, 'process_authority_board_compatibility': 1, 'refuse_restart_on_another_model': 1, 'report_kept_worktrees': 1, 'report_projection_mismatches': 1, 'upgrade_generated_project_layout': 1},  # SYRD-689 added report_projection_mismatches
 }
 #: Measured on the baseline launcher: every launcher definition that names it, and how often.
 DISPATCH = {'switchyard_main': {'launch_project': 2}, 'main': {'launch_project': 1}}
@@ -229,7 +229,7 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
              "_load_switchyard_project_config_for_command", "resume_tenant", "run_switchyard_launch_first_run_auth",
              "stop_before_launch_for_missing_owner_clis", "stop_before_launch_for_unauthenticated_providers",
              "stop_before_launch_for_unknown_models", "report_first_run_auth_warnings", "report_kept_worktrees",
-             "refuse_restart_on_another_model"]
+             "refuse_restart_on_another_model", "report_projection_mismatches"]
     saved = {n: getattr(t, n) for n in names}
     try:
         under = {n: getattr(holder, n) for n in FUNCTIONS}
@@ -338,6 +338,9 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
             "report_kept_worktrees": lambda cfg, kept, *, print_func: note("report_kept_worktrees", cfg, kept, print_func=print_func),
             # SYRD-579: before anything starts, no role is restarted over the model it chose.
             "refuse_restart_on_another_model": lambda cfg, **kwargs: note("refuse_restart_on_another_model", cfg, **kwargs) or False,
+            # SYRD-689's report, after the baseline: reached but unrecorded, so every measured case is the baseline's;
+            # what it says is role_ephemerality_test's.
+            "report_projection_mismatches": lambda cfg, **kwargs: reached.add("report_projection_mismatches"),
         }
         on_launcher.update({k: (StandInStartup if v == "STAND-IN" else v) for k, v in spec.get("launcher", {}).items()})
         for n, f in on_launcher.items():

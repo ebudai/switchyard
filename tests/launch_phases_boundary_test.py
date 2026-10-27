@@ -1138,8 +1138,10 @@ def test_the_worker_phase_reads_its_lookups_through_the_launcher() -> None:
               and not bare, f"P7+P8 read {name} at its {count} site(s), through the launcher")
     imports = [n for n in function.body if isinstance(n, ast.ImportFrom)]
     check([(n.module, [(a.name, a.asname) for a in n.names]) for n in imports]
-          == [("scripts", [("team_launcher", "launcher")]), ("scripts", [("presentation_controller", None)])],
-          "the launcher, then the presentation controller, are the phase's own imports, in that order")
+          == [("scripts", [("team_launcher", "launcher")]),
+              ("scripts", [("presentation_controller", None), ("worker_admission", None)])],
+          "the launcher, then the presentation controller and (SYRD-688) worker admission, are the phase's own "
+          "imports, in that order")
     controller = [n for n in ast.walk(function) if isinstance(n, ast.Attribute) and n.attr == "presentation_controller"]
     calls = sorted(n.func.attr for n in ast.walk(function) if isinstance(n, ast.Call)
                    and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
@@ -1175,11 +1177,12 @@ def test_the_worker_phase_reads_its_lookups_through_the_launcher() -> None:
 def test_the_worker_result_is_a_frozen_record_of_exactly_the_four_outputs() -> None:
     from scripts.launch_phases import WorkerStartup
 
-    check(tuple(f.name for f in dataclasses.fields(WorkerStartup)) == P78_OUTPUTS
-          and all(f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING
-                  for f in dataclasses.fields(WorkerStartup)),
-          f"WorkerStartup holds the four outputs, in the order P7+P8 assign them, with no defaults: "
-          f"{[f.name for f in dataclasses.fields(WorkerStartup)]}")
+    fields = dataclasses.fields(WorkerStartup)
+    check(tuple(f.name for f in fields) == (*P78_OUTPUTS, "deferred_roles")
+          and all(f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING for f in fields[:4])
+          and fields[4].default == (),
+          f"WorkerStartup holds the four outputs, in the order P7+P8 assign them, with no defaults, and (SYRD-688) "
+          f"the pull workers admission left stopped, none unless said: {[f.name for f in fields]}")
     result, _, _, _ = workers(Workers(), p78_config())
     try:
         result.worker_start_exit_code = 9
@@ -1658,7 +1661,8 @@ def test_the_launch_returns_p9s_answer_with_the_state_before_it() -> None:
                     resolved_layout_mode="SYRD344_SEPARATE", running_roles=[],
                     session_record_poll=team_launcher.LAUNCH_SESSION_RECORD_POLL_SECONDS,
                     session_record_timeout=team_launcher.LAUNCH_SESSION_RECORD_TIMEOUT_SECONDS,
-                    unreconciled_roles=set(), worker_start_exit_code=going.worker_start_exit_code)
+                    unreconciled_roles=set(), worker_start_exit_code=going.worker_start_exit_code,
+                    deferred_roles=going.deferred_roles)
           and k["failed_roles"] is failures and k["worker_start_exit_code"] is going.worker_start_exit_code
           and k["failed_roles"] is p78[0][1]["failed_roles"],
           f"P9 gets P7+P8's four values and the very failures dict they wrote into: {k}")

@@ -340,6 +340,22 @@ def converge_passes(observe: Callable[[], tuple[list[Cohort], list[str]]], *, ac
     return 1 if failed else 0
 
 
+def operator_recorded(config, config_path, *, runner, print_func: Callable[[str], None],
+                      stop: Callable[[str], Any], start: Callable[[str], Any]):
+    """Converge's stop and start, each recorded first as the operator's (SYRD-688).
+
+    A converge stop keeps that worker from demand starts until a start, by
+    converge or `worker-pool start`, clears it.
+    """
+    from scripts import worker_admission
+
+    def mark(member: str, stopped: bool) -> None:
+        worker_admission.mark(config, config_path, "--operator-stopped" if stopped else "--operator-started", member,
+                              runner=runner, print_func=print_func)
+
+    return (lambda member: (mark(member, True), stop(member))[1]), (lambda member: (mark(member, False), start(member))[1])
+
+
 def run_command(config, pool, *, document: Mapping[str, Any] | None, action: str, config_path, dry_run: bool = False,
                 watch: bool = False, interval: float = 60.0, passes: int | None = None,
                 read_readiness: Callable[[], Sequence[Any]], read_snapshot: Callable[[], Mapping[str, Any] | None],
@@ -399,12 +415,14 @@ def run_command(config, pool, *, document: Mapping[str, Any] | None, action: str
         cohorts, uncohorted = last["view"]
         for line in format_status(config.project, pool.name, cohorts, moves, uncohorted=uncohorted, would=False):
             print_func(line)
-        return execute(
-            moves, writer=writer, source=source, record_deferrals=record_deferrals, print_func=print_func,
+        stopping, starting = operator_recorded(
+            config, config_path, runner=runner, print_func=print_func,
             stop=stop or (lambda member: worker_pool.stop_worker(config, member, runner=runner)),
             start=start or (lambda member: worker_pool.start_worker(config, pool, member, readiness=read_readiness(),
-                                                                    config_path=config_path, runner=runner)),
-            still_idle=lambda member: not busy_of(member))
+                                                                    config_path=config_path, runner=runner)))
+        return execute(
+            moves, writer=writer, source=source, record_deferrals=record_deferrals, print_func=print_func,
+            stop=stopping, start=starting, still_idle=lambda member: not busy_of(member))
 
     return converge_passes(observed, act=act, passes=passes if passes is not None else (None if watch else 1),
                            interval=interval, sleep=sleep, print_func=print_func)

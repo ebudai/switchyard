@@ -39,7 +39,11 @@ def stop_project(
     # killed there or stop reports success while the session is still alive
     # (SYRD-39).
     from scripts import team_launcher as launcher
+    from scripts import worker_admission
 
+    # First, under worker admission's lock: a demand start already under way finishes before this is
+    # recorded, the sweep below then ends it, and none starts again until the next launch (SYRD-688).
+    unrecorded = worker_admission.record_stop(config, runner=runner, print_func=print_func)
     owner_runner = runner
     if config.run_as_user and launcher.current_user_name() != config.run_as_user:
         owner_runner = launcher._owner_process_runner(owner_user=config.run_as_user, runner=runner)
@@ -76,4 +80,5 @@ def stop_project(
     # Always, not short-circuited on an earlier failure: a viewer that would not
     # close is no reason to leave every worker running.
     workers_stopped = launcher.stop_role_sessions(config, runner=runner, print_func=print_func)
-    return exit_code or workers_stopped
+    not_clean = worker_admission.unrecorded_stop(config, unrecorded, runner=runner, print_func=print_func)
+    return exit_code or workers_stopped or not_clean

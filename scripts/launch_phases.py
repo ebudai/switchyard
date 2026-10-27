@@ -354,6 +354,8 @@ class WorkerStartup:
     launch_started_at: float
     launch_started_ns: int
     resolved_layout_mode: str
+    #: Idle pull workers this launch left stopped (SYRD-688): no session to report for them.
+    deferred_roles: tuple[str, ...] = ()
 
 
 def _start_workers_and_present(
@@ -383,7 +385,7 @@ def _start_workers_and_present(
     `failed_roles`."""
     from scripts import team_launcher as launcher
 
-    from scripts import presentation_controller
+    from scripts import presentation_controller, worker_admission
 
     use_runtime_presentation = presentation_controller.presentation_enabled(config, config_path=config_path)
     worker_start_exit_code = 0
@@ -397,8 +399,12 @@ def _start_workers_and_present(
 
     launch_started_at = time.time()
     launch_started_ns = time.time_ns()
+    # SYRD-688: an idle pull worker starts only for work; every other role as before.
+    admission = worker_admission.for_launch(config, config_path=config_path, mode=mode, runner=runner,
+                                            print_func=print_func)
+    deferred_roles = tuple(name for name, decision in admission.items() if not decision.starts)
     for role in config.roles:
-        if not role.detached:
+        if not role.detached or role.role in deferred_roles:
             continue
         if role.role in failed_roles:
             print(f"skipping detached role {role.role}: {failed_roles[role.role]}", file=sys.stderr)
@@ -606,6 +612,7 @@ def _start_workers_and_present(
         launch_started_at=launch_started_at,
         launch_started_ns=launch_started_ns,
         resolved_layout_mode=resolved_layout_mode,
+        deferred_roles=deferred_roles,
     )
 
 
@@ -627,6 +634,7 @@ def _report_launch(
     session_record_timeout: float,
     unreconciled_roles: set[str],
     worker_start_exit_code: int,
+    deferred_roles: tuple[str, ...] = (),
 ) -> int:
     """P9 of `launch_project`, unchanged: the unsafe-window report, the attach
     announcement, the provider-state records and the session report; it answers
@@ -651,7 +659,7 @@ def _report_launch(
     # next ordinary launch reconciles it instead of forgetting (SYRD-191).
     if mode == "attach-or-start" and reconcile_home is not None:
         for role in config.roles:
-            if role.role in failed_roles or role.role in unreconciled_roles:
+            if role.role in failed_roles or role.role in unreconciled_roles or role.role in deferred_roles:
                 continue
             cli = launcher._role_cli_name(role)
             if not cli:
@@ -662,6 +670,8 @@ def _report_launch(
     if report_session_records:
         launcher.report_launch_session_records(
             config,
+            # Not a pull worker the launch left stopped (SYRD-688): it has no session to wait for.
+            **({"roles": [role for role in config.roles if role.role not in deferred_roles]} if deferred_roles else {}),
             timeout_seconds=session_record_timeout,
             poll_seconds=session_record_poll,
             fallback_changed_since_ns=launch_started_ns,

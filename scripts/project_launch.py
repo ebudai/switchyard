@@ -211,6 +211,7 @@ def launch_project(
         session_record_timeout=session_record_timeout,
         unreconciled_roles=unreconciled_roles,
         worker_start_exit_code=worker_start_exit_code,
+        deferred_roles=getattr(worker_startup, "deferred_roles", ()),
     )
     # Last, where the operator reads: worktrees kept rather than refreshed (SYRD-555).
     launcher.report_kept_worktrees(config, launch_preparation.kept_worktrees, print_func=print_func)

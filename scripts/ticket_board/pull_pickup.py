@@ -24,8 +24,10 @@ transition's actor list: every active, ephemeral implementer that owns the
 implementation stage (`workflow_config.pull_claimant_pool`, the rule the
 board applies to every claim). Of those, only a worker whose registered
 provider process is running is a claimant now; a stopped one is neither
-claimed for nor called idle, since starting workers is the operator's, never
-the board's.
+claimed for nor called idle. Starting one is never the board's: when ready
+work is left that no running worker took, the pass asks the project's own
+admission, as the project account, which declared worker to start
+(`demand_start`, SYRD-688).
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from . import session_context
+from . import demand_start, session_context
 from .workflow_config import pull_claimant_pool
 
 
@@ -98,11 +100,12 @@ def run(listener: Any, conn: Any) -> int:
         return 0
     claimed = 0
     idle: dict[str, str] = {}
+    eligibility: dict[str, str] = {}
     held = _held(listener, conn)
     for role in pull_claimant_pool(listener.workflow or {}):
         if role in held:
             continue  # its provider is out of quota (SYRD-644): it cannot work a ticket, and is not idle capacity
-        reason = why_not_eligible(gate, role)
+        reason = eligibility[role] = why_not_eligible(gate, role)
         if reason:
             if reason not in NOT_RUNNING:
                 idle[role] = reason
@@ -120,6 +123,10 @@ def run(listener: Any, conn: Any) -> int:
         elif result and result.get("reason") == "nothing ready":
             idle[role] = "idle, nothing claimable"
     session_context.passes(listener, conn, gate)  # SYRD-540: bind, confirm and restart-repair conversations
+    try:
+        demand_start.trigger(listener, conn, eligibility, NOT_RUNNING)  # SYRD-688: work no running worker took
+    except Exception as exc:  # logged, never fatal to the pass
+        listener.logger.warning("Demand start check failed: %s", exc)
     try:
         conn.execute("SELECT ticket_board.notify_pull_idle_capacity(%s::jsonb, clock_timestamp())",
                      (json.dumps(idle, sort_keys=True),))

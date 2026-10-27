@@ -1488,6 +1488,10 @@ Each project config contains:
   per-project port used by the ticket-board provisioner.
 - `board_socket`: optional project ticket-board Unix write socket. Defaults to
   `/run/<project>-ticket-board/ticket-board.sock`.
+- `warm_workers`: optional non-negative integer, defaulting to 0. How many idle
+  pull workers a launch, or a demand start, keeps running beyond what ready
+  work needs. A launch otherwise starts an idle pull worker only for work; see
+  [syrd-688-worker-admission.md](syrd-688-worker-admission.md).
 - `repository`: optional shared checkout used as the default pane cwd and the
   checkout refreshed by `start`.
 - `worktree_base`: legacy optional setting retained for existing configs. It is
@@ -1573,10 +1577,14 @@ Each role entry contains:
   and this generated file is where it is recorded. When true, the notify
   listener sends the role's CLI its clear command once before the first
   notification that hands it a given ticket, so the role starts that ticket on
-  an empty conversation. It is not a launcher behaviour: nothing about starting
-  or reloading the pane changes, because the reset happens at the ticket
-  boundary in a pane that is already running. Compare `fresh_session_per_ticket`,
-  which is a launcher behaviour and discards the recorded session id instead.
+  an empty conversation. That reset is not a launcher behaviour: it happens at
+  the ticket boundary in a pane that is already running. Compare
+  `fresh_session_per_ticket`, which is a launcher behaviour and discards the
+  recorded session id instead. What the launcher does with it: a detached
+  ephemeral role the board's pull policy names as a claimant is started by
+  `start` and `attach-or-start` only when it holds work, a ticket needs it, or
+  `warm_workers` keeps it warm, and otherwise left stopped with its reason
+  (SYRD-688, [syrd-688-worker-admission.md](syrd-688-worker-admission.md)).
 - `resume_flag`: flag used by that CLI for context resume.
 - `live_commands`: optional command names accepted as the live pane process
   before destructive reload.

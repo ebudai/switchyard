@@ -610,6 +610,11 @@ def switchyard_worker_pool_command(
         record = worker_cohorts.operator_change(config, document, member, action, print_func=print_func)
         for kind in (("stop", "start") if action == "restart" else (action,)) if record else ():
             record(kind, "intended")
+        from scripts import worker_admission
+
+        # An operator's stop keeps the worker down until an operator starts it again (SYRD-688).
+        worker_admission.mark(config, entry.config_path, "--operator-stopped" if action == "stop" else "--operator-started",
+                              member, runner=runner, print_func=print_func)
         if action == "stop":
             results = [pool_module.stop_worker(config, member, runner=runner)]
         else:

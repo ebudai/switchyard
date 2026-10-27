@@ -300,9 +300,17 @@ def test_the_seams_read_through_the_launcher_and_nothing_bound() -> None:
     expected = SEAMS["stop_project"]
     check(through == expected, f"each launcher name read through it exactly as often as before: {through}")
     imports = [ast.unparse(x) for x in ast.walk(node) if isinstance(x, (ast.Import, ast.ImportFrom))]
-    check(imports == ["from scripts import team_launcher as launcher", "from scripts import presentation_controller"]
-          and ast.unparse(node.body[0]) == imports[0], f"the launcher imported first thing when it runs, and the controller inside too: {imports}")
-    at = [i for i, s in enumerate(node.body) if ast.unparse(s) == imports[1]]
+    # SYRD-688: worker admission's stop record comes right after the launcher, before any session is touched.
+    check(imports == ["from scripts import team_launcher as launcher", "from scripts import worker_admission",
+                      "from scripts import presentation_controller"]
+          and ast.unparse(node.body[0]) == imports[0] and ast.unparse(node.body[1]) == imports[1]
+          and ast.unparse(node.body[2]) == "unrecorded = worker_admission.record_stop(config, runner=runner, print_func=print_func)"
+          and [ast.unparse(x) for x in node.body[-2:]] == [
+              "not_clean = worker_admission.unrecorded_stop(config, unrecorded, runner=runner, print_func=print_func)",
+              "return exit_code or workers_stopped or not_clean"],
+          f"the launcher imported first thing when it runs, then admission's stop record, the controller inside too, "
+          f"and a stop that could not record itself is no clean stop: {imports}")
+    at = [i for i, s in enumerate(node.body) if ast.unparse(s) == imports[2]]
     viewer = [i for i, s in enumerate(node.body) if isinstance(s, ast.If) and ast.unparse(s.test) == "viewer_exists"]
     check(len(at) == 1 and len(viewer) == 1 and at[0] == viewer[0] + 1, "the controller is imported right after the viewer step, as before")
     skip = {id(y) for part in [node.returns, *(a.annotation for a in node.args.args + node.args.kwonlyargs), *[d for d in node.args.kw_defaults if d]]

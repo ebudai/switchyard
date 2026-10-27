@@ -68,8 +68,12 @@ nothing claimable.
 ## The cap
 
 The board never starts a worker. Concurrent claims are therefore bounded by the
-claimants that are running, which is the cap MEFP keeps by running eight
-sessions. Serial reservations are unchanged:
+claimants that are running. Since SYRD-688 a launch leaves an idle claimant
+stopped, and the tenant's own listener asks the project's admission, as the
+project account, to start one when ready work outruns the running claimants.
+That start is bounded by the cohorts' `target` and `ceiling` (SYRD-628), by
+quota holds and by operator stops; see
+[syrd-688-worker-admission.md](syrd-688-worker-admission.md). Serial reservations are unchanged:
 - one active ticket per worker;
 - a ticket in Audit holds its author until Audit's declared approval, and then
   the author may claim again;

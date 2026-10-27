@@ -165,6 +165,9 @@ switchyard worker-pool <project> rollback --journal  # undo an apply
 Everything that would change a board, a configuration or an account shows what
 it would do and writes nothing without `--apply`. `start`, `stop` and `restart`
 act, because a tmux session is the one thing here that is not durable state.
+A `stop` (and a `converge` stop) is also recorded as the operator's, so a
+demand start never brings that worker back; `start` or `restart` clears it
+(SYRD-688, [syrd-688-worker-admission.md](syrd-688-worker-admission.md)).
 
 None of it escalates. The document goes through the board's own workflow API as
 the invoking role and the sessions live on the project account's tmux server, so

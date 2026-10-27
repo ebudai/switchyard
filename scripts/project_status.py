@@ -658,6 +658,14 @@ def switchyard_status_command(
         print_func("")
         for line in report_lines:
             print_func(line)
+    from scripts import hermes_local_profile
+
+    # Which roles run Hermes on the local model service, on what exactly, and whether it serves them now (SYRD-692).
+    local_lines = hermes_local_profile.status_lines(configs)
+    if local_lines:
+        print_func("")
+        for line in local_lines:
+            print_func(line)
     unsafe = [status for status in statuses if status.root_windows]
     if unsafe:
         print_func("")

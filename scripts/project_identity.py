@@ -71,6 +71,9 @@ class RoleConfig:
     # SYRD-638: the other roles configured in this same worktree. Where there are any, a conversation's workspace
     # cannot say whose it is, so a resume needs proof the conversation is this role's own.
     workdir_peers: tuple[str, ...] = ()
+    # SYRD-692: the local model service profile a Hermes role runs on, when it was opted in (a
+    # `scripts.hermes_local_profile.LocalProfile`); None for every other role.
+    hermes_local: Any = None
 
 
 @dataclass(frozen=True)

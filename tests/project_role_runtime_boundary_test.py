@@ -125,7 +125,8 @@ def test_the_seams_the_local_import_and_the_dispatch() -> None:
     bare = sorted({n.id for n in ast.walk(module) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in SEAMS})
     check(through == SEAMS and not bare, f"15 reads of seven launcher names, none bare: {through} {bare}")
     imports = [ast.unparse(n) for n in command.body if isinstance(n, (ast.Import, ast.ImportFrom))]
-    check(imports == ["from scripts import team_launcher as launcher", "from scripts import role_runtime"]
+    # SYRD-692: the local model service profile comes from its own module, imported beside role_runtime.
+    check(imports == ["from scripts import team_launcher as launcher", "from scripts import hermes_local_profile, role_runtime"]
           and not [n for n in ast.walk(command) if isinstance(n, ast.Attribute) and n.attr == "role_runtime"],
           f"role_runtime is still the command's own import, never the launcher's: {imports}")
     check(not [n for n in ast.walk(functions["_role_named"]) if isinstance(n, (ast.Import, ast.ImportFrom))],

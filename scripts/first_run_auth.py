@@ -526,7 +526,8 @@ def run_first_run_auth_phase(
     owner_catalogs: dict[str, runtime_catalog.Catalog | None] = {}
     for role in config.roles:
         cli = launcher._role_cli_name(role)
-        if not role.model or cli in unauthenticated or cli in missing_cli_roles:
+        # A local model service role's model is its profile's, not the owner's catalog's (SYRD-692).
+        if not role.model or cli in unauthenticated or cli in missing_cli_roles or getattr(role, "hermes_local", None):
             # An account that cannot answer at all has nothing to say about a
             # model, and those roles are already reported. A role with no model
             # configured takes the runtime's own default and has nothing to
@@ -549,7 +550,9 @@ def run_first_run_auth_phase(
         # and reports a model failure for an account that is simply not signed
         # in yet (SYRD-221).
         skipped_clis = set(unauthenticated) | set(missing_cli_roles) | unfinished_first_run
-        model_roles = [role for role in config.roles if launcher._role_cli_name(role) not in skipped_clis]
+        # A local model service role is proved by its own pane's start check, on its own home (SYRD-692).
+        model_roles = [role for role in config.roles if launcher._role_cli_name(role) not in skipped_clis
+                       and getattr(role, "hermes_local", None) is None]
         model_validation_failures = launcher.validate_role_models(
             model_roles,
             owner_user=effective_owner,
@@ -557,6 +560,9 @@ def run_first_run_auth_phase(
             runner=runner,
             print_func=print_func,
         )
+        from scripts import hermes_local_profile
+
+        model_validation_failures += hermes_local_profile.validation_failures(config.roles, print_func=print_func)
 
     return FirstRunAuthReport(
         unauthenticated,

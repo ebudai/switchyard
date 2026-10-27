@@ -322,6 +322,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             relayout=args.relayout,
             start=not args.no_start,
             script_path=Path(launcher.__file__).resolve().with_name(launcher.TEAM_LAUNCHER_NAME),
+            **({"local_qwen": True} if args.local_qwen else {}),  # SYRD-692: every other add is called as before
         )
     if argv[0].casefold() == "board-skill":
         from scripts import board_skill_cli
@@ -497,6 +498,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             force=args.force,
             reason=args.reason,
             dry_run=args.dry_run,
+            **({} if args.local is None else {"local": args.local}),  # SYRD-692: every other switch is called as before
         )
     if argv[0].casefold() == "present":
         args = launcher._build_switchyard_present_parser().parse_args(argv[1:])

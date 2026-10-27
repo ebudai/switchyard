@@ -596,6 +596,8 @@ def project_role_runtime(
         # agy drops an effort level before it reaches the command line, so
         # one recorded for the runtime being left is now noise at best.
         entry.pop("effort", None)
+    if runtime != "hermes":  # a local model profile is Hermes configuration, and leaves with it (SYRD-692)
+        entry.pop("hermes_local", None)
     return notes
 
 

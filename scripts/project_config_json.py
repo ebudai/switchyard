@@ -89,6 +89,8 @@ def _role_from_json(project: str, raw: dict[str, Any], *, base: Path, default_wo
     resume_mode = str(raw.get("resume_mode") or launcher.DEFAULT_RESUME_MODE_BY_CLI.get(cli_name, "flag")).strip()
     resume_flag = str(raw.get("resume_flag") or launcher.DEFAULT_RESUME_FLAG_BY_CLI.get(cli_name, "--resume")).strip()
     resume_subcommand = str(raw.get("resume_subcommand") or launcher.DEFAULT_RESUME_SUBCOMMAND_BY_CLI.get(cli_name, "resume")).strip()
+    from scripts import hermes_local_profile
+
     return launcher.RoleConfig(
         role=role,
         slot=slot,
@@ -115,6 +117,8 @@ def _role_from_json(project: str, raw: dict[str, Any], *, base: Path, default_wo
         run_as_user=str(raw.get("run_as_user") or "").strip(),
         ephemeral=launcher._bool_value(raw.get("ephemeral"), field="ephemeral", role=role),
         presentation_label=str(raw.get("presentation_label") or "").strip(),
+        # SYRD-692: a local model service profile, only when the role declares one.
+        **hermes_local_profile.role_fields(raw, role=role, cli_name=cli_name),
     )
 
 

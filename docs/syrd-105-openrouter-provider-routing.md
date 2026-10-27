@@ -189,3 +189,12 @@ The one thing this note leaves open for Switchyard is the declarative
 model-to-provider mapping. It is worth having when a role is actually routed
 through a gateway, and worth nothing before that, so it should be filed when the
 first such role is proposed rather than built against a hypothetical.
+
+**Later (SYRD-692).** The first declared provider mapping is a local one. A
+Hermes role can be put on the host's local model service, and its launcher entry
+then records exactly which endpoint, model, revision and quantization serve it.
+That is the visible mapping this note anticipated. Switchyard writes it into the
+role's own Hermes `config.yaml` and checks it before Hermes starts, because a
+local role must never fall through to a hosted provider. It does no routing,
+health scoring or failover between providers. See
+[SYRD-692](syrd-692-hermes-local-profile.md).

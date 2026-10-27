@@ -215,7 +215,10 @@ def prepare_hermes_home_for_role(role: RoleConfig, *, session_dir: Path) -> Path
     if not _uses_hermes(role):
         return None
     hermes_home = hermes_home_for_role(role, session_dir=session_dir)
-    launcher._ensure_private_dir(hermes_home)
+    # A local model service role's home is made and written only by descriptor, never by pathname (SYRD-692).
+    local = getattr(role, "hermes_local", None) is not None
+    if not local:
+        launcher._ensure_private_dir(hermes_home)
     shared_home = hermes_shared_home_for_session_dir(session_dir)
     # Hermes takes its effort only from config.yaml: a role with one gets its
     # own copy of the shared document instead of the link (SYRD-546).
@@ -224,8 +227,13 @@ def prepare_hermes_home_for_role(role: RoleConfig, *, session_dir: Path) -> Path
     private_config, notice = prepare_hermes_role_config(role, hermes_home=hermes_home, shared_home=shared_home)
     if notice:
         print(f"team-launcher: {notice}", file=sys.stderr)
+    # A role on the local model service gets no hosted credential or sign-in (SYRD-692).
+    from scripts.hermes_local_profile import CREDENTIAL_ENTRIES, link_shared
+
+    linked: list[str] = []
     for entry in HERMES_SHARED_HOME_ENTRIES:
-        if entry in HERMES_PRIVATE_HOME_ENTRIES or (private_config and entry == HERMES_CONFIG_NAME):
+        if entry in HERMES_PRIVATE_HOME_ENTRIES or (private_config and entry == HERMES_CONFIG_NAME) or (
+                local and entry in (*CREDENTIAL_ENTRIES, HERMES_CONFIG_NAME)):
             continue
         source = shared_home / entry
         # Locks must live with the resource they guard. Hermes derives both
@@ -238,7 +246,12 @@ def prepare_hermes_home_for_role(role: RoleConfig, *, session_dir: Path) -> Path
                 source.touch(mode=0o600, exist_ok=True)
         if not source.exists():
             continue
-        _symlink_shared_hermes_entry(source, hermes_home / entry)
+        if local:
+            linked.append(entry)
+        else:
+            _symlink_shared_hermes_entry(source, hermes_home / entry)
+    if local:
+        link_shared(hermes_home, shared_home, linked)
     return hermes_home
 
 

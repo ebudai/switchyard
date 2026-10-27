@@ -38,9 +38,12 @@ HERMES_ROLE_CONFIG_MARK = (
 def _ours(path: Path) -> bool:
     if path.is_symlink() or not path.is_file():
         return False
+    from scripts.hermes_local_profile import CONFIG_MARK as LOCAL_PROFILE_MARK
+
     try:
         with path.open(encoding="utf-8") as handle:
-            return handle.readline().rstrip("\n") == HERMES_ROLE_CONFIG_MARK
+            # A local profile's config (SYRD-692) is Switchyard's too: a role leaving its profile gets it replaced.
+            return handle.readline().rstrip("\n") in (HERMES_ROLE_CONFIG_MARK, LOCAL_PROFILE_MARK)
     except (OSError, UnicodeDecodeError):
         return False
 
@@ -54,6 +57,13 @@ def prepare_hermes_role_config(role: RoleConfig, *, hermes_home: Path, shared_ho
     cannot be given, leaving whatever was there.
     """
     path = hermes_home / HERMES_CONFIG_NAME
+    profile = getattr(role, "hermes_local", None)
+    if profile is not None:
+        # The local model service's profile (SYRD-692): always private, effort included.
+        from scripts.hermes_local_profile import write_role_home
+
+        notice = write_role_home(hermes_home, profile, shared_home=shared_home, effort=role.effort)
+        return not notice, notice
     if not role.effort:
         if _ours(path):
             path.unlink()

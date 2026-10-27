@@ -123,7 +123,8 @@ def _roles_by_first_cli(config: ProjectConfig) -> dict[str, list[RoleConfig]]:
     grouped: dict[str, list[RoleConfig]] = {}
     for role in config.roles:
         cli = launcher._role_cli_name(role)
-        if cli:
+        # A role on the local model service signs in to nothing: its provider is that endpoint (SYRD-692).
+        if cli and getattr(role, "hermes_local", None) is None:
             grouped.setdefault(cli, []).append(role)
     return grouped
 

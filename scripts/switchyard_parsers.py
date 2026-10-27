@@ -453,6 +453,10 @@ def _build_switchyard_add_role_parser() -> argparse.ArgumentParser:
     parser.add_argument("--detached", action="store_true", help="start the role as a headless tmux session")
     parser.add_argument("--relayout", action="store_true", help="replace the existing layout with a generated layout when adding a visible role")
     parser.add_argument("--no-start", action="store_true", help="register the role without starting its pane")
+    parser.add_argument(
+        "--local-qwen", action="store_true",
+        help="run the role as Hermes on this host's local model service, exactly as its record pins it (SYRD-692)",
+    )
     return parser
 
 
@@ -584,6 +588,16 @@ def _build_switchyard_set_role_runtime_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--reason", default="", help="why a busy role was interrupted; recorded with the change")
     parser.add_argument("--dry-run", action="store_true", help="run every check, change nothing")
+    local = parser.add_mutually_exclusive_group()
+    local.add_argument(
+        "--local-qwen", dest="local", action="store_const", const=True, default=None,
+        help="run the role as Hermes on this host's local model service, exactly as its record pins it; run it "
+             "again to re-pin after the service changes (SYRD-692)",
+    )
+    local.add_argument(
+        "--no-local-qwen", dest="local", action="store_const", const=False,
+        help="take the role off the local model service; name the hosted model it runs instead with --model",
+    )
     return parser
 
 

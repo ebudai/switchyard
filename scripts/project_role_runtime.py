@@ -60,13 +60,35 @@ def set_project_role_runtime_command(
     interactive: bool | None = None,
     input_func: Callable[[str], str] = input,
     print_func: Callable[[str], None] = print,
+    #: SYRD-692: True puts the role on the host's local model service, as Hermes, exactly as the service's record
+    #: pins it (again, to re-pin); False takes it off; None leaves a local role local.
+    local: bool | None = None,
 ) -> int:
     from scripts import team_launcher as launcher
 
-    from scripts import role_runtime
+    from scripts import hermes_local_profile, role_runtime
 
     existing = launcher._role_named(config, role_name)
     current_runtime = launcher._role_cli_name(existing) if existing is not None else ""
+    current_profile = getattr(existing, "hermes_local", None)
+    profile = None
+    if local:
+        runtime = runtime or "hermes"
+        if runtime != "hermes":
+            raise SystemExit(f"switchyard: --local-qwen is Hermes configuration and {runtime} is not Hermes. "
+                             "Nothing was changed.")
+        profile = hermes_local_profile.profile_from_service()
+        if model is not None and model.strip() != profile.model:
+            raise SystemExit(f"switchyard: the local model service serves exactly {profile.model}, not {model!r}; "
+                             "drop --model. Nothing was changed.")
+        model = profile.model
+    elif local is False:
+        if current_profile is None:
+            raise SystemExit(f"switchyard: {role_name} is not on the local model service. Nothing was changed.")
+        if model is None:
+            raise SystemExit(f"switchyard: name the model {role_name} runs instead with --model (or --model '' for its "
+                             f"runtime's default), so it does not run {current_profile.model} on a hosted provider. "
+                             "Nothing was changed.")
     can_ask = (sys.stdin.isatty() if interactive is None else interactive)
     # Whose catalog decides. This used to be nobody's: the model selector below
     # ran with no owner prefix, so a director repairing a tenant was offered
@@ -93,7 +115,14 @@ def set_project_role_runtime_command(
     # and the new runtime was started with the old one's model (SYRD-115).
     configured_model = str(getattr(existing, "model", "") or "")
     chosen_model: str | None = None
-    if model is not None:
+    # A local role's model is its profile's, served by the local endpoint, not the owner's hosted catalog.
+    keeps_local = local is None and current_profile is not None and runtime == "hermes"
+    if keeps_local and model is not None and model.strip() != current_profile.model:
+        raise SystemExit(f"switchyard: {role_name} runs {current_profile.model} on the local model service; pass "
+                         "--no-local-qwen with the hosted model instead. Nothing was changed.")
+    if profile is not None or keeps_local:
+        chosen_model = model
+    elif model is not None:
         # Explicit, and checked against the owner's own list rather than taken
         # on faith. Refused rather than replaced: substituting a model nobody
         # asked for is what this ticket forbids.
@@ -202,21 +231,39 @@ def set_project_role_runtime_command(
                 "it could not be checked against the account, so the start will tell"
             )
 
-    result = role_runtime.switch_role_runtime(
-        config,
-        config_path=config_path,
-        role_name=role_name,
-        runtime=runtime,
-        model=chosen_model,
-        # Only when chosen, so a switch without one is called exactly as before.
-        **({} if chosen_effort is None else {"effort": chosen_effort}),
-        force=force,
-        reason=reason,
-        dry_run=dry_run,
-        pane_state_dir=pane_state_dir,
-        runner=runner,
-        print_func=print_func,
-    )
+    if profile is not None:
+        print_func(f"switchyard: {role_name} {'would run' if dry_run else 'runs'} hermes on {profile.describe()}")
+        if hermes_local_profile.context_problem(profile):
+            print_func(f"switchyard: it will not start until then: {hermes_local_profile.context_problem(profile)}")
+    # The declaration is written before the switch, which carries the entry's other fields through, and put back if
+    # the switch does not happen.
+    written = not dry_run and (profile is not None or local is False)
+    previous = hermes_local_profile.write_entry(config, config_path, role_name, profile, runner=runner) if written else None
+    try:
+        result = role_runtime.switch_role_runtime(
+            config,
+            config_path=config_path,
+            role_name=role_name,
+            runtime=runtime,
+            model=chosen_model,
+            # Only when chosen, so a switch without one is called exactly as before.
+            **({} if chosen_effort is None else {"effort": chosen_effort}),
+            force=force,
+            reason=reason,
+            dry_run=dry_run,
+            pane_state_dir=pane_state_dir,
+            runner=runner,
+            print_func=print_func,
+        )
+    except BaseException:
+        if written:
+            hermes_local_profile.restore_entry(config, config_path, role_name, previous, runner=runner)
+        raise
+    if not dry_run and current_profile is not None and runtime != "hermes":
+        # Off Hermes, nothing starts it again to replace the profile's config: it goes now, and only it.
+        hermes_local_profile.remove_role_material(config, existing)
+    if written and not result.configured_changed:
+        print_func(f"switchyard: {role_name}'s session keeps running as it is; the profile applies at its next start")
     if dry_run and result.configured_changed:
         # Read as optional: a result that does not say it is a repair is a move.
         if getattr(result, "argument_repair", False):

@@ -70,6 +70,8 @@ def _new_project_launcher_config_payload(
     worktree_policy: str = "shared",
     upstream_report_url: str = "",
     upstream_report_token_file: str = "",
+    #: SYRD-692: each local model service role's declared profile, written as its `hermes_local`.
+    role_local: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     from scripts import team_launcher as launcher
 
@@ -110,6 +112,8 @@ def _new_project_launcher_config_payload(
         chosen_effort = str((role_efforts or {}).get(role, "")).strip()
         if chosen_effort:
             role_payload["effort"] = chosen_effort
+        if role in (role_local or {}):
+            role_payload["hermes_local"] = dict(role_local[role])
         if index < launcher.MAX_VISIBLE_PANES_PER_WINDOW:
             role_payload["slot"] = index
         else:
@@ -248,6 +252,7 @@ def write_new_project_launcher_artifacts(
     upstream_report_url: str = "",
     upstream_report_token_file: str = "",
     print_func: Callable[[str], None] = print,
+    role_local: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> Path:
     from scripts import team_launcher as launcher
 
@@ -312,6 +317,7 @@ def write_new_project_launcher_artifacts(
                 role_clis=role_defs,
                 role_models=role_models,
                 role_efforts=role_efforts,
+                **({"role_local": role_local} if role_local else {}),
                 include_designer=include_designer,
                 include_audit=include_audit,
                 audit_roles=audit_roles,

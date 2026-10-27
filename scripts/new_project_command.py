@@ -121,6 +121,9 @@ def new_project_command(
         # is overridden by the file (SYRD-115).
         role_models = role_models or dict(design_artifact.role_models)
         role_efforts = role_efforts or dict(design_artifact.role_efforts)
+        from scripts import hermes_local_profile  # SYRD-692: the artifact's local model service roles
+
+        role_local, role_models = hermes_local_profile.new_project_roles(design_artifact, role_models, print_func=print_func)
         include_designer = design_artifact.include_designer
         include_audit = design_artifact.include_audit
         audit_roles = design_artifact.audit_roles
@@ -136,6 +139,7 @@ def new_project_command(
         ticket_prefix = None
         project_name = project
         design_document = None
+        role_local = {}
         implementer_roles = launcher.DEFAULT_PROJECT_IMPLEMENTER_ROLES
         role_clis = launcher._default_role_cli_pairs(implementer_roles, include_designer=True, include_audit=True)
         include_designer = True
@@ -306,6 +310,7 @@ def new_project_command(
         upstream_report_url=upstream_report_url.strip(),
         upstream_report_token_file=upstream_report_token_file.strip(),
         print_func=print_func,
+        **({"role_local": role_local} if role_local else {}),
     )
     if router:
         router_onboarding.record_router_runtime(config_path, from_artifact, router=router, owner_user=plan.owner_user)

@@ -81,6 +81,9 @@ def switchyard_seed_role_credentials_command(
             continue
         role_home = Path(identity.get("home") or "") if identity.get("home") else None
         cli_name = launcher._command_name(role.cli[0]) if role.cli else ""
+        if getattr(role, "hermes_local", None) is not None:
+            print_func(f"switchyard: {role.role} runs on the local model service; no hosted credential is seeded")
+            continue
         artifacts = role_credential_artifacts(role)
         if not artifacts:
             raise SystemExit(
@@ -487,6 +490,8 @@ def role_credential_manifest(config: ProjectConfig) -> list[str]:
         if not account or account == config.run_as_user:
             continue
         role_home = launcher.home_dir_for_user(account)
+        if getattr(role, "hermes_local", None) is not None:
+            continue  # the local model service: it needs no credential (SYRD-692)
         artifacts = role_credential_artifacts(role)
         if not artifacts:
             lines.append(f"{role.role} ({cli_name or 'unknown cli'}): no known credential artifact")

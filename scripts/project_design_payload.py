@@ -60,6 +60,9 @@ class ProjectDesignArtifact:
     #: the Librarian's gate, runtime, model and effort; empty is off, which is
     #: what every earlier artifact means.
     documentation: tuple[tuple[str, str], ...] = ()
+    #: The roles that run as Hermes on the host's local model service (SYRD-692); empty is none, which is what
+    #: every earlier artifact means. Their runtime must be hermes; the profile comes from the service's record.
+    local_qwen_roles: tuple[str, ...] = ()
 
 
 def _role_cli_map(role_clis: Sequence[tuple[str, str]]) -> dict[str, str]:
@@ -91,6 +94,7 @@ def project_design_artifact_payload(artifact: ProjectDesignArtifact) -> dict[str
             **({"catalog_version": artifact.catalog_version} if artifact.catalog_version else {}),
             **({"router": {"enabled": True, **dict(artifact.router)}} if artifact.router else {}),
             **({"documentation": dict(artifact.documentation)} if artifact.documentation else {}),
+            **({"local_qwen_roles": list(artifact.local_qwen_roles)} if artifact.local_qwen_roles else {}),
             "push_policy": artifact.push_policy,
             "gates": artifact.gates,
             "capability_grants": artifact.capability_grants,

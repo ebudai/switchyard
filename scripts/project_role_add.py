@@ -357,9 +357,14 @@ def add_project_role_command(
     account_exists: Callable[[str], bool] = local_account_exists,
     interactive: bool | None = None,
     input_func: Callable[[str], str] = input,
+    #: SYRD-692: add it as Hermes on the host's local model service, exactly as the service's record pins it.
+    local_qwen: bool = False,
 ) -> int:
     from scripts import team_launcher as launcher
 
+    from scripts import hermes_local_profile
+
+    cli, profile = hermes_local_profile.opt_in(role_name, cli, print_func=print_func) if local_qwen else (cli, None)
     if not cli:
         # The same list `switchyard new` and a runtime switch offer. A flag
         # still decides it for a script; what changes is that an operator at a
@@ -402,6 +407,9 @@ def add_project_role_command(
             audit_role=audit_role,
             runner=runner,
         )
+    if profile is not None:
+        # Written before anything outside the config, so the role's first start is already on its profile.
+        updated_config = hermes_local_profile.declare(updated_config, config_path, role, profile, runner=runner)
     plan = launcher._project_plan_for_added_role(
         updated_config,
         config_path=config_path,

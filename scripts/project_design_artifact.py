@@ -321,6 +321,10 @@ def load_project_design_artifact(path: Path, *, expected_project: str | None = N
     push_policy = launcher._artifact_string(project_raw, "push_policy", path=artifact_path, default="director-main-only")
     gates = launcher._artifact_bool_mapping(project_raw.get("gates"), path=artifact_path, field="project.gates", defaults=launcher.PROJECT_DESIGN_DEFAULT_GATES)
     capability_grants = launcher._artifact_capability_grants(project_raw.get("capability_grants"), path=artifact_path)
+    from scripts import hermes_local_profile
+
+    local_qwen_roles = hermes_local_profile.artifact_roles(project_raw.get("local_qwen_roles"), path=artifact_path,
+                                                         role_clis=role_clis)
     return launcher.ProjectDesignArtifact(
         project=slug,
         project_name=project_name,
@@ -344,4 +348,5 @@ def load_project_design_artifact(path: Path, *, expected_project: str | None = N
         capability_grants=capability_grants,
         router=router,
         documentation=documentation,
+        **({"local_qwen_roles": local_qwen_roles} if local_qwen_roles else {}),
     )

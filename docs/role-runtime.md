@@ -141,6 +141,17 @@ for the runtime's default), while neither the Director nor that role has a
 session, and the board is not written. See
 [SYRD-593](syrd-593-stopped-project-model-repair.md).
 
+## Hermes on the local model service
+
+`--local-qwen` puts a role on Hermes against the host's local model service, as
+the service's own record pins it: exact model, loopback endpoint, server,
+revisions, quantization and context. Run it again to re-pin. `--no-local-qwen
+--model <hosted model>` takes the role off the service, and moving the role to
+another runtime removes the profile as well. A local role's model is not checked
+against the owner's hosted catalog: the service serves it, and the role's pane
+checks that before Hermes starts. See
+[SYRD-692](syrd-692-hermes-local-profile.md).
+
 ## When something fails
 
 Every applied step is undone and the command says the switch was undone. The

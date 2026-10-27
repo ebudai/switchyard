@@ -279,10 +279,17 @@ def cli_command_for_role(
     command.extend(startup_args_for_role(role))
     command.extend(role.extra_args)
     command = copilot_root_prestart(role, command, str(env.get("TICKET_BOARD_PROJECT") or "").strip())
+    local = getattr(role, "hermes_local", None)
+    if local is not None:
+        # SYRD-692: Hermes starts only once its local endpoint serves exactly the declared model, with no hosted key.
+        from scripts import hermes_local_profile
+
+        command = hermes_local_profile.pane_command(role.role, local, command)
     env_prefix = [
         "env",
         *launcher._env_unset_prefix(
-            (*launcher.PANE_TARGET_ENV_KEYS, *launcher.PRESENTATION_HANDOFF_ENV_KEYS, *role.unset_env)
+            (*launcher.PANE_TARGET_ENV_KEYS, *launcher.PRESENTATION_HANDOFF_ENV_KEYS, *role.unset_env,
+             *(hermes_local_profile.unset_keys() if local is not None else ()))
         ),
         *launcher._env_prefix(env),
     ]

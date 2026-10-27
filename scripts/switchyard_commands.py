@@ -125,6 +125,10 @@ SWITCHYARD_COMMANDS = (
     # Adopts one legacy conversation of the control role's, begun outside its worktree, so its normal start
     # resumes it: a preview, then an apply from the live control role's own pane (SYRD-694).
     "adopt-conversation",
+    # Previews, installs and controls the one opt-in, host-wide local model
+    # service for Hermes roles: an approval packet before anything is
+    # downloaded, and nothing started by a launch (SYRD-691).
+    "local-model",
 )
 # `present` and `board-skill` act on the caller's own runtime -- display slots
 # and the caller's CLI skill trees -- so neither needs to escalate. `role-prompt`
@@ -170,11 +174,16 @@ SWITCHYARD_UNPRIVILEGED_COMMANDS = frozenset(
     # owner's clipboard -- the authority it passes on, one image at a time --
     # and proves who the caller is from the policy that owner installed.
     # Escalated, it would read root's clipboard, which does not exist (SYRD-247).
+    #
+    # `local-model`'s preview, status, probe and logs read and change nothing;
+    # escalating them would ask for a password to look. Its install, remove and
+    # service controls are root's, and refuse unless run as
+    # `sudo switchyard local-model <action>` (SYRD-691).
     {
         "present", "attach", "board-skill", "role-prompt", "design-stage", "router-role", "documentation-gate",
         "publisher", "set-role-runtime",
         "reconcile-role-models", "finish-upgrade", "worker-pool", "privileged-action", "status",
-        "paste-image", "adopt-conversation",
+        "paste-image", "adopt-conversation", "local-model",
     }
 )
 SWITCHYARD_PRIVILEGED_COMMANDS = frozenset(
@@ -230,6 +239,7 @@ Commands:
   paste-image      hand one copied image to a role, as the project's desktop owner
   adopt-conversation
                    let the control role resume one legacy conversation of its own
+  local-model      preview, install and control the opt-in host-wide local model service
 
 Bare project names start or attach the project. Recognized commands: {commands}.
 """

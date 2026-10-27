@@ -1550,9 +1550,8 @@ from scripts.cli_install_instructions import (
 from scripts.role_state_restore import (
     restore_interrupted_role_state,
 )
-from scripts.policy_hook_repair import (
-    repair_repository_policy_hooks,
-)
+from scripts.policy_hook_repair import repair_repository_policy_hooks
+from scripts.local_model_service import switchyard_local_model_command  # SYRD-691: the local model's front door
 from scripts.project_config_loader import (
     load_project_config,
 )

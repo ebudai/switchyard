@@ -154,6 +154,9 @@ def switchyard_main(argv: list[str] | None = None) -> int:
     if argv[0].casefold() == "repair-boundary":
         args = launcher._build_switchyard_repair_boundary_parser().parse_args(argv[1:])
         return launcher.switchyard_repair_boundary_command(args.project, apply=args.apply)
+    if argv[0].casefold() == "local-model":
+        # SYRD-691: the one host-wide local model service; its own parser, since it names no project.
+        return launcher.switchyard_local_model_command(argv[1:])
     if argv[0].casefold() == "approve-desktop":
         args = launcher._build_switchyard_approve_desktop_parser().parse_args(argv[1:])
         return launcher.switchyard_approve_desktop_command(

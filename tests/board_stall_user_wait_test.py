@@ -240,12 +240,14 @@ def candidate(got: dict) -> None:
 
 
 def mirrors() -> None:
-    """schema.sql carries pgu1018's function byte for byte, last, so fresh and upgraded boards agree."""
+    """schema.sql's last board_stall_runnable is pgu1018's, byte for byte, so fresh and upgraded boards agree. A later
+    ticket's functions may follow it (SYRD-697)."""
     migration = (ROOT / "scripts/ticket_board/migrations/pgu1018_syrd696_user_wait_not_runnable.sql").read_text()
     body = migration.split("BEGIN;\n\n", 1)[1].rsplit("\nCOMMIT;\n", 1)[0]
     schema = (ROOT / "scripts/ticket_board/schema.sql").read_text()
-    check(body.startswith("CREATE OR REPLACE FUNCTION ticket_board.board_stall_runnable(") and schema.endswith(body),
-          "schema.sql ends with pgu1018's board_stall_runnable, byte for byte")
+    head = "CREATE OR REPLACE FUNCTION ticket_board.board_stall_runnable("
+    check(body.startswith(head) and schema.rfind(body) >= 0 and schema.rfind(head) == schema.rfind(body),
+          "schema.sql's last board_stall_runnable is pgu1018's, byte for byte")
 
 
 def main() -> int:

@@ -146,7 +146,8 @@ notification_candidates AS (
         queued.next_attempt_at AS active_work_delivery_next_attempt_at,
         queued.id IS NOT NULL AS active_work_delivery_queued,
         unconfirmed.last_unconfirmed_at AS active_work_delivery_unconfirmed_at,
-        unconfirmed.unconfirmed_reason AS active_work_delivery_unconfirmed_reason
+        unconfirmed.unconfirmed_reason AS active_work_delivery_unconfirmed_reason,
+        owner_write.confirmed_at AS active_work_delivery_confirmed_at
     FROM notification_scope
     -- The owner's live runtime registration: a send before it reached a provider
     -- that has since been replaced, not the one running now (SYRD-595).
@@ -208,6 +209,16 @@ notification_candidates AS (
         ORDER BY trace.ts DESC
         LIMIT 1
     ) unconfirmed ON true
+    -- ... until the owner writes on the ticket itself: then it has the work, whichever provider was sent it. On
+    -- pie, PIE-17 read "sent to retired runtime" a day after Ops took it, through Ops' own review request
+    -- (SYRD-697).
+    LEFT JOIN LATERAL (
+        SELECT min(c.ts) AS confirmed_at
+        FROM ticket_board.ticket_comments c
+        WHERE c.ticket_id = notification_scope.id
+          AND c.who = notification_scope.owner_role
+          AND c.ts > unconfirmed.last_unconfirmed_at
+    ) owner_write ON true
 ),
 active_work AS (
     SELECT
@@ -222,6 +233,7 @@ active_work AS (
         notification_candidates.active_work_delivery_queued,
         notification_candidates.active_work_delivery_unconfirmed_at,
         notification_candidates.active_work_delivery_unconfirmed_reason,
+        notification_candidates.active_work_delivery_confirmed_at,
         -- There is exactly one visible current ticket per logical owner. The
         -- send timestamp remains separate evidence and does not rank work.
         notification_candidates.is_actionable_current
@@ -270,6 +282,7 @@ SELECT
     COALESCE(active_work.active_work_delivery_queued, false) AS active_work_delivery_queued,
     active_work.active_work_delivery_unconfirmed_at,
     active_work.active_work_delivery_unconfirmed_reason,
+    active_work.active_work_delivery_confirmed_at,
     COALESCE(active_work.active_work_highlight, false) AS active_work_highlight,
     COALESCE(notification_state.awaiting_role, '') AS awaiting_role,
     {snooze_sql} AS reminder_snooze,

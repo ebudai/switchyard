@@ -38,6 +38,13 @@ def checks(svc: str, admin: str) -> None:
     def due(step: int) -> None:
         sql(f"UPDATE ticket_board.ticket_notification_queue SET next_attempt_at=clock_timestamp() WHERE kind='awaiting_role' AND (payload->>'step')::int={step}")
 
+    def clear() -> None:
+        role('director', "SELECT ticket_board.clear_awaiting_role('PGU-1');")
+        # The owner is told its wait was cleared (SYRD-697); what follows is about the wait's own queued steps.
+        assert sql("SELECT string_agg(target_role || ':' || (message LIKE '%the wait on director was cleared%')::text, ',') "
+                   "FROM ticket_board.ticket_notification_queue WHERE kind = 'ticket_update'") == 'research:true'
+        sql("DELETE FROM ticket_board.ticket_notification_queue WHERE kind <> 'awaiting_role'")
+
     def listener(sender):
         return TicketBoardNotifyListener(conninfo=admin.replace('user=ticket_board_service', ''),
             sender=sender, activity_gate=lambda target: False, target_exists=lambda target: True,
@@ -109,7 +116,7 @@ def checks(svc: str, admin: str) -> None:
     due(2)
     assert process(listener(lambda t, m: sent.append((t, m)))) == 1
     assert fixture.awaiting(admin, 'PGU-1') == 'director'
-    role('director', "SELECT ticket_board.clear_awaiting_role('PGU-1');")
+    clear()
     sql("UPDATE ticket_board.ticket_notification_queue SET next_attempt_at=clock_timestamp()")
     assert process(listener(lambda t, m: sent.append((t, m)))) == 0 and count() == 0
 
@@ -139,7 +146,7 @@ def checks(svc: str, admin: str) -> None:
         f"FROM ticket_board.ticket_notification_queue WHERE id IN ({wait_a_id_list})"
     ) == '1,2,3,4'
 
-    role('director', "SELECT ticket_board.clear_awaiting_role('PGU-1');")
+    clear()
     request('director')
     wait_b_ids = [
         int(value)
@@ -206,7 +213,7 @@ def checks(svc: str, admin: str) -> None:
     assert process(listener(lambda t, m: sent.append((t, m)))) == 1
     assert len(sent) == before + 1
     assert sent[-1][0] == ROLE_TO_TARGET['director'] and 'New handoff.' in sent[-1][1]
-    role('director', "SELECT ticket_board.clear_awaiting_role('PGU-1');")
+    clear()
     sql(
         "UPDATE ticket_board.ticket_notification_queue "
         "SET next_attempt_at=clock_timestamp() "

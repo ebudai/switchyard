@@ -1132,7 +1132,8 @@ ORDER BY rank;
         Ops's work while its one notice sat dead-lettered (SYRD-264). This says
         which of the three it is, from the durable records:
 
-        * ``delivered`` -- a send is traced for this owner at this stage, since its live runtime registered;
+        * ``delivered`` -- a send is traced for this owner at this stage, since its live runtime registered; or an
+          unconfirmed send was followed by the owner's own comment on the ticket (``confirmed_by``, SYRD-697);
         * ``failed`` -- the notice was dead-lettered, with its reason;
         * ``pending`` -- the notice is queued and has not been delivered yet,
           with the last error, if a send has been tried and failed;
@@ -1164,19 +1165,18 @@ ORDER BY rank;
                 "state": "pending",
                 "attempts": attempts,
                 "reason": str(get("active_work_delivery_last_error", "") or ""),
-                "next_attempt_at": self._format_optional_datetime(
-                    get("active_work_delivery_next_attempt_at")
-                ),
+                "next_attempt_at": self._format_optional_datetime(get("active_work_delivery_next_attempt_at")),
             }
         unconfirmed_at = self._format_optional_datetime(get("active_work_delivery_unconfirmed_at"))
+        confirmed_at = self._format_optional_datetime(get("active_work_delivery_confirmed_at"))
+        if unconfirmed_at and confirmed_at:  # the owner wrote on the ticket after that send: it has the work (SYRD-697)
+            return {"state": "delivered", "at": unconfirmed_at, "confirmed_by": "owner_comment",
+                    "confirmed_at": confirmed_at}
         if unconfirmed_at:
             # Sent, and no turn followed in the recipient's pane. Reported as
             # exactly that, and never as delivered (SYRD-268).
-            return {
-                "state": "unconfirmed",
-                "at": unconfirmed_at,
-                "reason": get("active_work_delivery_unconfirmed_reason") or "no_submission_witnessed",
-            }
+            return {"state": "unconfirmed", "at": unconfirmed_at,
+                    "reason": get("active_work_delivery_unconfirmed_reason") or "no_submission_witnessed"}
         return {"state": "none"}
 
     def _format_optional_datetime(self, value: Any) -> str:

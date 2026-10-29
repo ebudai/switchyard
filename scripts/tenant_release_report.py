@@ -209,7 +209,15 @@ def recorded_rollout_command(
     )
 
 
-def tenant_release_unit_install_command(status: TenantReleaseStatus, project: str) -> str:
+def tenant_release_unit_install_command(
+    status: TenantReleaseStatus, project: str, *, exact_board: Path | None = None
+) -> str:
+    """Install root's staged units, or, with `exact_board`, only the listener and the readable copy of it.
+
+    `deploy-release` installs the board and canary itself, rendered for one trusted release
+    (`release_units`); the staged ones are templates and are never installed then, so no legacy
+    board or tenant-configured canary exists at any moment of the deploy (SYRD-700).
+    """
     from scripts import team_launcher as launcher
 
     from scripts.ticket_board.project_provision import system_unit_proof_chain
@@ -224,8 +232,10 @@ def tenant_release_unit_install_command(status: TenantReleaseStatus, project: st
     listener_target = status.owner_home / ".config" / "systemd" / "user" / listener_unit.name
     return " && ".join(
         [
-            launcher._quote_command(["sudo", "install", "-m", "0644", str(board_unit), f"/etc/systemd/system/{board_unit.name}"]),
-            launcher._quote_command(["sudo", "install", "-m", "0644", str(canary_unit), f"/etc/systemd/system/{canary_unit.name}"]),
+            *([] if exact_board is not None else [
+                launcher._quote_command(["sudo", "install", "-m", "0644", str(board_unit), f"/etc/systemd/system/{board_unit.name}"]),
+                launcher._quote_command(["sudo", "install", "-m", "0644", str(canary_unit), f"/etc/systemd/system/{canary_unit.name}"]),
+            ]),
             # Into the owner's home, so through the no-follow helper: a link
             # the owner left at the unit's name or above it is refused, not
             # written through (SYRD-605).
@@ -251,7 +261,7 @@ def tenant_release_unit_install_command(status: TenantReleaseStatus, project: st
             # deployer can read them. In this chain rather than a step of its
             # own so the copy cannot exist without the install having happened,
             # and cannot be stale relative to it (SYRD-127).
-            *system_unit_proof_chain(project, launcher._quote_command([str(board_unit)])),
+            *system_unit_proof_chain(project, launcher._quote_command([str(exact_board or board_unit)])),
             launcher._quote_command(["sudo", "systemctl", "daemon-reload"]),
         ]
     )
@@ -331,52 +341,29 @@ def report_tenant_release_upgrade(
                 f"switchyard: cannot produce a safe release update for {config.project}: {blocked}"
             )
             return status
-        print_func("switchyard: matching-release deployment sequence (keep the listener stopped through migrations):")
-        print_func(f"  {launcher.tenant_release_listener_command(status, config.project, 'stop')}")
-        unit_install = launcher.tenant_release_unit_install_command(status, config.project)
-        if unit_install:
-            privileged_root = launcher.switchyard_privileged_provision_root()
-            if status.provisioned_system_unit.is_relative_to(privileged_root):
-                print_func(f"  {launcher.recorded_rollout_command(status, config.project, unit_install, label='install units')}")
-            else:
-                # Not printed at all, rather than printed with a warning above
-                # it. This step is executed by root through the recorder, and
-                # its source is a directory the tenant can write: printing it
-                # asks an operator to install a unit file that anyone with the
-                # tenant account could have rewritten between the render and
-                # the run. The warning was already here and was not enough --
-                # on SYRD-137 the step had to be recognised as unsafe and
-                # skipped by hand, against a copy four days stale that would
-                # have stripped the live board's socket-group confinement
-                # (SYRD-138).
-                print_func(
-                    f"switchyard: omitting the unit-install step for {config.project}: it would "
-                    f"install from {status.provisioned_system_unit.parent}, which the tenant owns, "
-                    f"and the step runs as root. Run `switchyard upgrade {config.project}` as root "
-                    "to stage a root-owned copy, then re-render this sequence."
-                )
+        privileged_root = launcher.switchyard_privileged_provision_root()
+        if not status.provisioned_system_unit.is_relative_to(privileged_root):
+            # Not printed at all, rather than printed with a warning above it: the deploy renders root's units
+            # from this copy, and the tenant can write it (SYRD-138).
+            print_func(
+                f"switchyard: omitting the deploy step for {config.project}: its units would be rendered from "
+                f"{status.provisioned_system_unit.parent}, which the tenant owns, and the step runs as root. Run "
+                f"`switchyard upgrade {config.project}` as root to stage a root-owned copy, then re-render this "
+                "sequence."
+            )
+            return status
+        # One root command, never the units by hand: it stops the listener before the migrations, installs the
+        # board and canary rendered for exactly this release (the staged units are templates, and installing one
+        # would run the tenant's own tree), runs the tenant's deploy with its health gates, attests the board,
+        # brings the listener back and closes the phase against the running board (SYRD-700).
+        print_func("switchyard: matching-release deployment sequence, one root command (it renders the board's units "
+                   "for exactly this release; never install the staged units themselves):")
+        deploy = launcher._quote_command(["switchyard", "deploy-release", config.project, "--commit", status.target_sha])
+        print_func(f"  {launcher.recorded_rollout_command(status, config.project, deploy, label='deploy-release')}")
         print_func(
-            f"  {launcher.recorded_rollout_command(status, config.project, launcher.tenant_release_deploy_command(status, config.project), label='deploy-restart')}"
-        )
-        print_func(f"  {launcher.tenant_release_listener_command(status, config.project, 'start')}")
-        # The step that closes the phase, in the sequence, recorded like the
-        # rest. It runs last because it re-proves the end state -- the listener
-        # is back, the board is serving the release its own link names -- and a
-        # close that ran before the listener was restored would be closing over
-        # a system the deploy had not finished putting back (SYRD-117).
-        print_func(
-            f"  {launcher.recorded_rollout_command(status, config.project, launcher._quote_command(['switchyard', 'release-status', config.project, '--close']), label='close release')}"
-        )
-        # What to do when a step fails, said before anybody needs it. On mefp the
-        # deploy failed with the listener already stopped, and nothing said
-        # whether bringing it back was safe (SYRD-231).
-        print_func(
-            f"switchyard: if a step fails, stop there. `switchyard release-status {config.project}` "
-            "says which release the board is serving: if it is still the one it had, the deploy "
-            "stopped before activation and the listener can be brought back with "
-            f"`{launcher.tenant_release_listener_command(status, config.project, 'start')}`; then run "
-            f"`sudo switchyard upgrade {config.project}` to repair what stopped it and re-render "
-            "this sequence."
+            f"switchyard: if it stops, it says where and records the release phase blocked; "
+            f"`switchyard release-status {config.project}` says which release the board is serving, and "
+            f"`sudo switchyard upgrade {config.project}` repairs what stopped it before you run it again."
         )
         print_func(
             f"switchyard: each recorded step prints where its record is; read them with "

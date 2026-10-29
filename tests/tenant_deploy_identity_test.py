@@ -235,26 +235,16 @@ def test_only_the_journal_wrapper_is_privileged_in_the_printed_sequence() -> Non
     printed = printed_sequence(status())
     steps = [line.strip() for line in printed if line.startswith("  ")]
     assert steps, printed
-    deploy = [step for step in steps if "deploy-restart" in step]
-    assert len(deploy) == 1, steps
-    argv = shlex.split(deploy[0])
-    # Privileged on the outside...
+    # SYRD-700: one step, root's own deploy-release, which drops to the owner for the tenant's deploy inside it
+    # (`tenant_release_deploy_command`, below) and renders the units itself; nothing else is printed to run.
+    assert len(steps) == 1, steps
+    argv = shlex.split(steps[0])
+    # Privileged on the outside, and recorded...
     assert argv[0] == "sudo", argv[:3]
     assert Path(argv[1]).name == "switchyard-record-rollout", argv[:3]
-    # ...and the step it records drops to the owner on the inside.
-    inner = argv[-1]
-    assert "sudo -u" not in inner.split("exec ", 1)[0], inner
-    assert shlex.split(inner)[0] == "sh", inner
-    assert "owner" in shlex.split(inner), inner
-    assert "ticket-board-service.sh" in inner, inner
-    # The listener steps are the operator's own lines -- unrecorded, because
-    # they change no release -- and they carry the boundary too.
-    listener_steps = [step for step in steps if "systemctl --user" in step]
-    assert len(listener_steps) == 2, steps
-    for step in listener_steps:
-        assert shlex.split(step)[0] == "sh", step
-        assert "owner" in shlex.split(step), step
-        assert "switchyard-record-rollout" not in step, step
+    # ...and what it records is the root command itself, not a tenant script run as root.
+    assert argv[-1] == "switchyard deploy-release porter --commit " + "b" * 40, argv[-1]
+    assert "ticket-board-service.sh" not in steps[0], steps[0]
 
 
 def printed_sequence(release: tl.TenantReleaseStatus) -> list[str]:
@@ -287,16 +277,17 @@ def test_a_tenant_writable_unit_is_never_handed_to_root() -> None:
     printed = printed_sequence(tenant_owned)
     steps = [line.strip() for line in printed if line.startswith("  ")]
     assert not [step for step in steps if "install units" in step], steps
-    assert any("omitting the unit-install step" in line for line in printed), printed
+    # SYRD-700: the deploy renders root's units from that copy, so it is omitted too (deploy-release refuses it).
+    assert not steps, steps
+    assert any("omitting the deploy step" in line for line in printed), printed
     assert any("as root to stage a root-owned copy" in line for line in printed), printed
-    # The deploy is still offered: it reads the root-published readable copy,
-    # not the tenant's directory, so it is not the step at risk.
-    assert [step for step in steps if "deploy-restart" in step], steps
 
-    # And a root-staged unit still gets its step, because that source is root's.
+    # A root-staged unit gets the one root command that renders the units for the release; the staged units
+    # themselves are never installed by hand, and no tenant deploy-restart is printed outside it (SYRD-700).
     root_owned = printed_sequence(status())
-    assert [line for line in root_owned if "install units" in line], root_owned
-    assert not any("omitting the unit-install step" in line for line in root_owned), root_owned
+    root_steps = [line.strip() for line in root_owned if line.startswith("  ")]
+    assert len(root_steps) == 1 and shlex.split(root_steps[0])[-1] == "switchyard deploy-release porter --commit " + "b" * 40, root_steps
+    assert not any("omitting the deploy step" in line for line in root_owned), root_owned
 
 
 def test_provisioning_and_upgrade_agree_on_who_runs_the_deploy() -> None:

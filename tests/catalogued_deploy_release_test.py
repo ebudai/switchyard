@@ -68,12 +68,14 @@ class Host:
     """systemd and the deploy, as the recording runner answers them."""
 
     def __init__(self, tenant, board, unit_dir: Path, trusted_release: Path,
-                 *, stop="ok", units="ok", deploy="ok", start="ok") -> None:
+                 *, stop="ok", units="ok", deploy="ok", start="ok", restart="ok") -> None:
         self.tenant, self.board = tenant, board
         self.unit_dir = unit_dir
         self.trusted_release = trusted_release
-        self.outcome = {"stop": stop, "units": units, "deploy": deploy, "start": start}
+        self.outcome = {"stop": stop, "units": units, "deploy": deploy, "start": start, "restart": restart}
         self.steps: list[str] = []
+        # SYRD-700: whether root's template chain installed a staged (legacy) board or canary itself.
+        self.legacy_installed = False
         self.listener = "active"
 
     def move_board(self, commit: str) -> None:
@@ -107,6 +109,7 @@ class Host:
             return result(1)
         if "sudo install" in text:
             self.steps.append("install templates")
+            self.legacy_installed = self.legacy_installed or "/etc/systemd/system/porter-ticket-board" in text
             return result(0 if self.outcome["units"] == "ok" else 1)
         if argv[0] == "install":
             source, target = Path(argv[-2]), Path(argv[-1])
@@ -119,8 +122,11 @@ class Host:
         if argv[:2] == ["systemctl", "daemon-reload"]:
             return result(0)
         if argv[:2] == ["systemctl", "restart"]:
-            self.steps.append("restart restored board")
-            return result(0)
+            if self.steps and self.steps[-1] == "restore units":
+                self.steps.append("restart restored board")
+                return result(0)
+            self.steps.append("restart board")
+            return result(0 if self.outcome["restart"] == "ok" else 1)
         if "deploy-restart" in text:
             words = shlex.split(argv[-1])
             proof_values = [word.split("=", 1)[1] for word in words
@@ -154,7 +160,8 @@ def scenarios(tree: Path) -> dict:
     seen: dict = {}
 
     def run(name: str, *, deployed: str = OLD, pin: str | None = NEW, root: bool = True,
-            action: str = "deploy-release", installed: tuple[str, ...] = (NEW, OLD), **outcome) -> None:
+            action: str = "deploy-release", installed: tuple[str, ...] = (NEW, OLD), exact_installed: bool = False,
+            runtime: bool = True, installed_canary: str = "old", **outcome) -> None:
         with tempfile.TemporaryDirectory(prefix="syrd531.") as raw:
             tmp = Path(raw)
             tenant = journal.Tenant(tmp, deployed=deployed)
@@ -165,6 +172,11 @@ def scenarios(tree: Path) -> dict:
                 (release / "scripts").mkdir(parents=True, exist_ok=True)
                 (release / launcher.SWITCHYARD_RELEASE_MARKER_NAME).write_text(json.dumps({"commit": commit}), encoding="utf-8")
                 (release / "scripts" / "ticket-board-service.sh").write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+                # SYRD-700: a release new enough to run under its exact unit carries the renderer.
+                if runtime or commit != NEW:
+                    (release / "scripts" / "ticket_board").mkdir(exist_ok=True)
+                    (release / "scripts" / "ticket_board" / "release_units.py").write_text("# renderer\n",
+                                                                                            encoding="utf-8")
             units = launcher.privileged_provision_dir("porter", root=launcher.switchyard_privileged_provision_root())
             units.mkdir(parents=True, exist_ok=True)
             plan = build_plan(
@@ -178,7 +190,19 @@ def scenarios(tree: Path) -> dict:
             unit_dir = tmp / "systemd"
             unit_dir.mkdir()
             (unit_dir / "porter-ticket-board.service").write_text("old board unit\n", encoding="utf-8")
-            (unit_dir / "porter-ticket-board-canary.service").write_text("old canary unit\n", encoding="utf-8")
+            def exact(release: str, unit: str) -> bytes:
+                rendered = tenant_release_deploy._candidate_units(
+                    SimpleNamespace(provisioned_system_unit=units / "porter-ticket-board.service"), "porter",
+                    releases / release, 26991)
+                return next(v for k, v in rendered.items() if k.name == unit)
+
+            if exact_installed:
+                # SYRD-700: root's exact render of NEW is what is installed.
+                (unit_dir / "porter-ticket-board.service").write_bytes(exact(NEW, "porter-ticket-board.service"))
+            # The canary as a host may hold it: legacy, root's render of NEW, or of another release (SYRD-700).
+            (unit_dir / "porter-ticket-board-canary.service").write_bytes(
+                {"old": b"old canary unit\n", "exact": None, "other release": None}[installed_canary]
+                or exact(NEW if installed_canary == "exact" else OLD, "porter-ticket-board-canary.service"))
             if pin:
                 path = launcher.privileged_upgrade_source_path(tenant.config)
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -254,6 +278,8 @@ def scenarios(tree: Path) -> dict:
                 "release": launcher.upgrade_phase_state(tenant.trusted(), "release"),
                 "attempts": attempts,
                 "board_unit": (unit_dir / "porter-ticket-board.service").read_text(encoding="utf-8"),
+                "legacy_installed": host.legacy_installed,
+                "canary_unit": (unit_dir / "porter-ticket-board-canary.service").read_text(encoding="utf-8"),
             }
 
     run("unprepared", pin=OLD)
@@ -262,8 +288,13 @@ def scenarios(tree: Path) -> dict:
     run("deploy fails, board moved", deploy="moved")
     run("listener does not come back", start="fail")
     run("live board serves another build", deploy="wrong build")
-    run("already deployed", deployed=NEW)
+    run("already deployed", deployed=NEW, exact_installed=True, installed_canary="exact")
+    run("exact board, legacy canary", deployed=NEW, exact_installed=True)
+    run("exact board, another release's canary", deployed=NEW, exact_installed=True, installed_canary="other release")
+    run("already named, legacy unit", deployed=NEW)
+    run("already named, legacy unit, restart fails", deployed=NEW, restart="fail")
     run("not root", root=False)
+    run("release predates exact units", runtime=False)
     run("prepared release not installed", installed=(OLD,))
     return seen
 
@@ -337,7 +368,7 @@ def main() -> int:
           and ok["attempts"][0]["closed"]["status"] == "succeeded",
           f"through the helper's own dispatch, recorded as an attempt: {ok['attempts']}")
     check("live board build" in ok["said"] and "Panes are not restarted" in ok["said"], f"and says what it proved: {ok['said'][-500:]}")
-    for name in ("deployed", "live board serves another build", "already deployed"):
+    for name in ("deployed", "live board serves another build", "already deployed", "already named, legacy unit"):
         said = now[name]["said"]
         check("Nothing was deployed, restarted or rolled back" not in said and "Close it with" not in said,
               f"{name}: the close does not claim a deploy it did not see, or ask to be run: {said[-400:]}")
@@ -372,6 +403,37 @@ def main() -> int:
     already = now["already deployed"]
     check(already["code"] == 0 and already["steps"] == [] and already["release"] == "done",
           f"a board already serving the release is only closed, nothing restarted: {already}")
+    # SYRD-700: no path installs root's staged (legacy-shaped) board or canary itself; they are templates.
+    check(not any(result["legacy_installed"] for result in now.values()),
+          f"the template chain never installs a staged board or canary: "
+          f"{[n for n, r in now.items() if r['legacy_installed']]}")
+    converged = now["already named, legacy unit"]
+    check(converged["code"] == 0 and converged["steps"] == [
+              "stop listener", "install templates", "install exact units", "restart board", "start listener"]
+          and converged["release"] == "done" and NEW in converged["board_unit"]
+          and "-E -s -B" in converged["board_unit"] and "EnvironmentFile=" not in converged["board_unit"],
+          f"a tenant already naming the release under a legacy unit converges on root's exact unit: no deploy, "
+          f"a restart under it, the phase closed: {converged}")
+    # Audit's reproduction: an exact board is not proof on its own; the canary must be root's render of the same
+    # release too, or both converge.
+    for name in ("exact board, legacy canary", "exact board, another release's canary"):
+        both = now[name]
+        check(both["code"] == 0 and both["steps"] == [
+                  "stop listener", "install templates", "install exact units", "restart board", "start listener"]
+              and both["release"] == "done" and f"releases/{NEW}/scripts/ticket-board.py" in both["canary_unit"]
+              and f"releases/{OLD}" not in both["canary_unit"] and "/bin/sh" not in both["canary_unit"],
+              f"{name}: both units converge on root's render of the release: {both}")
+    unconverged = now["already named, legacy unit, restart fails"]
+    check(unconverged["code"] == 3 and unconverged["steps"] == [
+              "stop listener", "install templates", "install exact units", "restart board", "restore units",
+              "restart restored board", "start listener"]
+          and unconverged["board_unit"] == "old board unit\n" and unconverged["release"] == "blocked",
+          f"a board that will not serve under its exact unit gets its previous unit back, rolled back: {unconverged}")
+    old_runtime = now["release predates exact units"]
+    check(old_runtime["code"] == 1 and old_runtime["steps"] == [] and old_runtime["release"] == "ready"
+          and "predates exact root-release board units" in old_runtime["said"]
+          and old_runtime["board_unit"] == "old board unit\n",
+          f"a release that cannot run under its exact unit is refused before anything runs: {old_runtime}")
     missing = now["prepared release not installed"]
     check(missing["code"] == 1 and missing["steps"] == [] and missing["release"] == "ready"
           and f"root holds no installed release of {NEW}" in missing["said"],

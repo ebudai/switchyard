@@ -33,6 +33,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 
 
@@ -47,6 +48,16 @@ BOARD_READY_SECONDS = 30.0
 BOARD_READY_POLL_SECONDS = 0.5
 SYSTEM_UNIT_DIR = Path("/etc/systemd/system")
 TRUSTED_UNIT_OWNER_UID = 0
+
+
+#: The file a release must carry to run under root's exact-release units: their renderer, which arrived with the
+#: board's `--report-credentials-file` (SYRD-699). An older release has neither (SYRD-700).
+EXACT_RELEASE_RUNTIME = "scripts/ticket_board/release_units.py"
+
+
+def exact_release_runtime(release: Path) -> bool:
+    """Whether root's ``release`` can run its board under an exact-release unit."""
+    return (release / EXACT_RELEASE_RUNTIME).is_file()
 
 
 def _installed_unit_bytes(path: Path) -> bytes | None:
@@ -112,6 +123,145 @@ def _candidate_units(status: Any, project: str, release: Path, port: int) -> dic
         SYSTEM_UNIT_DIR / board_source.name: board.encode("utf-8"),
         SYSTEM_UNIT_DIR / canary_source.name: canary.encode("utf-8"),
     }
+
+
+def exact_authority_units(
+    config: Any,
+    *,
+    config_path: Path | None,
+    source_repo: Path,
+    commit_git_dir: str | None,
+    deploy_ref: str,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> tuple[list[str], dict[str, bytes], int | None]:
+    """The board, canary and readable copy rendered for the release ``deploy_ref`` resolves to, and the canary port.
+
+    For the identity cutover, which installs the board's units before it deploys: they are root's exact renders of
+    that release from the staged templates, never the templates themselves (SYRD-700). Keyed as
+    ``board_services.authority_unit_installs`` names them. Problems, and nothing rendered, when root holds no
+    trusted release of that commit that can run under them, or the templates are not root's.
+    """
+    from scripts import team_launcher as launcher
+    from scripts.ticket_board import privileged_operations
+
+    status = launcher.tenant_release_status(config, config_path=config_path, source_repo=source_repo,
+                                            commit_git_dir=commit_git_dir, deploy_ref=deploy_ref, runner=runner)
+    commit = status.target_sha if status is not None else ""
+    if not commit:
+        # A tenant with no board release of its own runs the release this cutover runs from, when that is root's.
+        held = launcher._read_switchyard_release_marker(source_repo)
+        commit = held.marker_commit if held is not None else ""
+    if not commit:
+        return [f"{config.project}'s release does not resolve, so its exact board units cannot be rendered"], {}, None
+    try:
+        release = Path(privileged_operations.trusted_release_root(commit))
+    except privileged_operations.NoTrustedSource as exc:
+        return [f"{config.project}'s board units are rendered from root's release of {commit}: {exc}"], {}, None
+    if not exact_release_runtime(release):
+        return [f"root's release {commit} predates exact root-release board units (SYRD-699)"], {}, None
+    staged = launcher.privileged_provision_dir(config.project, root=launcher.switchyard_privileged_provision_root())
+    template = status.provisioned_system_unit if status is not None else None
+    template = template or staged / f"{config.project}-ticket-board.service"
+    if not template.is_relative_to(launcher.switchyard_privileged_provision_root()):
+        return [f"{config.project}'s board units would be rendered from a template root does not own"], {}, None
+    port = _free_canary_port()
+    try:
+        rendered = _candidate_units(SimpleNamespace(provisioned_system_unit=template), config.project, release, port)
+    except (RuntimeError, ValueError) as exc:
+        return [f"rendering {config.project}'s exact board units failed: {exc}"], {}, None
+    board_name = template.name
+    board, canary = (next(v for k, v in rendered.items() if k.name == name)
+                     for name in (board_name, f"{config.project}-ticket-board-canary.service"))
+    return [], {board_name: board, f"{config.project}-ticket-board-canary.service": canary,
+                f"{board_name} (readable copy)": board}, port
+
+
+def install_deploy_and_attest(
+    config: Any,
+    *,
+    config_path: Path | None,
+    source_repo: Path,
+    commit_git_dir: str | None,
+    deploy_ref: str,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    print_func: Callable[[str], None] = print,
+) -> list[str]:
+    """The identity cutover's board half: root's exact units installed before the deploy, then the deploy, the
+    restart under them, and the board attested; the problem that stopped it otherwise, for the cutover's rollback.
+
+    Installed before the deploy because `deploy-restart` compares the installed unit with the one it is handed and
+    the cutover exists to change that unit (SYRD-63); rendered for the release, because the staged ones are
+    templates that run the tenant's own tree as the board's account (SYRD-700).
+    """
+    from scripts import team_launcher as launcher
+
+    problems, exact, canary_port = exact_authority_units(
+        config, config_path=config_path, source_repo=source_repo, commit_git_dir=commit_git_dir,
+        deploy_ref=deploy_ref, runner=runner,
+    )
+    if not problems:
+        problems = launcher.install_board_authority_files(config, runner=runner, config_path=config_path,
+                                                          print_func=print_func, exact=exact)
+    restarted = False
+    if not problems:
+        problems, restarted = launcher.deploy_release_in_transaction(
+            config, config_path=config_path, source_repo=source_repo, commit_git_dir=commit_git_dir,
+            deploy_ref=deploy_ref, runner=runner, print_func=print_func, canary_port=canary_port,
+        )
+    if not problems:
+        problems = launcher.activate_board_authority(config, runner=runner, restart=not restarted,
+                                                     print_func=print_func)
+    return problems or attestation_problems(config.project, runner=runner)
+
+
+def attestation_problems(project: str, *, runner: Callable[..., Any]) -> list[str]:
+    """Why the project's running board is not root's exact release under its effective unit, or none."""
+    from scripts.ticket_board import board_identity
+
+    try:
+        board_identity.effective_unit(project, runner=runner)
+    except board_identity.BoardIdentityError as exc:
+        return [f"the board did not attest its exact root release: {exc}"]
+    return []
+
+
+def _installed_canary_port(payload: bytes | None) -> int | None:
+    """The port an installed canary unit's ExecStart names, or None if it names none (a legacy canary)."""
+    import shlex
+
+    for line in (payload or b"").decode("utf-8", "replace").splitlines():
+        if line.startswith("ExecStart="):
+            try:
+                argv = shlex.split(line[len("ExecStart="):])
+            except ValueError:
+                return None
+            ports = [argv[i + 1] for i, word in enumerate(argv[:-1]) if word == "--port"]
+            return int(ports[0]) if len(ports) == 1 and ports[0].isdigit() else None
+    return None
+
+
+def _serves_exact_units(status: Any, project: str, release: Path) -> bool:
+    """Whether the installed board and canary units are byte for byte root's exact renders of ``release``.
+
+    The canary is compared at the port its installed unit names, which root chose when it rendered it; a canary
+    that names none is a legacy one. Either unit not root's render of this release, one that cannot be read, or
+    no staged template to render from, is not proof: the caller converges both, which refuses cleanly if it
+    cannot render them (SYRD-700).
+    """
+    if status.provisioned_system_unit is None:
+        return False
+    board_target = SYSTEM_UNIT_DIR / status.provisioned_system_unit.name
+    canary_target = board_target.with_name(f"{project}-ticket-board-canary.service")
+    try:
+        installed_board = _installed_unit_bytes(board_target)
+        installed_canary = _installed_unit_bytes(canary_target)
+        port = _installed_canary_port(installed_canary)
+        if port is None:
+            return False
+        exact = _candidate_units(status, project, release, port)
+    except (RuntimeError, ValueError):
+        return False
+    return installed_board == exact[board_target] and installed_canary == exact[canary_target]
 
 
 def _restore_units(units: dict[Path, bytes], board_unit: str, *, runner: Callable[..., Any]) -> list[str]:
@@ -219,6 +369,12 @@ def switchyard_deploy_release_command(
         return refuse(str(exc))
     if source != trusted_source:
         return refuse(f"{config.project}'s pinned source is {source}, not root's trusted release {trusted_source}")
+    if not exact_release_runtime(trusted_source):
+        return refuse(
+            f"root's release {commit} predates exact root-release board units (SYRD-699): its board cannot run "
+            "under them, and its own units would run tenant-selected code. Deploy a release that carries "
+            f"{EXACT_RELEASE_RUNTIME} instead"
+        )
     status = launcher.tenant_release_status(
         config, config_path=config_path, source_repo=source,
         commit_git_dir=pinned.get("commit_git_dir") or None, deploy_ref=commit, runner=runner,
@@ -278,7 +434,8 @@ def switchyard_deploy_release_command(
         print_func(f"switchyard: {config.project} ends as it began: {began}.")
         return code
 
-    if status.unchanged:
+    converging = status.unchanged and not _serves_exact_units(status, config.project, source)
+    if status.unchanged and not converging:
         print_func(f"switchyard: {config.project}'s board already serves {commit}; closing the phase against it.")
         if not board_was_active:
             # The close re-proves the release against what the running board
@@ -292,8 +449,20 @@ def switchyard_deploy_release_command(
             if started_board:
                 return ended(refuse(f"the board could not be started for the close: {'; '.join(started_board)}"),
                              board_back())
+        from scripts.ticket_board import board_identity
+        try:
+            board_identity.effective_unit(config.project, runner=runner)
+        except board_identity.BoardIdentityError as exc:
+            return ended(refuse(f"{config.project}'s board does not attest its exact root release: {exc}"),
+                         board_back())
         code = close()
         return ended(code, board_back())
+    if converging:
+        # The tenant's `current` already names the commit, but the unit is not root's exact render of it -- a
+        # legacy unit, or another release's. Nothing is migrated: the release is unchanged. The unit is
+        # replaced, the board restarted under it and attested, or the previous unit is put back (SYRD-700).
+        print_func(f"switchyard: {config.project} already names {commit}, but its board unit is not root's exact "
+                   "render of it; installing that and restarting the board under it.")
     if status.provisioned_system_unit is None:
         return refuse(launcher.release_update_blocked(status) or f"{config.project} has no provisioned board units")
     if not status.provisioned_system_unit.is_relative_to(launcher.switchyard_privileged_provision_root()):
@@ -350,11 +519,23 @@ def switchyard_deploy_release_command(
         return _restore_units({path: payload for path, payload in previous_units.items() if payload is not None},
                               board_target.name, runner=runner)
 
-    # Install the rest of root's reviewed provisioning first (notably the
-    # listener).  Board and canary are overwritten below before any tenant
-    # command runs, and the process already serving is unchanged in between.
-    units = runner(["sh", "-c", launcher.tenant_release_unit_install_command(status, config.project)],
-                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    canary_port = _free_canary_port()
+    try:
+        candidate_units = _candidate_units(status, config.project, source, canary_port)
+    except (RuntimeError, ValueError) as exc:
+        listener_said = listener_back()
+        return ended(blocked(f"rendering exact-release board units failed: {exc}",
+                             f"nothing was deployed; {listener_said}"),
+                     _listener_leftover(listener_said) + board_back())
+    # The rest of root's reviewed provisioning -- the listener, and the readable copy the tenant's gate compares
+    # with, now of the exact board -- but never the staged board and canary themselves: those are templates,
+    # so no legacy board or tenant-configured canary is installed at any moment of the deploy (SYRD-700).
+    with tempfile.TemporaryDirectory(prefix=f"switchyard-{config.project}-exact.") as exact_dir:
+        exact_board = Path(exact_dir) / board_target.name
+        exact_board.write_bytes(candidate_units[board_target])
+        units = runner(["sh", "-c", launcher.tenant_release_unit_install_command(status, config.project,
+                                                                                 exact_board=exact_board)],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if units.returncode != 0:
         unit_leftovers = restore_units()
         listener_said = listener_back()
@@ -363,15 +544,6 @@ def switchyard_deploy_release_command(
             f"{(str(units.stderr or '').strip() or 'no output')[:300]}",
             f"nothing was deployed; {listener_said}",
         ), unit_leftovers + _listener_leftover(listener_said) + board_back())
-    canary_port = _free_canary_port()
-    try:
-        candidate_units = _candidate_units(status, config.project, source, canary_port)
-    except (RuntimeError, ValueError) as exc:
-        unit_leftovers = restore_units()
-        listener_said = listener_back()
-        return ended(blocked(f"rendering exact-release board units failed: {exc}",
-                             f"nothing was deployed; {listener_said}"),
-                     unit_leftovers + _listener_leftover(listener_said) + board_back())
     installed = _install_units(candidate_units, runner=runner)
     if installed:
         unit_leftovers = restore_units()
@@ -385,17 +557,32 @@ def switchyard_deploy_release_command(
     # not the old provisioning template. The directory is searchable by the
     # tenant for the duration of this call; the root-owned file is read-only
     # and disappears before deploy-release returns.
-    with tempfile.TemporaryDirectory(prefix=f"switchyard-{config.project}-candidate.") as proof_dir:
-        os.chmod(proof_dir, 0o755)
-        candidate_proof = Path(proof_dir) / board_target.name
-        candidate_proof.write_bytes(candidate_units[board_target])
-        candidate_proof.chmod(0o644)
-        problems, _restarted = launcher.deploy_release_in_transaction(
-            config, config_path=config_path, source_repo=source,
-            commit_git_dir=pinned.get("commit_git_dir") or None,
-            deploy_ref=commit, runner=runner, print_func=print_func,
-            canary_port=canary_port, provisioned_system_unit=candidate_proof,
-        )
+    if converging:
+        restart = runner(["systemctl", "restart", board_target.name], stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, text=True)
+        unanswered = (f"restarting {board_target.name} failed (exit {restart.returncode}): "
+                      f"{(str(restart.stderr or '').strip() or 'no output')[:300]}" if restart.returncode != 0
+                      else _await_board(config, opener=opener))
+        if unanswered:
+            unit_leftovers = restore_units()
+            listener_said = listener_back()
+            return ended(blocked(f"the board did not serve under its exact unit ({unanswered}); the previous unit "
+                                 "was put back", f"the board still names {commit}; {listener_said}",
+                                 ROLLED_BACK_EXIT),
+                         unit_leftovers + _listener_leftover(listener_said) + board_back())
+        problems: list[str] = []
+    else:
+        with tempfile.TemporaryDirectory(prefix=f"switchyard-{config.project}-candidate.") as proof_dir:
+            os.chmod(proof_dir, 0o755)
+            candidate_proof = Path(proof_dir) / board_target.name
+            candidate_proof.write_bytes(candidate_units[board_target])
+            candidate_proof.chmod(0o644)
+            problems, _restarted = launcher.deploy_release_in_transaction(
+                config, config_path=config_path, source_repo=source,
+                commit_git_dir=pinned.get("commit_git_dir") or None,
+                deploy_ref=commit, runner=runner, print_func=print_func,
+                canary_port=canary_port, provisioned_system_unit=candidate_proof,
+            )
     if problems:
         now = launcher._current_tenant_release(status.board_root)[1]
         if now == before:

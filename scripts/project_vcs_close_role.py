@@ -138,6 +138,12 @@ def set_project_vcs_close_role_command(
     plan = launcher._project_plan_for_vcs_close_role(config, config_path=config_path, role_name=role_name)
     role = dict(plan.operation_allowed_roles)["mark_done"][0]
     launcher.render_vcs_close_role_sql(plan)
+    from scripts.ticket_board.release_units import refuse_rewriting_exact_board_unit
+
+    refused = refuse_rewriting_exact_board_unit(getattr(plan, "board_unit", ""), "set-vcs-close-role")
+    if refused:
+        print_func(refused)
+        return 1
     from scripts import root_packet
 
     board_unit = launcher.render_board_unit(plan)

@@ -34,6 +34,7 @@ if str(ROOT / "tests") not in sys.path:
 
 from team_launcher_test_helpers import *
 from root_tree_stand_in import roots_own
+from exact_release_fixture import exact_release_host
 from team_launcher_upgrade_cutover_test import (
     _RunningTenant,
     _declarative_tenant,
@@ -53,15 +54,18 @@ DRIFT_REFUSAL = (
 
 OLD_UNIT = """[Service]
 User=boardsvc
-ExecStart=/bin/true
+ExecStart=/usr/bin/python3 /srv/porter-ticketboard-live/current/scripts/ticket-board.py --unix-socket /run/porter-ticket-board/ticket-board.sock
 RuntimeDirectory=porter-ticket-board
 """
+#: Shaped like a provisioned unit, since root renders the installed one from it for the release (SYRD-700).
 NEW_UNIT = f"""[Service]
 User=boardsvc
 SupplementaryGroups={ROLES_GROUP}
-ExecStart=/bin/true
+ExecStart=/usr/bin/python3 /srv/porter-ticketboard-live/current/scripts/ticket-board.py --unix-socket /run/porter-ticket-board/ticket-board.sock
 RuntimeDirectory=porter-ticket-board
 RuntimeDirectoryMode=0750
+Environment=TICKET_BOARD_PROJECT=porter
+Environment=TICKET_BOARD_DATABASE_URL=postgresql:///porter
 Environment=TICKET_BOARD_ROLE_ACCOUNTS=main=porter-main
 """
 
@@ -276,9 +280,12 @@ def test_the_cutover_installs_the_reviewed_unit_before_the_deploy_gate() -> None
         assert result == 0, output
         assert deploys, output
         assert DRIFT_REFUSAL not in output, output
-        # The reviewed unit is what is installed now, and nobody was asked to
-        # install it by hand.
-        assert installed.read_text(encoding="utf-8") == NEW_UNIT
+        # Root's exact render of the reviewed unit is what is installed now, and
+        # nobody was asked to install it by hand (SYRD-700).
+        from scripts.ticket_board import release_units
+
+        exact = installed.read_text(encoding="utf-8")
+        assert release_units.is_exact_release_unit(exact) and release_units.renders_template(exact, NEW_UNIT), exact
         assert "Ask an operator" not in output and "install the candidate" not in output, output
         # And the order is the point: the file and the reload before the gate.
         install_at = _index_of(calls, lambda argv: argv[:1] == ["install"] and argv[-1] == str(installed))
@@ -345,7 +352,12 @@ def test_a_tenant_with_no_release_to_deploy_still_restarts_the_board() -> None:
                 config_path, runner=record, source_repo=trusted_release_root()
             )
         assert result == 0, output
-        assert installed.read_text(encoding="utf-8") == NEW_UNIT
+        # SYRD-700: with no release of its own, the board runs root's release this transaction runs from, as root's
+        # exact render of the staged unit for it.
+        from scripts.ticket_board import release_units
+
+        exact = installed.read_text(encoding="utf-8")
+        assert release_units.renders_template(exact, NEW_UNIT) and str(trusted_release_root()) in exact, exact
         restarts = [argv for argv in calls if argv[:2] == ["systemctl", "restart"] and argv[-1] == BOARD_UNIT]
         assert len(restarts) == 1, restarts
 
@@ -467,13 +479,16 @@ def test_the_printed_sequence_installs_before_it_deploys() -> None:
             print_func=printed.append,
         )
         output = "\n".join(printed)
-        install_at = output.index("systemctl daemon-reload")
-        deploy_at = output.index("deploy-restart")
-        assert install_at < deploy_at, output
+        # SYRD-700: one root command, which installs root's exact units before it deploys
+        # (catalogued_deploy_release_test); nothing for the operator to install, or to deploy, by hand.
+        steps = [line for line in printed if line.startswith("  ")]
+        assert len(steps) == 1 and "switchyard deploy-release porter --commit" in steps[0], output
+        assert "deploy-restart" not in output and "systemctl daemon-reload" not in output, output
 
 
 def main() -> int:
-    run_team_launcher_tests(globals(), first=())
+    with exact_release_host():  # SYRD-700: root's trusted releases are the ones these fixtures stage
+        run_team_launcher_tests(globals(), first=())
     print("team_launcher_authority_before_deploy_test: ok")
     return 0
 

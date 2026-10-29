@@ -67,7 +67,7 @@ SEAMS = {
     'recorded_rollout_command': {'_repo_root': 1, 'switchyard_shared_install_root': 1},
     # SYRD-605: the listener's directories and its install are two helper lines where one install was.
     'tenant_release_unit_install_command': {'_quote_command': 6},
-    'report_tenant_release_upgrade': {'_format_release_path': 1, '_format_release_sha': 1, '_quote_command': 1, 'recorded_rollout_command': 3, 'release_update_blocked': 1, 'switchyard_privileged_provision_root': 1, 'tenant_release_deploy_command': 1, 'tenant_release_listener_command': 3, 'tenant_release_status': 1, 'tenant_release_unit_install_command': 1},
+    'report_tenant_release_upgrade': {'_format_release_path': 1, '_format_release_sha': 1, '_quote_command': 1, 'recorded_rollout_command': 1, 'release_update_blocked': 1, 'switchyard_privileged_provision_root': 1, 'tenant_release_status': 1},
     '_owner_boundary_env_args': {'DEFAULT_PANE_BASE_PATH': 1, 'OWNER_BOUNDARY_SCRIPT': 1, '_owner_home_bin_dirs': 1, '_prepend_paths': 1},
     'capture_release_pointer': {'_tenant_board_root_from_config_or_plan': 1, 'current_user_name': 1},
     'deploy_release_in_transaction': {'tenant_release_deploy_command': 1, 'tenant_release_status': 1},
@@ -389,19 +389,20 @@ def test_the_deploy_report() -> None:
         priv = Path(tmp) / "priv"
         st = status(provisioned_system_unit=priv / "p379" / "p379-ticket-board.service")
         result, said, _, _ = report(st, privileged=priv)
-        check(said[2:6] == ["switchyard: matching-release deployment sequence (keep the listener stopped through migrations):", "  <listener stop>",
-                            "  <recorded install units: <units>>", "  <recorded deploy-restart: <deploy>>"]
-              and said[6] == "  <listener start>"
-              and said[7] == f"  <recorded close release: {QUOTE(['switchyard', 'release-status', 'p379', '--close'])}>"
-              and said[8].startswith("switchyard: if a step fails, stop there.") and "`<listener start>`" in said[8]
-              and said[9].startswith("switchyard: each recorded step prints where its record is")
-              and said[10].endswith("this command does not restart panes") and len(said) == 11,
-              f"a root-owned unit source: the whole sequence, recorded, in order: {said}")
+        # SYRD-700: one recorded root command, which renders the units for the release; never the staged units.
+        check(said[2].startswith("switchyard: matching-release deployment sequence, one root command")
+              and said[3] == f"  <recorded deploy-release: {QUOTE(['switchyard', 'deploy-release', 'p379', '--commit', NEW])}>"
+              and said[4].startswith("switchyard: if it stops, it says where")
+              and said[5].startswith("switchyard: each recorded step prints where its record is")
+              and said[6].endswith("this command does not restart panes") and len(said) == 7
+              and not any("install units" in line or "<units>" in line or "<deploy>" in line for line in said),
+              f"a root-owned unit source: the one recorded deploy-release, and no unit installed by hand: {said}")
         st = status(provisioned_system_unit=Path(tmp) / "tenant" / "p379-ticket-board.service")
         result, said, _, _ = report(st, privileged=priv)
-        check(said[3] == "  <listener stop>" and said[4].startswith(f"switchyard: omitting the unit-install step for p379: it would install from {Path(tmp) / 'tenant'}")
-              and not any("install units" in line for line in said) and said[5] == "  <recorded deploy-restart: <deploy>>",
-              f"a tenant-writable unit source: the install is omitted, not printed with a warning: {said}")
+        # SYRD-700: the deploy renders root's units from that copy, so the whole step is omitted (deploy-release refuses it).
+        check(said[2].startswith(f"switchyard: omitting the deploy step for p379: its units would be rendered from {Path(tmp) / 'tenant'}")
+              and len(said) == 3 and not any(line.startswith("  ") for line in said),
+              f"a tenant-writable unit source: the deploy is omitted, not printed with a warning: {said}")
 
 
 def test_the_release_pointer_is_captured_and_put_back() -> None:

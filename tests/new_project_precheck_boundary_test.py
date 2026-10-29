@@ -482,8 +482,11 @@ def launcher_reads(fn: ast.AST, *, moved: bool) -> list[str]:
 def test_the_module_loads_only_the_polkit_check_at_import() -> None:
     result = python("import sys, scripts.new_project_precheck as m; "
                     "print(sorted(n for n in sys.modules if n.startswith('scripts.') and n != m.__name__))")
-    check(result.returncode == 0 and result.stdout.strip() == "['scripts.polkit_readiness']",
-          f"it imports on its own, loading only the module its polkit default comes from and never the launcher: {result.stdout}{result.stderr[-400:]}")
+    # SYRD-700: and the dependency-free exact-unit renderer, so an installed exact-release unit is still "this plan's".
+    check(result.returncode == 0 and result.stdout.strip()
+          == "['scripts.polkit_readiness', 'scripts.ticket_board', 'scripts.ticket_board.release_units']",
+          f"it imports on its own, loading only the module its polkit default comes from, the exact-unit renderer, "
+          f"and never the launcher: {result.stdout}{result.stderr[-400:]}")
 
 
 def test_either_import_order_gives_one_set_of_objects_and_the_defaults() -> None:
@@ -524,9 +527,12 @@ def test_the_seams_read_through_the_launcher_and_nothing_bound() -> None:
     top = [ast.unparse(n) for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
     tc = [ast.unparse(n) for n in tree.body if isinstance(n, ast.If)]
     check(top == ["from __future__ import annotations", "import os", "import socket", "import subprocess", "from pathlib import Path",
-                  "from typing import TYPE_CHECKING, Any, Callable", "from scripts.polkit_readiness import polkit_readiness_problems"]
+                  "from typing import TYPE_CHECKING, Any, Callable", "from scripts.polkit_readiness import polkit_readiness_problems",
+                  # SYRD-700: the exact-unit comparison.
+                  "from scripts.ticket_board.release_units import renders_template"]
           and tc == ["if TYPE_CHECKING:\n    from scripts.ticket_board.project_provision import ProjectBoardProvision"],
-          f"the standard library, the polkit default's own module, and the plan type under TYPE_CHECKING: {top} {tc}")
+          f"the standard library, the polkit default's own module, the exact-unit comparison, and the plan type under "
+          f"TYPE_CHECKING: {top} {tc}")
     names = [n.name if isinstance(n, ast.FunctionDef) else n.targets[0].id for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef, ast.Assign))]
     check(names == list(MOVED), f"the fourteen in the launcher's order, and nothing else: {names}")
 

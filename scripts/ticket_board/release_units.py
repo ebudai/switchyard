@@ -132,6 +132,63 @@ ReadWritePaths=/run/{runtime}
 """
 
 
+def is_exact_release_unit(text: str) -> bool:
+    """Whether an installed board unit is one of these exact-release renders, not a legacy unit (SYRD-700).
+
+    Every render runs Python ``-E -s -B`` from a commit-named root release and loads no ``EnvironmentFile``; the
+    legacy units do neither. ``board_identity.effective_unit`` is the proof; this only says which kind a file is.
+    """
+    lines = text.splitlines()
+    exec_start = [line for line in lines if line.startswith("ExecStart=")]
+    return (len(exec_start) == 1 and " -E -s -B " in exec_start[0] and "/scripts/ticket-board.py" in exec_start[0]
+            and not any(line.startswith("EnvironmentFile=") for line in lines))
+
+
+def renders_template(installed: str, template: str) -> bool:
+    """Whether ``installed`` is ``template`` itself, or its exact render for the release its own ExecStart names.
+
+    So a check that a host's board unit is "this plan's" holds for the unit root installs now as well as the
+    legacy one it used to (SYRD-700).
+    """
+    if installed == template:
+        return True
+    if not is_exact_release_unit(installed):
+        return False
+    exec_start = next(line for line in installed.splitlines() if line.startswith("ExecStart="))
+    try:
+        argv = shlex.split(exec_start[len("ExecStart="):])
+        release = Path(argv[4]).parent.parent
+        rendered = render_board_unit(template, release=release, report_credentials=report_credentials_path(template))
+    except (ValueError, IndexError):  # ReleaseUnitError is a ValueError
+        return False
+    return installed == rendered
+
+
+#: Where root's installed board units are; a suite points it at a directory of its own.
+SYSTEM_UNIT_DIR = Path("/etc/systemd/system")
+
+
+def refuse_rewriting_exact_board_unit(board_unit: str, command: str) -> str:
+    """Why ``command`` may not rewrite this board's unit, or ''.
+
+    `add-role` and `set-vcs-close-role` render the board unit from the legacy template, which runs the tenant's
+    ``current`` with its environment file. Over a unit that is still legacy that changes nothing about who chooses
+    the code; over root's exact-release unit it would undo the repair, so it is refused until SYRD-702 renders it
+    from the board's attested release (SYRD-700). Asked before the command changes anything, so a refusal leaves
+    the project as it was.
+    """
+    if not board_unit:
+        return ""
+    try:
+        text = (SYSTEM_UNIT_DIR / board_unit).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    if not is_exact_release_unit(text):
+        return ""
+    return (f"team-launcher: {command} would replace {board_unit}, root's exact-release board unit, with a legacy "
+            "one that runs the tenant's own release tree; it is refused until SYRD-702. Nothing was changed.")
+
+
 def report_credentials_path(template: str) -> Path | None:
     """The old environment file as data only; systemd copies it as a credential."""
     values = [line.split("=", 1)[1].lstrip("-") for line in template.splitlines()
@@ -141,3 +198,26 @@ def report_credentials_path(template: str) -> Path | None:
     if len(values) != 1 or not values[0].startswith("/"):
         raise ReleaseUnitError("the provisioned board unit names an invalid EnvironmentFile")
     return Path(values[0])
+
+
+def main(argv: list[str] | None = None) -> int:
+    """``release_units.py <board template> <canary template> <release> <out dir>``: root's exact renders of both units
+    for ``release``, named as their templates, for the operator packet. Dependency-free, so it runs as
+    ``python3 -I -B`` from the release itself (SYRD-700). The canary's port is chosen by each deploy-release."""
+    import sys
+
+    args = sys.argv[1:] if argv is None else argv
+    if len(args) != 4:
+        print("usage: release_units.py <board template> <canary template> <release> <out dir>", file=sys.stderr)
+        return 2
+    board_template, canary_template, release, out = (Path(arg) for arg in args)
+    board_text = board_template.read_text(encoding="utf-8")
+    board = render_board_unit(board_text, release=release, report_credentials=report_credentials_path(board_text))
+    canary = render_canary_unit(board_text, canary_template.read_text(encoding="utf-8"), release=release, port=0)
+    (out / board_template.name).write_text(board, encoding="utf-8")
+    (out / canary_template.name).write_text(canary, encoding="utf-8")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

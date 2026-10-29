@@ -152,6 +152,7 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
     q_source_repo = provision.shell_quote(plan.source_repo)
     q_commit_git_dir = provision.shell_quote(plan.commit_git_dir)
     q_deploy_script = provision.shell_quote(f"{plan.source_repo}/scripts/ticket-board-service.sh")
+    q_release_units = provision.shell_quote(f"{plan.source_repo}/scripts/ticket_board/release_units.py")
     q_board_unit = provision.shell_quote(f"/etc/systemd/system/{plan.board_unit}")
     # Published from the artifacts the operator is reviewing, so the deployer
     # compares the release's unit against the loaded one rather than being sent
@@ -443,6 +444,12 @@ provision_dir="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 {provision.tenant_paths_definition(str(plan.source_repo))}
 system_unit_candidate="$provision_dir/{plan.board_unit}"
 canary_unit_candidate="$provision_dir/{plan.canary_unit}"
+# Root's renders of the board and canary for exactly this release, from those templates: installing a template
+# would run the tenant's own release tree as the board's account (SYRD-700).
+exact_units="$(mktemp -d)"
+sudo /usr/bin/python3 -I -B {q_release_units} "$system_unit_candidate" "$canary_unit_candidate" {q_source_repo} "$exact_units"
+system_unit_candidate="$exact_units/{plan.board_unit}"
+canary_unit_candidate="$exact_units/{plan.canary_unit}"
 # The deployer runs as the project account and has to read the reviewed unit to
 # compare it against the one systemd loaded. Root publishes a copy it can reach,
 # rather than the account being sent into a directory root owns (SYRD-127).
@@ -490,9 +497,9 @@ sudo install -m 0644 {provision.packet_companion(plan.polkit_name)} {q_polkit}
 {github_identity}
 sudo systemd-tmpfiles --create {q_tmpfiles}
 {provision.postgres_sql_file_command(plan.project + '-database.sql', companion=True)}
-{provision.postgres_sql_file_command(plan.board_current + '/scripts/ticket_board/schema.sql', database_url=plan.admin_database_url)}
-sudo env TICKET_BOARD_ADMIN_DATABASE_URL={provision.shell_quote(plan.admin_database_url)} {provision.shell_quote(plan.board_current + '/scripts/ticket-board-migrate')}
-{provision.postgres_sql_file_command(plan.board_current + '/scripts/ticket_board/rbac.sql', database_url=plan.admin_database_url)}
+{provision.postgres_sql_file_command(str(plan.source_repo) + '/scripts/ticket_board/schema.sql', database_url=plan.admin_database_url)}
+sudo env TICKET_BOARD_ADMIN_DATABASE_URL={provision.shell_quote(plan.admin_database_url)} {provision.shell_quote(str(plan.source_repo) + '/scripts/ticket-board-migrate')}
+{provision.postgres_sql_file_command(str(plan.source_repo) + '/scripts/ticket_board/rbac.sql', database_url=plan.admin_database_url)}
 {workflow_seed_command.rstrip()}
 sudo systemctl daemon-reload
 sudo systemctl enable --now {plan.board_unit}

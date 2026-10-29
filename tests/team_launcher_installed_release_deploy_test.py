@@ -242,7 +242,9 @@ def test_the_upgrade_deploys_an_installed_release_without_the_publication_cache(
         assert f"deployed board release new: {commit} from {commit}" in output, output
         # The deployment sequence is rendered, which is the thing the live run
         # never reached.
-        assert "matching-release deployment sequence" in output, output
+        # SYRD-700: one root command, never the staged units by hand.
+        assert "matching-release deployment sequence, one root command" in output, output
+        assert f"switchyard deploy-release porter --commit {commit}" in output, output
         # And the release tree is deployed directly: no archive out of a cache,
         # because the release is already the materialized commit.
         assert "git --git-dir=" not in output, output

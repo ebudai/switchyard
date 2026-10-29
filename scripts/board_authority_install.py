@@ -26,6 +26,7 @@ The standard-library names are this module's own imports, the same objects.
 from __future__ import annotations
 
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -39,8 +40,14 @@ def install_board_authority_files(
     runner: Callable[..., subprocess.CompletedProcess[Any]],
     config_path: Path | None = None,
     print_func: Callable[[str], None] = print,
+    exact: dict[str, bytes] | None = None,
 ) -> list[str]:
     """Install the staged units and reload systemd. Nothing is restarted here.
+
+    The board, its canary and the board's readable copy are installed from ``exact``, root's renders of them for
+    one trusted release (`tenant_release_deploy.exact_authority_units`); their staged files are templates, and
+    installing one would run the tenant's own release tree as the board's account. Without root's bytes for one of
+    them nothing is installed (SYRD-700).
 
     This has to happen before the release deploy, not after it. `deploy-restart`
     compares the release's own production unit with the one installed and
@@ -66,38 +73,47 @@ def install_board_authority_files(
     problems: list[str] = []
     staged_dir = launcher.privileged_provision_dir(config.project, root=launcher.switchyard_privileged_provision_root())
     owner = config.run_as_user or launcher.current_user_name()
-    for unit, destination, ownership in launcher.authority_unit_installs(
-        config, config_path=config_path
-    ):
-        # The staged source is the generated unit; a destination that is a copy
-        # of it says so in its name rather than being a second, different file.
-        staged = staged_dir / unit.split(" (", 1)[0]
-        if not staged.is_file():
-            problems.append(f"{unit} has not been generated under {staged_dir}")
-            continue
-        home = launcher.home_dir_for_user(owner)
-        if home is not None and Path(destination).is_relative_to(home):
-            # Into the owner's home -- the listener unit -- so through the
-            # no-follow helper, parents first: `install -D` would follow a
-            # link the owner left anywhere on the way (SYRD-605).
-            from scripts.ticket_board.provision_tenant_paths import tenant_paths_argv
+    with tempfile.TemporaryDirectory(prefix="switchyard-exact-units.") as exact_dir:
+        for unit, destination, ownership in launcher.authority_unit_installs(
+            config, config_path=config_path
+        ):
+            # The staged source is the generated unit; a destination that is a copy
+            # of it says so in its name rather than being a second, different file.
+            staged = staged_dir / unit.split(" (", 1)[0]
+            if not staged.is_file():
+                problems.append(f"{unit} has not been generated under {staged_dir}")
+                continue
+            home = launcher.home_dir_for_user(owner)
+            if home is not None and Path(destination).is_relative_to(home):
+                # Into the owner's home -- the listener unit -- so through the
+                # no-follow helper, parents first: `install -D` would follow a
+                # link the owner left anywhere on the way (SYRD-605).
+                from scripts.ticket_board.provision_tenant_paths import tenant_paths_argv
 
-            parents = [str(Path(destination).parent)]
-            while Path(parents[-1]).parent != home and Path(parents[-1]).parent.is_relative_to(home):
-                parents.append(str(Path(parents[-1]).parent))
-            steps = [
-                tenant_paths_argv(str(home), "dir", "--mode", "0755", "--owner", owner, "--group", owner,
-                                  *reversed(parents)),
-                tenant_paths_argv(str(home), "install", "--mode", "0644", "--owner", owner, "--group", owner,
-                                  str(staged), str(destination)),
-            ]
-        else:
-            steps = [["install", "-D", "-m", "0644", *ownership, str(staged), str(destination)]]
-        for step in steps:
-            result = runner(step, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            if result.returncode != 0:
-                problems.append(f"could not install {unit} (exit {result.returncode})")
-                break
+                parents = [str(Path(destination).parent)]
+                while Path(parents[-1]).parent != home and Path(parents[-1]).parent.is_relative_to(home):
+                    parents.append(str(Path(parents[-1]).parent))
+                steps = [
+                    tenant_paths_argv(str(home), "dir", "--mode", "0755", "--owner", owner, "--group", owner,
+                                      *reversed(parents)),
+                    tenant_paths_argv(str(home), "install", "--mode", "0644", "--owner", owner, "--group", owner,
+                                      str(staged), str(destination)),
+                ]
+            elif ownership == ["-o", "root", "-g", "root"] and unit not in (exact or {}):
+                # The board, the canary and the board's readable copy: root's exact render, or nothing (SYRD-700).
+                problems.append(f"{unit} is installed only as root's render of a trusted release, never from its "
+                                "staged template")
+                continue
+            else:
+                if ownership == ["-o", "root", "-g", "root"]:
+                    staged = Path(exact_dir) / unit.replace(" ", "_")
+                    staged.write_bytes((exact or {})[unit])
+                steps = [["install", "-D", "-m", "0644", *ownership, str(staged), str(destination)]]
+            for step in steps:
+                result = runner(step, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if result.returncode != 0:
+                    problems.append(f"could not install {unit} (exit {result.returncode})")
+                    break
     if problems:
         return problems
     if runner(["systemctl", "daemon-reload"], stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode != 0:
@@ -115,6 +131,7 @@ def install_board_authority(
     runner: Callable[..., subprocess.CompletedProcess[Any]],
     config_path: Path | None = None,
     print_func: Callable[[str], None] = print,
+    exact: dict[str, bytes] | None = None,
 ) -> list[str]:
     """Install the staged units, reload, restart and health-check the board.
 
@@ -124,7 +141,7 @@ def install_board_authority(
     from scripts import team_launcher as launcher
 
     problems = launcher.install_board_authority_files(
-        config, runner=runner, config_path=config_path, print_func=print_func
+        config, runner=runner, config_path=config_path, print_func=print_func, exact=exact
     )
     if problems:
         return problems

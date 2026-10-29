@@ -126,7 +126,8 @@ GOLDEN = {
 }
 REACHED: set[str] = set()
 #: Measured on the candidate: what importing the module alone loads -- the module its probe defaults come from, and its.
-DEFAULT_MODULES_LOADED = ['scripts.new_project_precheck', 'scripts.polkit_readiness']
+# SYRD-700: the precheck's exact-unit comparison comes with it.
+DEFAULT_MODULES_LOADED = ['scripts.new_project_precheck', 'scripts.polkit_readiness', 'scripts.ticket_board', 'scripts.ticket_board.release_units']
 
 # --- the cases, shared verbatim with `gold426.py` (which ran them on the baseline) ------------------------------------
 # A case runs `team-launcher new` (or one of its two helpers) in a fresh test-owned tree. Every step that would reach

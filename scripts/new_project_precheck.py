@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from scripts.polkit_readiness import polkit_readiness_problems
+from scripts.ticket_board.release_units import renders_template
 
 if TYPE_CHECKING:
     from scripts.ticket_board.project_provision import ProjectBoardProvision
@@ -277,7 +278,7 @@ def _ticket_board_table_count(database: str, *, runner: Callable[..., subprocess
 
 
 def _installed_unit_is_this_plans(plan: ProjectBoardProvision) -> bool:
-    """Whether the installed board unit is exactly the one this plan renders.
+    """Whether the installed board unit is exactly the one this plan renders, or root's exact-release render of it.
 
     The packet installs the units before it creates the database, so a run that
     stopped between the two leaves precisely this unit and no database. That is
@@ -290,7 +291,7 @@ def _installed_unit_is_this_plans(plan: ProjectBoardProvision) -> bool:
         installed = launcher._installed_unit_path(plan.board_unit).read_text(encoding="utf-8")
     except OSError:
         return False
-    return installed == launcher.render_board_unit(plan)
+    return renders_template(installed, launcher.render_board_unit(plan))
 
 
 def precheck_new_project(

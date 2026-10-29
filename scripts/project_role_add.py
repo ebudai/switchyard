@@ -390,6 +390,12 @@ def add_project_role_command(
         audit_role=audit_role,
     )
     launcher.render_add_role_sql(preflight_plan, role)
+    from scripts.ticket_board.release_units import refuse_rewriting_exact_board_unit
+
+    refused = refuse_rewriting_exact_board_unit(getattr(preflight_plan, "board_unit", ""), "add-role")
+    if refused:
+        print_func(refused)
+        return 1
     existing_role = next((candidate for candidate in config.roles if candidate.role == role), None)
     recovering_existing_role = existing_role is not None
     if recovering_existing_role:

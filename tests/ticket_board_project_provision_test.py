@@ -445,7 +445,7 @@ def test_operator_commands_use_peer_portable_postgres_admin_invocations() -> Non
         "sudo -u postgres psql -X -v ON_ERROR_STOP=1 -f -"
     ) in commands
     assert (
-        "sudo cat '/home/stellaris-agent/stellaris-ticketboard-live/current/scripts/ticket_board/schema.sql' | "
+        f"sudo cat '{plan.source_repo}/scripts/ticket_board/schema.sql' | "
         "sudo -u postgres psql -X -v ON_ERROR_STOP=1 "
         "'postgresql:///stellaris_ticket_board?host=/var/run/postgresql' "
         "-f -"
@@ -453,7 +453,7 @@ def test_operator_commands_use_peer_portable_postgres_admin_invocations() -> Non
     assert (
         "sudo env "
         "TICKET_BOARD_ADMIN_DATABASE_URL='postgresql:///stellaris_ticket_board?host=/var/run/postgresql' "
-        "'/home/stellaris-agent/stellaris-ticketboard-live/current/scripts/ticket-board-migrate'"
+        f"'{plan.source_repo}/scripts/ticket-board-migrate'"
     ) in commands
     assert (
         "sudo cat \"$provision_dir\"/'stellaris-workflow.sql' | "
@@ -462,11 +462,15 @@ def test_operator_commands_use_peer_portable_postgres_admin_invocations() -> Non
         "-f -"
     ) in commands
     assert (
-        "sudo cat '/home/stellaris-agent/stellaris-ticketboard-live/current/scripts/ticket_board/rbac.sql' | "
+        f"sudo cat '{plan.source_repo}/scripts/ticket_board/rbac.sql' | "
         "sudo -u postgres psql -X -v ON_ERROR_STOP=1 "
         "'postgresql:///stellaris_ticket_board?host=/var/run/postgresql' "
         "-f -"
     ) in commands
+    # SYRD-700: root runs the release's own migrations and SQL, never anything from the tenant's `current` (the
+    # owner's own hook and skill installers run as the owner).
+    assert not [line for line in commands.splitlines() if line.startswith("sudo ")
+                and not line.startswith("sudo -u 'stellaris-agent'") and "stellaris-ticketboard-live/current" in line], commands
     assert "sudo -u postgres psql -X -v ON_ERROR_STOP=1 -f 'stellaris-database.sql'" not in commands
     assert "sudo -u postgres psql -X -v ON_ERROR_STOP=1 'postgresql:///stellaris_ticket_board?host=/var/run/postgresql' -f '/home/stellaris-agent/stellaris-ticketboard-live/current/scripts/ticket_board/schema.sql'" not in commands
     assert "sudo -u postgres env TICKET_BOARD_ADMIN_DATABASE_URL=" not in commands

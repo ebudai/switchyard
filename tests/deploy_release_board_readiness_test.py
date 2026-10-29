@@ -224,7 +224,7 @@ class Host:
 
 
 def deploy(root: Path, work: Path, *, board_unit: str, listener: str, deployed: str, board_mode: str = "ok",
-           ready_seconds: float | None = None) -> dict:
+           ready_seconds: float | None = None, exact_installed: bool = False) -> dict:
     """`switchyard deploy-release porter --commit NEW` against a prepared tenant in that state."""
     import release_phase_journal_test as journal
     from scripts import team_launcher as launcher
@@ -244,6 +244,9 @@ def deploy(root: Path, work: Path, *, board_unit: str, listener: str, deployed: 
         (release / "scripts").mkdir(parents=True, exist_ok=True)
         (release / launcher.SWITCHYARD_RELEASE_MARKER_NAME).write_text(json.dumps({"commit": commit}), encoding="utf-8")
         (release / "scripts" / "ticket-board-service.sh").write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+        # SYRD-700: a release new enough to run under its exact unit carries the renderer.
+        (release / "scripts" / "ticket_board").mkdir(exist_ok=True)
+        (release / "scripts" / "ticket_board" / "release_units.py").write_text("# renderer\n", encoding="utf-8")
     units = launcher.privileged_provision_dir("porter", root=launcher.switchyard_privileged_provision_root())
     units.mkdir(parents=True, exist_ok=True)
     if board_identity is not None:
@@ -273,6 +276,13 @@ def deploy(root: Path, work: Path, *, board_unit: str, listener: str, deployed: 
     reached: list[str] = []
     from scripts import tenant_release_deploy as deploy_module
 
+    if exact_installed and board_identity is not None and hasattr(deploy_module, "_serves_exact_units"):
+        # SYRD-700: a tenant already on the release under root's exact unit for it has nothing to converge.
+        rendered = deploy_module._candidate_units(
+            SimpleNamespace(provisioned_system_unit=units / "porter-ticket-board.service"), "porter", releases / NEW,
+            26991)
+        for name in ("porter-ticket-board.service", "porter-ticket-board-canary.service"):  # both, as root renders them
+            (unit_dir / name).write_bytes(next(v for k, v in rendered.items() if k.name == name))
     if ready_seconds is not None and hasattr(deploy_module, "BOARD_READY_SECONDS"):
         deploy_module.BOARD_READY_SECONDS = ready_seconds
     if board_identity is not None:
@@ -318,12 +328,14 @@ def scenario(root: Path, work: Path) -> dict:
         sys.path.insert(0, extra)
     out = {}
     cases = {
-        "suspended, already on the release": dict(board_unit="inactive", listener="inactive", deployed=NEW),
+        "suspended, already on the release": dict(board_unit="inactive", listener="inactive", deployed=NEW,
+                                                  exact_installed=True),
         "suspended, deployed here": dict(board_unit="inactive", listener="inactive", deployed=OLD),
-        "running, already on the release": dict(board_unit="active", listener="active", deployed=NEW),
+        "running, already on the release": dict(board_unit="active", listener="active", deployed=NEW,
+                                                exact_installed=True),
         "running, deployed here": dict(board_unit="active", listener="active", deployed=OLD),
         "suspended, a board that never answers": dict(board_unit="inactive", listener="inactive", deployed=NEW,
-                                                      board_mode="never", ready_seconds=2.0),
+                                                      board_mode="never", ready_seconds=2.0, exact_installed=True),
     }
     for name, kwargs in cases.items():
         case_dir = work / re.sub(r"\W+", "-", name)

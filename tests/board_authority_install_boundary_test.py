@@ -32,6 +32,7 @@ from __future__ import annotations
 import ast
 import inspect
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -55,9 +56,11 @@ SEAMS = {
     'install_board_authority': {'activate_board_authority': 1, 'install_board_authority_files': 1},
 }
 #: The BASELINE's own behaviour for the cases below (`gold401.py`, run on the baseline launcher under the guard).
+#: SYRD-700 regenerated them with `run()`: each differs only by the board's and the canary's source, root's exact
+#: render (`<exact>`) instead of the staged template; the listener is unchanged, and one case is new.
 GOLDEN = {'files:all installed and reloaded': {'answer': [],
-                                      'said': ["switchyard: installed p401's generated units and reloaded systemd; p401-owner's listener "
-                                               'stays stopped until the roles have verified'],
+                                      'said': ["switchyard: installed p401's generated units and reloaded systemd; "
+                                               "p401-owner's listener stays stopped until the roles have verified"],
                                       'calls': [['provision root'],
                                                 ['provision dir', 'p401', '<tmp>/provision'],
                                                 ['units', 'p401', '/nonexistent/syrd401/p401.json'],
@@ -70,7 +73,7 @@ GOLDEN = {'files:all installed and reloaded': {'answer': [],
                                                   'root',
                                                   '-g',
                                                   'root',
-                                                  '<tmp>/provision/p401/p401-ticket-board.service',
+                                                  '<exact>/p401-ticket-board.service',
                                                   '/nonexistent/syrd401/system/p401-ticket-board.service'],
                                                  [['stderr', 'PIPE'], ['stdout', 'PIPE']]],
                                                 ['run',
@@ -94,14 +97,17 @@ GOLDEN = {'files:all installed and reloaded': {'answer': [],
                                                   'root',
                                                   '-g',
                                                   'root',
-                                                  '<tmp>/provision/p401/p401-canary.service',
+                                                  '<exact>/p401-canary.service',
                                                   '/nonexistent/syrd401/system/p401-canary.service'],
                                                  [['stderr', 'PIPE'], ['stdout', 'PIPE']]],
-                                                ['run', ['systemctl', 'daemon-reload'], [['stderr', 'PIPE'], ['stdout', 'PIPE']]],
+                                                ['run',
+                                                 ['systemctl', 'daemon-reload'],
+                                                 [['stderr', 'PIPE'], ['stdout', 'PIPE']]],
                                                 ['say']]},
  'files:the current user when none is configured': {'answer': [],
-                                                    'said': ["switchyard: installed p401's generated units and reloaded systemd; "
-                                                             "p401-current's listener stays stopped until the roles have verified"],
+                                                    'said': ["switchyard: installed p401's generated units and "
+                                                             "reloaded systemd; p401-current's listener stays "
+                                                             'stopped until the roles have verified'],
                                                     'calls': [['provision root'],
                                                               ['provision dir', 'p401', '<tmp>/provision'],
                                                               ['current user'],
@@ -115,7 +121,7 @@ GOLDEN = {'files:all installed and reloaded': {'answer': [],
                                                                 'root',
                                                                 '-g',
                                                                 'root',
-                                                                '<tmp>/provision/p401/p401-ticket-board.service',
+                                                                '<exact>/p401-ticket-board.service',
                                                                 '/nonexistent/syrd401/system/p401-ticket-board.service'],
                                                                [['stderr', 'PIPE'], ['stdout', 'PIPE']]],
                                                               ['run',
@@ -139,14 +145,15 @@ GOLDEN = {'files:all installed and reloaded': {'answer': [],
                                                                 'root',
                                                                 '-g',
                                                                 'root',
-                                                                '<tmp>/provision/p401/p401-canary.service',
+                                                                '<exact>/p401-canary.service',
                                                                 '/nonexistent/syrd401/system/p401-canary.service'],
                                                                [['stderr', 'PIPE'], ['stdout', 'PIPE']]],
                                                               ['run',
                                                                ['systemctl', 'daemon-reload'],
                                                                [['stderr', 'PIPE'], ['stdout', 'PIPE']]],
                                                               ['say']]},
- 'files:one unit not staged': {'answer': ["p401-notify.service (the owner's listener) has not been generated under <tmp>/provision/p401"],
+ 'files:one unit not staged': {'answer': ["p401-notify.service (the owner's listener) has not been generated under "
+                                          '<tmp>/provision/p401'],
                                'said': [],
                                'calls': [['provision root'],
                                          ['provision dir', 'p401', '<tmp>/provision'],
@@ -160,7 +167,7 @@ GOLDEN = {'files:all installed and reloaded': {'answer': [],
                                            'root',
                                            '-g',
                                            'root',
-                                           '<tmp>/provision/p401/p401-ticket-board.service',
+                                           '<exact>/p401-ticket-board.service',
                                            '/nonexistent/syrd401/system/p401-ticket-board.service'],
                                           [['stderr', 'PIPE'], ['stdout', 'PIPE']]],
                                          ['run',
@@ -172,14 +179,17 @@ GOLDEN = {'files:all installed and reloaded': {'answer': [],
                                            'root',
                                            '-g',
                                            'root',
-                                           '<tmp>/provision/p401/p401-canary.service',
+                                           '<exact>/p401-canary.service',
                                            '/nonexistent/syrd401/system/p401-canary.service'],
                                           [['stderr', 'PIPE'], ['stdout', 'PIPE']]]]},
  'files:nothing staged': {'answer': ['p401-ticket-board.service has not been generated under <tmp>/provision/p401',
-                                     "p401-notify.service (the owner's listener) has not been generated under <tmp>/provision/p401",
+                                     "p401-notify.service (the owner's listener) has not been generated under "
+                                     '<tmp>/provision/p401',
                                      'p401-canary.service has not been generated under <tmp>/provision/p401'],
                           'said': [],
-                          'calls': [['provision root'], ['provision dir', 'p401', '<tmp>/provision'], ['units', 'p401', None]]},
+                          'calls': [['provision root'],
+                                    ['provision dir', 'p401', '<tmp>/provision'],
+                                    ['units', 'p401', None]]},
  'files:one install fails': {'answer': ['could not install p401-canary.service (exit 1)'],
                              'said': [],
                              'calls': [['provision root'],
@@ -194,7 +204,7 @@ GOLDEN = {'files:all installed and reloaded': {'answer': [],
                                          'root',
                                          '-g',
                                          'root',
-                                         '<tmp>/provision/p401/p401-ticket-board.service',
+                                         '<exact>/p401-ticket-board.service',
                                          '/nonexistent/syrd401/system/p401-ticket-board.service'],
                                         [['stderr', 'PIPE'], ['stdout', 'PIPE']]],
                                        ['run',
@@ -218,7 +228,7 @@ GOLDEN = {'files:all installed and reloaded': {'answer': [],
                                          'root',
                                          '-g',
                                          'root',
-                                         '<tmp>/provision/p401/p401-canary.service',
+                                         '<exact>/p401-canary.service',
                                          '/nonexistent/syrd401/system/p401-canary.service'],
                                         [['stderr', 'PIPE'], ['stdout', 'PIPE']]]]},
  'files:two installs fail': {'answer': ['could not install p401-ticket-board.service (exit 1)',
@@ -236,7 +246,7 @@ GOLDEN = {'files:all installed and reloaded': {'answer': [],
                                          'root',
                                          '-g',
                                          'root',
-                                         '<tmp>/provision/p401/p401-ticket-board.service',
+                                         '<exact>/p401-ticket-board.service',
                                          '/nonexistent/syrd401/system/p401-ticket-board.service'],
                                         [['stderr', 'PIPE'], ['stdout', 'PIPE']]],
                                        ['run',
@@ -260,11 +270,11 @@ GOLDEN = {'files:all installed and reloaded': {'answer': [],
                                          'root',
                                          '-g',
                                          'root',
-                                         '<tmp>/provision/p401/p401-canary.service',
+                                         '<exact>/p401-canary.service',
                                          '/nonexistent/syrd401/system/p401-canary.service'],
                                         [['stderr', 'PIPE'], ['stdout', 'PIPE']]]]},
- 'files:one missing and one failing': {'answer': ["p401-notify.service (the owner's listener) has not been generated under "
-                                                  '<tmp>/provision/p401',
+ 'files:one missing and one failing': {'answer': ["p401-notify.service (the owner's listener) has not been generated "
+                                                  'under <tmp>/provision/p401',
                                                   'could not install p401-canary.service (exit 1)'],
                                        'said': [],
                                        'calls': [['provision root'],
@@ -279,7 +289,7 @@ GOLDEN = {'files:all installed and reloaded': {'answer': [],
                                                    'root',
                                                    '-g',
                                                    'root',
-                                                   '<tmp>/provision/p401/p401-ticket-board.service',
+                                                   '<exact>/p401-ticket-board.service',
                                                    '/nonexistent/syrd401/system/p401-ticket-board.service'],
                                                   [['stderr', 'PIPE'], ['stdout', 'PIPE']]],
                                                  ['run',
@@ -291,7 +301,7 @@ GOLDEN = {'files:all installed and reloaded': {'answer': [],
                                                    'root',
                                                    '-g',
                                                    'root',
-                                                   '<tmp>/provision/p401/p401-canary.service',
+                                                   '<exact>/p401-canary.service',
                                                    '/nonexistent/syrd401/system/p401-canary.service'],
                                                   [['stderr', 'PIPE'], ['stdout', 'PIPE']]]]},
  'files:the reload fails': {'answer': ['systemctl daemon-reload failed'],
@@ -308,7 +318,7 @@ GOLDEN = {'files:all installed and reloaded': {'answer': [],
                                         'root',
                                         '-g',
                                         'root',
-                                        '<tmp>/provision/p401/p401-ticket-board.service',
+                                        '<exact>/p401-ticket-board.service',
                                         '/nonexistent/syrd401/system/p401-ticket-board.service'],
                                        [['stderr', 'PIPE'], ['stdout', 'PIPE']]],
                                       ['run',
@@ -332,11 +342,36 @@ GOLDEN = {'files:all installed and reloaded': {'answer': [],
                                         'root',
                                         '-g',
                                         'root',
-                                        '<tmp>/provision/p401/p401-canary.service',
+                                        '<exact>/p401-canary.service',
                                         '/nonexistent/syrd401/system/p401-canary.service'],
                                        [['stderr', 'PIPE'], ['stdout', 'PIPE']]],
-                                      ['run', ['systemctl', 'daemon-reload'], [['stderr', 'PIPE'], ['stdout', 'PIPE']]]]},
- 'full:the files fail: nothing activated': {'answer': ["could not install p401-notify.service (the owner's listener) (exit 1)"],
+                                      ['run',
+                                       ['systemctl', 'daemon-reload'],
+                                       [['stderr', 'PIPE'], ['stdout', 'PIPE']]]]},
+ "files:no exact renders: nothing of root's from a template": {'answer': ['p401-ticket-board.service is installed '
+                                                                          "only as root's render of a trusted "
+                                                                          'release, never from its staged template',
+                                                                          'p401-canary.service is installed only as '
+                                                                          "root's render of a trusted release, never "
+                                                                          'from its staged template'],
+                                                               'said': [],
+                                                               'calls': [['provision root'],
+                                                                         ['provision dir', 'p401', '<tmp>/provision'],
+                                                                         ['units', 'p401', None],
+                                                                         ['run',
+                                                                          ['install',
+                                                                           '-D',
+                                                                           '-m',
+                                                                           '0644',
+                                                                           '-o',
+                                                                           'p401-owner',
+                                                                           '-g',
+                                                                           'p401-owner',
+                                                                           '<tmp>/provision/p401/p401-notify.service',
+                                                                           '/nonexistent/syrd401/user/p401-notify.service'],
+                                                                          [['stderr', 'PIPE'], ['stdout', 'PIPE']]]]},
+ 'full:the files fail: nothing activated': {'answer': ["could not install p401-notify.service (the owner's listener) "
+                                                       '(exit 1)'],
                                             'said': [],
                                             'calls': [['provision root'],
                                                       ['provision dir', 'p401', '<tmp>/provision'],
@@ -350,7 +385,7 @@ GOLDEN = {'files:all installed and reloaded': {'answer': [],
                                                         'root',
                                                         '-g',
                                                         'root',
-                                                        '<tmp>/provision/p401/p401-ticket-board.service',
+                                                        '<exact>/p401-ticket-board.service',
                                                         '/nonexistent/syrd401/system/p401-ticket-board.service'],
                                                        [['stderr', 'PIPE'], ['stdout', 'PIPE']]],
                                                       ['run',
@@ -374,12 +409,12 @@ GOLDEN = {'files:all installed and reloaded': {'answer': [],
                                                         'root',
                                                         '-g',
                                                         'root',
-                                                        '<tmp>/provision/p401/p401-canary.service',
+                                                        '<exact>/p401-canary.service',
                                                         '/nonexistent/syrd401/system/p401-canary.service'],
                                                        [['stderr', 'PIPE'], ['stdout', 'PIPE']]]]},
  'full:installed, then activated': {'answer': [],
-                                    'said': ["switchyard: installed p401's generated units and reloaded systemd; p401-owner's listener "
-                                             'stays stopped until the roles have verified'],
+                                    'said': ["switchyard: installed p401's generated units and reloaded systemd; "
+                                             "p401-owner's listener stays stopped until the roles have verified"],
                                     'calls': [['provision root'],
                                               ['provision dir', 'p401', '<tmp>/provision'],
                                               ['units', 'p401', None],
@@ -392,7 +427,7 @@ GOLDEN = {'files:all installed and reloaded': {'answer': [],
                                                 'root',
                                                 '-g',
                                                 'root',
-                                                '<tmp>/provision/p401/p401-ticket-board.service',
+                                                '<exact>/p401-ticket-board.service',
                                                 '/nonexistent/syrd401/system/p401-ticket-board.service'],
                                                [['stderr', 'PIPE'], ['stdout', 'PIPE']]],
                                               ['run',
@@ -416,15 +451,17 @@ GOLDEN = {'files:all installed and reloaded': {'answer': [],
                                                 'root',
                                                 '-g',
                                                 'root',
-                                                '<tmp>/provision/p401/p401-canary.service',
+                                                '<exact>/p401-canary.service',
                                                 '/nonexistent/syrd401/system/p401-canary.service'],
                                                [['stderr', 'PIPE'], ['stdout', 'PIPE']]],
-                                              ['run', ['systemctl', 'daemon-reload'], [['stderr', 'PIPE'], ['stdout', 'PIPE']]],
+                                              ['run',
+                                               ['systemctl', 'daemon-reload'],
+                                               [['stderr', 'PIPE'], ['stdout', 'PIPE']]],
                                               ['say'],
                                               ['activate', 'p401', True]]},
  "full:activation's own problems": {'answer': ['the board did not come back healthy'],
-                                    'said': ["switchyard: installed p401's generated units and reloaded systemd; p401-owner's listener "
-                                             'stays stopped until the roles have verified'],
+                                    'said': ["switchyard: installed p401's generated units and reloaded systemd; "
+                                             "p401-owner's listener stays stopped until the roles have verified"],
                                     'calls': [['provision root'],
                                               ['provision dir', 'p401', '<tmp>/provision'],
                                               ['units', 'p401', None],
@@ -437,7 +474,7 @@ GOLDEN = {'files:all installed and reloaded': {'answer': [],
                                                 'root',
                                                 '-g',
                                                 'root',
-                                                '<tmp>/provision/p401/p401-ticket-board.service',
+                                                '<exact>/p401-ticket-board.service',
                                                 '/nonexistent/syrd401/system/p401-ticket-board.service'],
                                                [['stderr', 'PIPE'], ['stdout', 'PIPE']]],
                                               ['run',
@@ -461,16 +498,20 @@ GOLDEN = {'files:all installed and reloaded': {'answer': [],
                                                 'root',
                                                 '-g',
                                                 'root',
-                                                '<tmp>/provision/p401/p401-canary.service',
+                                                '<exact>/p401-canary.service',
                                                 '/nonexistent/syrd401/system/p401-canary.service'],
                                                [['stderr', 'PIPE'], ['stdout', 'PIPE']]],
-                                              ['run', ['systemctl', 'daemon-reload'], [['stderr', 'PIPE'], ['stdout', 'PIPE']]],
+                                              ['run',
+                                               ['systemctl', 'daemon-reload'],
+                                               [['stderr', 'PIPE'], ['stdout', 'PIPE']]],
                                               ['say'],
                                               ['activate', 'p401', True]]},
- 'full:nothing staged: nothing activated': {'answer': ['p401-ticket-board.service has not been generated under <tmp>/provision/p401',
-                                                       "p401-notify.service (the owner's listener) has not been generated under "
+ 'full:nothing staged: nothing activated': {'answer': ['p401-ticket-board.service has not been generated under '
                                                        '<tmp>/provision/p401',
-                                                       'p401-canary.service has not been generated under <tmp>/provision/p401'],
+                                                       "p401-notify.service (the owner's listener) has not been "
+                                                       'generated under <tmp>/provision/p401',
+                                                       'p401-canary.service has not been generated under '
+                                                       '<tmp>/provision/p401'],
                                             'said': [],
                                             'calls': [['provision root'],
                                                       ['provision dir', 'p401', '<tmp>/provision'],
@@ -480,6 +521,8 @@ UNITS = [("p401-ticket-board.service", "/nonexistent/syrd401/system/p401-ticket-
          ("p401-notify.service (the owner's listener)", "/nonexistent/syrd401/user/p401-notify.service", ["-o", "p401-owner", "-g", "p401-owner"]),
          ("p401-canary.service", "/nonexistent/syrd401/system/p401-canary.service", ["-o", "root", "-g", "root"])]
 ALL = ("p401-ticket-board.service", "p401-notify.service", "p401-canary.service")
+#: SYRD-700: root's renders of the root-owned units; their staged files are templates and never installed.
+EXACT = {"p401-ticket-board.service": b"exact board\n", "p401-canary.service": b"exact canary\n"}
 
 
 def check(condition: bool, detail: str) -> None:
@@ -520,7 +563,8 @@ def refuse(what: str):
     return refused
 
 
-def run(kind: str, *, staged=ALL, failing=(), reload_rc=0, owner="p401-owner", activation=(), config_path=None) -> dict:
+def run(kind: str, *, staged=ALL, failing=(), reload_rc=0, owner="p401-owner", activation=(), config_path=None,
+        exact=EXACT) -> dict:
     with tempfile.TemporaryDirectory() as tmp:
         provision = Path(tmp) / "provision"
         (provision / "p401").mkdir(parents=True)
@@ -528,7 +572,8 @@ def run(kind: str, *, staged=ALL, failing=(), reload_rc=0, owner="p401-owner", a
             (provision / "p401" / name).write_text("[Unit]\n")
         log: list = []
         said: list = []
-        n = lambda v: (str(v).replace(tmp, "<tmp>") if isinstance(v, (str, Path)) else v)  # noqa: E731
+        n = lambda v: (re.sub(r"\S*/switchyard-exact-units\.\w+", "<exact>", str(v).replace(tmp, "<tmp>"))  # noqa: E731
+                       if isinstance(v, (str, Path)) else v)
 
         def runner(argv, **k):
             argv = [str(a) for a in argv]
@@ -551,7 +596,8 @@ def run(kind: str, *, staged=ALL, failing=(), reload_rc=0, owner="p401-owner", a
             config = SimpleNamespace(project="p401", run_as_user=owner)
             fn = m.install_board_authority_files if kind == "files" else m.install_board_authority
             try:
-                got = [n(p) for p in fn(config, runner=runner, config_path=config_path, print_func=lambda line: said.append(n(line)) or log.append(["say"]))]
+                got = [n(p) for p in fn(config, runner=runner, config_path=config_path, print_func=lambda line: said.append(n(line)) or log.append(["say"]),
+                                        exact=exact)]
             except AssertionError:
                 raise
             except BaseException as exc:  # noqa: BLE001 -- whatever a mutant raises is an answer to compare
@@ -602,7 +648,9 @@ def test_the_seams_read_through_the_launcher_and_nothing_bound() -> None:
         check(bare == [], f"{name}: none of them read past it: {bare}")
     top = [ast.unparse(n) for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
     tc = [ast.unparse(n) for n in tree.body if isinstance(n, ast.If)]
-    check(top == ["from __future__ import annotations", "import subprocess", "from pathlib import Path", "from typing import TYPE_CHECKING, Any, Callable"]
+    # SYRD-700: tempfile, for root's exact unit bytes on their way to `install`.
+    check(top == ["from __future__ import annotations", "import subprocess", "import tempfile", "from pathlib import Path",
+                  "from typing import TYPE_CHECKING, Any, Callable"]
           and tc == ["if TYPE_CHECKING:\n    from scripts.team_launcher import ProjectConfig"],
           f"only the standard library at the top, and the annotation's type under TYPE_CHECKING: {top} {tc}")
     order = [n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))]
@@ -622,9 +670,15 @@ def test_the_launcher_reexports_both_above_every_reader() -> None:
                 for a in n.names if a.asname is None}
     check(not defined & set(MOVED) and {"capture_installed_units", "_finish_upgrade_preview"} <= defined | exported,
           "the launcher defines neither, and keeps its neighbours, its own or re-exported")
+    # SYRD-700: the cutover's board half is `tenant_release_deploy.install_deploy_and_attest`, which renders root's
+    # exact units and hands them to the install, still read through the launcher.
     cutover = ast.parse((ROOT / "scripts" / "role_identity_cutover.py").read_text(encoding="utf-8"))
     reads = [ast.unparse(x) for x in ast.walk(cutover) if isinstance(x, ast.Attribute) and x.attr in MOVED]
-    check(reads == ["team_launcher.install_board_authority_files"], f"the identity cutover installs the units through the launcher: {reads}")
+    half = ast.parse((ROOT / "scripts" / "tenant_release_deploy.py").read_text(encoding="utf-8"))
+    half_reads = [ast.unparse(x) for x in ast.walk(half) if isinstance(x, ast.Attribute) and x.attr in MOVED]
+    check(reads == [] and half_reads == ["launcher.install_board_authority_files"]
+          and "tenant_release_deploy.install_deploy_and_attest" in ast.unparse(cutover),
+          f"the identity cutover installs the units through its board half, and that through the launcher: {reads} {half_reads}")
 
 
 # --- behaviour -----------------------------------------------------------------------------------------------------
@@ -640,6 +694,8 @@ def test_every_answer_print_and_call_is_the_baselines() -> None:
         "files:two installs fail": ("files", dict(failing=("p401-ticket-board.service", "p401-notify.service"))),
         "files:one missing and one failing": ("files", dict(staged=("p401-ticket-board.service", "p401-canary.service"), failing=("p401-canary.service",))),
         "files:the reload fails": ("files", dict(reload_rc=1)),
+        # SYRD-700: without root's renders, nothing of root's is installed from its staged template.
+        "files:no exact renders: nothing of root's from a template": ("files", dict(exact=None)),
         "full:the files fail: nothing activated": ("full", dict(failing=("p401-notify.service",))),
         "full:installed, then activated": ("full", {}),
         "full:activation's own problems": ("full", dict(activation=["the board did not come back healthy"])),
@@ -664,8 +720,9 @@ def test_no_reload_or_activation_before_every_unit_installed() -> None:
     check(kinds.index("daemon-reload") > max(i for i, k in enumerate(kinds) if k == "install") and kinds[-1] == "activate"
           and ["activate", "p401", True] in got["calls"], f"install every unit, then reload, then activate with a restart: {kinds}")
     sources = [c[1][-2] for c in got["calls"] if c[0] == "run" and c[1][0] == "install"]
-    check(sources == ["<tmp>/provision/p401/p401-ticket-board.service", "<tmp>/provision/p401/p401-notify.service", "<tmp>/provision/p401/p401-canary.service"],
-          f"each unit from root's staged provisioning directory: {sources}")
+    # SYRD-700: the board and canary from root's exact renders; only the listener from the staged directory.
+    check(sources == ["<exact>/p401-ticket-board.service", "<tmp>/provision/p401/p401-notify.service", "<exact>/p401-canary.service"],
+          f"the board and canary as root rendered them, the listener from root's staged provisioning directory: {sources}")
 
 
 def test_a_patch_of_the_launchers_files_half_reaches_the_whole_operation() -> None:
@@ -678,7 +735,9 @@ def test_a_patch_of_the_launchers_files_half_reaches_the_whole_operation() -> No
             raise
         except BaseException as exc:  # noqa: BLE001 -- a body that went past the launcher answers with whatever it raised
             answer = repr(exc)
-    check(answer == ["from the patch"] and asked == [["config_path", "print_func", "runner"]], f"the launcher's files half, and nothing activated: {answer} {asked}")
+    # SYRD-700: and root's exact renders, handed on to it.
+    check(answer == ["from the patch"] and asked == [["config_path", "exact", "print_func", "runner"]],
+          f"the launcher's files half, and nothing activated: {answer} {asked}")
 
 
 def test_every_launcher_seam_is_reached() -> None:

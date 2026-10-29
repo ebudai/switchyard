@@ -293,6 +293,88 @@ def test_proven_peer_must_report_the_effective_release_build() -> None:
             server.server_close()
 
 
+def test_unit_rewriters_refuse_to_replace_an_exact_unit_before_changing_anything() -> None:
+    import ast
+
+    with tempfile.TemporaryDirectory(prefix="syrd700-rewrite.") as raw:
+        tmp = Path(raw)
+        provision = plan(tmp)
+        legacy = render_legacy_board(provision)
+        exact = release_units.render_board_unit(legacy, release=Path("/opt/switchyard/releases") / SHA,
+                                                report_credentials=release_units.report_credentials_path(legacy))
+        assert not release_units.is_exact_release_unit(legacy) and release_units.is_exact_release_unit(exact)
+        # "This plan's unit", for the precheck: the template itself, or its exact render for the release it names.
+        other = render_legacy_board(build_plan(project="p699", owner_user="tenant", owner_home=tmp / "home",
+                                               board_root=tmp / "tenant-board", asset_dir=tmp / "assets",
+                                               frame_dir=tmp / "frames", commit_git_dir=tmp / "other.git"))
+        assert release_units.renders_template(legacy, legacy) and release_units.renders_template(exact, legacy)
+        assert not release_units.renders_template(exact, other), "another plan's template"
+        assert not release_units.renders_template(exact.replace("-E -s -B", "-E -s -B -X dev"), legacy), "edited"
+        assert not release_units.renders_template(legacy + "# edited\n", legacy)
+        units = tmp / "systemd"
+        units.mkdir()
+        old_dir = release_units.SYSTEM_UNIT_DIR
+        release_units.SYSTEM_UNIT_DIR = units
+        try:
+            name = "p699-ticket-board.service"
+            assert release_units.refuse_rewriting_exact_board_unit(name, "add-role") == "", "no unit installed"
+            (units / name).write_text(legacy, encoding="utf-8")
+            assert release_units.refuse_rewriting_exact_board_unit(name, "add-role") == "", "a legacy unit stays as is"
+            (units / name).write_text(exact, encoding="utf-8")
+            refused = release_units.refuse_rewriting_exact_board_unit(name, "add-role")
+            assert "add-role would replace" in refused and "Nothing was changed" in refused, refused
+        finally:
+            release_units.SYSTEM_UNIT_DIR = old_dir
+
+    # Each command asks before its first write, so a refusal leaves the project as it was.
+    for module, command, first_write in (
+        ("project_role_add.py", "add_project_role_command", "_write_added_role_config"),
+        ("project_vcs_close_role.py", "set_project_vcs_close_role_command", "_write_vcs_close_role_artifacts"),
+    ):
+        tree = ast.parse((ROOT / "scripts" / module).read_text(encoding="utf-8"))
+        node = next(n for n in tree.body if getattr(n, "name", None) == command)
+        calls = sorted((n for n in ast.walk(node) if isinstance(n, ast.Call)), key=lambda n: (n.lineno, n.col_offset))
+        names = [ast.unparse(n.func).rsplit(".", 1)[-1] for n in calls]
+        assert "refuse_rewriting_exact_board_unit" in names and first_write in names, (module, names)
+        assert names.index("refuse_rewriting_exact_board_unit") < names.index(first_write), (module, names)
+
+
+def test_the_operator_packet_installs_root_renders_of_the_release_it_provisions() -> None:
+    from scripts.ticket_board.provision_operator_packet import render_operator_commands
+
+    with tempfile.TemporaryDirectory(prefix="syrd700-packet.") as raw:
+        tmp = Path(raw)
+        provision = plan(tmp)
+        board_template, canary_template = tmp / provision.board_unit, tmp / provision.canary_unit
+        board_template.write_text(render_legacy_board(provision), encoding="utf-8")
+        canary_template.write_text(render_legacy_canary(provision), encoding="utf-8")
+        out = tmp / "exact"
+        out.mkdir()
+        release = Path("/opt/switchyard/releases") / SHA
+        # As the packet runs it: the release's own renderer, isolated, with no Switchyard import.
+        done = subprocess.run([sys.executable, "-I", "-B", str(ROOT / "scripts" / "ticket_board" / "release_units.py"),
+                               str(board_template), str(canary_template), str(release), str(out)],
+                              capture_output=True, text=True, check=False)
+        assert done.returncode == 0, done.stderr
+        board = (out / provision.board_unit).read_text(encoding="utf-8")
+        canary = (out / provision.canary_unit).read_text(encoding="utf-8")
+        assert release_units.is_exact_release_unit(board) and release_units.renders_template(board, render_legacy_board(provision))
+        assert "/bin/sh" not in canary and "EnvironmentFile=" not in canary and f"{release}/scripts/ticket-board.py" in canary
+
+        commands = render_operator_commands(provision).splitlines()
+        exact_at = next(i for i, line in enumerate(commands) if "release_units.py" in line)
+        assert commands[exact_at].startswith("sudo /usr/bin/python3 -I -B "), commands[exact_at]
+        assert commands[exact_at + 1] == f'system_unit_candidate="$exact_units/{provision.board_unit}"'
+        assert commands[exact_at + 2] == f'canary_unit_candidate="$exact_units/{provision.canary_unit}"'
+        # The readable copy and both installs come after, so all three are root's renders; the staged ones never are.
+        installs = [i for i, line in enumerate(commands) if line.startswith("sudo install -m 0644 \"$")
+                    and "_unit_candidate" in line]
+        assert len(installs) == 2 and min(installs) > exact_at, installs
+        assert not any(f'$provision_dir/{provision.board_unit}" ' in line and "install" in line for line in commands)
+        migrate = next(line for line in commands if "ticket-board-migrate" in line)
+        assert f"{provision.source_repo}/scripts/ticket-board-migrate" in migrate and str(provision.board_current) not in migrate
+
+
 def main() -> int:
     tests = [value for name, value in sorted(globals().items()) if name.startswith("test_") and callable(value)]
     for test in tests:

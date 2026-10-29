@@ -18,6 +18,7 @@ from pathlib import Path
 
 from team_launcher_test_helpers import *
 from root_tree_stand_in import roots_own
+from exact_release_fixture import exact_release_host, staged_unit  # noqa: F401
 
 
 class _RunningTenant:
@@ -222,7 +223,7 @@ def _stage_units(project: str) -> None:
         f"{project}-ticket-board-canary.service",
         f"{project}-ticket-board-notify-listener.service",
     ):
-        (staged / unit).write_text(f"[Service]\n# generated {unit}\n", encoding="utf-8")
+        (staged / unit).write_text(staged_unit(unit, project), encoding="utf-8")  # shaped for root's render (SYRD-700)
 
 
 def _deployed_release(tmp: Path, project: str, sha: str) -> Path:
@@ -1087,7 +1088,8 @@ def test_the_release_the_transaction_deployed_is_reported_done_not_owed() -> Non
         assert deploys == [], deploys
         assert (board_root / "current").resolve().name == "1" * 40
         assert target in output, output
-        assert "matching-release deployment sequence" in output, output
+        assert "matching-release deployment sequence, one root command" in output, output  # SYRD-700
+        assert "switchyard deploy-release porter --commit" in output, output
         assert "after that deploy" in output, output
         config = team_launcher.load_project_config("porter", config_path)
         trusted = team_launcher.read_upgrade_journal(config, config_path=config_path, trusted=True)
@@ -1139,17 +1141,13 @@ def test_a_release_that_really_moved_on_is_still_owed_and_still_printed() -> Non
         assert "release phase is ready" in output, output
         assert "pkexec switchyard release-status porter --close" in output, output
 
-        # And the printed deployment sequence ends with that step, recorded like
-        # every other privileged step in it, so the phase is closed in the same
-        # operator run that deploys rather than left for somebody to notice.
+        # And the printed deployment is the one recorded root command that deploys and closes the phase in the
+        # same run, the listener brought back inside it, rather than left for somebody to notice (SYRD-700).
         steps = [line for line in output.splitlines() if line.startswith("  ")]
-        closing = [line for line in steps if "release-status" in line and "--close" in line]
-        assert closing, steps
-        assert "switchyard-record-rollout" in closing[0], closing[0]
-        listener_start = [
-            index for index, line in enumerate(steps) if "listener" in line and "start" in line
-        ]
-        assert listener_start and steps.index(closing[0]) > listener_start[0], steps
+        deploying = [line for line in steps if "switchyard deploy-release porter --commit" in line]
+        assert len(deploying) == 1, steps
+        assert "switchyard-record-rollout" in deploying[0], deploying[0]
+        assert not [line for line in steps if "systemctl --user" in line or "deploy-restart" in line], steps
 
 
 def test_a_dry_run_reports_the_deployed_release_and_records_nothing() -> None:
@@ -1359,10 +1357,10 @@ def test_the_printed_sequence_says_how_to_recover_a_stopped_listener() -> None:
         with _OwnerHomeAt(Path(tmp)):
             output, _deploys = _cut_over(config_path, source_repo, board_root, accounts)
         assert "matching-release deployment sequence" in output, output
-        recovery = [line for line in output.splitlines() if "if a step fails" in line]
+        # SYRD-700: the one command brings the listener back itself (catalogued_deploy_release_test).
+        recovery = [line for line in output.splitlines() if "if it stops" in line]
         assert recovery, output
         assert "switchyard release-status porter" in recovery[0], recovery
-        assert "listener" in recovery[0] and "start" in recovery[0], recovery
         assert "sudo switchyard upgrade porter" in recovery[0], recovery
 
 
@@ -1405,7 +1403,8 @@ def test_finish_upgrade_withholds_the_sequence_the_owner_could_not_run() -> None
 
 
 def main() -> int:
-    run_team_launcher_tests(globals(), first=())
+    with exact_release_host():  # SYRD-700
+        run_team_launcher_tests(globals(), first=())
     print("team_launcher_upgrade_cutover_test: ok")
     return 0
 

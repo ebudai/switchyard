@@ -1041,24 +1041,13 @@ def cutover_role_identities_command(
         # so the invariant that put the binary first still holds: the old board
         # is never restarted under a unit its release cannot serve, because the
         # restart comes with the new binary (SYRD-63).
-        board_restarted = False
         if not authority_problems:
-            authority_problems = team_launcher.install_board_authority_files(
-                config, runner=runner, config_path=config_path, print_func=print_func
-            )
-        if not authority_problems:
-            authority_problems, board_restarted = team_launcher.deploy_release_in_transaction(
-                config,
-                config_path=config_path,
-                source_repo=source_repo or team_launcher._repo_root(),
-                commit_git_dir=commit_git_dir,
-                deploy_ref=deploy_ref,
-                runner=runner,
-                print_func=print_func,
-            )
-        if not authority_problems:
-            authority_problems = team_launcher.activate_board_authority(
-                config, runner=runner, restart=not board_restarted, print_func=print_func
+            # Root's exact units for the release, never the staged templates; attested once serving (SYRD-700).
+            from scripts import tenant_release_deploy
+
+            authority_problems = tenant_release_deploy.install_deploy_and_attest(
+                config, config_path=config_path, source_repo=source_repo or team_launcher._repo_root(),
+                commit_git_dir=commit_git_dir, deploy_ref=deploy_ref, runner=runner, print_func=print_func,
             )
     # Nothing is asked to come back when an earlier step already failed: the
     # release did not resolve, or a tree did not change hands, and the workers

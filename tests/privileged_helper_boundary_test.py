@@ -656,12 +656,15 @@ def test_main_runs_the_action_once_everything_has_been_proved() -> None:
     def require(project, **kwargs):
         return "director"
 
+    def authorizing_board(action, project):
+        return (lambda _url, _path: {}), f"{project}'s attested root unit"
+
     buffer = io.StringIO()
     with swapped(
         ph,
         privileged_install=_StubInstall([]),
         caller_identity=lambda *a, **k: ph.CallerIdentity(4242, 99, 1006),
-        board_url_for=lambda project, **k: "http://127.0.0.1:1/",
+        authorizing_board=authorizing_board,
         require_registered_control_caller=require,
         _attempt_factory=attempt_factory,
         _run_command=runner,
@@ -689,12 +692,15 @@ def test_main_refuses_a_caller_that_is_not_the_registered_control_pane() -> None
             "under process 5555 (started 12, uid 1006)"
         )
 
+    def authorizing_board(action, project):
+        return (lambda _url, _path: {}), f"{project}'s attested root unit"
+
     buffer = io.StringIO()
     with swapped(
         ph,
         privileged_install=_StubInstall([]),
         caller_identity=lambda *a, **k: ph.CallerIdentity(5555, 12, 1006),
-        board_url_for=lambda project, **k: "http://127.0.0.1:1/",
+        authorizing_board=authorizing_board,
         require_registered_control_caller=require,
         _run_command=lambda command, *, timeout: ran.append(command),
     ):

@@ -74,7 +74,13 @@ class TenantReleaseStatus:
         return bool(self.current_sha and self.target_sha and self.current_sha == self.target_sha)
 
 
-def tenant_release_deploy_command(status: TenantReleaseStatus, project: str) -> str:
+def tenant_release_deploy_command(
+    status: TenantReleaseStatus,
+    project: str,
+    *,
+    canary_port: int | None = None,
+    provisioned_system_unit: Path | None = None,
+) -> str:
     from scripts import team_launcher as launcher
 
     deploy_env = [
@@ -82,6 +88,7 @@ def tenant_release_deploy_command(status: TenantReleaseStatus, project: str) -> 
         f"TICKET_BOARD_PROJECT={project}",
         f"BOARD_ROOT={status.board_root}",
         f"DEPLOY_REF={status.deploy_ref}",
+        f"TICKET_BOARD_TRUSTED_RELEASE_DIR={status.source_repo}",
     ]
     # Where this tenant's board listens, named rather than defaulted.
     #
@@ -97,7 +104,15 @@ def tenant_release_deploy_command(status: TenantReleaseStatus, project: str) -> 
         deploy_env.append(f"BOARD_PORT={status.board_port}")
     if status.board_socket:
         deploy_env.append(f"BOARD_UNIX_SOCKET={status.board_socket}")
-    if status.provisioned_system_unit is not None:
+    if canary_port is not None:
+        deploy_env.append(f"BOARD_CANARY_PORT={canary_port}")
+    if provisioned_system_unit is not None:
+        # Root's rendered exact-release candidate, readable by the tenant only
+        # for deploy-restart's equality gate. It is not a selector: root has
+        # already installed these same bytes, and removes this proof after the
+        # transaction.
+        deploy_env.append(f"TICKET_BOARD_PROVISIONED_SYSTEM_UNIT={provisioned_system_unit}")
+    elif status.provisioned_system_unit is not None:
         # The readable copy, never root's own. The deployer runs as the project
         # account and root's copy lives in the privileged provision directory,
         # which is root-only: handing over that path made a present, correct,
@@ -444,6 +459,8 @@ def deploy_release_in_transaction(
     deploy_ref: str,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
     print_func: Callable[[str], None] = print,
+    canary_port: int | None = None,
+    provisioned_system_unit: Path | None = None,
 ) -> tuple[list[str], bool]:
     """Switch the board to the release that enforces the per-role table.
 
@@ -477,7 +494,10 @@ def deploy_release_in_transaction(
         return [f"the release to deploy could not be resolved: {status.resolve_error}"], False
     if status.unchanged:
         return [], False
-    command = launcher.tenant_release_deploy_command(status, config.project)
+    canary: dict[str, Any] = {"canary_port": canary_port} if canary_port is not None else {}
+    if provisioned_system_unit is not None:
+        canary["provisioned_system_unit"] = provisioned_system_unit
+    command = launcher.tenant_release_deploy_command(status, config.project, **canary)
     if not command:
         return ["no deploy command could be built for this release"], False
     result = runner(["sh", "-c", command], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

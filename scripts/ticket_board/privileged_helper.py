@@ -160,10 +160,11 @@ def authorizing_board(
 ) -> tuple[Callable[[str, str], Any], str]:
     """The board the control pane is proven against, and how it is asked.
 
-    Most actions ask the URL `board_url_for` reads from the tenant's registered configuration. An action that mints
-    durable proof (`board_from_unit`) asks only the board root's own unit names, over a connection the kernel shows
-    that board's main process holds (`board_identity`), because every role shares the account that can rewrite
-    that configuration (SYRD-694).
+    Every pre-authorized action (`board_from_unit`) asks only the board root's
+    own unit names, over a connection the kernel shows that board's main
+    process holds (`board_identity`), because every role shares the account
+    that can rewrite the registered configuration. Human-authenticated actions
+    retain the registered URL path (SYRD-694, SYRD-699).
     """
     if action.board_from_unit:
         try:

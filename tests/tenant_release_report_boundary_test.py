@@ -257,7 +257,8 @@ def test_the_owner_boundary() -> None:
 def test_the_deploy_command() -> None:
     with patched(t, _quote_command=seam("_quote_command", QUOTE), _owner_boundary_env_args=seam("_owner_boundary_env_args", t._owner_boundary_env_args), **BOUNDARY):
         st = status()
-        env = ["TICKET_BOARD_OWNER_HOME=/nonexistent/home/p379 owner", "TICKET_BOARD_PROJECT=p379", "BOARD_ROOT=/nonexistent/board", "DEPLOY_REF=origin/main"]
+        env = ["TICKET_BOARD_OWNER_HOME=/nonexistent/home/p379 owner", "TICKET_BOARD_PROJECT=p379", "BOARD_ROOT=/nonexistent/board", "DEPLOY_REF=origin/main",
+               "TICKET_BOARD_TRUSTED_RELEASE_DIR=/nonexistent/src"]
         check(m.tenant_release_deploy_command(st, "p379") == QUOTE(boundary(
             ["env", *env, "SOURCE_REPO=/nonexistent/src", "/nonexistent/src/scripts/ticket-board-service.sh", "deploy-restart"], st)),
               "the plain deploy, as the tenant, with only what it needs")
@@ -268,6 +269,18 @@ def test_the_deploy_command() -> None:
         check(m.tenant_release_deploy_command(st, "p379") == QUOTE(boundary(
             ["env", *full, "SOURCE_REPO=/nonexistent/src", "/nonexistent/src/scripts/ticket-board-service.sh", "deploy-restart"], st)),
               "its own port and socket, the readable unit copy, and the commit cache, in that order")
+        exact = m.tenant_release_deploy_command(
+            st, "p379", canary_port=24799,
+            provisioned_system_unit=Path("/tmp/root-rendered/p379-ticket-board.service"),
+        )
+        exact_env = env + ["BOARD_PORT=8779", "BOARD_UNIX_SOCKET=/nonexistent/b.sock",
+                           "BOARD_CANARY_PORT=24799",
+                           "TICKET_BOARD_PROVISIONED_SYSTEM_UNIT=/tmp/root-rendered/p379-ticket-board.service",
+                           "TICKET_BOARD_COMMIT_GIT_DIR=/nonexistent/cache"]
+        check(exact == QUOTE(boundary(
+            ["env", *exact_env, "SOURCE_REPO=/nonexistent/src",
+             "/nonexistent/src/scripts/ticket-board-service.sh", "deploy-restart"], st)),
+              "root's rendered exact-release candidate is the tenant health gate's proof")
         with patched(t, SWITCHYARD_RELEASE_MARKER_NAME=".syrd379-marker"):
             st = status(clone_source_repo=Path("/nonexistent/cl one.git"))
             line = m.tenant_release_deploy_command(st, "p379")

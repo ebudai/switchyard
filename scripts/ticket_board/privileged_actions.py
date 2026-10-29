@@ -183,6 +183,7 @@ CATALOGUE: tuple[PrivilegedAction, ...] = (
         # three-minute wait on SYRD-102 with nobody to answer.
         authentication=ALLOW_ACTIVE,
         arguments=(("project", _slug), ("commit", _commit)),
+        board_from_unit=True,
     ),
     PrivilegedAction(
         name="upgrade-tenant",
@@ -190,6 +191,7 @@ CATALOGUE: tuple[PrivilegedAction, ...] = (
         message="Authentication is required to upgrade a Switchyard tenant",
         authentication=ALLOW_ACTIVE,
         arguments=(("project", _slug),),
+        board_from_unit=True,
     ),
     PrivilegedAction(
         name="preview-upgrade",
@@ -202,6 +204,7 @@ CATALOGUE: tuple[PrivilegedAction, ...] = (
         # the helper only ever adds --dry-run.
         authentication=ALLOW_ACTIVE,
         arguments=(("project", _slug), ("commit", _commit)),
+        board_from_unit=True,
     ),
     PrivilegedAction(
         name="upgrade-tenant-release",
@@ -212,6 +215,7 @@ CATALOGUE: tuple[PrivilegedAction, ...] = (
         # root reads it (SYRD-283). Same authority as `upgrade-tenant`.
         authentication=ALLOW_ACTIVE,
         arguments=(("project", _slug), ("commit", _commit)),
+        board_from_unit=True,
     ),
     PrivilegedAction(
         name="install-shared-release",
@@ -244,6 +248,7 @@ CATALOGUE: tuple[PrivilegedAction, ...] = (
         message="Authentication is required to repair a Switchyard tenant's boundary",
         authentication=ALLOW_ACTIVE,
         arguments=(("project", _slug),),
+        board_from_unit=True,
     ),
     # SYRD-694: root's record that lets the control role resume one legacy conversation of its own, filed under
     # a workspace that is not its worktree. Every role shares the tenant account, so only a record root writes
@@ -281,6 +286,7 @@ CATALOGUE: tuple[PrivilegedAction, ...] = (
         message="Authentication is required to run a Switchyard privileged-job self-test",
         authentication=ALLOW_ACTIVE,
         arguments=(("project", _slug), ("ticket", _ticket), ("outcome", _outcome)),
+        board_from_unit=True,
     ),
 )
 

@@ -15,6 +15,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from .commit_cache_reader import CacheReader, cache_reader
+
 #: Where a publication proves itself (SYRD-118). The privileged publisher writes
 #: this namespace into the tenant's trusted commit cache only after it has
 #: pushed and read the exact commit back from the public remote, so a ref here
@@ -34,11 +36,26 @@ PUBLISHABLE_REF = re.compile(r"[0-9A-Za-z][0-9A-Za-z._-]*(?:/[0-9A-Za-z][0-9A-Za
 
 
 def commit_repo_git_args(commit_git_dir: Path) -> list[str]:
-    if (commit_git_dir / ".git").exists():
-        return ["git", "-C", str(commit_git_dir)]
-    if not commit_git_dir.exists():
-        raise ValueError(f"commit_hash verification repository not found: {commit_git_dir}")
-    return ["git", f"--git-dir={commit_git_dir}"]
+    """A cache command prefix with no discovered repository or configured program."""
+    try:
+        return cache_reader(commit_git_dir).command_prefix()
+    except (ValueError, PermissionError):
+        raise ValueError(f"commit_hash verification repository not found: {commit_git_dir}") from None
+
+
+def _git_env() -> dict[str, str]:
+    env = CacheReader.environment()
+    # Fetch may dispatch a transport helper. Neither the tenant repository nor
+    # the board service's inherited process environment chooses one.
+    env.update(
+        PATH="/usr/bin:/bin",
+        GIT_ASKPASS="/bin/false",
+        GIT_TERMINAL_PROMPT="0",
+        GIT_SSH="/usr/bin/ssh",
+        GIT_SSH_COMMAND="/usr/bin/ssh",
+        GIT_ALLOW_PROTOCOL="https:ssh:file",
+    )
+    return env
 
 
 def denied_at(commit_git_dir: Path) -> Path | None:
@@ -110,6 +127,7 @@ def cache_ref_commit(commit_git_dirs: tuple[Path, ...], refname: str) -> str:
             capture_output=True,
             text=True,
             check=False,
+            env=_git_env(),
         )
         if resolved.returncode == 0 and resolved.stdout.strip():
             return resolved.stdout.strip().lower()
@@ -152,6 +170,7 @@ def resolve_known_commit(commit_git_dirs: tuple[Path, ...], value: str) -> tuple
             capture_output=True,
             text=True,
             check=False,
+            env=_git_env(),
         )
         if proc.returncode != 0:
             continue
@@ -160,6 +179,7 @@ def resolve_known_commit(commit_git_dirs: tuple[Path, ...], value: str) -> tuple
             capture_output=True,
             text=True,
             check=False,
+            env=_git_env(),
         )
         if resolved.returncode == 0 and resolved.stdout.strip():
             return resolved.stdout.strip(), missing_repos
@@ -184,11 +204,14 @@ def refresh_commit_repos(commit_git_dirs: tuple[Path, ...]) -> bool:
             continue
         try:
             fetched = subprocess.run(
-                [*git_args, "fetch", "--quiet", "--prune", "origin"],
+                [*git_args, "-c", "remote.origin.uploadpack=git-upload-pack",
+                 "-c", "core.sshCommand=/usr/bin/ssh", "-c", "core.gitProxy=",
+                 "fetch", "--quiet", "--prune", "origin"],
                 capture_output=True,
                 text=True,
                 check=False,
                 timeout=COMMIT_REFRESH_TIMEOUT_SECONDS,
+                env=_git_env(),
             )
         except subprocess.TimeoutExpired:
             continue
@@ -203,7 +226,7 @@ def _first_answer(commit_git_dirs: tuple[Path, ...], args: list[str]) -> str | N
             git_args = commit_repo_git_args(commit_git_dir)
         except ValueError:
             continue
-        answer = subprocess.run([*git_args, *args], capture_output=True, text=True, check=False)
+        answer = subprocess.run([*git_args, *args], capture_output=True, text=True, check=False, env=_git_env())
         if answer.returncode == 0:
             return answer.stdout
     return None
@@ -228,7 +251,7 @@ def changed_entries(commit_git_dirs: tuple[Path, ...], old: str, new: str) -> li
 
 
 #: `git diff` arguments whose output parse_raw_diff reads.
-RAW_DIFF_ARGS = ["diff", "--raw", "--no-renames", "--no-abbrev", "-z"]
+RAW_DIFF_ARGS = ["diff", "--no-ext-diff", "--no-textconv", "--raw", "--no-renames", "--no-abbrev", "-z"]
 
 
 def parse_raw_diff(listed: str) -> list[tuple[str, str, str, str]]:

@@ -1040,7 +1040,7 @@ deploy_service() {
 }
 
 deploy_restart_service() {
-    local deployed_sha export_result release_dir previous_release scope
+    local deployed_sha export_result release_dir execution_release previous_release scope
     # Before the release is exported, not after: a root-run deploy writes
     # root-owned files into the tenant's release tree on its way to a user
     # manager it should never have reached.
@@ -1050,14 +1050,25 @@ deploy_restart_service() {
     fi
     IFS=$'\t' read -r deployed_sha release_dir <<<"$export_result"
     [[ -n "$deployed_sha" && -n "$release_dir" ]] || die "deploy export did not return a release path"
+    execution_release="${TICKET_BOARD_TRUSTED_RELEASE_DIR:-$release_dir}"
+    if [[ -n "${TICKET_BOARD_TRUSTED_RELEASE_DIR:-}" ]]; then
+        [[ "$execution_release" == "/opt/switchyard/releases/$deployed_sha" ]] || \
+            die "trusted execution release is $execution_release, not /opt/switchyard/releases/$deployed_sha"
+        [[ ! -L "$execution_release" && -d "$execution_release" ]] || \
+            die "trusted execution release is not a real directory: $execution_release"
+    fi
     previous_release="$(current_release_dir || true)"
     scope="$(resolved_service_scope)"
     if [[ "$scope" == "system" ]]; then
         assert_system_unit_reload_not_required_for_release "$release_dir"
     fi
     stop_listener_for_upgrade
-    apply_database_migrations_for_release "$release_dir"
-    run_release_canary "$release_dir" "$scope"
+    # The selector remains for compatibility until the lifecycle migration,
+    # but code run during a root-owned deployment comes from root's exact
+    # release too. A sibling sharing the tenant uid can rewrite the exported
+    # tree while this command runs; it cannot rewrite /opt/switchyard/releases.
+    apply_database_migrations_for_release "$execution_release"
+    run_release_canary "$execution_release" "$scope"
     activate_release "$release_dir"
     verify_current_release_sha "$deployed_sha"
     restart_live_service "$scope"

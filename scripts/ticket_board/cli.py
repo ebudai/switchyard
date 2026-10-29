@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import signal
+import shlex
 import sys
 import threading
 import webbrowser
@@ -32,6 +33,39 @@ DEFAULT_UNIX_SOCKET = (
     or os.environ.get("PGU_TICKET_BOARD_SOCKET", "").strip()
     or "/run/pgu-ticket-board/ticket-board.sock"
 )
+
+
+def _report_credentials(path: str) -> tuple[str, str]:
+    """Read the two report secrets as data, never as process environment.
+
+    The file is normally a systemd credential copied from the tenant's legacy
+    board env file.  Only these two assignments have meaning here; an injected
+    ``PYTHONPATH``, ``LD_PRELOAD`` or database setting is inert text.
+    """
+    if not path:
+        return "", ""
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise SystemExit(f"ticket-board: cannot read report credentials {path}: {exc}") from None
+    found: dict[str, str] = {}
+    allowed = {"TICKET_BOARD_TENANT_REPORT_TOKEN", "TICKET_BOARD_REPORT_BINDING_KEY"}
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        key, separator, value = stripped.partition("=")
+        if not separator or key not in allowed:
+            continue
+        try:
+            words = shlex.split(value, comments=False, posix=True)
+        except ValueError as exc:
+            raise SystemExit(f"ticket-board: malformed {key} in report credentials: {exc}") from None
+        if len(words) != 1:
+            raise SystemExit(f"ticket-board: malformed {key} in report credentials")
+        found[key] = words[0]
+    return (found.get("TICKET_BOARD_TENANT_REPORT_TOKEN", ""),
+            found.get("TICKET_BOARD_REPORT_BINDING_KEY", ""))
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,6 +100,11 @@ def parse_args() -> argparse.Namespace:
         help="The board's own key for tenant report credentials bound to a project (SYRD-677); never given to a "
              "tenant. Default: TICKET_BOARD_REPORT_BINDING_KEY.",
     )
+    parser.add_argument(
+        "--report-credentials-file",
+        default="",
+        help="Read only the report token and binding key from this data file; no assignment becomes environment.",
+    )
     parser.add_argument("--open-browser", action="store_true", help="Open the board URL automatically.")
     parser.add_argument(
         "--board-ui-record",
@@ -78,6 +117,13 @@ def parse_args() -> argparse.Namespace:
 
 
 def run_server(args: argparse.Namespace) -> int:
+    credential_token, credential_binding = _report_credentials(
+        str(getattr(args, "report_credentials_file", "") or "")
+    )
+    if credential_token:
+        args.tenant_report_token = credential_token
+    if credential_binding:
+        args.tenant_report_binding_key = credential_binding
     commit_git_dir_arg = str(getattr(args, "commit_git_dir", "") or "")
     if getattr(args, "board_ui_record", ""):
         from . import ui_user_identity

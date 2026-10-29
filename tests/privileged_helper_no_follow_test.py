@@ -265,7 +265,7 @@ def test_a_tampered_configuration_refuses_before_the_action_runs() -> None:
             _attempt_factory=lambda *a, **k: opened.append(a),
         ), redirect_stderr(buffer):
             code = ph.main(
-                ["deploy-release", "project=mefp",
+                ["select-shared-release", "project=mefp",
                  "commit=1111111111111111111111111111111111111111"]
             )
         said = buffer.getvalue()

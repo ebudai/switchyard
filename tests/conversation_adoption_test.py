@@ -687,9 +687,10 @@ def main() -> int:
                         got = None
                     check(got == expected, f"{name}: the pane {pane} is proven against root's board alone: {got}")
             deploy_get, deploy_url = privileged_helper.authorizing_board(
-                privileged_actions.action_for("deploy-release"), "pgu", url_for=lambda project: f"url-of-{project}")
-            check(deploy_url == "url-of-pgu" and deploy_get is privileged_helper._board_get,
-                  "an action that mints no proof asks as it always has")
+                privileged_actions.action_for("deploy-release"), "pgu", url_for=forged_url,
+                board_get_for=lambda project: board_identity.board_get_for(project, main_pid=lambda _u: os.getpid()))
+            check("root's unit" in deploy_url and deploy_get("", "/api/workflow") == answers["/api/workflow"],
+                  "every allow-active action proves authority against root's live board unit")
             try:
                 privileged_helper.authorizing_board(privileged_actions.action_for("adopt-conversation"), "nobody",
                                                     url_for=forged_url)

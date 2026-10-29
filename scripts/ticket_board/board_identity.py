@@ -31,6 +31,7 @@ import socket
 import stat
 import struct
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -129,6 +130,189 @@ def unit_main_pid(unit: str, *, runner: Callable[..., Any] = subprocess.run) -> 
     return int(value) if value.isdigit() else 0
 
 
+@dataclass(frozen=True)
+class EffectiveUnit:
+    user: str
+    argv: tuple[str, ...]
+    main_pid: int
+    release_commit: str
+
+
+def _show_values(unit: str, *, runner: Callable[..., Any]) -> dict[str, str]:
+    properties = ("User", "ExecStart", "EnvironmentFiles", "DropInPaths", "MainPID", "Environment",
+                  "PassEnvironment", "WorkingDirectory", "NeedDaemonReload")
+    try:
+        done = runner(
+            ["systemctl", "show", unit, *(f"--property={name}" for name in properties), "--no-pager"],
+            capture_output=True, text=True, timeout=TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise BoardIdentityError(f"cannot inspect {unit}'s effective service definition ({exc})") from None
+    if getattr(done, "returncode", 1) != 0:
+        detail = (getattr(done, "stderr", "") or "").strip() or "systemctl show failed"
+        raise BoardIdentityError(f"cannot inspect {unit}'s effective service definition ({detail[:200]})")
+    values: dict[str, str] = {}
+    for line in (getattr(done, "stdout", "") or "").splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            values[key] = value.strip()
+    return values
+
+
+def _shown_argv(value: str) -> tuple[str, ...]:
+    """Parse systemd's scalar or ``ExecCommand`` rendering of ExecStart."""
+    raw = value.strip()
+    match = re.search(r"(?:^|[;{]\s*)argv\[\]=(.*?)(?:\s*;|\s*}$)", raw)
+    if match:
+        raw = match.group(1).strip()
+    try:
+        return tuple(shlex.split(raw))
+    except ValueError:
+        return ()
+
+
+#: Every variable root's exact-release board unit sets (`release_units.render_board_unit` over the provisioned
+#: template), and nothing else. A name outside it can choose code or what the board claims to be --
+#: `LD_PRELOAD`, `PYTHONPATH`, `TICKET_BOARD_PYTHON`, `TICKET_BOARD_BUILD_ID` -- so a unit that sets one is not
+#: the reviewed unit, whatever its ExecStart says.
+BOARD_ENVIRONMENT = frozenset({
+    "PYTHONUNBUFFERED", "HOME", "PGHOST", "PGDATABASE", "PGUSER",
+    "TICKET_BOARD_DIRECTORCTL", "TICKET_BOARD_PROJECT", "TICKET_BOARD_PROCESS_AUTHORITY",
+    "TICKET_BOARD_PROJECT_NAME", "TICKET_BOARD_TICKET_PREFIX", "TICKET_BOARD_COMMIT_GIT_DIR",
+    "TICKET_BOARD_SOCKET", "TICKET_BOARD_TENANT_USER", "TICKET_BOARD_SOCKET_GROUP", "TICKET_BOARD_ROLE_ACCOUNTS",
+    "TICKET_BOARD_DATABASE_URL", "TICKET_BOARD_DRAFT_ROLES", "TICKET_BOARD_IMPLEMENTER_ROLES",
+    "TICKET_BOARD_ASSIGNEES", "TICKET_BOARD_CALLER_ROLES", "TICKET_BOARD_OPERATION_ALLOWED_ROLES",
+})
+#: What the live process may not carry beyond those. Systemd adds its own names (PATH, LANG, LC_*, INVOCATION_ID,
+#: the directory and credential variables...), which vary by version, so the live check refuses these families
+#: rather than listing systemd's.
+LIVE_CODE_PREFIXES = ("LD_", "PYTHON", "GIT_", "GCONV_", "TICKET_BOARD_")
+
+
+def _shown_environment(value: str, unit: str) -> dict[str, str]:
+    try:
+        words = shlex.split(value)
+    except ValueError:
+        raise BoardIdentityError(f"{unit}'s effective Environment cannot be parsed") from None
+    environment: dict[str, str] = {}
+    for word in words:
+        key, separator, item = word.partition("=")
+        if not separator or not key or key in environment:
+            raise BoardIdentityError(f"{unit}'s effective Environment has a malformed or repeated entry")
+        environment[key] = item
+    return environment
+
+
+def _trusted_environment(environment: dict[str, str], release: Path, unit: str) -> None:
+    unknown = sorted(set(environment) - BOARD_ENVIRONMENT)
+    if unknown:
+        raise BoardIdentityError(f"{unit}'s effective Environment sets {', '.join(unknown)}, which the "
+                                 "exact-release board unit does not")
+    # Unset, the board runs its own release's directorctl (`runtime_paths.directorctl_path`); set, it must be that.
+    directorctl = str(release / "scripts" / "directorctl")
+    if environment.get("TICKET_BOARD_DIRECTORCTL", directorctl) != directorctl:
+        raise BoardIdentityError(f"{unit}'s TICKET_BOARD_DIRECTORCTL is not {directorctl}")
+    if environment.get("PYTHONUNBUFFERED", "1") != "1":
+        raise BoardIdentityError(f"{unit} sets PYTHONUNBUFFERED to something other than 1")
+    home = environment.get("HOME")
+    if home is not None and (not home.startswith("/var/lib/") or os.path.normpath(home) != home):
+        raise BoardIdentityError(f"{unit}'s HOME {home} is not the board's own /var/lib state")
+
+
+def _trusted_exec(argv: tuple[str, ...], *, trusted_release: Callable[[str], str]) -> str:
+    if len(argv) < 6 or argv[1:4] != ("-E", "-s", "-B"):
+        raise BoardIdentityError("the board's effective ExecStart does not isolate Python with -E -s -B")
+    script = Path(argv[4])
+    if script.name != "ticket-board.py" or script.parent.name != "scripts":
+        raise BoardIdentityError("the board's effective ExecStart does not run ticket-board.py from an exact release")
+    release = script.parent.parent
+    commit = release.name
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise BoardIdentityError(f"the board executes {script}, not a commit-named root release")
+    try:
+        expected = Path(trusted_release(commit))
+    except Exception as exc:  # the resolver's refusal is the useful boundary message
+        raise BoardIdentityError(str(exc)) from None
+    if release != expected:
+        raise BoardIdentityError(f"the board executes {release}, not root's trusted release {expected}")
+    python = Path(argv[0])
+    if not python.is_absolute():
+        raise BoardIdentityError("the board's Python executable is not an absolute root-controlled path")
+    try:
+        info = os.lstat(script)
+        python_info = os.stat(python)
+    except OSError as exc:
+        raise BoardIdentityError(f"the board's executable files cannot be inspected ({exc.strerror})") from None
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != TRUSTED_OWNER_UID
+            or info.st_mode & SHARED_WRITE):
+        raise BoardIdentityError(f"the board program {script} is not a root-owned, non-writable regular file")
+    if (not stat.S_ISREG(python_info.st_mode) or python_info.st_uid != TRUSTED_OWNER_UID
+            or python_info.st_mode & SHARED_WRITE):
+        raise BoardIdentityError(f"the board's Python {python} is not root-owned and non-writable")
+    return commit
+
+
+def effective_unit(
+    project: str, *, runner: Callable[..., Any] = subprocess.run,
+    proc_root: Path = Path("/proc"), trusted_release: Callable[[str], str] | None = None,
+) -> EffectiveUnit:
+    """Attest systemd's effective unit and the exact argv its live process has."""
+    if trusted_release is None:
+        from .privileged_operations import trusted_release_root
+        trusted_release = trusted_release_root
+    unit = unit_name(project)
+    values = _show_values(unit, runner=runner)
+    if values.get("EnvironmentFiles"):
+        raise BoardIdentityError(f"{unit} still loads EnvironmentFiles; tenant environment is not board authority")
+    if values.get("DropInPaths"):
+        raise BoardIdentityError(f"{unit} has drop-ins, so its execution definition is not the reviewed unit")
+    if values.get("NeedDaemonReload") != "no":
+        raise BoardIdentityError(f"{unit}'s file differs from what systemd loaded (NeedDaemonReload), so its "
+                                 "effective definition is not the reviewed unit")
+    if values.get("PassEnvironment"):
+        raise BoardIdentityError(f"{unit} passes the manager's environment through (PassEnvironment)")
+    user = values.get("User", "")
+    if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", user) or user == "root":
+        raise BoardIdentityError(f"{unit} names no service account (User=) for its board")
+    argv = tuple(value.replace("%d", f"/run/credentials/{unit}")
+                 for value in _shown_argv(values.get("ExecStart", "")))
+    release_commit = _trusted_exec(argv, trusted_release=trusted_release)
+    release = Path(argv[4]).parent.parent
+    if values.get("WorkingDirectory") != str(release):
+        raise BoardIdentityError(f"{unit}'s effective WorkingDirectory is not its exact release {release}")
+    environment = _shown_environment(values.get("Environment", ""), unit)
+    _trusted_environment(environment, release, unit)
+    pid_text = values.get("MainPID", "")
+    pid = int(pid_text) if pid_text.isdigit() else 0
+    if not pid:
+        raise BoardIdentityError(f"{unit} is not running")
+    try:
+        live = tuple(part.decode("utf-8") for part in (proc_root / str(pid) / "cmdline").read_bytes().split(b"\0") if part)
+    except (OSError, UnicodeDecodeError) as exc:
+        raise BoardIdentityError(f"cannot read {unit}'s live command for process {pid} ({exc})") from None
+    if live != argv:
+        raise BoardIdentityError(f"{unit}'s live process {pid} does not execute its effective ExecStart")
+    # The live process can predate a reload that changed only its environment, so it is read as well.
+    try:
+        live_cwd = os.readlink(proc_root / str(pid) / "cwd")
+        live_environment = dict(
+            part.decode("utf-8").partition("=")[::2]
+            for part in (proc_root / str(pid) / "environ").read_bytes().split(b"\0") if part
+        )
+    except (OSError, UnicodeDecodeError) as exc:
+        raise BoardIdentityError(f"cannot read {unit}'s live directory and environment for process {pid} "
+                                 f"({exc})") from None
+    if live_cwd != str(release):
+        raise BoardIdentityError(f"{unit}'s live process {pid} does not run in its exact release {release}")
+    for key in BOARD_ENVIRONMENT | set(live_environment):
+        if key in BOARD_ENVIRONMENT:
+            if live_environment.get(key) != environment.get(key):
+                raise BoardIdentityError(f"{unit}'s live process {pid} has a {key} its effective unit does not set")
+        elif key.startswith(LIVE_CODE_PREFIXES):
+            raise BoardIdentityError(f"{unit}'s live process {pid} carries {key}, which the board unit does not set")
+    return EffectiveUnit(user, argv, pid, release_commit)
+
+
 class _ProvenConnection(http.client.HTTPConnection):
     def __init__(self, sock: socket.socket) -> None:
         super().__init__("localhost", timeout=TIMEOUT_SECONDS)
@@ -140,18 +324,28 @@ class _ProvenConnection(http.client.HTTPConnection):
 
 def board_get_for(project: str, *, unit_dir: Path | None = None, owner_uid: int | None = None,
                   anchor: Path | None = None, main_pid: Callable[[str], int] = unit_main_pid,
-                  service_uid: Callable[[str], int] = lambda user: pwd.getpwnam(user).pw_uid
+                  service_uid: Callable[[str], int] = lambda user: pwd.getpwnam(user).pw_uid,
+                  runtime_unit: Callable[[str], EffectiveUnit] | None = None,
                   ) -> Callable[[str, str], Any]:
     """A `board_get(board_url, path)` that asks only the board root's unit names, each answer over a connection the
     kernel shows that board's own process holds. `board_url` is ignored: nothing the caller says chooses it."""
-    path, user = unit_endpoint(project, unit_dir=unit_dir, owner_uid=owner_uid, anchor=anchor)
+    path, disk_user = unit_endpoint(project, unit_dir=unit_dir, owner_uid=owner_uid, anchor=anchor)
+    # Explicit ``main_pid`` remains the narrow test seam SYRD-694 shipped.  The
+    # production path attests the effective unit and live command instead.
+    if runtime_unit is not None or main_pid is unit_main_pid:
+        runtime = (runtime_unit or effective_unit)(project)
+        user, expected_pid, expected_build = runtime.user, runtime.main_pid, runtime.release_commit
+        if user != disk_user:
+            raise BoardIdentityError(f"{unit_name(project)}'s effective User={user} differs from its root unit")
+    else:
+        user, expected_pid, expected_build = disk_user, main_pid(unit_name(project)), ""
     try:
         expected_uid = service_uid(user)
     except KeyError:
         raise BoardIdentityError(f"{project}'s board account {user} does not exist") from None
     unit = unit_name(project)
 
-    def get(_board_url: str, request_path: str) -> Any:
+    def request(request_path: str) -> Any:
         if not request_path.startswith("/api/"):
             raise BoardIdentityError(f"refusing to ask {project}'s board for {request_path!r}")
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -165,7 +359,7 @@ def board_get_for(project: str, *, unit_dir: Path | None = None, owner_uid: int 
                                                                  struct.calcsize("3i")))
             if uid != expected_uid:
                 raise BoardIdentityError(f"{path} is answered by uid {uid}, not {project}'s board account {user}")
-            running = main_pid(unit)
+            running = expected_pid
             if not running or pid != running:
                 raise BoardIdentityError(f"{path} is answered by process {pid}, not {unit}'s main process "
                                          f"({running or 'not running'})")
@@ -183,5 +377,17 @@ def board_get_for(project: str, *, unit_dir: Path | None = None, owner_uid: int 
                 raise BoardIdentityError(f"{project}'s board answered {request_path} with no JSON") from None
         finally:
             sock.close()
+
+    if expected_build:
+        identity = request("/api/board")
+        build = str(identity.get("build_id") or "") if isinstance(identity, dict) else ""
+        if build != expected_build:
+            raise BoardIdentityError(
+                f"{project}'s board process reports build {build or 'nothing'}, not its effective "
+                f"root release {expected_build}"
+            )
+
+    def get(_board_url: str, request_path: str) -> Any:
+        return request(request_path)
 
     return get

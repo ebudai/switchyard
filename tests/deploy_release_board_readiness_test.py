@@ -26,9 +26,12 @@ records being reached. The before-run is main's code, from a git archive.
 from __future__ import annotations
 
 import io
+import getpass
 import json
 import os
 import re
+import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -86,8 +89,11 @@ def free_port() -> int:
 class Host:
     """systemd for one tenant: a real board process behind its unit, and the owner's listener unit."""
 
-    def __init__(self, tenant, work: Path, *, board_unit: str, listener: str, board_mode: str = "ok") -> None:
+    def __init__(self, tenant, work: Path, unit_dir: Path, trusted_release: Path, *, exact_units: bool,
+                 board_unit: str, listener: str, board_mode: str = "ok") -> None:
         self.tenant, self.work, self.mode = tenant, work, board_mode
+        self.unit_dir, self.trusted_release = unit_dir, trusted_release
+        self.exact_units = exact_units
         self.port = free_port()
         self.build_file = work / "build"
         self.build_file.write_text(self._serving() + "\n", encoding="utf-8")
@@ -174,12 +180,39 @@ class Host:
             self._start()
             return done(0)
         if "sudo install" in text:
-            self.steps.append("install units")
+            self.steps.append("install templates")
+            return done(0)
+        if argv[0] == "install":
+            source, target = Path(argv[-2]), Path(argv[-1])
+            restoring = source.read_text(encoding="utf-8").startswith("old ")
+            shutil.copyfile(source, target)
+            step = "restore units" if restoring else "install exact units"
+            if step not in self.steps:
+                self.steps.append(step)
+            return done(0)
+        if argv[:2] == ["systemctl", "daemon-reload"]:
+            return done(0)
+        if argv[:2] == ["systemctl", "restart"]:
+            self.steps.append("restart restored board")
+            self._stop()
+            self._start(delay=0.0)
+            self._wait_until_serving()
             return done(0)
         if "deploy-restart" in text:
             # The tenant's own deploy-restart: the release moves, the unit restarts, and its smoke check waits
             # for the board to answer before it returns.
-            self.steps.append("deploy-restart")
+            if self.exact_units:
+                words = shlex.split(argv[-1])
+                proof_values = [word.split("=", 1)[1] for word in words
+                                if word.startswith("TICKET_BOARD_PROVISIONED_SYSTEM_UNIT=")]
+                board_path = self.unit_dir / "porter-ticket-board.service"
+                canary_path = self.unit_dir / "porter-ticket-board-canary.service"
+                assert len(proof_values) == 1 and Path(proof_values[0]).read_bytes() == board_path.read_bytes()
+                assert str(self.trusted_release) in board_path.read_text(encoding="utf-8")
+                assert str(self.trusted_release) in canary_path.read_text(encoding="utf-8")
+                self.steps.append("deploy-restart exact candidate")
+            else:
+                self.steps.append("deploy-restart")
             self.move_board(NEW)
             self._stop()
             self._start()
@@ -195,6 +228,14 @@ def deploy(root: Path, work: Path, *, board_unit: str, listener: str, deployed: 
     """`switchyard deploy-release porter --commit NEW` against a prepared tenant in that state."""
     import release_phase_journal_test as journal
     from scripts import team_launcher as launcher
+    try:
+        from scripts.ticket_board import board_identity, privileged_operations
+        from scripts.ticket_board.project_provision import build_plan, render_board_unit, render_canary_unit
+    except ImportError:
+        # The historical comparison predates the root-release modules. Keep
+        # its original generic-unit fixture so the before assertion remains a
+        # test of the readiness bug it was written for.
+        board_identity = privileged_operations = None
 
     tenant = journal.Tenant(work, deployed=deployed)
     releases = work / "opt-switchyard" / "releases"
@@ -205,20 +246,48 @@ def deploy(root: Path, work: Path, *, board_unit: str, listener: str, deployed: 
         (release / "scripts" / "ticket-board-service.sh").write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
     units = launcher.privileged_provision_dir("porter", root=launcher.switchyard_privileged_provision_root())
     units.mkdir(parents=True, exist_ok=True)
-    for unit in ("ticket-board", "ticket-board-canary", "ticket-board-notify-listener"):
-        (units / f"porter-{unit}.service").write_text("[Unit]\n", encoding="utf-8")
+    if board_identity is not None:
+        plan = build_plan(
+            project="porter", owner_user=getpass.getuser(), owner_home=work / "tenant",
+            board_root=tenant.board_root, port=29117, commit_git_dir=work / "cache.git",
+            asset_dir=work / "assets", frame_dir=work / "frames",
+        )
+        (units / "porter-ticket-board.service").write_text(render_board_unit(plan), encoding="utf-8")
+        (units / "porter-ticket-board-canary.service").write_text(render_canary_unit(plan), encoding="utf-8")
+    else:
+        for name in ("ticket-board", "ticket-board-canary"):
+            (units / f"porter-{name}.service").write_text("[Unit]\n", encoding="utf-8")
+    (units / "porter-ticket-board-notify-listener.service").write_text("[Unit]\n", encoding="utf-8")
+    unit_dir = work / "systemd"
+    unit_dir.mkdir()
+    (unit_dir / "porter-ticket-board.service").write_text("old board unit\n", encoding="utf-8")
+    (unit_dir / "porter-ticket-board-canary.service").write_text("old canary unit\n", encoding="utf-8")
     pin = launcher.privileged_upgrade_source_path(tenant.config)
     pin.parent.mkdir(parents=True, exist_ok=True)
     pin.write_text(json.dumps({"schema": launcher.UPGRADE_SOURCE_SCHEMA, "project": "porter",
                                "source_repo": str(releases / NEW), "commit_git_dir": "/data/git/cache",
                                "deploy_ref": NEW}), encoding="utf-8")
     os.chmod(pin, 0o600)
-    host = Host(tenant, work, board_unit=board_unit, listener=listener, board_mode=board_mode)
+    host = Host(tenant, work, unit_dir, releases / NEW, exact_units=board_identity is not None, board_unit=board_unit,
+                listener=listener, board_mode=board_mode)
     reached: list[str] = []
     from scripts import tenant_release_deploy as deploy_module
 
     if ready_seconds is not None and hasattr(deploy_module, "BOARD_READY_SECONDS"):
         deploy_module.BOARD_READY_SECONDS = ready_seconds
+    if board_identity is not None:
+        privileged_operations.SHARED_RELEASES = str(releases)
+        privileged_operations.TRUSTED_OWNER_UID = os.getuid()
+        deploy_module.SYSTEM_UNIT_DIR = unit_dir
+        deploy_module.TRUSTED_UNIT_OWNER_UID = os.getuid()
+
+        def attest(*_args, **_kwargs):
+            build = host.build_file.read_text(encoding="utf-8").strip()
+            if build != NEW:
+                raise board_identity.BoardIdentityError(f"board reports {build}, not root release {NEW}")
+            return SimpleNamespace(release_commit=NEW)
+
+        board_identity.effective_unit = attest
     launcher.os.geteuid = lambda: 0
     launcher.record_upgrade_phase(tenant.config, config_path=tenant.config_path, phase="release", state="ready",
                                   detail="prepared")
@@ -240,7 +309,8 @@ def deploy(root: Path, work: Path, *, board_unit: str, listener: str, deployed: 
     return {"code": code, "said": "\n".join(said), "steps": host.steps, "board_active": board_active,
             "listener": host.listener, "release": launcher.upgrade_phase_state(tenant.trusted(), "release"),
             "serving": launcher._current_tenant_release(tenant.board_root)[1], "reached": reached,
-            "seconds": round(time.monotonic() - started, 2)}
+            "seconds": round(time.monotonic() - started, 2),
+            "board_unit": (unit_dir / "porter-ticket-board.service").read_text(encoding="utf-8")}
 
 
 def scenario(root: Path, work: Path) -> dict:
@@ -308,6 +378,9 @@ def candidate(out: dict) -> None:
           f"path reached, and it says so: {seen}")
     deployed = out["suspended, deployed here"]
     check(deployed["code"] == 0 and deployed["release"] == "done" and deployed["serving"] == NEW
+          and "install exact units" in deployed["steps"]
+          and "deploy-restart exact candidate" in deployed["steps"]
+          and NEW in deployed["board_unit"]
           and deployed["steps"].index("deploy-restart smoke ok") < deployed["steps"].index("read /api/board")
           < deployed["steps"].index("board stop") == len(deployed["steps"]) - 1
           and not deployed["board_active"] and "listener start" not in deployed["steps"] and deployed["reached"] == [],

@@ -26,7 +26,10 @@ main's catalogue in a child, from a git worktree.
 from __future__ import annotations
 
 import json
+import getpass
 import os
+import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -64,8 +67,11 @@ def catalogue(tree: Path) -> dict:
 class Host:
     """systemd and the deploy, as the recording runner answers them."""
 
-    def __init__(self, tenant, board, *, stop="ok", units="ok", deploy="ok", start="ok") -> None:
+    def __init__(self, tenant, board, unit_dir: Path, trusted_release: Path,
+                 *, stop="ok", units="ok", deploy="ok", start="ok") -> None:
         self.tenant, self.board = tenant, board
+        self.unit_dir = unit_dir
+        self.trusted_release = trusted_release
         self.outcome = {"stop": stop, "units": units, "deploy": deploy, "start": start}
         self.steps: list[str] = []
         self.listener = "active"
@@ -100,14 +106,36 @@ class Host:
                 return result(0)
             return result(1)
         if "sudo install" in text:
-            self.steps.append("install units")
+            self.steps.append("install templates")
             return result(0 if self.outcome["units"] == "ok" else 1)
+        if argv[0] == "install":
+            source, target = Path(argv[-2]), Path(argv[-1])
+            restoring = source.read_text(encoding="utf-8").startswith("old ")
+            shutil.copyfile(source, target)
+            step = "restore units" if restoring else "install exact units"
+            if step not in self.steps:
+                self.steps.append(step)
+            return result(0)
+        if argv[:2] == ["systemctl", "daemon-reload"]:
+            return result(0)
+        if argv[:2] == ["systemctl", "restart"]:
+            self.steps.append("restart restored board")
+            return result(0)
         if "deploy-restart" in text:
-            self.steps.append("deploy-restart")
+            words = shlex.split(argv[-1])
+            proof_values = [word.split("=", 1)[1] for word in words
+                            if word.startswith("TICKET_BOARD_PROVISIONED_SYSTEM_UNIT=")]
+            board_unit = self.unit_dir / "porter-ticket-board.service"
+            canary_unit = self.unit_dir / "porter-ticket-board-canary.service"
+            assert len(proof_values) == 1 and Path(proof_values[0]).read_bytes() == board_unit.read_bytes()
+            assert str(self.trusted_release) in board_unit.read_text(encoding="utf-8")
+            assert str(self.trusted_release) in canary_unit.read_text(encoding="utf-8")
+            self.steps.extend(("canary exact candidate", "deploy-restart exact candidate"))
             outcome = self.outcome["deploy"]
             if outcome in ("ok", "moved", "wrong build"):
                 self.move_board(NEW)
                 self.board.build_id = OTHER if outcome == "wrong build" else NEW
+            self.steps.append("health passed" if outcome in ("ok", "wrong build") else "health failed")
             return result(0 if outcome in ("ok", "wrong build") else 1)
         self.steps.append("other: " + text[:80])
         return result(0)
@@ -119,6 +147,9 @@ def scenarios(tree: Path) -> dict:
     from scripts import team_launcher as launcher
     from scripts.ticket_board import privileged_helper as helper
     from scripts.ticket_board import privileged_operations as operations
+    from scripts.ticket_board import board_identity
+    from scripts.ticket_board.project_provision import build_plan, render_board_unit, render_canary_unit
+    from scripts import tenant_release_deploy
 
     seen: dict = {}
 
@@ -136,8 +167,18 @@ def scenarios(tree: Path) -> dict:
                 (release / "scripts" / "ticket-board-service.sh").write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
             units = launcher.privileged_provision_dir("porter", root=launcher.switchyard_privileged_provision_root())
             units.mkdir(parents=True, exist_ok=True)
-            for unit in ("ticket-board", "ticket-board-canary", "ticket-board-notify-listener"):
-                (units / f"porter-{unit}.service").write_text("[Unit]\n", encoding="utf-8")
+            plan = build_plan(
+                project="porter", owner_user=getpass.getuser(), owner_home=tmp / "tenant",
+                board_root=tenant.board_root, port=29117, commit_git_dir=tmp / "cache.git",
+                asset_dir=tmp / "assets", frame_dir=tmp / "frames",
+            )
+            (units / "porter-ticket-board.service").write_text(render_board_unit(plan), encoding="utf-8")
+            (units / "porter-ticket-board-canary.service").write_text(render_canary_unit(plan), encoding="utf-8")
+            (units / "porter-ticket-board-notify-listener.service").write_text("[Unit]\n", encoding="utf-8")
+            unit_dir = tmp / "systemd"
+            unit_dir.mkdir()
+            (unit_dir / "porter-ticket-board.service").write_text("old board unit\n", encoding="utf-8")
+            (unit_dir / "porter-ticket-board-canary.service").write_text("old canary unit\n", encoding="utf-8")
             if pin:
                 path = launcher.privileged_upgrade_source_path(tenant.config)
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -154,12 +195,26 @@ def scenarios(tree: Path) -> dict:
             finally:
                 launcher.os.geteuid = real_euid
             board = journal.FakeBoard(deployed)
-            host = Host(tenant, board, **outcome)
+            host = Host(tenant, board, unit_dir, releases / NEW, **outcome)
             saved = (launcher._resolve_switchyard_project, launcher._open_board_url, launcher.os.geteuid,
-                     launcher.subprocess.run)
+                     launcher.subprocess.run, operations.SHARED_RELEASES, operations.TRUSTED_OWNER_UID,
+                     tenant_release_deploy.SYSTEM_UNIT_DIR, tenant_release_deploy.TRUSTED_UNIT_OWNER_UID,
+                     board_identity.effective_unit)
             launcher._resolve_switchyard_project = lambda project, **_k: SimpleNamespace(slug="porter", config_path=tenant.config_path)
             launcher._open_board_url = board
             launcher.os.geteuid = (lambda: 0) if root else (lambda: 1006)
+            operations.SHARED_RELEASES = str(releases)
+            operations.TRUSTED_OWNER_UID = os.getuid()
+            tenant_release_deploy.SYSTEM_UNIT_DIR = unit_dir
+            tenant_release_deploy.TRUSTED_UNIT_OWNER_UID = os.getuid()
+            def attest(*_args, **_kwargs):
+                if board.build_id != NEW:
+                    raise board_identity.BoardIdentityError(
+                        f"board reports {board.build_id}, not root release {NEW}"
+                    )
+                return SimpleNamespace(release_commit=NEW)
+
+            board_identity.effective_unit = attest
             # Anything the command runs without being handed a runner is a
             # boundary this test did not model: refuse it loudly.
             launcher.subprocess.run = lambda *a, **k: (_ for _ in ()).throw(AssertionError(f"unmodelled subprocess: {a[:1]}"))
@@ -189,13 +244,16 @@ def scenarios(tree: Path) -> dict:
                                                    runner=dispatch, print_func=printed.append)
             finally:
                 (launcher._resolve_switchyard_project, launcher._open_board_url, launcher.os.geteuid,
-                 launcher.subprocess.run) = saved
+                 launcher.subprocess.run, operations.SHARED_RELEASES, operations.TRUSTED_OWNER_UID,
+                 tenant_release_deploy.SYSTEM_UNIT_DIR, tenant_release_deploy.TRUSTED_UNIT_OWNER_UID,
+                 board_identity.effective_unit) = saved
             seen[name] = {
                 "code": code, "steps": host.steps, "said": "\n".join(printed),
                 "board": launcher._current_tenant_release(tenant.board_root)[1],
                 "listener": host.listener,
                 "release": launcher.upgrade_phase_state(tenant.trusted(), "release"),
                 "attempts": attempts,
+                "board_unit": (unit_dir / "porter-ticket-board.service").read_text(encoding="utf-8"),
             }
 
     run("unprepared", pin=OLD)
@@ -267,10 +325,14 @@ def main() -> int:
 
     now = child("--scenarios", ROOT)
     ok = now["deployed"]
-    check(ok["code"] == 0 and ok["steps"] == ["stop listener", "install units", "deploy-restart", "start listener"],
+    check(ok["code"] == 0 and ok["steps"] == [
+              "stop listener", "install templates", "install exact units",
+              "canary exact candidate", "deploy-restart exact candidate", "health passed", "start listener"],
           f"a prepared tenant: listener down, root's units, the deploy, listener up -- in that order: {ok['steps']} {ok['said'][-600:]}")
     check(ok["board"] == NEW and ok["release"] == "done" and ok["listener"] == "active",
           f"the board serves the release and the phase is closed against it: {ok}")
+    check(NEW in ok["board_unit"],
+          f"the legitimate deployment leaves the exact root release selected: {ok['board_unit']}")
     check(ok["attempts"][0]["command"][1:] == ["deploy-release", "porter", "--commit", NEW]
           and ok["attempts"][0]["closed"]["status"] == "succeeded",
           f"through the helper's own dispatch, recorded as an attempt: {ok['attempts']}")
@@ -285,19 +347,28 @@ def main() -> int:
           and f"was prepared for {OLD}, not {NEW}" in unprepared["said"],
           f"preparation is not activation: an unprepared tenant is refused before anything runs: {unprepared}")
     failed = now["deploy fails, board unchanged"]
-    check(failed["code"] == 1 and failed["steps"] == ["stop listener", "install units", "deploy-restart", "start listener"]
+    check(failed["code"] == 1 and failed["steps"] == [
+              "stop listener", "install templates", "install exact units", "canary exact candidate",
+              "deploy-restart exact candidate",
+              "health failed", "restore units", "restart restored board", "start listener"]
           and failed["board"] == OLD and failed["listener"] == "active" and failed["release"] == "blocked",
           f"a failed deploy that left the board: the listener comes back, the phase is blocked: {failed}")
+    check(failed["board_unit"] == "old board unit\n",
+          f"failed health restores the captured board unit before the listener: {failed}")
     moved = now["deploy fails, board moved"]
-    check(moved["code"] == 1 and moved["steps"] == ["stop listener", "install units", "deploy-restart"]
+    check(moved["code"] == 1 and moved["steps"] == [
+              "stop listener", "install templates", "install exact units", "canary exact candidate",
+              "deploy-restart exact candidate",
+              "health failed", "restore units", "restart restored board"]
           and moved["listener"] == "inactive" and moved["release"] == "blocked" and "left stopped" in moved["said"],
           f"a failed deploy that moved the board: the listener is left down, said so: {moved}")
     down = now["listener does not come back"]
     check(down["code"] == 1 and down["release"] == "blocked" and "listener is not running" in down["said"],
           f"deployed but the listener is not back: not closed: {down}")
     wrong = now["live board serves another build"]
-    check(wrong["code"] == 1 and wrong["release"] == "blocked" and wrong["board"] == NEW,
-          f"the running board reports another build: the phase is not closed: {wrong}")
+    check(wrong["code"] == 3 and wrong["release"] == "blocked" and wrong["board"] == OLD
+          and wrong["board_unit"] == "old board unit\n",
+          f"another live build restores selector and units and reports rolled back: {wrong}")
     already = now["already deployed"]
     check(already["code"] == 0 and already["steps"] == [] and already["release"] == "done",
           f"a board already serving the release is only closed, nothing restarted: {already}")
@@ -309,7 +380,8 @@ def main() -> int:
     check(unprivileged["code"] == 1 and unprivileged["steps"] == [] and "Nothing was deployed" in unprivileged["said"],
           f"not root: nothing: {unprivileged}")
     for name, result in now.items():
-        check(result["attempts"] and result["attempts"][0]["closed"]["status"] == ("succeeded" if result["code"] == 0 else "failed"),
+        expected = "succeeded" if result["code"] == 0 else "rolled_back" if result["code"] == 3 else "failed"
+        check(result["attempts"] and result["attempts"][0]["closed"]["status"] == expected,
               f"{name}: the helper's attempt record tells the truth: {result['attempts']}")
     print(f"catalogued_deploy_release_test: {CHECKS} checks ok")
     return 0

@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import ast
+import http.server
 import os
+import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -91,6 +94,13 @@ def refusal(operation: Any) -> str:
     raise AssertionError("expected a refusal")
 
 
+def secure_git(repo: Path) -> list[str]:
+    git_dir = repo / ".git" if (repo / ".git").is_dir() else repo
+    return ["git", "-c", f"safe.directory={git_dir}", "-c", "core.hooksPath=/dev/null",
+            "-c", "core.fsmonitor=false", "-c", "protocol.ext.allow=never",
+            "-c", "credential.helper=", f"--git-dir={git_dir}", "--no-replace-objects"]
+
+
 def bare_app(dirs: tuple[Path, ...]) -> TicketBoardApp:
     app = TicketBoardApp.__new__(TicketBoardApp)
     app.commit_git_dirs = dirs
@@ -127,7 +137,7 @@ def test_surface_keeps_two_app_methods_and_moves_the_rest() -> None:
         node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
     } | {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
     # The standard library only; os and pwd say which directory the board may not search (SYRD-682).
-    assert imported == {"__future__", "os", "pwd", "re", "subprocess", "pathlib"}, imported
+    assert imported == {"__future__", "os", "pwd", "re", "subprocess", "pathlib", "commit_cache_reader"}, imported
     assert "://" not in source and "git@" not in source
 
 
@@ -154,11 +164,11 @@ def test_ref_reads_refuse_unsafe_names_before_git() -> None:
             assert commit_cache.published_ref_commit(dirs, "roles/main/pub") == repos.a
             assert commit_cache.published_ref_commit(dirs, "roles/main/claimed") == ""
         assert rec.calls[0][0] == [
-            "git", f"--git-dir={repos.cache}", "rev-parse", "--verify", "--quiet", "--end-of-options",
+            *secure_git(repos.cache), "rev-parse", "--verify", "--quiet", "--end-of-options",
             "refs/remotes/origin/roles/main/pub^{commit}",
         ], rec.calls
-        assert commit_cache.commit_repo_git_args(repos.checkout) == ["git", "-C", str(repos.checkout)]
-        assert commit_cache.commit_repo_git_args(repos.cache) == ["git", f"--git-dir={repos.cache}"]
+        assert commit_cache.commit_repo_git_args(repos.checkout) == secure_git(repos.checkout)
+        assert commit_cache.commit_repo_git_args(repos.cache) == secure_git(repos.cache)
         assert refusal(lambda: commit_cache.commit_repo_git_args(repos.missing)) == (
             f"commit_hash verification repository not found: {repos.missing}"
         )
@@ -174,12 +184,80 @@ def test_refresh_is_bounded_origin_only_and_skips_failures() -> None:
         for mode in ("hang", "fail"):
             with Recorder(fetch=mode) as rec:
                 assert commit_cache.refresh_commit_repos(dirs) is False
-            assert rec.calls == [(["git", f"--git-dir={repos.cache}", "fetch", "--quiet", "--prune", "origin"], 30)], rec.calls
+            assert rec.calls == [([*secure_git(repos.cache), "-c", "remote.origin.uploadpack=git-upload-pack",
+                                  "-c", "core.sshCommand=/usr/bin/ssh", "-c", "core.gitProxy=",
+                                  "fetch", "--quiet", "--prune", "origin"], 30)], rec.calls
         with Recorder() as rec:
             assert commit_cache.refresh_commit_repos(dirs) is True
         assert [call[1] for call in rec.calls] == [30]
         assert commit_cache.resolve_known_commit(dirs, repos.b[:10].upper()) == (repos.b, [repos.missing])
         assert commit_cache.refresh_commit_repos((repos.missing,)) is False
+
+
+def test_refresh_ignores_repository_configured_transport_programs() -> None:
+    with tempfile.TemporaryDirectory(prefix="syrd699-fetch-program.") as tmp:
+        repos = Repos(Path(tmp).resolve())
+        ssh_sentinel = Path(tmp) / "tenant-ssh-program-ran"
+        ssh_program = f"sh -c 'touch {ssh_sentinel}; exit 1' --"
+        git("--git-dir", str(repos.cache), "config", "core.sshCommand", ssh_program)
+        git("--git-dir", str(repos.cache), "config", "remote.origin.uploadpack", ssh_program)
+        git("--git-dir", str(repos.cache), "remote", "set-url", "origin", "ssh://127.0.0.1:1/no-repository")
+        assert commit_cache.refresh_commit_repos((repos.cache,)) is False
+        assert not ssh_sentinel.exists(), "the tenant repository's configured SSH or upload-pack ran in the board"
+
+        proxy_sentinel = Path(tmp) / "tenant-git-proxy-ran"
+        proxy_program = f"sh -c 'touch {proxy_sentinel}; exit 1' --"
+        git("--git-dir", str(repos.cache), "config", "core.gitProxy", proxy_program)
+        git("--git-dir", str(repos.cache), "remote", "set-url", "origin", "git://127.0.0.1:1/no-repository")
+        assert commit_cache.refresh_commit_repos((repos.cache,)) is False
+        assert not proxy_sentinel.exists(), "the tenant repository's configured git proxy ran in the board"
+
+
+def test_refresh_ignores_a_repository_configured_askpass_program() -> None:
+    with tempfile.TemporaryDirectory(prefix="syrd699-fetch-askpass.") as tmp:
+        root = Path(tmp).resolve()
+        repos = Repos(root)
+        sentinel = root / "tenant-askpass-ran"
+        askpass = root / "tenant-askpass"
+        askpass.write_text(f"#!/bin/sh\n: > {sentinel}\nexit 1\n", encoding="utf-8")
+        askpass.chmod(0o755)
+        git("--git-dir", str(repos.cache), "config", "core.askPass", str(askpass))
+        git("--git-dir", str(repos.cache), "config", "http.sslVerify", "false")
+
+        certificate = root / "certificate.pem"
+        private_key = root / "private-key.pem"
+        REAL_RUN(
+            ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+             "-subj", "/CN=127.0.0.1", "-keyout", str(private_key), "-out", str(certificate)],
+            check=True, capture_output=True,
+        )
+
+        class AuthenticationRequired(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="commit cache"')
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *_args: Any) -> None:
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), AuthenticationRequired)
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls.load_cert_chain(certificate, private_key)
+        server.socket = tls.wrap_socket(server.socket, server_side=True)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            port = server.server_address[1]
+            git("--git-dir", str(repos.cache), "remote", "set-url", "origin",
+                f"https://127.0.0.1:{port}/repository.git")
+            assert commit_cache.refresh_commit_repos((repos.cache,)) is False
+            assert not sentinel.exists(), "the tenant repository's configured askpass ran in the board"
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
 
 def test_validate_refreshes_once_and_keeps_its_text() -> None:

@@ -27,7 +27,10 @@ from __future__ import annotations
 
 import argparse
 import os
+import socket
+import stat
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -42,6 +45,85 @@ ROLLED_BACK = "rolled back: "
 #: How long the board has to answer before the close reads it, and how often it is asked (SYRD-632).
 BOARD_READY_SECONDS = 30.0
 BOARD_READY_POLL_SECONDS = 0.5
+SYSTEM_UNIT_DIR = Path("/etc/systemd/system")
+TRUSTED_UNIT_OWNER_UID = 0
+
+
+def _installed_unit_bytes(path: Path) -> bytes | None:
+    """Read one root unit without following a replacement link."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise RuntimeError(f"cannot capture {path} without following links: {exc}") from None
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != TRUSTED_UNIT_OWNER_UID
+                or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+            raise RuntimeError(f"{path} is not a root-owned, non-writable regular unit")
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            return handle.read(1 << 20)
+    finally:
+        os.close(fd)
+
+
+def _free_canary_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def _install_units(
+    units: dict[Path, bytes], *, runner: Callable[..., subprocess.CompletedProcess[Any]]
+) -> list[str]:
+    """Install already-rendered unit bytes and reload, as this root command."""
+    with tempfile.TemporaryDirectory(prefix="switchyard-release-units.") as temporary:
+        for target, payload in units.items():
+            staged = Path(temporary) / target.name
+            staged.write_bytes(payload)
+            done = runner(["install", "-o", "root", "-g", "root", "-m", "0644", str(staged), str(target)],
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if done.returncode != 0:
+                return [f"installing {target} failed (exit {done.returncode}): "
+                        f"{(str(done.stderr or '').strip() or 'no output')[:300]}"]
+    reloaded = runner(["systemctl", "daemon-reload"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if reloaded.returncode != 0:
+        return [f"systemctl daemon-reload failed (exit {reloaded.returncode}): "
+                f"{(str(reloaded.stderr or '').strip() or 'no output')[:300]}"]
+    return []
+
+
+def _candidate_units(status: Any, project: str, release: Path, port: int) -> dict[Path, bytes]:
+    """Render board and canary from root's staged provisioning, fixed to ``release``."""
+    from scripts.ticket_board import release_units
+
+    board_source = status.provisioned_system_unit
+    canary_source = board_source.parent / f"{project}-ticket-board-canary.service"
+    try:
+        board_template = board_source.read_text(encoding="utf-8")
+        canary_template = canary_source.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"cannot read root's staged board units: {exc}") from None
+    credentials = release_units.report_credentials_path(board_template)
+    board = release_units.render_board_unit(board_template, release=release, report_credentials=credentials)
+    canary = release_units.render_canary_unit(board_template, canary_template, release=release, port=port)
+    return {
+        SYSTEM_UNIT_DIR / board_source.name: board.encode("utf-8"),
+        SYSTEM_UNIT_DIR / canary_source.name: canary.encode("utf-8"),
+    }
+
+
+def _restore_units(units: dict[Path, bytes], board_unit: str, *, runner: Callable[..., Any]) -> list[str]:
+    restored = _install_units(units, runner=runner)
+    if restored:
+        return restored
+    restarted = runner(["systemctl", "restart", board_unit], stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE, text=True)
+    if restarted.returncode != 0:
+        return [f"restoring {board_unit} failed to restart it (exit {restarted.returncode}): "
+                f"{(str(restarted.stderr or '').strip() or 'no output')[:300]}"]
+    return []
 
 
 def _await_board(config: Any, *, opener: Callable[[str], Any] | None, clock: Callable[[], float] = time.monotonic,
@@ -130,6 +212,13 @@ def switchyard_deploy_release_command(
     held = launcher._read_switchyard_release_marker(source) if source is not None else None
     if held is None or held.marker_commit != commit:
         return refuse(f"root holds no installed release of {commit} as {config.project}'s pinned source ({source})")
+    from scripts.ticket_board import privileged_operations
+    try:
+        trusted_source = Path(privileged_operations.trusted_release_root(commit))
+    except privileged_operations.NoTrustedSource as exc:
+        return refuse(str(exc))
+    if source != trusted_source:
+        return refuse(f"{config.project}'s pinned source is {source}, not root's trusted release {trusted_source}")
     status = launcher.tenant_release_status(
         config, config_path=config_path, source_repo=source,
         commit_git_dir=pinned.get("commit_git_dir") or None, deploy_ref=commit, runner=runner,
@@ -239,39 +328,110 @@ def switchyard_deploy_release_command(
     if stopped:
         return ended(blocked("; ".join(stopped), "nothing was deployed; the listener's state is as that says"),
                      stopped if listener_was_active else [])
+    board_target = SYSTEM_UNIT_DIR / status.provisioned_system_unit.name
+    canary_target = board_target.with_name(f"{config.project}-ticket-board-canary.service")
+    try:
+        previous_units = {
+            board_target: _installed_unit_bytes(board_target),
+            canary_target: _installed_unit_bytes(canary_target),
+        }
+    except RuntimeError as exc:
+        listener_said = listener_back()
+        return ended(blocked(str(exc), f"nothing was deployed; {listener_said}"),
+                     _listener_leftover(listener_said) + board_back())
+    if any(payload is None for payload in previous_units.values()):
+        listener_said = listener_back()
+        missing = ", ".join(str(path) for path, payload in previous_units.items() if payload is None)
+        return ended(blocked(f"cannot capture the rollback units ({missing} is absent)",
+                             f"nothing was deployed; {listener_said}"),
+                     _listener_leftover(listener_said) + board_back())
+
+    def restore_units() -> list[str]:
+        return _restore_units({path: payload for path, payload in previous_units.items() if payload is not None},
+                              board_target.name, runner=runner)
+
+    # Install the rest of root's reviewed provisioning first (notably the
+    # listener).  Board and canary are overwritten below before any tenant
+    # command runs, and the process already serving is unchanged in between.
     units = runner(["sh", "-c", launcher.tenant_release_unit_install_command(status, config.project)],
                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if units.returncode != 0:
+        unit_leftovers = restore_units()
         listener_said = listener_back()
         return ended(blocked(
             f"installing {config.project}'s board units failed (exit {units.returncode}): "
             f"{(str(units.stderr or '').strip() or 'no output')[:300]}",
             f"nothing was deployed; {listener_said}",
-        ), _listener_leftover(listener_said) + board_back())
+        ), unit_leftovers + _listener_leftover(listener_said) + board_back())
+    canary_port = _free_canary_port()
+    try:
+        candidate_units = _candidate_units(status, config.project, source, canary_port)
+    except (RuntimeError, ValueError) as exc:
+        unit_leftovers = restore_units()
+        listener_said = listener_back()
+        return ended(blocked(f"rendering exact-release board units failed: {exc}",
+                             f"nothing was deployed; {listener_said}"),
+                     unit_leftovers + _listener_leftover(listener_said) + board_back())
+    installed = _install_units(candidate_units, runner=runner)
+    if installed:
+        unit_leftovers = restore_units()
+        listener_said = listener_back()
+        return ended(blocked("; ".join(installed), f"nothing was deployed; {listener_said}"),
+                     unit_leftovers + _listener_leftover(listener_said) + board_back())
     # The tenant's own deploy-restart restarts the board -- and so starts one
     # that was stopped -- because its health gates and live-build check need a
     # serving board. A board that was stopped is put back down after the close.
-    problems, _restarted = launcher.deploy_release_in_transaction(
-        config, config_path=config_path, source_repo=source, commit_git_dir=pinned.get("commit_git_dir") or None,
-        deploy_ref=commit, runner=runner, print_func=print_func,
-    )
+    # The tenant deploy's system-unit gate compares against these exact bytes,
+    # not the old provisioning template. The directory is searchable by the
+    # tenant for the duration of this call; the root-owned file is read-only
+    # and disappears before deploy-release returns.
+    with tempfile.TemporaryDirectory(prefix=f"switchyard-{config.project}-candidate.") as proof_dir:
+        os.chmod(proof_dir, 0o755)
+        candidate_proof = Path(proof_dir) / board_target.name
+        candidate_proof.write_bytes(candidate_units[board_target])
+        candidate_proof.chmod(0o644)
+        problems, _restarted = launcher.deploy_release_in_transaction(
+            config, config_path=config_path, source_repo=source,
+            commit_git_dir=pinned.get("commit_git_dir") or None,
+            deploy_ref=commit, runner=runner, print_func=print_func,
+            canary_port=canary_port, provisioned_system_unit=candidate_proof,
+        )
     if problems:
         now = launcher._current_tenant_release(status.board_root)[1]
         if now == before:
             # SYRD-113: deployed, failed its health gate and rolled back is its own outcome.
             rolled_back = any(problem.startswith(ROLLED_BACK) for problem in problems)
+            unit_leftovers = restore_units()
             listener_said = listener_back()
             return ended(
                 blocked("; ".join(problems), f"the board still names {before or 'no release'}; {listener_said}",
                         ROLLED_BACK_EXIT if rolled_back else 1),
-                _listener_leftover(listener_said) + board_back(),
+                unit_leftovers + _listener_leftover(listener_said) + board_back(),
             )
+        unit_leftovers = restore_units()
         return ended(blocked(
             "; ".join(problems),
             f"the board now names {now or 'no release'}, not the {before or 'no release'} it had, so the "
             "listener was left stopped: bring it back only once release-status shows a board it can read",
-        ), (["the notify listener was running before and was left stopped"] if listener_was_active else [])
+        ), unit_leftovers
+           + (["the notify listener was running before and was left stopped"] if listener_was_active else [])
            + board_back())
+    from scripts.ticket_board import board_identity
+    try:
+        board_identity.effective_unit(config.project, runner=runner)
+    except board_identity.BoardIdentityError as exc:
+        pointer_problems = launcher.restore_release_pointer(
+            status.board_root / "current", str(status.current_release or ""), runner=runner,
+            owner_user=status.owner_user,
+        )
+        unit_leftovers = restore_units()
+        listener_said = listener_back()
+        return ended(
+            blocked(f"the deployed board did not attest its exact root release: {exc}",
+                    f"the previous unit and release selector were restored; {listener_said}",
+                    ROLLED_BACK_EXIT),
+            unit_leftovers + pointer_problems + _listener_leftover(listener_said) + board_back(),
+        )
     if listener_was_active:
         started = launcher.start_owner_listener(config, runner=runner, config_path=config_path)
         if started:

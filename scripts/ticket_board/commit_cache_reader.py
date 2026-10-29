@@ -38,15 +38,26 @@ class CacheReader:
 
     git_dir: Path
 
+    def command_prefix(self) -> list[str]:
+        return [
+            "git", "-c", f"safe.directory={self.git_dir}",
+            "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+            "-c", "protocol.ext.allow=never", "-c", "credential.helper=",
+            f"--git-dir={self.git_dir}", "--no-replace-objects",
+        ]
+
+    @staticmethod
+    def environment() -> dict[str, str]:
+        env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", GIT_NO_LAZY_FETCH="1")
+        return env
+
     def git_command(self, args: Sequence[str]) -> tuple[list[str], dict[str, str]]:
         if not args or args[0] not in CACHE_READS:
             raise ValueError(f"not a read of the trusted commit cache: git {' '.join(args[:1])}")
         if args[0] == "diff" and not {"--no-ext-diff", "--no-textconv"} <= set(args):
             raise ValueError("a diff in the trusted commit cache must not run the cache's diff programs")
-        env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-        env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_NO_LAZY_FETCH="1")
-        return ["git", "-c", f"safe.directory={self.git_dir}", f"--git-dir={self.git_dir}", "--no-replace-objects",
-                *args], env
+        return [*self.command_prefix(), *args], self.environment()
 
 
 def cache_reader(commit_git_dir: Path) -> CacheReader:

@@ -46,6 +46,9 @@ def test_every_catalogued_action_is_fully_declared() -> None:
             all(callable(validate) for _name, validate in action.arguments),
             f"{action.name}'s arguments are typed",
         )
+        if action.authentication == pa.ALLOW_ACTIVE:
+            check(action.board_from_unit,
+                  f"{action.name}'s silent active-session grant attests root's live board unit")
 
 
 def test_an_action_nobody_catalogued_is_refused_by_name() -> None:

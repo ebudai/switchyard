@@ -134,15 +134,15 @@ def legacy_owner_from_host_records(
     Nothing the tenant can edit is consulted here, and no account is inferred
     from a pathname. The owner comes from root-controlled host records:
 
-    * the tenant's board unit, root-owned: its `TICKET_BOARD_TENANT_USER` when
-      it names one, and its `HOME`, resolved through the passwd database to the
-      one account whose home it is;
+    * the tenant's board unit, root-owned: its `TICKET_BOARD_TENANT_USER`, which
+      every provisioned unit sets -- never its `HOME`, which under root's
+      exact-release unit is the board's own state directory (SYRD-702);
     * the registry entry, root-owned, which must name THIS provision directory,
       inside that account's home;
-    * the board root the unit runs from, whose owner -- set only by root --
+    * the tenant's board root in that home, whose owner -- set only by root --
       must be that account when the directory exists.
 
-    Every present source must agree and at least one must name the account.
+    Every present source must agree, and the unit must name the account.
     Returns (owner, the evidence that established it, why not).
     """
     from scripts import team_launcher as launcher
@@ -161,25 +161,11 @@ def legacy_owner_from_host_records(
         return "", evidence, f"{unit_path} names more than one tenant user: {sorted(tenant_users)}"
     if tenant_users:
         candidates["TICKET_BOARD_TENANT_USER"] = next(iter(tenant_users))
-    homes = {value.strip() for value in environment.get("HOME", []) if value.strip()}
-    if len(homes) > 1:
-        return "", evidence, f"{unit_path} sets more than one HOME: {sorted(homes)}"
-    if homes:
-        home = next(iter(homes))
-        holders = sorted(entry.pw_name for entry in pwd.getpwall() if entry.pw_dir.rstrip("/") == home.rstrip("/"))
-        if len(holders) != 1:
-            return "", evidence, (
-                f"{unit_path} sets HOME={home}, which is the home of "
-                + (f"{len(holders)} accounts ({', '.join(holders)})" if holders else "no account")
-            )
-        candidates["HOME"] = holders[0]
+    # Never from the unit's HOME: root's exact-release unit gives the board a HOME of its own under /var/lib, which
+    # is no account's, and a HOME names a directory, not who the tenant is. Every provisioned unit names its tenant
+    # (SYRD-702).
     if not candidates:
-        return "", evidence, f"{unit_path} names neither a tenant user nor a HOME"
-    if len(set(candidates.values())) != 1:
-        return "", evidence, (
-            f"{unit_path} is contradictory: "
-            + ", ".join(f"{source} -> {owner}" for source, owner in sorted(candidates.items()))
-        )
+        return "", evidence, f"{unit_path} names no tenant user (TICKET_BOARD_TENANT_USER)"
     owner = next(iter(candidates.values()))
     evidence.extend(f"{unit_path} {source} -> {owner}" for source, owner in sorted(candidates.items()))
     try:

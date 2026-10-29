@@ -129,7 +129,8 @@ def test_the_seams_the_modules_own_names_and_the_consumers() -> None:
         bound |= {n.id for n in ast.walk(function) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
         check(through == seams and not bare and not (bound | set(OWN)) & set(through),
               f"{name} reads {seams} through the launcher, none bare, nothing it binds: {through} {bare}")
-    for consumer, count in (("project_role_add.py", 12), ("project_vcs_close_role.py", 12)):
+    # SYRD-702: each puts the previous board unit back through the launcher when root's exact render does not attest.
+    for consumer, count in (("project_role_add.py", 13), ("project_vcs_close_role.py", 13)):
         tree = ast.parse((ROOT / "scripts" / consumer).read_text(encoding="utf-8"))
         reads = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
                  and n.value.id == "launcher" and n.attr in MOVED]

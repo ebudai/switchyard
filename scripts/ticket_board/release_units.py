@@ -168,14 +168,25 @@ def renders_template(installed: str, template: str) -> bool:
 SYSTEM_UNIT_DIR = Path("/etc/systemd/system")
 
 
-def refuse_rewriting_exact_board_unit(board_unit: str, command: str) -> str:
-    """Why ``command`` may not rewrite this board's unit, or ''.
+def installed_release(text: str) -> Path | None:
+    """The release an exact-release unit runs, or None for any other unit."""
+    if not is_exact_release_unit(text):
+        return None
+    exec_start = next(line for line in text.splitlines() if line.startswith("ExecStart="))
+    try:
+        return Path(shlex.split(exec_start[len("ExecStart="):])[4]).parent.parent
+    except (ValueError, IndexError):
+        return None
 
-    `add-role` and `set-vcs-close-role` render the board unit from the legacy template, which runs the tenant's
-    ``current`` with its environment file. Over a unit that is still legacy that changes nothing about who chooses
-    the code; over root's exact-release unit it would undo the repair, so it is refused until SYRD-702 renders it
-    from the board's attested release (SYRD-700). Asked before the command changes anything, so a refusal leaves
-    the project as it was.
+
+def exact_board_unit_rewrite_problem(board_unit: str, command: str) -> str:
+    """Why ``command`` cannot rewrite this board's unit, or ''; asked before it changes anything.
+
+    `add-role` and `set-vcs-close-role` change what the board's unit says. Over root's exact-release unit they
+    install the exact render of the refreshed template for the release that unit already runs, never the legacy
+    template, which would run the tenant's own tree (SYRD-702). That needs root's trusted copy of that release,
+    able to run under the render; without it nothing is changed. A unit that is still legacy is rewritten as
+    before, and repaired one tenant at a time (SYRD-701).
     """
     if not board_unit:
         return ""
@@ -183,10 +194,23 @@ def refuse_rewriting_exact_board_unit(board_unit: str, command: str) -> str:
         text = (SYSTEM_UNIT_DIR / board_unit).read_text(encoding="utf-8")
     except OSError:
         return ""
-    if not is_exact_release_unit(text):
+    release = installed_release(text)
+    if release is None:
         return ""
-    return (f"team-launcher: {command} would replace {board_unit}, root's exact-release board unit, with a legacy "
-            "one that runs the tenant's own release tree; it is refused until SYRD-702. Nothing was changed.")
+    from .privileged_operations import NoTrustedSource, trusted_release_root
+
+    def refused(why: str) -> str:
+        return f"team-launcher: {command} re-renders {board_unit} for the release it runs, {release}: {why}. Nothing was changed."
+
+    try:
+        trusted = Path(trusted_release_root(release.name))
+    except NoTrustedSource as exc:
+        return refused(str(exc))
+    if trusted != release:
+        return refused(f"root's trusted release of {release.name} is {trusted}")
+    if not (release / "scripts" / "ticket_board" / "release_units.py").is_file():
+        return refused("it predates exact root-release board units (SYRD-699)")
+    return ""
 
 
 def report_credentials_path(template: str) -> Path | None:

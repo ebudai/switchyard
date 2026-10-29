@@ -321,20 +321,28 @@ def test_a_legacy_owner_is_established_from_agreeing_root_records() -> None:
         records = HostRecords(raw, board_uid=ME)
         owner, evidence, problem = records.owner()
         unit = records.units / f"{PROJECT}-ticket-board.service"
+        # SYRD-702: the unit's tenant user, never its HOME.
         check(owner == OWNER and problem == "" and evidence == [
-            f"{unit} HOME -> {OWNER}", f"{unit} TICKET_BOARD_TENANT_USER -> {OWNER}",
+            f"{unit} TICKET_BOARD_TENANT_USER -> {OWNER}",
             f"{records.registry / (PROJECT + '.json')} registers {records.provision / (PROJECT + '.json')}, inside {OWNER}'s home",
             f"{records.home / (PROJECT + '-ticketboard-live')} is owned by {OWNER}"],
-              f"the unit's user and home, the registry and the board root all say {OWNER}: {evidence} {problem}")
+              f"the unit's tenant user, the registry and the board root all say {OWNER}: {evidence} {problem}")
+    # Root's exact-release unit: its HOME is the board's own state, which is no account's.
+    with tempfile.TemporaryDirectory(prefix="syrd702-exact.") as raw:
+        records = HostRecords(raw, board_uid=ME, unit=f"[Service]\nEnvironment=TICKET_BOARD_TENANT_USER={OWNER}\n"
+                                                      "Environment=HOME=/var/lib/p353-ticket-board\n")
+        owner, _evidence, problem = records.owner()
+        check(owner == OWNER and problem == "", f"an exact-release unit's own HOME does not hide its tenant: {problem}")
 
 
 def test_each_legacy_owner_refusal() -> None:
     cases = [
         (dict(unit="[Service]\nEnvironment=TICKET_BOARD_TENANT_USER=a TICKET_BOARD_TENANT_USER=b\n"), "names more than one tenant user"),
-        (dict(unit="[Service]\nEnvironment=HOME=/a HOME=/b\n"), "sets more than one HOME"),
-        (dict(unit="[Service]\nEnvironment=HOME=/nonexistent/syrd353/nobody\n"), "which is the home of no account"),
-        (dict(unit="[Service]\nEnvironment=LANG=C\n"), "names neither a tenant user nor a HOME"),
-        (dict(unit=f"[Service]\nEnvironment=TICKET_BOARD_TENANT_USER=syrd353-other HOME={{home}}\n"), "is contradictory"),
+        # SYRD-702: a HOME is never the evidence, alone or beside a tenant user.
+        (dict(unit="[Service]\nEnvironment=HOME=/a HOME=/b\n"), "names no tenant user"),
+        (dict(unit="[Service]\nEnvironment=HOME={home}\n"), "names no tenant user"),
+        (dict(unit="[Service]\nEnvironment=LANG=C\n"), "names no tenant user"),
+        (dict(unit=f"[Service]\nEnvironment=TICKET_BOARD_TENANT_USER=syrd353-other HOME={{home}}\n"), "which is not inside syrd353-other's home"),
         (dict(unit="[Service]\nEnvironment=TICKET_BOARD_TENANT_USER=syrd353-ghost\n"), "is not a local account"),
         (dict(registry=b"not json"), "is not a registry record"),
         (dict(registry={"slug": "other", "config_path": "/x/p.json"}), f"does not register {PROJECT} at an absolute path"),
@@ -352,7 +360,7 @@ def test_each_legacy_owner_refusal() -> None:
         records = HostRecords(raw, unit=f"[Service]\nEnvironment=HOME={Path(raw) / 'home' / OWNER}\n")
         records.passwd.append(account("syrd353-twin", ME + 2, records.home))
         problem = records.owner()[2]
-        check(problem.endswith(f"which is the home of 2 accounts ({OWNER}, syrd353-twin)"), f"a shared HOME names nobody: {problem}")
+        check(problem.endswith("names no tenant user (TICKET_BOARD_TENANT_USER)"), f"a HOME names nobody: {problem}")
     with tempfile.TemporaryDirectory(prefix="syrd353-refuse.") as raw:
         records = HostRecords(raw)
         outside = Path(raw) / "elsewhere" / "provision"

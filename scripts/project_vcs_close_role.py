@@ -138,9 +138,9 @@ def set_project_vcs_close_role_command(
     plan = launcher._project_plan_for_vcs_close_role(config, config_path=config_path, role_name=role_name)
     role = dict(plan.operation_allowed_roles)["mark_done"][0]
     launcher.render_vcs_close_role_sql(plan)
-    from scripts.ticket_board.release_units import refuse_rewriting_exact_board_unit
+    from scripts.ticket_board.release_units import exact_board_unit_rewrite_problem
 
-    refused = refuse_rewriting_exact_board_unit(getattr(plan, "board_unit", ""), "set-vcs-close-role")
+    refused = exact_board_unit_rewrite_problem(getattr(plan, "board_unit", ""), "set-vcs-close-role")
     if refused:
         print_func(refused)
         return 1
@@ -156,8 +156,22 @@ def set_project_vcs_close_role_command(
         board_unit=board_unit,
     )
     launcher._apply_vcs_close_role_board_sql(plan, role_name=role, runner=runner)
-    launcher._install_and_restart_board_unit(plan, board_unit=board_unit, runner=runner)
-    record_problem = root_packet.record_unit_install(config_path.parent, plan, board_unit)
+    # Root's staged template refreshed for the plan, and under root's exact-release unit its exact render for the
+    # release that unit runs, attested once restarted -- or the previous unit back (SYRD-702).
+    from scripts import tenant_release_deploy
+
+    installed_unit, previous_unit = tenant_release_deploy.board_unit_for_plan(plan, board_unit)
+    if installed_unit != board_unit:
+        problems = tenant_release_deploy.install_exact_or_restore(
+            plan, installing=installed_unit, previous=previous_unit, runner=runner,
+            install=launcher._install_and_restart_board_unit,
+        )
+        if problems:
+            print_func(f"team-launcher: {'; '.join(problems)}")
+            return 1
+    else:
+        launcher._install_and_restart_board_unit(plan, board_unit=installed_unit, runner=runner)
+    record_problem = root_packet.record_unit_install(config_path.parent, plan, installed_unit)
     if record_problem:
         print_func(f"team-launcher: {record_problem}")
     print_func(

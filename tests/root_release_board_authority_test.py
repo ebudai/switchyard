@@ -293,7 +293,7 @@ def test_proven_peer_must_report_the_effective_release_build() -> None:
             server.server_close()
 
 
-def test_unit_rewriters_refuse_to_replace_an_exact_unit_before_changing_anything() -> None:
+def test_unit_rewriters_install_the_exact_render_or_refuse_before_changing_anything() -> None:
     import ast
 
     with tempfile.TemporaryDirectory(prefix="syrd700-rewrite.") as raw:
@@ -317,12 +317,55 @@ def test_unit_rewriters_refuse_to_replace_an_exact_unit_before_changing_anything
         release_units.SYSTEM_UNIT_DIR = units
         try:
             name = "p699-ticket-board.service"
-            assert release_units.refuse_rewriting_exact_board_unit(name, "add-role") == "", "no unit installed"
+            assert release_units.exact_board_unit_rewrite_problem(name, "add-role") == "", "no unit installed"
             (units / name).write_text(legacy, encoding="utf-8")
-            assert release_units.refuse_rewriting_exact_board_unit(name, "add-role") == "", "a legacy unit stays as is"
+            assert release_units.exact_board_unit_rewrite_problem(name, "add-role") == "", "a legacy unit stays as is"
             (units / name).write_text(exact, encoding="utf-8")
-            refused = release_units.refuse_rewriting_exact_board_unit(name, "add-role")
-            assert "add-role would replace" in refused and "Nothing was changed" in refused, refused
+            # SYRD-702: over an exact unit, the command re-renders for the release that unit runs -- refused, before
+            # anything changes, when root holds no trusted copy of that release able to run under it.
+            refused = release_units.exact_board_unit_rewrite_problem(name, "add-role")
+            assert "add-role re-renders" in refused and "Nothing was changed" in refused, refused
+
+            from scripts.ticket_board import privileged_operations
+            from scripts import tenant_release_deploy
+
+            releases = tmp / "releases"
+            release = releases / SHA
+            (release / "scripts" / "ticket_board").mkdir(parents=True)
+            (release / privileged_operations.RELEASE_MARKER_NAME).write_text(f'{{"commit": "{SHA}"}}', encoding="utf-8")
+            trusted_exact = release_units.render_board_unit(legacy, release=release,
+                                                             report_credentials=release_units.report_credentials_path(legacy))
+            (units / name).write_text(trusted_exact, encoding="utf-8")
+            saved = privileged_operations.SHARED_RELEASES, privileged_operations.TRUSTED_OWNER_UID
+            privileged_operations.SHARED_RELEASES, privileged_operations.TRUSTED_OWNER_UID = str(releases), os.getuid()
+            try:
+                refused = release_units.exact_board_unit_rewrite_problem(name, "add-role")
+                assert "predates exact root-release board units" in refused, refused
+                (release / "scripts" / "ticket_board" / "release_units.py").write_text("# renderer\n", encoding="utf-8")
+                assert release_units.exact_board_unit_rewrite_problem(name, "add-role") == ""
+
+                # The unit installed is the exact render of the plan's refreshed template for that release, and
+                # root's staged templates are refreshed so the next deploy-release keeps the change.
+                from scripts import team_launcher as launcher
+
+                refreshed: list[str] = []
+                saved_launcher = launcher.render_privileged_artifacts, launcher.install_privileged_artifacts
+                launcher.render_privileged_artifacts = lambda p: {"rendered": b""}
+                launcher.install_privileged_artifacts = lambda p, rendered: refreshed.append(p.board_unit)
+                try:
+                    changed = legacy.replace("Environment=TICKET_BOARD_TICKET_PREFIX=", "Environment=TICKET_BOARD_TICKET_PREFIX=X")
+                    installing, previous = tenant_release_deploy.board_unit_for_plan(provision, changed)
+                    assert previous == trusted_exact and refreshed == [provision.board_unit], refreshed
+                    assert installing == release_units.render_board_unit(
+                        changed, release=release, report_credentials=release_units.report_credentials_path(changed))
+                    (units / name).write_text(legacy, encoding="utf-8")
+                    refreshed.clear()
+                    assert tenant_release_deploy.board_unit_for_plan(provision, changed) == (changed, legacy)
+                    assert refreshed == [], "a legacy tenant's templates are its repair's to stage"
+                finally:
+                    launcher.render_privileged_artifacts, launcher.install_privileged_artifacts = saved_launcher
+            finally:
+                privileged_operations.SHARED_RELEASES, privileged_operations.TRUSTED_OWNER_UID = saved
         finally:
             release_units.SYSTEM_UNIT_DIR = old_dir
 
@@ -335,8 +378,8 @@ def test_unit_rewriters_refuse_to_replace_an_exact_unit_before_changing_anything
         node = next(n for n in tree.body if getattr(n, "name", None) == command)
         calls = sorted((n for n in ast.walk(node) if isinstance(n, ast.Call)), key=lambda n: (n.lineno, n.col_offset))
         names = [ast.unparse(n.func).rsplit(".", 1)[-1] for n in calls]
-        assert "refuse_rewriting_exact_board_unit" in names and first_write in names, (module, names)
-        assert names.index("refuse_rewriting_exact_board_unit") < names.index(first_write), (module, names)
+        assert "exact_board_unit_rewrite_problem" in names and first_write in names, (module, names)
+        assert names.index("exact_board_unit_rewrite_problem") < names.index(first_write), (module, names)
 
 
 def test_the_operator_packet_installs_root_renders_of_the_release_it_provisions() -> None:
@@ -373,6 +416,100 @@ def test_the_operator_packet_installs_root_renders_of_the_release_it_provisions(
         assert not any(f'$provision_dir/{provision.board_unit}" ' in line and "install" in line for line in commands)
         migrate = next(line for line in commands if "ticket-board-migrate" in line)
         assert f"{provision.source_repo}/scripts/ticket-board-migrate" in migrate and str(provision.board_current) not in migrate
+
+
+def test_the_board_supervisor_refuses_an_exact_release_unit_and_reads_a_legacy_one() -> None:
+    from scripts import board_supervisor_spec as spec_mod
+
+    with tempfile.TemporaryDirectory(prefix="syrd702-supervisor.") as raw:
+        tmp = Path(raw)
+        provision = plan(tmp)
+        legacy = render_legacy_board(provision)
+        exact = release_units.render_board_unit(legacy, release=Path("/opt/switchyard/releases") / SHA,
+                                                report_credentials=release_units.report_credentials_path(legacy))
+        units = tmp / "units"
+        units.mkdir()
+        paths = spec_mod.Paths(unit_dir=units, owner_uid=os.getuid())
+        unit = units / f"{provision.project}-ticket-board.service"
+        unit.write_text(exact, encoding="utf-8")
+        try:
+            spec_mod.read_unit_spec(provision.project, paths)
+        except spec_mod.SpecError as exc:
+            assert "root's exact-release board unit" in str(exc) and "it is not supervised" in str(exc), exc
+        else:
+            raise AssertionError("the supervisor would run an exact-release unit, which could never be attested")
+        # A legacy unit is not refused for being exact: whatever the supervisor says of it, it says something else.
+        unit.write_text(legacy, encoding="utf-8")
+        try:
+            spec_mod.read_unit_spec(provision.project, paths)
+        except spec_mod.SpecError as exc:
+            assert "exact-release" not in str(exc), exc
+
+
+def test_a_role_commands_exact_unit_is_installed_and_attested_or_the_previous_unit_comes_back() -> None:
+    """Audit's SYRD-702 finding: a failed install, reload or restart of the replacement put nothing back."""
+    from types import SimpleNamespace
+
+    from scripts import team_launcher as launcher
+    from scripts import tenant_release_deploy
+
+    unit = SimpleNamespace(project="p702", board_unit="p702-ticket-board.service")
+
+    def host(fail: str, *, times: int = 1):
+        """The real installer's commands, answered: `fail` fails its first `times` occurrences."""
+        installed: list[str] = []
+        failures = {"left": times}
+
+        def run(argv, **kwargs):
+            text = " ".join(str(part) for part in argv)
+            step = ("install" if "/dev/stdin" in text else "reload" if "daemon-reload" in text
+                    else "restart" if "systemctl restart" in text else "other")
+            if step == "install":
+                installed.append(kwargs.get("input", ""))
+            failed = step == fail and failures["left"] > 0
+            failures["left"] -= failed
+            return subprocess.CompletedProcess(argv, 1 if failed else 0, "", "")
+
+        return run, installed
+
+    def attempt(run) -> list[str]:
+        try:
+            return tenant_release_deploy.install_exact_or_restore(
+                unit, installing="EXACT NEW", previous="EXACT OLD", runner=run,
+                install=launcher._install_and_restart_board_unit)
+        except SystemExit as exc:  # escaping is the bug: nothing put back
+            raise AssertionError(f"the failure escaped with the replacement in place: {exc}") from None
+
+    saved = tenant_release_deploy.attestation_problems
+    try:
+        tenant_release_deploy.attestation_problems = lambda project, **_kwargs: []
+        for stage in ("install", "reload", "restart"):
+            run, installed = host(stage)
+            problems = attempt(run)
+            assert installed == ["EXACT NEW", "EXACT OLD"], (stage, installed)
+            assert problems and problems[-1] == "the previous board unit was put back", (stage, problems)
+        # Both fail: said, not swallowed.
+        run, installed = host("restart", times=2)
+        problems = attempt(run)
+        assert installed == ["EXACT NEW", "EXACT OLD"] and "it needs an operator" in problems[-1], problems
+        # It held: one install, nothing put back.
+        run, installed = host("none")
+        assert attempt(run) == [] and installed == ["EXACT NEW"]
+        # Installed and restarted, but the board does not attest: the previous unit comes back too.
+        tenant_release_deploy.attestation_problems = lambda project, **_kwargs: ["the board did not attest"]
+        run, installed = host("none")
+        problems = attempt(run)
+        assert installed == ["EXACT NEW", "EXACT OLD"] and problems[0] == "the board did not attest", problems
+    finally:
+        tenant_release_deploy.attestation_problems = saved
+
+    # Both commands take that path for an exact unit, and the plain install only for a legacy one.
+    import ast
+
+    for module in ("project_role_add.py", "project_vcs_close_role.py"):
+        source = ast.unparse(ast.parse((ROOT / "scripts" / module).read_text(encoding="utf-8")))
+        assert "tenant_release_deploy.install_exact_or_restore(" in source, module
+        assert "tenant_release_deploy.attestation_problems" not in source, module
 
 
 def main() -> int:

@@ -390,9 +390,9 @@ def add_project_role_command(
         audit_role=audit_role,
     )
     launcher.render_add_role_sql(preflight_plan, role)
-    from scripts.ticket_board.release_units import refuse_rewriting_exact_board_unit
+    from scripts.ticket_board.release_units import exact_board_unit_rewrite_problem
 
-    refused = refuse_rewriting_exact_board_unit(getattr(preflight_plan, "board_unit", ""), "add-role")
+    refused = exact_board_unit_rewrite_problem(getattr(preflight_plan, "board_unit", ""), "add-role")
     if refused:
         print_func(refused)
         return 1
@@ -434,8 +434,22 @@ def add_project_role_command(
         board_unit=board_unit,
     )
     launcher._apply_add_role_board_sql(plan, role_name=role, runner=runner)
-    launcher._install_and_restart_board_unit(plan, board_unit=board_unit, runner=runner)
-    record_problem = root_packet.record_unit_install(config_path.parent, plan, board_unit)
+    # Root's staged template refreshed for the plan, and under root's exact-release unit its exact render for the
+    # release that unit runs, attested once restarted -- or the previous unit back (SYRD-702).
+    from scripts import tenant_release_deploy
+
+    installed_unit, previous_unit = tenant_release_deploy.board_unit_for_plan(plan, board_unit)
+    if installed_unit != board_unit:
+        problems = tenant_release_deploy.install_exact_or_restore(
+            plan, installing=installed_unit, previous=previous_unit, runner=runner,
+            install=launcher._install_and_restart_board_unit,
+        )
+        if problems:
+            print_func(f"team-launcher: {'; '.join(problems)}")
+            return 1
+    else:
+        launcher._install_and_restart_board_unit(plan, board_unit=installed_unit, runner=runner)
+    record_problem = root_packet.record_unit_install(config_path.parent, plan, installed_unit)
     if record_problem:
         print_func(f"team-launcher: {record_problem}")
     role_runner = runner

@@ -131,9 +131,11 @@ def test_the_seams_the_modules_own_names_and_the_callers() -> None:
     bare = sorted({n.id for n in ast.walk(module) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
                    and n.id in set(SHARED) | set(MOVED)})
     # SYRD-608: the unit and SQL writes go through the launcher's `write_owner_file` (29 + 2).
-    check(sum(through.values()) == 31 and all(through.get(n) for n in SHARED) and through.get("_loaded_plan_field") == 6
+    # SYRD-702: `_install_and_restart_board_unit` a second time, to put the previous unit back when the board under
+    # root's exact render does not attest (32).
+    check(sum(through.values()) == 32 and all(through.get(n) for n in SHARED) and through.get("_loaded_plan_field") == 6
           and through.get("write_owner_file") == 2 and not bare,
-          f"31 call-time reads, the seven shared facilities among them, none bare: {through} {bare}")
+          f"32 call-time reads, the seven shared facilities among them, none bare: {through} {bare}")
     launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
     # SYRD-357 moved the shared facilities into project_role_plan_support; the launcher re-exports them,
     # so each is still bound on the launcher, where this module reads (and suites patch) it.

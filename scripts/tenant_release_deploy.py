@@ -214,6 +214,54 @@ def install_deploy_and_attest(
     return problems or attestation_problems(config.project, runner=runner)
 
 
+def board_unit_for_plan(plan: Any, template: str) -> tuple[str, str]:
+    """The board unit `add-role` or `set-vcs-close-role` installs for ``plan``, and the one it replaces.
+
+    Under root's exact-release unit, root's staged templates are refreshed for the plan, so the next deploy-release
+    renders the change rather than dropping it, and the unit installed is the exact render of the refreshed template
+    for the release that unit runs. Under a legacy one it is the template, as before; that tenant's repair stages
+    its templates (SYRD-701, SYRD-702).
+    """
+    from scripts import team_launcher as launcher
+    from scripts.ticket_board import release_units
+
+    board_unit = getattr(plan, "board_unit", "")
+    try:
+        installed = (release_units.SYSTEM_UNIT_DIR / board_unit).read_text(encoding="utf-8") if board_unit else ""
+    except OSError:
+        return template, ""
+    release = release_units.installed_release(installed)
+    if release is None:
+        return template, installed
+    launcher.install_privileged_artifacts(plan, launcher.render_privileged_artifacts(plan))
+    return release_units.render_board_unit(template, release=release,
+                                           report_credentials=release_units.report_credentials_path(template)), installed
+
+
+def install_exact_or_restore(
+    plan: Any, *, installing: str, previous: str, runner: Callable[..., Any], install: Callable[..., None]
+) -> list[str]:
+    """Root's exact unit installed, reloaded, restarted and attested as one transaction, or the previous unit back.
+
+    `install` is the role commands' `_install_and_restart_board_unit`, which raises SystemExit when the install, the
+    reload or the restart fails -- by then the replacement may already be in place and the board stopped. Any of
+    those, or a board that does not attest, puts ``previous`` back the same way; a restore that fails too is said,
+    not swallowed (SYRD-702). Nothing when it all held.
+    """
+    try:
+        install(plan, board_unit=installing, runner=runner)
+        problems = attestation_problems(plan.project, runner=runner)
+    except SystemExit as exc:
+        problems = [str(exc) or f"installing root's exact {plan.board_unit} failed"]
+    if not problems:
+        return []
+    try:
+        install(plan, board_unit=previous, runner=runner)
+    except SystemExit as exc:
+        return [*problems, f"and putting the previous {plan.board_unit} back failed too: {exc}; it needs an operator"]
+    return [*problems, "the previous board unit was put back"]
+
+
 def attestation_problems(project: str, *, runner: Callable[..., Any]) -> list[str]:
     """Why the project's running board is not root's exact release under its effective unit, or none."""
     from scripts.ticket_board import board_identity

@@ -4,6 +4,10 @@
 from __future__ import annotations
 
 from team_launcher_test_helpers import *
+from scripts.ticket_board import release_units
+
+# SYRD-702: these tenants' installed units are their fixtures', never the host's.
+release_units.SYSTEM_UNIT_DIR = Path(tempfile.gettempdir()) / f"syrd702-no-units-{os.getpid()}"
 
 def test_add_role_unrecognized_layout_without_room_refuses_actionably_without_mutation() -> None:
     current_user = team_launcher.current_user_name()

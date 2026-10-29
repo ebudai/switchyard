@@ -347,6 +347,15 @@ def read_unit_spec(project: str, paths: Paths) -> ChildSpec:
     unit_path = paths.unit_path(project)
     text = read_root_file(unit_path, limit=UNIT_LIMIT_BYTES, owner_uid=paths.owner_uid, what="unit")
     where = str(unit_path)
+    from scripts.ticket_board.release_units import is_exact_release_unit
+
+    if is_exact_release_unit(text):
+        # Root's exact-release unit is attested as the unit systemd itself runs: its effective definition, with no
+        # drop-ins, and the live process systemd started (`board_identity.effective_unit`). A supervised board has
+        # this supervisor's drop-in and a child the supervisor started, so it could never be attested; and its
+        # StateDirectory and credentials are systemd's to provide. It is not supervised (SYRD-702).
+        raise SpecError(f"{where}: this is root's exact-release board unit, which runs only under systemd, where "
+                        "its board can be attested; it is not supervised")
     sections = parse_unit(text, where=where)
     unknown_sections = set(sections) - {"Unit", "Service", "Install"}
     if unknown_sections:

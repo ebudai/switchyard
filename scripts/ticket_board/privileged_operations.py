@@ -225,6 +225,18 @@ def _job_selftest(values: Mapping[str, str]) -> list[str]:
     return [LAUNCHER, "job-selftest", values["project"], "--outcome", values["outcome"]]
 
 
+def _adopt_conversation(values: Mapping[str, str]) -> list[str]:
+    # SYRD-694: handed straight to conversation_adoption_record by the launcher's wrapper, as root, which
+    # recomputes the confirmed plan as the tenant and records that plan's values alone.
+    return [LAUNCHER, "conversation-adoption-record", "record", values["project"], values["role"],
+            values["conversation"], values["digest"]]
+
+
+def _withdraw_conversation_adoption(values: Mapping[str, str]) -> list[str]:
+    return [LAUNCHER, "conversation-adoption-record", "withdraw", values["project"], values["role"],
+            values["conversation"]]
+
+
 #: One entry per catalogued action. `privileged_operations_test` asserts the
 #: two tables have exactly the same names, so an action added to the catalogue
 #: without an operation here is a failing test rather than a helper that
@@ -238,6 +250,8 @@ OPERATIONS: dict[str, Callable[[Mapping[str, str]], list[str]]] = {
     "select-shared-release": _select_shared_release,
     "repair-boundary": _repair_boundary,
     "job-selftest": _job_selftest,
+    "adopt-conversation": _adopt_conversation,
+    "withdraw-conversation-adoption": _withdraw_conversation_adoption,
 }
 
 

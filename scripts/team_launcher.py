@@ -1517,9 +1517,7 @@ from scripts.runtime_user_provisioning import (
     loginctl_enable_linger_args,
     provision_runtime_command,
 )
-from scripts.rollout_log import (
-    rollout_log_command,
-)
+from scripts.rollout_log import rollout_log_command
 from scripts.control_role import (
     CONTROL_ROLE_CAPABILITIES,
     control_role_name,
@@ -1574,6 +1572,7 @@ from scripts.project_resolution import (
     _switchyard_entries,
     partial_provision_record,
 )
+from scripts.conversation_adoption import _build_switchyard_adopt_conversation_parser, adopt_conversation_command
 from scripts.project_identity import (
     ProjectConfig,
     RoleConfig,

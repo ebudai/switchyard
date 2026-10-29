@@ -38,6 +38,7 @@ from typing import Any, Callable, Mapping, Sequence
 if __package__ in (None, ""):  # pragma: no cover - direct execution as a program
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from ticket_board import (
+        board_identity,
         no_follow,
         peer_identity,
         privileged_actions,
@@ -47,6 +48,7 @@ if __package__ in (None, ""):  # pragma: no cover - direct execution as a progra
     )
 else:
     from . import (
+        board_identity,
         no_follow,
         peer_identity,
         privileged_actions,
@@ -147,6 +149,36 @@ def board_url_for(project: str, *, registry_dir: Path = DEFAULT_REGISTRY_DIR) ->
     if not board_url:
         raise Refused(f"{project}'s configuration records no board URL")
     return board_url
+
+
+def authorizing_board(
+    action: privileged_actions.PrivilegedAction,
+    project: str,
+    *,
+    board_get_for: Callable[[str], Callable[[str, str], Any]] | None = None,
+    url_for: Callable[[str], str] | None = None,
+) -> tuple[Callable[[str, str], Any], str]:
+    """The board the control pane is proven against, and how it is asked.
+
+    Most actions ask the URL `board_url_for` reads from the tenant's registered configuration. An action that mints
+    durable proof (`board_from_unit`) asks only the board root's own unit names, over a connection the kernel shows
+    that board's main process holds (`board_identity`), because every role shares the account that can rewrite
+    that configuration (SYRD-694).
+    """
+    if action.board_from_unit:
+        try:
+            get = (board_get_for or board_identity.board_get_for)(project)
+        except board_identity.BoardIdentityError as exc:
+            raise Refused(str(exc)) from None
+
+        def proven(board_url: str, path: str) -> Any:
+            try:
+                return get(board_url, path)
+            except board_identity.BoardIdentityError as exc:
+                raise Refused(str(exc)) from None
+
+        return proven, f"{project}'s board, from root's unit {board_identity.unit_name(project)}"
+    return _board_get, (url_for or board_url_for)(project)
 
 
 def require_registered_control_caller(
@@ -292,6 +324,13 @@ def run_privileged_action(
     They are reported to the caller instead, in bounded time and with the
     reason.
     """
+    bound = action.requester_argument
+    if bound and (not requester_role or values.get(bound) != requester_role):
+        # SYRD-694: what root records about a role is about the role the helper proved asked, never another.
+        raise Refused(
+            f"{action.name} acts only for the role that asked for it: the registered caller is "
+            f"{requester_role or 'no verified role'}, and {bound}={values.get(bound)!r} was given"
+        )
     builder = command_for or privileged_operations.command_for
     try:
         command = builder(action.name, action.operation_values(values))
@@ -423,15 +462,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         project = values.get("project") or ""
         requester_role = ""
         if project:
-            board_url = board_url_for(project)
+            board_get, board_url = authorizing_board(action, project)
             requester_role = require_registered_control_caller(
                 project,
-                board_get=_board_get,
+                board_get=board_get,
                 board_url=board_url,
                 caller=caller,
             ) or ""
             if values.get("ticket"):
-                require_ticket_on_board(project, values["ticket"], board_get=_board_get, board_url=board_url)
+                require_ticket_on_board(project, values["ticket"], board_get=board_get, board_url=board_url)
         # A host-wide action names no tenant, so there is no single board to
         # prove the caller against -- which is exactly why every action without
         # a project is `auth_admin` in the catalogue: a human authenticates,

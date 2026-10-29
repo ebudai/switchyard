@@ -85,6 +85,26 @@ def _outcome(value: str) -> str:
     return value
 
 
+def _role(value: str) -> str:
+    if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", value or ""):
+        raise ArgumentError(f"role must be a role name: {value!r}")
+    return value
+
+
+def _conversation(value: str) -> str:
+    """A provider conversation id: no glob character, no separator, nothing that could name a path."""
+    if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z-]{7,127}", value or ""):
+        raise ArgumentError(f"conversation must be a provider conversation id: {value!r}")
+    return value
+
+
+def _sha256(value: str) -> str:
+    """A sha256, as lowercase hex: the digest of the adoption preview the caller confirmed."""
+    if not re.fullmatch(r"[0-9a-f]{64}", value or ""):
+        raise ArgumentError(f"a digest must be 64 lowercase hex characters: {value!r}")
+    return value
+
+
 #: Values about the JOB rather than the operation, optional on every action
 #: that names a project. A projectless action has no board to report to, so it
 #: takes none (SYRD-113).
@@ -103,6 +123,12 @@ class PrivilegedAction:
     authentication: str
     #: Ordered argument names and their validators. Nothing else is accepted.
     arguments: tuple[tuple[str, Callable[[str], str]], ...]
+    #: An argument whose value must be the role the helper proved asked for the action, or "" for none: a
+    #: record root makes about a role is about the role that asked (SYRD-694).
+    requester_argument: str = ""
+    #: True when the control pane is proven only against the board root's own unit names, over a connection the
+    #: kernel shows that board's process holds, never a URL from the tenant's configuration (SYRD-694).
+    board_from_unit: bool = False
 
     @property
     def action_id(self) -> str:
@@ -218,6 +244,31 @@ CATALOGUE: tuple[PrivilegedAction, ...] = (
         message="Authentication is required to repair a Switchyard tenant's boundary",
         authentication=ALLOW_ACTIVE,
         arguments=(("project", _slug),),
+    ),
+    # SYRD-694: root's record that lets the control role resume one legacy conversation of its own, filed under
+    # a workspace that is not its worktree. Every role shares the tenant account, so only a record root writes
+    # after proving the control pane is one a sibling role cannot forge. The role must be the one the helper
+    # proved asked. The caller names only the conversation and the digest of the preview it confirmed: root
+    # recomputes that plan with the shared release, as the tenant account, and records only the plan's own
+    # values, only when the plan is clean and its digest is that one. Pre-authorized like the other control-pane
+    # actions; the User's sign-off is the ticket's, before it is asked for.
+    PrivilegedAction(
+        name="adopt-conversation",
+        summary="Record that the control role may resume one legacy conversation filed outside its worktree",
+        message="Authentication is required to adopt a legacy Switchyard conversation",
+        authentication=ALLOW_ACTIVE,
+        arguments=(("project", _slug), ("role", _role), ("conversation", _conversation), ("digest", _sha256)),
+        requester_argument="role",
+        board_from_unit=True,
+    ),
+    PrivilegedAction(
+        name="withdraw-conversation-adoption",
+        summary="Remove root's record of an adopted conversation, and nothing else",
+        message="Authentication is required to withdraw an adopted Switchyard conversation",
+        authentication=ALLOW_ACTIVE,
+        arguments=(("project", _slug), ("role", _role), ("conversation", _conversation)),
+        requester_argument="role",
+        board_from_unit=True,
     ),
     # SYRD-113: the disposable acceptance of the privileged-job path itself. It
     # runs a fixed program that prints fixed synthetic lines -- one a fixed fake

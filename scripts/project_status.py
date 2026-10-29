@@ -666,6 +666,14 @@ def switchyard_status_command(
         print_func("")
         for line in local_lines:
             print_func(line)
+    from scripts import conversation_adoption
+
+    # A conversation a role resumes by adoption is said to be that, not one begun in its worktree (SYRD-694).
+    adoption_lines = [line for config in configs for line in conversation_adoption.status_lines(config)]
+    if adoption_lines:
+        print_func("")
+        for line in adoption_lines:
+            print_func(line)
     unsafe = [status for status in statuses if status.root_windows]
     if unsafe:
         print_func("")

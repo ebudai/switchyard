@@ -126,6 +126,11 @@ Where the check runs:
 Nothing is typed into a pane, and a role's own conversation resumes exactly as
 before.
 
+A conversation of the control role's that was begun before it had a worktree
+of its own is accepted only through an explicit adoption of exactly that
+conversation, for exactly that role; see
+[SYRD-694](syrd-694-conversation-adoption.md).
+
 **After deploy, in a shared worktree.** A role whose current conversation has
 no owner record yet starts fresh once. From then on its hook claims each new
 conversation, and the launcher each resume it accepts. With a worktree of its own, a role's

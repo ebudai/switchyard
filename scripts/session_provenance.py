@@ -384,9 +384,20 @@ def judge(role: RoleConfig, session_id: str, record: dict[str, Any] | None, *, s
         return Verdict(False, "no-proof",
                        f"{runtime} records no workspace for it at {location}, so nothing shows it is {role.role}'s")
     if not any(_same(workspace, role.workdir) for workspace in workspaces):
-        return Verdict(False, "workspace",
-                       f"{runtime} files it under {', '.join(workspaces)} ({location}), not {role.role}'s worktree "
-                       f"{role.workdir}", workspaces)
+        from scripts.conversation_adoption import adopted
+
+        # SYRD-694: only an explicit adoption, of exactly this conversation for exactly this role, from exactly
+        # this workspace, passes here; every check below still applies to it.
+        if adopted(role, session_dir, session_id, runtime, workspaces) is None:
+            return Verdict(False, "workspace",
+                           f"{runtime} files it under {', '.join(workspaces)} ({location}), not {role.role}'s worktree "
+                           f"{role.workdir}", workspaces)
+        if elsewhere := named_elsewhere(role, session_dir, session_id):
+            return Verdict(False, "other-role", f"{elsewhere}, and no record shows it is {role.role}'s", workspaces)
+        if peers := getattr(role, "workdir_peers", ()):
+            return Verdict(False, "shared-worktree",
+                           f"{role.role}'s worktree {role.workdir} is also {', '.join(peers)}'s", workspaces)
+        return Verdict(True, workspaces=workspaces, proof="adopted")
     if owner == role.role:
         # Claimed by this role: by the pane's own hook when its provider opened the conversation as new, or by an
         # earlier resume the launcher accepted.
@@ -433,6 +444,10 @@ def refuse_foreign(role: RoleConfig, session_id: str, session_dir: Path, entry: 
 
     verdict = judge(role, session_id, _session_record_for_role(role, session_dir), session_dir=session_dir)
     if verdict.ok:
+        if verdict.proof == "adopted":
+            _decided(role, session_dir, entry, "adopted_conversation",
+                     f"team-launcher: {role.role} resumes {session_id} by adoption (SYRD-694): it began in "
+                     f"{', '.join(verdict.workspaces)}, not {role.role}'s worktree {role.workdir}", session_id)
         if verdict.proof:
             claim(role, session_dir, session_id, verdict.proof)  # durable from now on, whatever the records become
         return ""

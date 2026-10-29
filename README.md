@@ -119,8 +119,10 @@ Commands:
   status           list registered projects and pane liveness
   validate-models  check configured role models without starting panes
   paste-image      hand one copied image to a role, as the project's desktop owner
+  adopt-conversation
+                   let the control role resume one legacy conversation of its own
 
-Bare project names start or attach the project. Recognized commands: board-skill, new, register, upgrade, repair-boundary, approve-desktop, adopt-workflow, migrate-workflow, rebind-workflow-panes, resume-provision, finish-upgrade, cutover-roles, publication-status, rollout-log, recover-display, privileged-action, install-shared-release, release-status, deploy-release, add-role, worker-pool, set-owner-identity, present, attach, replace-window, set-vcs-close-role, set-role-runtime, reconcile-role-models, agy-credential, seed-role-credentials, role-prompt, design-stage, router-role, documentation-gate, publisher, onboarding-readiness, stop, start, teardown, status, validate-models, paste-image.
+Bare project names start or attach the project. Recognized commands: board-skill, new, register, upgrade, repair-boundary, approve-desktop, adopt-workflow, migrate-workflow, rebind-workflow-panes, resume-provision, finish-upgrade, cutover-roles, publication-status, rollout-log, recover-display, privileged-action, install-shared-release, release-status, deploy-release, add-role, worker-pool, set-owner-identity, present, attach, replace-window, set-vcs-close-role, set-role-runtime, reconcile-role-models, agy-credential, seed-role-credentials, role-prompt, design-stage, router-role, documentation-gate, publisher, onboarding-readiness, stop, start, teardown, status, validate-models, paste-image, adopt-conversation.
 ```
 
 <!-- switchyard-help:end -->

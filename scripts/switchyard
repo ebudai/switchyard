@@ -19,6 +19,13 @@ if __name__ == "__main__" and sys.argv[1:2] == ["job-selftest"]:
 
     raise SystemExit(job_selftest(sys.argv[2:]))
 
+if __name__ == "__main__" and sys.argv[1:2] == ["conversation-adoption-record"]:
+    # SYRD-694: the catalogued adopt-conversation actions' operation, root's own record. It reads no tenant file,
+    # so it runs before the launcher or anything else is imported.
+    from scripts.conversation_adoption_record import main as conversation_adoption_record
+
+    raise SystemExit(conversation_adoption_record(sys.argv[2:]))
+
 from scripts.team_launcher import switchyard_main
 from scripts.repository_hooks import install_new_registry_entries, registry_snapshot
 

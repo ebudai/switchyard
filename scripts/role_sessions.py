@@ -123,6 +123,10 @@ def _start_role_session(
         from scripts.agy_last_conversation import adopt_agy_last_conversation
 
         adopt_agy_last_conversation(role, session_dir)
+        # SYRD-694: a conversation the control role explicitly adopted becomes its record once, at this start.
+        from scripts.conversation_adoption import install_adopted_record
+
+        install_adopted_record(role, session_dir, seed_source)
     recovery = None
     if prefer_resume and _uses_fresh_session_per_ticket(role):
         # SYRD-626: a launch is not a ticket boundary; the board says what this role's work needs.

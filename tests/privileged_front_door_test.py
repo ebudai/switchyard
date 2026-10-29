@@ -533,7 +533,9 @@ def test_every_operation_runs_the_pinned_launcher_and_nothing_else() -> None:
                                        # SYRD-531: the deploy the catalogue names.
                                        "deploy-release",
                                        # SYRD-113: the privileged-job self-test.
-                                       "job-selftest"}
+                                       "job-selftest",
+                                       # SYRD-694: root's adoption record, written or withdrawn.
+                                       "conversation-adoption-record", "record", "withdraw"}
                         or element.startswith(releases),
                         f"{action.name} passes {element!r}, which is neither a literal "
                         "from the operations table nor a validated value",

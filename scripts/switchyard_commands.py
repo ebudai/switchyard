@@ -122,6 +122,9 @@ SWITCHYARD_COMMANDS = (
     # compositor where no provider can read that clipboard itself. Run by the
     # desktop owner the project's policy names, never by a role (SYRD-247).
     "paste-image",
+    # Adopts one legacy conversation of the control role's, begun outside its worktree, so its normal start
+    # resumes it: a preview, then an apply from the live control role's own pane (SYRD-694).
+    "adopt-conversation",
 )
 # `present` and `board-skill` act on the caller's own runtime -- display slots
 # and the caller's CLI skill trees -- so neither needs to escalate. `role-prompt`
@@ -171,7 +174,7 @@ SWITCHYARD_UNPRIVILEGED_COMMANDS = frozenset(
         "present", "attach", "board-skill", "role-prompt", "design-stage", "router-role", "documentation-gate",
         "publisher", "set-role-runtime",
         "reconcile-role-models", "finish-upgrade", "worker-pool", "privileged-action", "status",
-        "paste-image",
+        "paste-image", "adopt-conversation",
     }
 )
 SWITCHYARD_PRIVILEGED_COMMANDS = frozenset(
@@ -225,6 +228,8 @@ Commands:
   status           list registered projects and pane liveness
   validate-models  check configured role models without starting panes
   paste-image      hand one copied image to a role, as the project's desktop owner
+  adopt-conversation
+                   let the control role resume one legacy conversation of its own
 
 Bare project names start or attach the project. Recognized commands: {commands}.
 """

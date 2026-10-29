@@ -269,10 +269,19 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             f"{args.project}` to repatriate resumable state without creating or deleting accounts"
         )
         return 1
-    if argv[0].casefold() == "finish-upgrade":
-        args = launcher._build_switchyard_finish_upgrade_parser().parse_args(argv[1:])
+    # `adopt-conversation` shares this block: like finish-upgrade it is the control role's own write, run as the
+    # caller on the project's own store (SYRD-694).
+    if argv[0].casefold() in ("finish-upgrade", "adopt-conversation"):
+        adopt = argv[0].casefold() == "adopt-conversation"
+        args = (launcher._build_switchyard_adopt_conversation_parser() if adopt
+                else launcher._build_switchyard_finish_upgrade_parser()).parse_args(argv[1:])
         entry = launcher._resolve_switchyard_project(args.project)
         config = launcher._load_switchyard_project_config_for_command(entry, argv)
+        if adopt:
+            return launcher.adopt_conversation_command(
+                config, config_path=entry.config_path, role=args.role, session_id=args.session_id,
+                rollback=args.rollback, confirm=args.confirm, plan_json=args.plan_json,
+            )
         return launcher.finish_upgrade_command(
             config,
             config_path=entry.config_path,

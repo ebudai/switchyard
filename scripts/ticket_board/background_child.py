@@ -261,8 +261,10 @@ def _elapsed(seconds: float) -> str:
 
 
 def sentence(holder: Holder, origin: dict[str, Any] | None, *, now: float | None = None,
-             provider_pid: int | None = None, stop: str = "") -> str:
-    """What the Director is told about one holder; `stop`, when given, is the way to end it."""
+             provider_pid: int | None = None, stop: str = "", under: str = "") -> str:
+    """What the Director is told about one holder; `stop`, when given, is the way to end it.
+
+    `under`, when given, names what else runs under it (SYRD-704)."""
     now = time.time() if now is None else now
     running = (f"running for {_elapsed(now - holder.started_at)}, since "
                f"{time.strftime('%Y-%m-%d %H:%M:%S %z', time.localtime(holder.started_at))}"
@@ -278,7 +280,7 @@ def sentence(holder: Holder, origin: dict[str, Any] | None, *, now: float | None
     where = f" in {holder.cwd}" if holder.cwd else ""
     endless = (" It waits on a `pgrep -f` whose pattern matches its own command line, so it can never end by itself."
                if holder.self_matching else "")
-    return (f"pid {holder.pid} (process group {holder.pgid or 'unknown'}), {running}, {turn}, {whose}{command}{where}.{endless} "
+    return (f"pid {holder.pid} (process group {holder.pgid or 'unknown'}), {running}, {turn}, {whose}{command}{where}.{endless}{under} "
             f"Nothing was stopped. To end it: {stop or holder.recovery(provider_pid)}.")
 
 
@@ -353,12 +355,15 @@ def _present(ledger: Any, conn: Any) -> bool:
     return present
 
 
-def tell(ledger: Any, conn: Any, notification_id: int, holder: Holder, what: str) -> None:
-    """Tell the Director about this child, once for as long as the board remembers it. Never fatal."""
+def tell(ledger: Any, conn: Any, notification_id: int, holder: Holder, what: str) -> bool:
+    """Tell the Director about this child, once for as long as the board remembers it; whether it was newly told.
+
+    Never fatal."""
     try:
         if _present(ledger, conn):
-            conn.execute("SELECT ticket_board.note_background_child(%s::bigint, %s::text, %s::text)",
-                         (notification_id, holder.key, what))
+            return _one_value(conn.execute("SELECT ticket_board.note_background_child(%s::bigint, %s::text, %s::text)",
+                                           (notification_id, holder.key, what)).fetchone())
     except Exception as exc:  # The delivery must never depend on its own bookkeeping.
         ledger.logger.warning("Failed to note background child %s for notification %s: %s",
                               holder.key, notification_id, exc)
+    return False

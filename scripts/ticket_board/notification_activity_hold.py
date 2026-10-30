@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from . import background_child, blocked_pane, composer_hold
+from . import background_child, background_episode, blocked_pane, composer_hold
 from .notification_dispatch import ComposerSnapshot, NotificationDispatch
 from .notification_eligibility import TERMINAL_STATES, NotificationEligibility
 from .notification_ledger import NotificationLedger
@@ -350,11 +350,13 @@ class NotificationActivityHold:
             },
         )
         # The child is still running, and nothing here stops it: the Director
-        # is told once what it is and how to end only it (SYRD-583).
-        identity = getattr(getattr(self.activity_gate(), "__self__", None), "role_identities", {}).get(target_role)
-        for holder in holders:
-            what = background_child.sentence(holder, origins.get(holder.key), provider_pid=getattr(identity, "pid", None))
-            background_child.tell(self.ledger, conn, notification_id, holder, what)
+        # is told once what it is and how to end only it (SYRD-583) -- once per
+        # command, and only for one still there and long enough or overdue to
+        # matter (SYRD-704).
+        gate = getattr(self.activity_gate(), "__self__", None)
+        identity = getattr(gate, "role_identities", {}).get(target_role)
+        background_episode.tell(self.ledger, conn, notification_id, holders, origins, gate=gate, role=target_role,
+                                provider_pid=getattr(identity, "pid", None), terminal=self._terminal_states())
         self._prior_turn_hold_started_at.pop(notification_id, None)
         return PRIOR_TURN_HOLD_DELIVER
 

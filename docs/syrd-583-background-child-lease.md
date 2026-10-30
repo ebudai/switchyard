@@ -111,6 +111,12 @@ describing:
     `ps -o pid,pgid,lstart,args -g <pgid>`, then `kill -TERM -- -<pgid>`, never
     the provider, whose pid it names. A child in the pane's own process group is
     given `kill -TERM <pid>` instead.
+
+  Since SYRD-704 this is said once per command, not once per child: the
+  holders are read again just before, grouped under the shell the provider's
+  tool started, and told only when that has run a minute or is past a deadline
+  declared for it. A queued notice whose process group has gone is dropped. See
+  `docs/syrd-704-background-episodes.md`.
 - **SYRD-557's hold alert** names the same children, the same way, when a child
   hold lasts past its threshold. It uses SYRD-566's described form of
   `note_background_hold`.

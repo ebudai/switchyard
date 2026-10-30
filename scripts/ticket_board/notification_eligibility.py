@@ -5,7 +5,7 @@ import json
 from datetime import datetime
 from typing import Any, Callable
 
-from . import board_stall, reminder_snooze, stall_episode
+from . import background_episode, board_stall, reminder_snooze, stall_episode
 
 TERMINAL_STATES = {"done", "cancelled"}
 NUDGE_ELIGIBLE_STATES = {"in_progress", "inspection", "audit", "dat", "director_review", "analysis", "backlog"}
@@ -415,6 +415,9 @@ WHERE id = %s
         # A pull policy's idle-capacity alert is about the ready queue and is
         # for the Director: current while its ticket still waits there, which
         # the state and assignee checks above already establish (SYRD-539).
+        # SYRD-704: an alert about background work only while the process group it names is still there.
+        if kind == "background_child" and not background_episode.alert_is_current(parsed):
+            return False
         if kind in {"pull_idle_capacity", "ticket_context", "delivery_proof", "background_hold", "composer_hold",
                     "background_child", "blocked_pane", "uat_question", "execution_lease",
                     "provider_quota_hold", "invalid_user_wait", "audit_return_missing",

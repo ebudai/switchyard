@@ -68,11 +68,12 @@ class Host:
     """systemd and the deploy, as the recording runner answers them."""
 
     def __init__(self, tenant, board, unit_dir: Path, trusted_release: Path,
-                 *, stop="ok", units="ok", deploy="ok", start="ok", restart="ok") -> None:
+                 *, stop="ok", units="ok", deploy="ok", start="ok", restart="ok", database="ok") -> None:
         self.tenant, self.board = tenant, board
         self.unit_dir = unit_dir
         self.trusted_release = trusted_release
-        self.outcome = {"stop": stop, "units": units, "deploy": deploy, "start": start, "restart": restart}
+        self.outcome = {"stop": stop, "units": units, "deploy": deploy, "start": start, "restart": restart,
+                        "database": database}
         self.steps: list[str] = []
         # SYRD-700: whether root's template chain installed a staged (legacy) board or canary itself.
         self.legacy_installed = False
@@ -127,8 +128,16 @@ class Host:
                 return result(0)
             self.steps.append("restart board")
             return result(0 if self.outcome["restart"] == "ok" else 1)
+        if argv[:4] == ["runuser", "-u", "postgres", "--"]:
+            # SYRD-706: root's own database work, as the cluster's account, from root's trusted release only.
+            assert argv[4:6] == ["env", "-i"] and _kwargs.get("cwd") == "/", argv
+            assert any(part.startswith(str(self.trusted_release) + "/") for part in argv), argv
+            self.steps.append("migrate as postgres" if argv[-1].endswith("ticket-board-migrate") else "rbac as postgres")
+            return result(0 if self.outcome["database"] == "ok" else 1)
         if "deploy-restart" in text:
             words = shlex.split(argv[-1])
+            # SYRD-706: the tenant's deploy skips the database work root has done.
+            assert "TICKET_BOARD_SKIP_MIGRATIONS=1" in words, words
             proof_values = [word.split("=", 1)[1] for word in words
                             if word.startswith("TICKET_BOARD_PROVISIONED_SYSTEM_UNIT=")]
             board_unit = self.unit_dir / "porter-ticket-board.service"
@@ -172,6 +181,11 @@ def scenarios(tree: Path) -> dict:
                 (release / "scripts").mkdir(parents=True, exist_ok=True)
                 (release / launcher.SWITCHYARD_RELEASE_MARKER_NAME).write_text(json.dumps({"commit": commit}), encoding="utf-8")
                 (release / "scripts" / "ticket-board-service.sh").write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+                # SYRD-706: what root migrates and grants from, as the cluster's account.
+                (release / "scripts" / "ticket_board" / "migrations").mkdir(parents=True, exist_ok=True)
+                (release / "scripts" / "ticket_board" / "migrations" / "pgu1_fixture.sql").write_text("SELECT 1;\n")
+                (release / "scripts" / "ticket_board" / "rbac.sql").write_text("SELECT 1;\n", encoding="utf-8")
+                (release / "scripts" / "ticket-board-migrate").write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
                 # SYRD-700: a release new enough to run under its exact unit carries the renderer.
                 if runtime or commit != NEW:
                     (release / "scripts" / "ticket_board").mkdir(exist_ok=True)
@@ -296,6 +310,7 @@ def scenarios(tree: Path) -> dict:
     run("not root", root=False)
     run("release predates exact units", runtime=False)
     run("prepared release not installed", installed=(OLD,))
+    run("database work fails", database="fail")
     return seen
 
 
@@ -358,7 +373,7 @@ def main() -> int:
     ok = now["deployed"]
     check(ok["code"] == 0 and ok["steps"] == [
               "stop listener", "install templates", "install exact units",
-              "canary exact candidate", "deploy-restart exact candidate", "health passed", "start listener"],
+              "migrate as postgres", "rbac as postgres", "canary exact candidate", "deploy-restart exact candidate", "health passed", "start listener"],
           f"a prepared tenant: listener down, root's units, the deploy, listener up -- in that order: {ok['steps']} {ok['said'][-600:]}")
     check(ok["board"] == NEW and ok["release"] == "done" and ok["listener"] == "active",
           f"the board serves the release and the phase is closed against it: {ok}")
@@ -379,16 +394,23 @@ def main() -> int:
           f"preparation is not activation: an unprepared tenant is refused before anything runs: {unprepared}")
     failed = now["deploy fails, board unchanged"]
     check(failed["code"] == 1 and failed["steps"] == [
-              "stop listener", "install templates", "install exact units", "canary exact candidate",
+              "stop listener", "install templates", "install exact units", "migrate as postgres", "rbac as postgres", "canary exact candidate",
               "deploy-restart exact candidate",
               "health failed", "restore units", "restart restored board", "start listener"]
           and failed["board"] == OLD and failed["listener"] == "active" and failed["release"] == "blocked",
           f"a failed deploy that left the board: the listener comes back, the phase is blocked: {failed}")
     check(failed["board_unit"] == "old board unit\n",
           f"failed health restores the captured board unit before the listener: {failed}")
+    database = now["database work fails"]
+    check(database["code"] == 1 and database["steps"] == [
+              "stop listener", "install templates", "install exact units", "migrate as postgres", "restore units",
+              "restart restored board", "start listener"]
+          and database["board"] == OLD and database["listener"] == "active" and database["release"] == "blocked"
+          and "the database work for" in database["said"] and "as postgres failed" in database["said"],
+          f"SYRD-706: root's migration fails: no tenant deploy runs, the units come back, the phase is blocked: {database}")
     moved = now["deploy fails, board moved"]
     check(moved["code"] == 1 and moved["steps"] == [
-              "stop listener", "install templates", "install exact units", "canary exact candidate",
+              "stop listener", "install templates", "install exact units", "migrate as postgres", "rbac as postgres", "canary exact candidate",
               "deploy-restart exact candidate",
               "health failed", "restore units", "restart restored board"]
           and moved["listener"] == "inactive" and moved["release"] == "blocked" and "left stopped" in moved["said"],

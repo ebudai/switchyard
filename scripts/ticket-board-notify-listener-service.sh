@@ -228,7 +228,7 @@ ensure_database_roles() {
     command -v psql >/dev/null 2>&1 || die "psql is required to ensure ticket-board service roles"
     local output
     if ! output="$(psql -X -v ON_ERROR_STOP=1 "$BOARD_ADMIN_DATABASE_URL" -f "$RBAC_SQL" 2>&1)"; then
-        printf '[ticket-board-notify-listener-service] ERROR: failed to ensure ticket-board database roles using TICKET_BOARD_ADMIN_DATABASE_URL. This must connect as a PostgreSQL role with CREATEROLE (default: user=postgres); override TICKET_BOARD_ADMIN_DATABASE_URL for nonstandard clusters.\n' >&2
+        printf '[ticket-board-notify-listener-service] ERROR: failed to ensure ticket-board database roles using TICKET_BOARD_ADMIN_DATABASE_URL. It needs the cluster superuser, which a tenant account does not have once the cluster trusts no local connection (SYRD-706): run `switchyard deploy-release <project> --commit <sha>` as root, which does this as the postgres account itself and tells this deploy to skip it.\n' >&2
         printf '%s\n' "$output" >&2
         exit 1
     fi

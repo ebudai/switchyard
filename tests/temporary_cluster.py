@@ -227,6 +227,7 @@ def temporary_cluster(
     prefix: str,
     initdb_args: tuple[str, ...] = ("--username=postgres",),
     shutdown: str = "fast",
+    settings: tuple[str, ...] = (),
 ):
     """Run a throwaway cluster for the body, and leave nothing behind.
 
@@ -263,6 +264,8 @@ def temporary_cluster(
                 str(port),
                 "-h",
                 "",
+                # Server settings as `name=value`, e.g. a preloaded library (SYRD-706's pg_cron).
+                *(arg for setting in settings for arg in ("-c", setting)),
             ],
             stdout=log_handle,
             stderr=log_handle,

@@ -14,6 +14,12 @@
 # `initdb` is run only into a directory that has no cluster in it and no other
 # contents. An existing cluster is served, never re-initialized: the data
 # directory is somebody's database.
+#
+# `initdb` with no authentication method trusts every local and loopback
+# connection: every account on the host is the cluster superuser, over every
+# tenant's database (SYRD-706). The cluster this makes authenticates a local
+# connection by its OS account (peer) and a TCP one by password, so only the
+# postgres account is the superuser.
 set -euo pipefail
 
 DRY_RUN=0
@@ -21,6 +27,7 @@ SUDO_BIN="${SWITCHYARD_SUDO_BIN:-sudo}"
 PG_SERVICE="${SWITCHYARD_PG_SERVICE:-postgresql.service}"
 PG_SOCKET_DIR="${SWITCHYARD_PG_SOCKET_DIR:-/var/run/postgresql}"
 PG_ADMIN_USER="${SWITCHYARD_PG_ADMIN_USER:-postgres}"
+INITDB_AUTH=(--auth-local=peer --auth-host=scram-sha-256)
 #: Where the Arch package's own unit puts a cluster when nothing says otherwise.
 PACMAN_DEFAULT_PGDATA="${SWITCHYARD_PACMAN_DEFAULT_PGDATA:-/var/lib/postgres/data}"
 #: `systemctl start` returns before the server is accepting connections.
@@ -211,7 +218,7 @@ manual_initdb_remedy() {
     local dir="$1"
     cat >&2 <<EOF
 ensure-postgres-cluster: initialize the cluster once, as $PG_ADMIN_USER, then start the service:
-  $SUDO_BIN runuser -u $PG_ADMIN_USER -- initdb --locale=C.UTF-8 --encoding=UTF8 -D $dir
+  $SUDO_BIN runuser -u $PG_ADMIN_USER -- initdb ${INITDB_AUTH[*]} --locale=C.UTF-8 --encoding=UTF8 -D $dir
   $SUDO_BIN systemctl enable --now $PG_SERVICE
   $SUDO_BIN runuser -u $PG_ADMIN_USER -- psql -XAtq '$(admin_url)' -c 'SELECT 1'
 EOF
@@ -263,7 +270,7 @@ else
             ;;
         empty)
             say "no cluster at $data_dir; initializing it once as $PG_ADMIN_USER."
-            if ! run_root_cmd runuser -u "$PG_ADMIN_USER" -- initdb --locale=C.UTF-8 --encoding=UTF8 -D "$data_dir"; then
+            if ! run_root_cmd runuser -u "$PG_ADMIN_USER" -- initdb "${INITDB_AUTH[@]}" --locale=C.UTF-8 --encoding=UTF8 -D "$data_dir"; then
                 manual_initdb_remedy "$data_dir"
                 stop
             fi

@@ -384,6 +384,12 @@ DEFAULT_SERVICE_USER = "boardsvc"
 DEFAULT_PG_IDENT_MAP = "pgu_ticket_board_service"
 
 
+def listener_ident_map(project: str) -> str:
+    """The tenant's own pg_ident map from its owner to ticket_board_listener. Never shared: a map another tenant's
+    rule named would let this owner reach that tenant's database as its listener (SYRD-706)."""
+    return f"{project.replace('-', '_')}_ticket_board_listener"
+
+
 @dataclass(frozen=True)
 class ProjectBoardProvision:
     project: str

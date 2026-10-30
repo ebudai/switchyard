@@ -130,6 +130,8 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     peer_auth_command = (
         f"sudo env PG_DATABASE='stellaris_ticket_board' PG_IDENT_MAP='pgu_ticket_board_service' "
         f"SERVICE_USER='boardsvc' SERVICE_ROLE='ticket_board_service' "
+        # SYRD-706: the owner's listener, through the tenant's own map.
+        f"LISTENER_USER='stellaris-agent' LISTENER_IDENT_MAP='stellaris_ticket_board_listener' "
         f"'{ROOT}/scripts/ticket-board-boardsvc-setup.sh' --apply-peer-auth"
     )
     assert peer_auth_command in combined

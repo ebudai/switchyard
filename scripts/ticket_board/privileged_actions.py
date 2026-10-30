@@ -242,6 +242,25 @@ CATALOGUE: tuple[PrivilegedAction, ...] = (
         authentication=AUTH_ADMIN,
         arguments=(("project", _slug), ("commit", _commit)),
     ),
+    # SYRD-706: the cluster that trusted every local connection -- every account on the host its superuser, over
+    # every tenant's board -- rendered so it trusts none. Host-wide, and it decides who may reach every tenant's
+    # database, so the User authenticates for both halves: the preview reads root's own pg_hba, pg_ident and tenant
+    # records and changes nothing; the apply recomputes that plan and applies it only when its digest is the one
+    # the User accepted.
+    PrivilegedAction(
+        name="preview-database-auth",
+        summary="Show exactly how the database cluster would stop trusting local connections, changing nothing",
+        message="Authentication is required to read the database cluster's authentication",
+        authentication=AUTH_ADMIN,
+        arguments=(),
+    ),
+    PrivilegedAction(
+        name="harden-database-auth",
+        summary="Apply an accepted database-auth preview: no local connection is trusted, with probes and rollback",
+        message="Authentication is required to change who may connect to every tenant's database",
+        authentication=AUTH_ADMIN,
+        arguments=(("digest", _sha256),),
+    ),
     PrivilegedAction(
         name="repair-boundary",
         summary="Reapply a tenant's reviewed repository boundary",

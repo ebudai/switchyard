@@ -227,6 +227,8 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         return launcher.switchyard_install_shared_release_command(
             args.commit, rollback=args.rollback, dry_run=args.dry_run
         )
+    if argv[0].casefold() == "database-auth":
+        return launcher.database_auth_command(argv[1:])
     if argv[0].casefold() == "privileged-action":
         args = launcher._build_switchyard_privileged_action_parser().parse_args(argv[1:])
         values: dict[str, str] = {}

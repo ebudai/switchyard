@@ -469,12 +469,10 @@ from scripts.first_run_auth import (
     run_first_run_auth_phase,
     stop_before_launch_for_unauthenticated_providers,
 )
-# `switchyard deploy-release` (SYRD-531): the catalogued `deploy-release`
-# action's command, dispatched from `switchyard_main` below.
-from scripts.tenant_release_deploy import (
-    _build_switchyard_deploy_release_parser,
-    switchyard_deploy_release_command,
-)
+# `switchyard deploy-release` (SYRD-531) and `switchyard database-auth` (SYRD-706): the catalogued actions'
+# commands, dispatched from `switchyard_main` below.
+from scripts.tenant_release_deploy import _build_switchyard_deploy_release_parser, switchyard_deploy_release_command
+from scripts.database_auth_transition import database_auth_command
 
 # `switchyard status` and `switchyard release-status` (SYRD-301), moved out
 # whole. Named here because `switchyard_main` below dispatches to them -- a

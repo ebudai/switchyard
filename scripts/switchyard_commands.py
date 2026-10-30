@@ -87,6 +87,10 @@ SWITCHYARD_COMMANDS = (
     # Deploys a prepared tenant's board to its pinned release and closes the
     # release phase by re-proof; the catalogued `deploy-release` (SYRD-531).
     "deploy-release",
+    # Reads the cluster's authentication and root's tenant records and renders the cluster with no local trust;
+    # applies that exact preview, by its digest, with a backup, probes and the way back. Root's, behind the
+    # catalogued auth_admin preview-database-auth and harden-database-auth (SYRD-706).
+    "database-auth",
     "add-role",
     # Reports what a declared pool of interchangeable workers would change, and
     # what would stop it. Reads only (SYRD-37).

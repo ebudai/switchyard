@@ -13,6 +13,12 @@ if [[ -z "${PG_DATABASE:-}" ]]; then
     [[ "$PROJECT_SLUG" == "pgu" ]] || PG_DATABASE="${PG_DATABASE}_ticket_board"
 fi
 PG_IDENT_MAP="${PG_IDENT_MAP:-${PROJECT_SLUG//-/_}_ticket_board_service}"
+# The tenant's notify listener runs as its owner and connects as ticket_board_listener. Its map is the tenant's
+# own and its rule names the tenant's database, so an owner reaches only its own board, as the listener -- never
+# another tenant's, and never as the superuser (SYRD-706). Unset, no listener rule is installed.
+LISTENER_USER="${LISTENER_USER:-}"
+LISTENER_ROLE="ticket_board_listener"
+LISTENER_IDENT_MAP="${LISTENER_IDENT_MAP:-${PROJECT_SLUG//-/_}_ticket_board_listener}"
 OWNER_HOME="${TICKET_BOARD_OWNER_HOME:-}"
 BOARD_ROOT="${BOARD_ROOT:-${OWNER_HOME:+$OWNER_HOME/$PROJECT_SLUG-ticketboard-live}}"
 ASSET_ROOT="${ASSET_ROOT:-${OWNER_HOME:+$OWNER_HOME/.claude/$PROJECT_SLUG-tickets-assets}}"
@@ -208,6 +214,18 @@ apply_peer_auth() {
 
     install_peer_hba_rule "$hba_file" "$hba_line"
     install_peer_ident_rule "$ident_file" "$ident_line"
+    if [[ -n "$LISTENER_USER" ]]; then
+        if [[ ! "$LISTENER_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ || "$LISTENER_USER" == root || "$LISTENER_USER" == postgres ]]; then
+            printf 'ERROR: LISTENER_USER must be the tenant owner account: %s\n' "$LISTENER_USER" >&2
+            exit 1
+        fi
+        if [[ ! "$LISTENER_IDENT_MAP" =~ ^[a-z_][a-z0-9_]{0,62}$ ]]; then
+            printf 'ERROR: LISTENER_IDENT_MAP is not a plain map name: %s\n' "$LISTENER_IDENT_MAP" >&2
+            exit 1
+        fi
+        install_peer_hba_rule "$hba_file" "local   $PG_DATABASE   $LISTENER_ROLE   peer map=$LISTENER_IDENT_MAP"
+        install_peer_ident_rule "$ident_file" "$LISTENER_IDENT_MAP   $LISTENER_USER   $LISTENER_ROLE"
+    fi
     runuser -u postgres -- psql -Atqc "SELECT pg_reload_conf();"
 }
 

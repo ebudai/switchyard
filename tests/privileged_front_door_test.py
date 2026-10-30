@@ -535,7 +535,9 @@ def test_every_operation_runs_the_pinned_launcher_and_nothing_else() -> None:
                                        # SYRD-113: the privileged-job self-test.
                                        "job-selftest",
                                        # SYRD-694: root's adoption record, written or withdrawn.
-                                       "conversation-adoption-record", "record", "withdraw"}
+                                       "conversation-adoption-record", "record", "withdraw",
+                                       # SYRD-706: root's database-auth preview and apply.
+                                       "database-auth", "preview", "apply"}
                         or element.startswith(releases),
                         f"{action.name} passes {element!r}, which is neither a literal "
                         "from the operations table nor a validated value",

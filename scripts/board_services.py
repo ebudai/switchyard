@@ -100,6 +100,7 @@ def _ensure_board_service_peer_auth(
     runner: Callable[..., subprocess.CompletedProcess[Any]],
 ) -> None:
     from scripts import team_launcher as launcher
+    from scripts.ticket_board.project_provision import listener_ident_map
 
     setup_script = source_repo / "scripts" / "ticket-board-boardsvc-setup.sh"
     env = {
@@ -108,6 +109,9 @@ def _ensure_board_service_peer_auth(
         "PG_IDENT_MAP": launcher.DEFAULT_PG_IDENT_MAP,
         "SERVICE_USER": plan.service_user,
         "SERVICE_ROLE": plan.service_role,
+        # The owner's listener, through the tenant's own map: no cluster trust is needed for it (SYRD-706).
+        "LISTENER_USER": plan.owner_user,
+        "LISTENER_IDENT_MAP": listener_ident_map(plan.project),
     }
     try:
         result = runner([str(setup_script), "--apply-peer-auth"], env=env)

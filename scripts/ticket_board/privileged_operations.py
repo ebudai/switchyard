@@ -216,6 +216,16 @@ def _select_shared_release(values: Mapping[str, str]) -> list[str]:
     ]
 
 
+def _preview_database_auth(values: Mapping[str, str]) -> list[str]:
+    # SYRD-706: read-only; root reads the cluster's files and its own tenant records.
+    return [LAUNCHER, "database-auth", "preview"]
+
+
+def _harden_database_auth(values: Mapping[str, str]) -> list[str]:
+    # SYRD-706: the plan is recomputed and applied only when its digest is the accepted one.
+    return [LAUNCHER, "database-auth", "apply", values["digest"]]
+
+
 def _repair_boundary(values: Mapping[str, str]) -> list[str]:
     return [LAUNCHER, "repair-boundary", values["project"], "--apply"]
 
@@ -248,6 +258,8 @@ OPERATIONS: dict[str, Callable[[Mapping[str, str]], list[str]]] = {
     "upgrade-tenant-release": _upgrade_tenant_release,
     "install-shared-release": _install_shared_release,
     "select-shared-release": _select_shared_release,
+    "preview-database-auth": _preview_database_auth,
+    "harden-database-auth": _harden_database_auth,
     "repair-boundary": _repair_boundary,
     "job-selftest": _job_selftest,
     "adopt-conversation": _adopt_conversation,

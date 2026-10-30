@@ -98,6 +98,8 @@ def peer_auth_command(plan: ProjectBoardProvision) -> str:
         f"PG_IDENT_MAP={provision.shell_quote(provision.DEFAULT_PG_IDENT_MAP)} "
         f"SERVICE_USER={provision.shell_quote(plan.service_user)} "
         f"SERVICE_ROLE={provision.shell_quote(plan.service_role)} "
+        f"LISTENER_USER={provision.shell_quote(plan.owner_user)} "
+        f"LISTENER_IDENT_MAP={provision.shell_quote(provision.listener_ident_map(plan.project))} "
         f"{q_setup_script} --apply-peer-auth"
     )
 

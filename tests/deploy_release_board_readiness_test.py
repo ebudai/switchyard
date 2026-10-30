@@ -198,6 +198,11 @@ class Host:
             self._start(delay=0.0)
             self._wait_until_serving()
             return done(0)
+        if argv[:4] == ["runuser", "-u", "postgres", "--"]:
+            # SYRD-706: root migrates and grants first, as the cluster's account, from its trusted release.
+            assert any(part.startswith(str(self.trusted_release) + "/") for part in argv), argv
+            self.steps.append("migrate as postgres" if argv[-1].endswith("ticket-board-migrate") else "rbac as postgres")
+            return done(0)
         if "deploy-restart" in text:
             # The tenant's own deploy-restart: the release moves, the unit restarts, and its smoke check waits
             # for the board to answer before it returns.
@@ -247,6 +252,10 @@ def deploy(root: Path, work: Path, *, board_unit: str, listener: str, deployed: 
         # SYRD-700: a release new enough to run under its exact unit carries the renderer.
         (release / "scripts" / "ticket_board").mkdir(exist_ok=True)
         (release / "scripts" / "ticket_board" / "release_units.py").write_text("# renderer\n", encoding="utf-8")
+        # SYRD-706: what root migrates and grants from, as the cluster's account.
+        (release / "scripts" / "ticket_board" / "migrations").mkdir(exist_ok=True)
+        (release / "scripts" / "ticket_board" / "rbac.sql").write_text("SELECT 1;\n", encoding="utf-8")
+        (release / "scripts" / "ticket-board-migrate").write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
     units = launcher.privileged_provision_dir("porter", root=launcher.switchyard_privileged_provision_root())
     units.mkdir(parents=True, exist_ok=True)
     if board_identity is not None:

@@ -204,9 +204,17 @@ def install_deploy_and_attest(
                                                           print_func=print_func, exact=exact)
     restarted = False
     if not problems:
+        from scripts.ticket_board import database_admin
+
+        try:
+            database: str | None = database_admin.database_from_unit(
+                exact.get(f"{config.project}-ticket-board.service", b"").decode("utf-8"))
+        except database_admin.DatabaseAdminError as exc:
+            problems, database = [f"root's board unit names no database to migrate: {exc}"], None
+    if not problems:
         problems, restarted = launcher.deploy_release_in_transaction(
             config, config_path=config_path, source_repo=source_repo, commit_git_dir=commit_git_dir,
-            deploy_ref=deploy_ref, runner=runner, print_func=print_func, canary_port=canary_port,
+            deploy_ref=deploy_ref, runner=runner, print_func=print_func, canary_port=canary_port, database=database,
         )
     if not problems:
         problems = launcher.activate_board_authority(config, runner=runner, restart=not restarted,
@@ -620,6 +628,17 @@ def switchyard_deploy_release_command(
                          unit_leftovers + _listener_leftover(listener_said) + board_back())
         problems: list[str] = []
     else:
+        # The database, from the unit root rendered: the deploy's cluster-superuser work is root's (SYRD-706).
+        from scripts.ticket_board import database_admin
+
+        try:
+            database = database_admin.database_from_unit(candidate_units[board_target].decode("utf-8"))
+        except database_admin.DatabaseAdminError as exc:
+            unit_leftovers = restore_units()
+            listener_said = listener_back()
+            return ended(blocked(f"root's board unit names no database to migrate: {exc}",
+                                 f"nothing was deployed; {listener_said}"),
+                         unit_leftovers + _listener_leftover(listener_said) + board_back())
         with tempfile.TemporaryDirectory(prefix=f"switchyard-{config.project}-candidate.") as proof_dir:
             os.chmod(proof_dir, 0o755)
             candidate_proof = Path(proof_dir) / board_target.name
@@ -629,7 +648,7 @@ def switchyard_deploy_release_command(
                 config, config_path=config_path, source_repo=source,
                 commit_git_dir=pinned.get("commit_git_dir") or None,
                 deploy_ref=commit, runner=runner, print_func=print_func,
-                canary_port=canary_port, provisioned_system_unit=candidate_proof,
+                canary_port=canary_port, provisioned_system_unit=candidate_proof, database=database,
             )
     if problems:
         now = launcher._current_tenant_release(status.board_root)[1]

@@ -57,6 +57,8 @@ LOCAL_IMPORTS = {"tenant_release_deploy_command": ["from scripts.ticket_board.pr
                  # SYRD-612: the release pointer in the owner's home, read and put back by descriptor.
                  "capture_release_pointer": ["from scripts import owner_writes"],
                  "restore_release_pointer": ["from scripts import owner_writes"],
+                 # SYRD-706: root migrates the database itself, from its trusted release, before the tenant's deploy.
+                 "deploy_release_in_transaction": ["from scripts.ticket_board import database_admin, privileged_operations"],
                  # SYRD-605: and the no-follow helper's argv, for the listener unit in the owner's home.
                  "tenant_release_unit_install_command": ["from scripts.ticket_board.project_provision import system_unit_proof_chain",
                                                         "from scripts.ticket_board.provision_tenant_paths import tenant_paths_argv"]}

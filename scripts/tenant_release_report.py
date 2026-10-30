@@ -80,6 +80,7 @@ def tenant_release_deploy_command(
     *,
     canary_port: int | None = None,
     provisioned_system_unit: Path | None = None,
+    database_administered: bool = False,
 ) -> str:
     from scripts import team_launcher as launcher
 
@@ -128,6 +129,10 @@ def tenant_release_deploy_command(
         )
     if status.commit_git_dir:
         deploy_env.append(f"TICKET_BOARD_COMMIT_GIT_DIR={status.commit_git_dir}")
+    if database_administered:
+        # Root has migrated the database and applied its RBAC as the cluster's own account; the tenant has no
+        # authority to, and is not asked (SYRD-706). Every release since 2026-07 honours this.
+        deploy_env.append("TICKET_BOARD_SKIP_MIGRATIONS=1")
     if status.clone_source_repo is not None:
         marker = json.dumps({"commit": status.target_sha}, separators=(",", ":"))
         script = (
@@ -448,6 +453,7 @@ def deploy_release_in_transaction(
     print_func: Callable[[str], None] = print,
     canary_port: int | None = None,
     provisioned_system_unit: Path | None = None,
+    database: str | None = None,
 ) -> tuple[list[str], bool]:
     """Switch the board to the release that enforces the per-role table.
 
@@ -484,6 +490,20 @@ def deploy_release_in_transaction(
     canary: dict[str, Any] = {"canary_port": canary_port} if canary_port is not None else {}
     if provisioned_system_unit is not None:
         canary["provisioned_system_unit"] = provisioned_system_unit
+    if database is not None:
+        # Root migrates `database` and applies its RBAC first, as the cluster's own account and from its own
+        # trusted copy of the release -- never the tree the deploy is handed -- and the tenant's deploy-restart
+        # skips that work (SYRD-706).
+        from scripts.ticket_board import database_admin, privileged_operations
+
+        try:
+            release = Path(privileged_operations.trusted_release_root(status.target_sha))
+        except privileged_operations.NoTrustedSource as exc:
+            return [f"the database work for {status.target_sha} needs root's trusted release of it: {exc}"], False
+        administered = database_admin.administer_release_database(release, database, runner=runner)
+        if administered:
+            return [f"the database work for {status.target_sha} failed: {'; '.join(administered)}"], False
+        canary["database_administered"] = True
     command = launcher.tenant_release_deploy_command(status, config.project, **canary)
     if not command:
         return ["no deploy command could be built for this release"], False

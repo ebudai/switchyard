@@ -107,7 +107,7 @@ directory with other contents in it stops the run instead. Done by hand on
 Arch, the same steps are:
 
 ```bash
-sudo runuser -u postgres -- initdb --locale=C.UTF-8 --encoding=UTF8 -D /var/lib/postgres/data
+sudo runuser -u postgres -- initdb --auth-local=peer --auth-host=scram-sha-256 --locale=C.UTF-8 --encoding=UTF8 -D /var/lib/postgres/data
 sudo systemctl enable --now postgresql.service
 sudo runuser -u postgres -- psql -XAtq 'postgresql:///postgres?host=/var/run/postgresql' -c 'SELECT 1'
 ```

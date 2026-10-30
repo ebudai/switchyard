@@ -16,6 +16,10 @@ the config loader, the slug check, the registry listing and the configured-CLI
 reader -- is read through the launcher at call time, so a suite that rebinds
 one there still intercepts it. The one definition-time default is `print`.
 This module imports `team_launcher` only inside the functions, when they run.
+
+A collision is with a registration alone (SYRD-709): a launcher config in the
+config directory -- a release's bundled `pgu.json`, say -- is shadowed by the
+registration, so it is never a registration of its own slug or name.
 """
 
 from __future__ import annotations
@@ -36,7 +40,9 @@ def _registered_project_collision(
     from scripts import team_launcher as launcher
 
     skip_resolved = skip_config_path.expanduser().resolve(strict=False) if skip_config_path is not None else None
-    for entry in launcher._switchyard_entries(config_dir=config_dir, registry_dir=registry_dir):
+    # Only a registration collides (SYRD-709): a launcher config in `config_dir` -- a release's bundled one, say --
+    # is shadowed by the registration, never a registration of its own slug or name. `config_dir` is kept for callers.
+    for entry in launcher._registry_project_entries(registry_dir):
         if skip_resolved is not None and entry.config_path.expanduser().resolve(strict=False) == skip_resolved:
             continue
         if entry.slug.casefold() == slug.casefold():

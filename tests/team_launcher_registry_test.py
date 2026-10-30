@@ -424,59 +424,43 @@ def test_switchyard_register_rejects_duplicate_project_name_without_writing_poin
     assert str(existing_config) in message
     assert not duplicate_pointer_exists
 
-def test_switchyard_new_rejects_config_dir_project_slug_before_mutating() -> None:
+def test_a_config_dir_project_slug_is_no_registration() -> None:
+    """SYRD-709: a launcher config in the config directory -- a release's bundled `pgu.json` -- is not a registration.
+
+    Until SYRD-709 this test asserted that `switchyard new pgu` refused because
+    `pgu.json` sat in the config directory. That is the defect: the bundled
+    legacy config blocked registering PGU's real tenant. `switchyard new` and
+    `switchyard register` share this check, and the registry's own slug and name
+    collisions (the two tests below) still refuse before anything is mutated.
+    """
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new.") as tmp:
         tmp_path = Path(tmp)
         config_dir = tmp_path / "configs"
         registry_dir = tmp_path / "registry"
-        home_base = tmp_path / "home"
-        output_dir = tmp_path / "out"
-        layout = tmp_path / "layout.json"
         config_dir.mkdir()
         registry_dir.mkdir()
-        layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
         (config_dir / "pgu.json").write_text(
-            json.dumps(
-                {
-                    "desktop_access": {"mode": "headless"},
-                    "project": "pgu",
-                    "project_name": "pgu",
-                    "layout": str(layout),
-                    "roles": [{"role": "director", "slot": 0, "cli": ["claude"], "workdir": str(tmp_path / "pgu")}],
-                }
-            )
-            + "\n",
+            json.dumps({"project": "pgu", "project_name": "pgu", "roles": [{"role": "director", "slot": 0, "cli": ["claude"]}]}) + "\n",
             encoding="utf-8",
         )
-        calls: list[list[str]] = []
-        output: list[str] = []
-
+        assert team_launcher._check_switchyard_registration_available(
+            slug="pgu", name="PGU Two", config_dir=config_dir, registry_dir=registry_dir) is None
+        assert team_launcher._check_switchyard_registration_available(
+            slug="pgu2", name="pgu", config_dir=config_dir, registry_dir=registry_dir) is None
+        registered = tmp_path / "pgu-agent.json"
+        (registry_dir / "pgu.json").write_text(
+            json.dumps({"schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA, "slug": "pgu", "name": "pgu",
+                        "config_path": str(registered)}) + "\n",
+            encoding="utf-8",
+        )
         try:
-            switchyard_new_command(
-                desktop_policy=Path("headless"),
-                slug="pgu",
-                agent_name="pgu2",
-                project_name="PGU Two",
-                output_dir=output_dir,
-                yes=True,
-                home_base=home_base,
-                euid_getter=lambda: 0,
-                runner=lambda args, **_kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0),
-                config_dir=config_dir,
-                registry_dir=registry_dir,
-                input_func=lambda _prompt: "",
-                print_func=output.append,
-            )
-            raise AssertionError("expected duplicate config-dir slug rejection")
+            team_launcher._check_switchyard_registration_available(
+                slug="pgu", name="PGU Two", config_dir=config_dir, registry_dir=registry_dir)
+            raise AssertionError("expected the registered slug to be refused")
         except SystemExit as exc:
             message = str(exc)
+    assert message == f"switchyard: project slug 'pgu' is already registered to 'pgu' at {registered}"
 
-    assert "project slug 'pgu' is already registered to 'pgu'" in message
-    assert str(config_dir / "pgu.json") in message
-    assert calls == []
-    assert output == []
-    assert not output_dir.exists()
-    assert not (home_base / "pgu2-agent").exists()
 
 def test_switchyard_new_rejects_duplicate_slug_before_mutating() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-new.") as tmp:

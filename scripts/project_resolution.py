@@ -2,8 +2,12 @@
 
 `_project_entries` reads the launcher configs in the config directory and
 `_registry_project_entries` the registered tenants in the registry, and
-`_switchyard_entries` merges them, keeping the first entry seen for a slug --
-the launcher config's, which are read first -- and sorts them by name.
+`_switchyard_entries` merges them and sorts them by name. The registry is
+authoritative (SYRD-709): a registered tenant is kept whatever the config
+directory -- a release's own bundled `config/team-launcher` by default -- holds,
+and a config there is dropped when the registry claims its slug or its name,
+or holds an entry file for its slug that cannot be used
+(`_registry_claims`). A config nobody registered is kept as before.
 `_resolve_switchyard_project` finds the one a selection names --
 by slug or by name, then by the slugs a name would derive
 (`_project_name_selector_slugs`) -- or refuses: an empty or ambiguous
@@ -19,7 +23,9 @@ the config directory, registry directory and schema, the JSON reader, the slug
 validator and derivations, the entry type and the privileged baseline plan
 path -- is read through the launcher, so a suite that rebinds one there still
 intercepts it. This module imports `team_launcher` only inside the functions,
-when they run.
+when they run. `_registry_claims` (SYRD-709) is this module's own and is called
+directly, not re-exported; it reads the registry directory, schema, JSON reader
+and slug validator through the launcher like the rest.
 """
 
 from __future__ import annotations
@@ -74,13 +80,26 @@ def _project_entries(config_dir: Path | None = None) -> list[SwitchyardProjectEn
     return entries
 
 
+def _regular_file(path: Path) -> bool:
+    """Whether `path` itself is a regular file, never looking through a link (SYRD-709).
+
+    A registry entry is a regular file root wrote: a symlink, broken or not, is
+    not one, and is never read through -- what it points at is whatever the link
+    names, not root's record.
+    """
+    try:
+        return stat.S_ISREG(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
 def _registry_project_entries(registry_dir: Path | None = None) -> list[SwitchyardProjectEntry]:
     from scripts import team_launcher as launcher
 
     registry_dir = registry_dir or launcher.switchyard_registry_dir()
     entries: list[SwitchyardProjectEntry] = []
     try:
-        paths = sorted(path for path in registry_dir.iterdir() if path.is_file() and path.suffix == ".json")
+        paths = sorted(path for path in registry_dir.iterdir() if path.suffix == ".json" and _regular_file(path))
     except OSError:
         return []
     for path in paths:
@@ -103,6 +122,58 @@ def _registry_project_entries(registry_dir: Path | None = None) -> list[Switchya
     return entries
 
 
+def _registry_claims(registry_dir: Path | None = None) -> dict[str, str]:
+    """The slugs the registry holds an entry file for that cannot be used, casefolded, each with why (SYRD-709).
+
+    `switchyard register` writes a tenant's entry as `<slug>.json`, so an entry
+    claims its own name's slug even when it cannot be read, and the slug it
+    names when that is valid. Every `.json` entry is looked at, never through a
+    link: one that is not a regular file -- a symlink, broken or not, a
+    directory -- or cannot be examined claims its name as surely as one that is
+    not JSON (Audit). The key `""` means the registry directory exists but
+    cannot be listed: then nothing can be known not to be registered. A
+    registry that does not exist claims nothing.
+    """
+    from scripts import team_launcher as launcher
+
+    registry_dir = registry_dir or launcher.switchyard_registry_dir()
+    try:
+        paths = sorted(path for path in registry_dir.iterdir() if path.suffix == ".json")
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        return {"": f"the registry {registry_dir} cannot be read ({exc.strerror or exc})"}
+    claims: dict[str, str] = {}
+    for path in paths:
+        claimed = [path.stem.casefold()]
+        why = ""
+        try:
+            if not stat.S_ISREG(os.lstat(path).st_mode):
+                why = "is not a regular file"  # nor is it read through: `_regular_file` keeps it out of the entries too
+        except OSError as exc:
+            why = f"cannot be examined ({exc.strerror or exc})"
+        if not why:
+            try:
+                raw = launcher._load_json(path)
+            except (OSError, json.JSONDecodeError, SystemExit) as exc:
+                why = f"cannot be read ({exc})"
+        if not why and str(raw.get("schema") or "") != launcher.SWITCHYARD_REGISTRY_SCHEMA:
+            why = f"is not a {launcher.SWITCHYARD_REGISTRY_SCHEMA} record"
+        if not why:
+            try:
+                slug = launcher._validate_project_slug(str(raw.get("slug") or ""))
+            except SystemExit as exc:
+                why = f"names no valid slug ({exc})"
+            else:
+                if str(raw.get("config_path") or "").strip():
+                    continue  # usable: `_registry_project_entries` lists it
+                claimed.append(slug.casefold())
+                why = "names no configuration"
+        for slug in claimed:
+            claims.setdefault(slug, f"its registry entry {path} {why}")
+    return claims
+
+
 def _switchyard_entries(
     *,
     config_dir: Path | None = None,
@@ -110,10 +181,24 @@ def _switchyard_entries(
 ) -> list[SwitchyardProjectEntry]:
     from scripts import team_launcher as launcher
 
+    configured = launcher._project_entries(config_dir)
+    registered = launcher._registry_project_entries(registry_dir)
+    claims = _registry_claims(registry_dir)
     entries: dict[str, SwitchyardProjectEntry] = {}
-    for entry in [*launcher._project_entries(config_dir), *launcher._registry_project_entries(registry_dir)]:
-        key = entry.slug.casefold()
-        entries.setdefault(key, entry)
+    for entry in registered:
+        if entry.slug.casefold() in claims:
+            continue  # the registry also holds an unusable entry for it: refused, so never offered (Audit)
+        entries.setdefault(entry.slug.casefold(), entry)
+    # The registry is authoritative for every slug and name it holds (SYRD-709): a config of the same slug or name
+    # never shadows it, and one whose slug the registry claims but cannot use is not offered in its place. With a
+    # registry that cannot be listed, nothing is known not to be registered, so no config is offered at all.
+    names = {entry.name.casefold() for entry in registered}
+    for entry in configured:
+        if "" in claims or entry.slug.casefold() in entries or entry.slug.casefold() in claims:
+            continue
+        if entry.name.casefold() in names:
+            continue
+        entries.setdefault(entry.slug.casefold(), entry)
     return sorted(entries.values(), key=lambda entry: (entry.name.casefold(), entry.slug.casefold()))
 
 
@@ -160,6 +245,12 @@ def _resolve_switchyard_project(
     if not wanted:
         raise SystemExit("switchyard: project name cannot be empty")
     entries = launcher._switchyard_entries(config_dir=config_dir, registry_dir=registry_dir)
+    # A registry entry that exists for this slug but cannot be used is refused, never answered with another
+    # configuration of the same slug -- a release's bundled one included (SYRD-709).
+    claims = _registry_claims(registry_dir)
+    if wanted in claims:
+        raise SystemExit(f"switchyard: project {selection.strip()!r} is registered, but {claims[wanted]}; "
+                         "refusing to use any other configuration for it. Repair or remove that entry as root.")
     exact = [
         entry
         for entry in entries
@@ -193,4 +284,7 @@ def _resolve_switchyard_project(
     hint = launcher._resume_provision_hint(selection.strip())
     if hint:
         raise SystemExit(hint)
+    if "" in claims:
+        raise SystemExit(f"switchyard: cannot resolve {selection!r}: {claims['']}, so no project can be known "
+                         "not to be registered")
     raise SystemExit(f"switchyard: unknown project {selection!r}")

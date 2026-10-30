@@ -33,6 +33,14 @@ detached background tmux session. Each role pane starts in the shared checkout
 at `/home/agent/Projects/pgu`; feature work still happens in explicit per-ticket
 worktrees created outside the launcher.
 
+A bundled config like this one is used only while no tenant of its slug is
+registered. A root registry entry (`/etc/switchyard/projects/<slug>.json`) is
+authoritative for its slug and its name: every command resolves the registered
+config, `switchyard register` does not count a bundled config as a
+registration, and an entry that exists but cannot be used is refused rather
+than answered with the bundled config. See
+[SYRD-709](syrd-709-registry-authoritative-resolution.md).
+
 The executable wrapper runs as the user who invoked it by default. A project
 may opt into a dedicated runtime account with `run_as_user`; when that key is
 set and the invoker is different, the wrapper re-execs through

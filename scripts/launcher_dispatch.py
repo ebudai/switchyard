@@ -97,7 +97,9 @@ def main(argv: list[str] | None = None) -> int:
             resolved = launcher._resolve_launcher_project_config(args.project)
             config_path = resolved.config_path
             config_project = resolved.slug
-        except SystemExit:
+        except SystemExit as exc:  # a registry entry that cannot be used is never answered with a bundled config (SYRD-709)
+            if " is registered, but " in str(exc) or str(exc).startswith("switchyard: cannot resolve "):
+                raise
             config_path = launcher.DEFAULT_CONFIG_DIR / f"{args.project}.json"
             config_project = args.project
     else:

@@ -938,6 +938,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if parsed.path == "/api/build": return self.send_json({"build_id": self.server.build_id})  # SYRD-703: the build alone, at any board size
         if parsed.path == "/api/board":
             payload = self.app.snapshot()
             payload.setdefault("project", getattr(self.app, "project", "pgu"))

@@ -44,6 +44,18 @@ PROJECT = re.compile(r"[a-z][a-z0-9-]{0,31}")
 MAX_UNIT_BYTES = 64 << 10
 MAX_ANSWER_BYTES = 8 << 20
 TIMEOUT_SECONDS = 15.0
+#: Where the board says which build it runs, and nothing else, whatever its size (SYRD-703). A build id is a commit
+#: or a release's own short name, so its answer has a cap of its own, far below a snapshot's.
+BUILD_PATH = "/api/build"
+MAX_BUILD_ANSWER_BYTES = 4 << 10
+BUILD_ID = re.compile(r"[0-9A-Za-z._-]{1,128}")
+#: How an exact release from before SYRD-703, which has no BUILD_PATH, says its build: `/api/client-config`, a few
+#: short fields. It also carries the board's write token, so only `build_id` is taken from it, and nothing else of
+#: the answer is kept, returned or said. A release with no such bounded answer is refused, never read from its whole
+#: snapshot (the Director's decision on SYRD-703).
+COMPAT_BUILD_PATH = "/api/client-config"
+MAX_COMPAT_ANSWER_BYTES = 16 << 10
+MAX_SERVER_SOURCE_BYTES = 4 << 20
 
 
 class BoardIdentityError(Exception):
@@ -322,6 +334,26 @@ class _ProvenConnection(http.client.HTTPConnection):
         return None
 
 
+def _release_serves_build(release: Path) -> bool:
+    """Whether the board code in root's trusted `release` answers BUILD_PATH: read from the release itself, never from
+    the board, so a board that should answer it cannot choose the snapshot instead (SYRD-703)."""
+    server = release / "scripts" / "ticket_board" / "server.py"
+    try:
+        fd = os.open(str(server), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        raise BoardIdentityError(f"cannot read the board code {server} ({exc.strerror})") from None
+    try:
+        _check(fd, str(server), TRUSTED_OWNER_UID, directory=False)
+        source = b""
+        while chunk := os.read(fd, 1 << 16):
+            source += chunk
+            if len(source) > MAX_SERVER_SOURCE_BYTES:
+                raise BoardIdentityError(f"the board code {server} is larger than {MAX_SERVER_SOURCE_BYTES} bytes")
+    finally:
+        os.close(fd)
+    return f'parsed.path == "{BUILD_PATH}"'.encode() in source
+
+
 def board_get_for(project: str, *, unit_dir: Path | None = None, owner_uid: int | None = None,
                   anchor: Path | None = None, main_pid: Callable[[str], int] = unit_main_pid,
                   service_uid: Callable[[str], int] = lambda user: pwd.getpwnam(user).pw_uid,
@@ -335,17 +367,18 @@ def board_get_for(project: str, *, unit_dir: Path | None = None, owner_uid: int 
     if runtime_unit is not None or main_pid is unit_main_pid:
         runtime = (runtime_unit or effective_unit)(project)
         user, expected_pid, expected_build = runtime.user, runtime.main_pid, runtime.release_commit
+        release = Path(runtime.argv[4]).parent.parent if len(runtime.argv) > 4 else None
         if user != disk_user:
             raise BoardIdentityError(f"{unit_name(project)}'s effective User={user} differs from its root unit")
     else:
-        user, expected_pid, expected_build = disk_user, main_pid(unit_name(project)), ""
+        user, expected_pid, expected_build, release = disk_user, main_pid(unit_name(project)), "", None
     try:
         expected_uid = service_uid(user)
     except KeyError:
         raise BoardIdentityError(f"{project}'s board account {user} does not exist") from None
     unit = unit_name(project)
 
-    def request(request_path: str) -> Any:
+    def exchange(request_path: str, read: Callable[[http.client.HTTPResponse], Any]) -> Any:
         if not request_path.startswith("/api/"):
             raise BoardIdentityError(f"refusing to ask {project}'s board for {request_path!r}")
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -365,25 +398,50 @@ def board_get_for(project: str, *, unit_dir: Path | None = None, owner_uid: int 
                                          f"({running or 'not running'})")
             connection = _ProvenConnection(sock)
             connection.request("GET", request_path, headers={"Host": "localhost", "Connection": "close"})
-            response = connection.getresponse()
-            body = response.read(MAX_ANSWER_BYTES + 1)
+            return read(connection.getresponse())
+        finally:
+            sock.close()
+
+    def request(request_path: str, limit: int = MAX_ANSWER_BYTES) -> Any:
+        def read(response: http.client.HTTPResponse) -> Any:
+            body = response.read(limit + 1)
             if response.status == 404:
                 return None
-            if response.status != 200 or len(body) > MAX_ANSWER_BYTES:
+            if response.status != 200:
                 raise BoardIdentityError(f"{project}'s board answered {request_path} with HTTP {response.status}")
+            if len(body) > limit:
+                raise BoardIdentityError(f"{project}'s board answered {request_path} with more than {limit} bytes")
             try:
                 return json.loads(body.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 raise BoardIdentityError(f"{project}'s board answered {request_path} with no JSON") from None
-        finally:
-            sock.close()
+
+        return exchange(request_path, read)
 
     if expected_build:
-        identity = request("/api/board")
-        build = str(identity.get("build_id") or "") if isinstance(identity, dict) else ""
+        asked, identity = BUILD_PATH, request(BUILD_PATH, MAX_BUILD_ANSWER_BYTES)
+        if identity is None:
+            if release is None:
+                raise BoardIdentityError(f"{project}'s board answered {BUILD_PATH} with HTTP 404, and its effective "
+                                         "unit names no release to tell whether it should")
+            if _release_serves_build(release):
+                raise BoardIdentityError(f"{project}'s board answered {BUILD_PATH} with HTTP 404, though its release "
+                                         f"{release} serves it")
+            asked, identity = COMPAT_BUILD_PATH, request(COMPAT_BUILD_PATH, MAX_COMPAT_ANSWER_BYTES)
+            if identity is None:
+                raise BoardIdentityError(f"{project}'s board answered {COMPAT_BUILD_PATH} with HTTP 404: its release "
+                                         f"predates {BUILD_PATH} and has no bounded build answer to repair from")
+        build = identity.get("build_id") if isinstance(identity, dict) else None
+        identity = None  # the compatibility answer carries the write token: nothing of it outlives its build
+        if not isinstance(build, str) or not BUILD_ID.fullmatch(build):
+            raise BoardIdentityError(f"{project}'s board answered {asked} with no well-formed build id")
+        if build != expected_build and asked == COMPAT_BUILD_PATH:
+            # Not repeated: a well-formed build id can be the write token that answer also carries (Audit on SYRD-703).
+            raise BoardIdentityError(f"{project}'s board process reports a build other than its effective root release "
+                                     f"{expected_build} (from {COMPAT_BUILD_PATH}, not repeated here)")
         if build != expected_build:
             raise BoardIdentityError(
-                f"{project}'s board process reports build {build or 'nothing'}, not its effective "
+                f"{project}'s board process reports build {build}, not its effective "
                 f"root release {expected_build}"
             )
 

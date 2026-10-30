@@ -49,7 +49,7 @@ from .pane_activity_gate import (
 )
 from .idle_nudges import IdleNudges
 from . import reminder_snooze
-from . import board_stall, blocked_pane, capacity_retry, delivery_proof, execution_lease_pass, handoff_children, publisher_pass, pull_pickup, quota_hold, replaced_delivery, stall_episode
+from . import background_authorization, board_stall, blocked_pane, capacity_retry, delivery_proof, execution_lease_pass, handoff_children, publisher_pass, pull_pickup, quota_hold, replaced_delivery, stall_episode
 from .notification_ledger import NotificationLedger
 from .notification_activity_hold import (
     NotificationActivityHold, ActivityTrace, SELF_REMINDER_KINDS,
@@ -574,14 +574,14 @@ class TicketBoardNotifyListener:
 
     def _defer_for_background_work(self, conn: Any, notification_id: int, attempts: int, kind: str,
                                    target_role: str, payload: str, phase: str) -> bool:
-        """Requeue a reminder about an owner still working in the background; True if it was (SYRD-538)."""
+        """Requeue a reminder about an owner still working in the background (SYRD-538), or an alert about authorized work (SYRD-708)."""
         owner = background_work.working_owner(getattr(self.activity_gate, "__self__", None), kind, target_role, payload)
         if owner:
             self.logger.info("Deferring %s notification %s at %s: %s's background work is still running",
                              kind, notification_id, phase, owner)
             self.ledger.requeue(conn, notification_id, attempts, f"owner_background_work ({phase})",
                                 delay_seconds=BACKGROUND_WORK_REQUEUE_SECONDS)
-        return bool(owner)
+        return bool(owner) or background_authorization.hold_alert(self, conn, notification_id, attempts, kind, target_role, payload, phase)
 
     def deliver_payload(self, payload: str) -> bool:
         transition = parse_transition_payload(payload)

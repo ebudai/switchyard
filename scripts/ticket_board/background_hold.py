@@ -28,7 +28,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from . import background_child, provider_prompt
+from . import background_authorization, background_child, provider_prompt
 
 #: How long background work may hold a role's notices before the Director is
 #: told. Otto's own tenant watchdog settled on half an hour, and an ordinary
@@ -55,6 +55,9 @@ OWNER_BACKGROUND_WORK = "owner_background_work"
 #: question never ends by itself, and two minutes is long enough for a person
 #: already at the pane to answer it first.
 DEFAULT_PROMPT_ALERT_AFTER_SECONDS = 120.0
+#: The threshold a hold is noted with while the Director has authorized the work behind it (SYRD-708): the
+#: episode is kept, so its clock never stops, and the alert waits until the authorization does not hold.
+AUTHORIZED_ALERT_AFTER = "1000 years"
 PROMPT_ALERT_AFTER_ENV = "TICKET_BOARD_PROVIDER_PROMPT_ALERT_SECONDS"
 
 
@@ -109,11 +112,14 @@ def child_hold_description(conn: Any, holders: Any) -> str:
             f"A job that never ends -- a wait loop whose pgrep matches itself, say -- holds them for good.")
 
 
-def note(ledger: Any, conn: Any, notification_id: int, reason: str, holders: Any = None) -> None:
+def note(ledger: Any, conn: Any, notification_id: int, reason: str, holders: Any = None, *, ticket_id: str = "",
+         role: str = "") -> None:
     """Record that background work, or a provider's own question, held this notice again.
 
     The board decides whether that is news. A hold by the pane's children says
-    which children, when the gate saw them (SYRD-583).
+    which children, when the gate saw them (SYRD-583). While the Director has
+    authorized every one of them for this notice's ticket -- a lease extension
+    or a reminder snooze -- the hold is noted, but nothing is told (SYRD-708).
 
     Never fatal: a failure here is logged, and the hold goes on exactly as it
     would have without it.
@@ -134,16 +140,19 @@ def note(ledger: Any, conn: Any, notification_id: int, reason: str, holders: Any
                 (notification_id, reason, f"{prompt_alert_after_seconds():g} seconds", prompt_hold_description(prompt)),
             )
             return
+        parsed = [holder for holder in map(background_child.Holder.from_detail, holders or ()) if holder is not None]
+        authorized = background_authorization.covered(conn, role, parsed, ticket=ticket_id) if ticket_id else ""
+        after = AUTHORIZED_ALERT_AFTER if authorized else f"{alert_after_seconds():g} seconds"
         children = child_hold_description(conn, holders) if holders and present == "described" else ""
         if children:
             conn.execute(
                 "SELECT ticket_board.note_background_hold(%s::bigint, %s::text, %s::interval, %s::text)",
-                (notification_id, reason, f"{alert_after_seconds():g} seconds", children),
+                (notification_id, reason, after, children),
             )
             return
         conn.execute(
             "SELECT ticket_board.note_background_hold(%s::bigint, %s::text, %s::interval)",
-            (notification_id, reason, f"{alert_after_seconds():g} seconds"),
+            (notification_id, reason, after),
         )
     except Exception as exc:  # The hold must never depend on its own bookkeeping.
         ledger.logger.warning("Failed to note the background hold of notification %s: %s", notification_id, exc)

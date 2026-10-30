@@ -72,6 +72,12 @@ notice also goes out past a child whose ticket is no longer the role's, and past
 a finished turn's poll loop once SYRD-212's bound is reached, and the Director is
 told once per child. See `docs/syrd-583-background-child-lease.md`.
 
+**SYRD-708.** While the Director has authorized the work behind a hold for the
+held notice's own ticket, by extending its lease or snoozing that ticket's
+reminders, the hold is still noted, so its episode and clock carry on, but
+nothing is told. When the authorization ends the alert is due at once. See
+`docs/syrd-708-authorized-background-work.md`.
+
 ## Configuration
 
 The threshold is `TICKET_BOARD_BACKGROUND_HOLD_ALERT_SECONDS`, in the

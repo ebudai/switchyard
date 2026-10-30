@@ -79,6 +79,10 @@ Whatever its age, two more are told:
 A lead whose start time cannot be read is treated as material: nothing says
 it is short.
 
+Since SYRD-708, an episode that the Director has authorized, by extending its
+lease or snoozing its ticket's reminders, is not told while that stands
+(`docs/syrd-708-authorized-background-work.md`).
+
 ### Still true when delivered
 
 A queued `background_child` alert waits until the Director's pane is free. When

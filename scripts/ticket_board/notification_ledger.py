@@ -168,7 +168,8 @@ SELECT ticket_board.record_notification_trace(
             reason = str(fields.get("busy_reason") or "")
             # SYRD-583: a child hold's alert names the children holding it.
             holders = once().get("anti_clobber", {}).get("holders") if reason in background_hold.HOLD_REASONS else None
-            background_hold.note(self, conn, notification_id, reason, holders)
+            background_hold.note(self, conn, notification_id, reason, holders, ticket_id=str(fields.get("ticket_id") or ""),
+                                 role=str(fields.get("target_role") or ""))
             # SYRD-570: a composer hold under a trusted idle hook opens or joins
             # the role's episode; any other deferral ends it.
             trusted = reason in composer_hold.HOLD_REASONS and bool(once().get("anti_clobber", {}).get("trusted_idle"))

@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from . import background_child, execution_lease as lease
+from . import background_authorization, background_child, execution_lease as lease
 from .execution_lease_pass import MIN_AGE_SECONDS
 
 #: Where processes are read. A parameter everywhere, looked up when called, so a test can point it elsewhere.
@@ -242,6 +242,9 @@ def tell(ledger: Any, conn: Any, notification_id: int, holders: Iterable[backgro
                 (origins[holder.key] for holder in episode.members if holder.key in origins), None)
             if not material(episode, now=now, conn=conn, lease_dir=lease_dir, proc_root=proc_root,
                             lapsed=background_child.lapsed(origin, role, terminal)):
+                continue
+            # SYRD-708: work the Director has authorized -- an extension, a snooze -- is not told while it stands.
+            if background_authorization.covered(conn, role, episode.members, terminal=terminal, proc_root=proc_root):
                 continue
             what = background_child.sentence(episode.lead, origin, now=now, provider_pid=provider_pid,
                                              under=others_clause(episode))

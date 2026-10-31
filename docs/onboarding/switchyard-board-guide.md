@@ -159,6 +159,9 @@ system working, not a bug to route around.
   is linked to the source ticket and lands in `analysis`.
 - Audit **cannot** re-assign or route. It is a gate, not an implementer, and it is
   deliberately not an owner of any implementation stage.
+- Audit verifies the implementer's recorded test evidence and runs focused checks of its
+  own; it reruns the complete suite only for a reason it records first. See **Test
+  evidence** below.
 
 **Inspector**
 - `inspector-sign-off` — inspection → audit
@@ -257,6 +260,84 @@ system working, not a bug to route around.
 - `user-sign-off` — UAT user_review → director_review
 - `user-reopen` — back to analysis, from user_review, director_review or done
 - `release-draft` — draft → analysis
+
+---
+
+## Test evidence: reuse what is exact, rerun for a reason
+
+Running the same large suite again at every review stage multiplies latency and
+adds no confidence when nothing it depends on has changed. Independent review means
+independent judgment, not a duplicate computation. Each role's default:
+
+**The implementer runs the complete validation the change needs and records it
+exactly**, on the ticket, so that a later role can tell whether the result still
+applies:
+- the candidate commit and its tree (`git rev-parse <commit>^{tree}`), and the base it
+  was built on and tested against;
+- the commands that ran, or the suite manifest, precise enough to repeat;
+- the environment the result depends on: tool and runtime versions, database and
+  schema, sandbox or disposable HOME;
+- the outcomes, and for every suite that is red, a comparison of where it fails on the
+  base and on the candidate.
+
+**Audit verifies that this evidence is about this candidate, then reviews the work.**
+- Provenance and applicability: the recorded commit and tree are the ticket's
+  candidate, the base is the one the candidate sits on, the run was complete, bounded
+  and finished, and red suites were compared with the base.
+- Read the affected code and tests.
+- Run independent, focused checks chosen from the risk you see: add or rerun the
+  tests that answer a concrete review question, kill a mutant of your own, probe the
+  boundary the change touches.
+- Do not rerun the complete suite merely because the ticket entered Audit.
+
+**The Director's Final Sign-Off** verifies the exact audited or published candidate,
+the review decisions, any unresolved findings, the size, provenance and publication
+gates, and the acceptance evidence. It does not rerun the implementer's or Audit's
+complete suite merely because the ticket entered Final Sign-Off
+(`switchyard-director-guide.md`, "Reviewing: verify, do not trust").
+
+**A complete rerun at Audit or Final Sign-Off needs a concrete reason, recorded
+first.** Before you start one on an unchanged candidate, post a short comment on the
+ticket naming what could make the result differ. Valid reasons:
+- the candidate commit or tree, or the tested base, differs from the evidence,
+  including a non-mechanical rebase, a merge, or a documentation commit that can
+  affect tested behaviour;
+- relevant dependencies, toolchain, database or schema, generated artifacts,
+  permissions, platform or runtime configuration changed;
+- the recorded run was incomplete, unbounded, interrupted or ambiguous, lacks exact
+  commands or results, or cannot be tied to the candidate;
+- baseline and candidate failures were not compared adequately;
+- review found an untested risk, a mutation survivor, a security boundary, suspected
+  flakiness or nondeterminism, or a contradiction in the submitted evidence;
+- a required release, host or live acceptance property cannot be established from the
+  existing evidence;
+- the project's own policy, or the ticket, requires the run.
+
+Not a reason by itself:
+- the ticket entered a new stage;
+- another role wanting its own copy of an exact, applicable result;
+- elapsed time, while the candidate, base and relevant environment are unchanged;
+- generic caution that names nothing that could make the result different.
+
+When the reason concerns one area, rerun the suites for that area, not everything.
+
+| Situation | What the reviewer does |
+|---|---|
+| **Unchanged candidate**: the ticket's commit and tree, the base and the environment match the evidence | Reuse the run. Verify its provenance, read the change, run focused checks. No complete rerun. |
+| **Mechanical rebase** onto a main that moved: the range-diff shows the patch unchanged, and main's new commits share no files or behaviour with it | Say why it is mechanical. Reuse the run for the change, and rerun the suites that cover both the change and what main added. |
+| **Non-mechanical rebase or merge**: conflicts were resolved, or main changed code the change calls | A valid reason: the tested tree differs. Rerun the affected suites, or the complete validation when the overlap is broad. |
+| **Librarian documentation commit** on top of the candidate | Read its diff; the decision comment lists every path. Prose that nothing executes changes no test result, so reuse. If it touches anything a test or program reads (embedded help, executable examples, configuration, a document a test pins), rerun the suites that read those files. |
+| **Migration or runtime change** between the run and now: a new migration on main, another database version, a changed dependency or permission | A valid reason: the environment the result depends on changed. Rerun the suites that exercise it. |
+| **Flaky test**: a test failed once and passed on retry, or results differ between runs | A valid reason, for that test: rerun it enough times to tell flaky from broken, and record the counts. A complete rerun answers nothing more. |
+| **Baseline-equivalent failures**: suites red on both base and candidate, with matching failure points recorded | Reuse. The comparison is the evidence. Failure points that were not compared are a valid reason to rerun those suites on both sides. |
+| **Security finding**: a trust boundary, permission or secret path the evidence does not exercise | A valid reason: an untested risk. Add or run the test that exercises that boundary, and kick back if it is missing. |
+
+This is not trusting conclusions. Read the source, act on any failing or
+contradictory evidence, and verify focused claims yourself. A bare "tests pass" with
+no commit, commands or output is a claim, not evidence. Say in your sign-off what you
+ran yourself and what you reused, naming the commit and tree the reused evidence
+covers. Nothing here changes a board authority, a transition, a gate or a test
+requirement: a run the project or the ticket requires is still owed.
 
 ---
 

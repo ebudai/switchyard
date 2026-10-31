@@ -413,33 +413,58 @@ git merge-base --is-ancestor <commit> origin/main   # after integration: it land
 git diff --stat origin/main...<commit>
 ```
 
-### Reusing Audit's evidence
+### Reusing recorded evidence
 
-An independently recorded Audit result is evidence for the exact commit and tree
+The implementer runs the complete validation and records it exactly: commit
+and tree, base, commands, environment, outcomes and a baseline comparison of
+any failures. Audit verifies that record applies and adds targeted checks. An
+independently recorded Audit result is evidence for the exact commit and tree
 it names. Re-running the same suite against an unchanged commit spends time and
-tokens to learn what is already known.
+tokens to learn what is already known, so do not rerun the complete suite
+merely because the ticket entered Final Sign-Off.
 
 So: verify identity first, then judge. Confirm the commit Audit recorded is the
-commit you are integrating - the tree, not just the ticket field - and read what
-Audit actually ran. Then look at provenance and the boundaries the change
-touches, and run focused checks only where you see a risk their evidence does not
-cover. Killing a mutant of your own is such a check, and it is usually worth more
-than repeating their suite.
+commit you are integrating - the exact audited or published candidate, the
+tree, not just the ticket field - and read what was actually run. Check the
+review decisions, unresolved findings, the size, provenance and publication
+gates and the acceptance evidence. Then run focused checks only where you see a
+risk their evidence does not cover. Killing a mutant of your own is such a
+check, and it is usually worth more than repeating their suite.
 
-Re-run broader tests when, and only when, one of these holds:
+Re-run broader tests when, and only when, one of these holds, and record the
+reason in a ticket comment before you start:
 
-- the tree changed after Audit recorded its result;
-- the recorded environment or result is inadequate for what you are integrating;
+- the tree changed after Audit recorded its result: the candidate commit or
+  tree, or its tested base, differs from the evidence (a non-mechanical rebase,
+  a merge, a documentation commit that changes what a test reads);
+- the recorded environment or result is inadequate: relevant dependencies,
+  toolchain, database or schema, generated artifacts, permissions, platform or
+  runtime configuration changed;
+- the recorded run was incomplete, unbounded, interrupted or ambiguous, is
+  missing its exact commands or results, or cannot be tied to the candidate;
+- baseline and candidate failures were not compared adequately;
 - a focused check of yours contradicts their evidence;
-- repository policy requires the run.
+- review raised an untested risk, a mutation survivor, a security boundary or
+  suspected flakiness;
+- a required release, host or live acceptance property cannot be established
+  from the evidence;
+- repository policy requires the run, or the ticket requires it.
 
-After a merge commit, a short integration smoke check is enough unless the merge
+Not a reason by itself: entering Final Sign-Off, wanting your own copy of an
+exact result, elapsed time with nothing changed, or caution that names nothing
+that could differ. Rerun only the affected area where that answers the reason:
+a flaky test is rerun until flaky and broken can be told apart, not the suite;
+red suites with matching recorded failure points on base and candidate are
+reused; a Librarian commit of prose nothing executes needs no rerun. After a
+merge commit, a short integration smoke check is enough unless the merge
 needed real resolution or pulled in changed dependencies.
 
-**Report which is which.** Say what you ran yourself and what you reused from
-Audit, naming the commit their result covers. "Audit's suite passed at <sha>, and
-I ran the focused X check myself" is an honest record; "tests pass" over reused
-evidence is not.
+**Report which is which.** Say what you ran yourself and what you reused,
+naming the commit and tree the reused result covers. "The implementer's run at
+<sha>, verified by Audit, covers this tree, and I ran the focused X check
+myself" is an honest record; "tests pass" over reused evidence is not. The
+onboarding Director guide has worked examples, and the board guide's "Test
+evidence" section states the policy for every role.
 
 Then close with the workflow's completion action, which requires the commit hash.
 

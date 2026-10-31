@@ -300,8 +300,51 @@ back with a reason, and does not take the work over or reassign it. Kick-backs
 require a reason for the same purpose the commit hash serves: the next person has
 to be able to reconstruct the decision from the ticket alone.
 
-Sign off on what you actually verified. "Tests pass" is only true if you ran them
-and read the output; say what you ran and what it printed.
+Sign off on what you actually verified. Say what you ran yourself, with what it
+printed, and what you reused, with the commit and tree it covers. A bare "tests
+pass" with no commit, commands or output is a claim, not evidence.
+
+### Test evidence: reuse what is exact, rerun for a reason
+
+The implementer runs the complete validation and records it on the ticket: the
+candidate commit and tree, the base, the commands or suite manifest, the
+environment and tool versions the result depends on, the outcomes, and where
+each red suite fails on the base and on the candidate.
+
+A reviewer (Audit, or the director at final sign-off) does not rerun that
+complete suite merely because the ticket entered their stage. The default is:
+
+1. Verify the evidence applies: same commit, tree, base and relevant
+   environment; the run was complete, bounded and finished; red suites were
+   compared with the base.
+2. Read the affected code and tests.
+3. Run focused checks chosen from the risk you see: the tests that answer a
+   concrete review question, a mutant of your own, the boundary the change
+   touches. Reuse the exact evidence for the rest.
+
+Rerun when something could make the result differ, and only the area it
+concerns where that is enough:
+- the commit, tree or base changed: a non-mechanical rebase, a merge, or a
+  documentation commit touching something a test or program reads;
+- dependencies, toolchain, database or schema, generated artifacts,
+  permissions, platform or runtime configuration changed;
+- the run was incomplete, unbounded, interrupted, ambiguous, missing exact
+  commands or results, or not tied to the candidate;
+- baseline and candidate failures were not compared;
+- review found an untested risk, a mutation survivor, a security boundary,
+  suspected flakiness, or a contradiction in the evidence;
+- an acceptance property cannot be established from the evidence, or the
+  project or ticket requires the run.
+
+Before starting a complete-suite rerun on an unchanged candidate, record that
+reason in a short ticket comment. Not a reason by itself: a new stage, wanting
+your own copy of an exact result, elapsed time with nothing changed, or caution
+that names nothing that could differ. This changes no authority, transition or
+test requirement, and it is not blind trust: read the source and act on any
+failing or contradictory evidence. The onboarding board guide's "Test evidence"
+section has worked examples: unchanged candidates, rebases, Librarian commits,
+migration or runtime changes, flaky tests, baseline-equivalent failures and
+security findings.
 
 Audit's kick-back returns the work to its substantive origin: the implementer
 or designer who produced it, never the Librarian whose documentation commit

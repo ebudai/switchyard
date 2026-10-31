@@ -5,7 +5,9 @@ Audit already runs the suite and records the result. Re-running the same suite
 against an unchanged commit buys nothing, so the policy is that an independently
 recorded Audit result is evidence for the exact commit it names -- with identity
 checked first, focused checks where the evidence leaves a gap, and an honest split
-between what the Director ran and what it reused.
+between what the Director ran and what it reused. SYRD-720 extended the same
+rule to Audit, which now verifies the implementer's exactly recorded run rather
+than repeating it; `review_evidence_policy_test.py` pins that half.
 
 The policy lives in two hand-written bodies: the portable skill every Director CLI
 loads, and the onboarding guide a provisioned project carries. This module pins the

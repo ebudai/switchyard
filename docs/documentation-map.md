@@ -27,6 +27,7 @@ running. Do not copy a transition or option from a historical ticket record.
 | See projects and attach to a role | [Launcher: attaching](team-launcher.md#attaching-to-a-role) | `switchyard status --help`; `switchyard attach --help` |
 | Start or stop a whole project | [Launcher](team-launcher.md) | `switchyard start --help`; `switchyard stop --help` |
 | Route, review or move a ticket | [Board guide](onboarding/switchyard-board-guide.md) | the ticket's `workflow_actions`; `ticket-board-write <action> --help` |
+| Decide what to rerun when reviewing | [Board guide: test evidence](onboarding/switchyard-board-guide.md#test-evidence-reuse-what-is-exact-rerun-for-a-reason) | the ticket's recorded evidence and candidate commit |
 | Operate as the Director | [Director guide](onboarding/switchyard-director-guide.md) | the `switchyard-director` skill and `/api/workflow` |
 | Recover a role, pane or display | [Role runtime](role-runtime.md), [runtime presentation](runtime-presentation.md), and [launcher](team-launcher.md) | `switchyard status --json`; `switchyard attach`, `recover-display`, `set-role-runtime` or `start --help` |
 | Upgrade a tenant | [Launcher: upgrading](team-launcher.md#upgrading-a-tenant) | `switchyard upgrade --dry-run <project>`; `switchyard release-status <project>` |

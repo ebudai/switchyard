@@ -46,24 +46,70 @@ merged today can silently revert everything that landed in between. Diff the bra
 against main and look at the *shape* of the change: a stat showing thousands of deletions
 on a small ticket means the branch is stale, not that the work is large.
 
-**Reuse audit's evidence, but prove it is about your tree first.** An independently
-recorded audit result is evidence for the exact commit and tree it names, and repeating
-that suite against an unchanged commit buys nothing. So spend the effort on identity
-instead: confirm the commit audit recorded is the commit you are integrating — the tree,
-not just the ticket field — and read what audit actually ran and where. Then run focused
-checks where their evidence leaves a gap. The implementer's numbers are never evidence;
-only an independently recorded result is.
+**Reuse the recorded evidence, but prove it is about your tree first.** The implementer
+runs the complete validation and records it exactly: commit and tree, base, commands,
+environment, outcomes and a baseline comparison of any failures. Audit verifies that
+record applies to the candidate and adds targeted checks of its own. That
+independently recorded audit result is evidence for the exact commit and tree it names,
+and repeating the suite against an unchanged commit buys nothing. So at Final Sign-Off
+spend the effort on identity instead: confirm the commit audit recorded is the commit
+you are integrating or signing off, the exact audited or published candidate, the tree
+and not just the ticket field, and read what was actually run and where. Then check the
+review decisions, unresolved findings, the size, provenance and publication gates and
+the acceptance evidence, and run focused checks where the evidence leaves a gap. A
+claim without its commit, commands and output is never evidence.
 
-Re-run the broader suite yourself when the tree changed after audit recorded its result,
-when the recorded environment or result is inadequate for what you are integrating, when
-a focused check of yours contradicts their evidence, or when repository policy requires
-the run. Then it is yours, in a throwaway worktree at the exact commit — green on the
-branch is not green on main. After a merge commit, a short integration smoke check is
-enough unless the merge needed real resolution or pulled in changed dependencies.
+Do not rerun the complete suite merely because the ticket entered Final Sign-Off. Re-run
+the broader suite yourself when you have a concrete reason the result might differ, and
+record that reason on the ticket before you start:
+
+- the tree changed after audit recorded its result: the candidate commit or tree, or its
+  tested base, differs from the evidence (a non-mechanical rebase, a merge, or a
+  documentation commit that changes what a test reads);
+- the recorded environment or result is inadequate: a relevant dependency, toolchain,
+  database or schema, generated artifact, permission, platform or runtime configuration
+  changed;
+- the recorded run was incomplete, unbounded, interrupted or ambiguous, is missing its
+  exact commands or results, or cannot be tied to the candidate;
+- baseline and candidate failures were not compared adequately, or a focused check of
+  yours contradicts their evidence;
+- review raised an untested risk, a mutation survivor, a security boundary or suspected
+  flakiness;
+- a required release, host or live acceptance property cannot be established from the
+  evidence; or
+- repository policy requires the run, or the ticket requires it.
+
+Entering a new stage, wanting your own copy of an exact result, elapsed time with nothing
+changed, and caution that names nothing that could differ are not reasons. Then it is
+yours, in a throwaway worktree at the exact commit — green on the branch is not green on
+main. After a merge commit, a short integration smoke check is enough unless the merge
+needed real resolution or pulled in changed dependencies.
 
 **Say which is which.** Name what you ran yourself and what you reused, with the commit
-the reused result covers. "Audit's suite passed at `<sha>`, which is the tree I merged; I
-ran the mutation myself" is a record. "Tests pass" over someone else's run is not.
+the reused result covers. "The implementer's run covers `<sha>`, tree `<tree>`, which
+audit verified and which is the tree I signed off; I ran the mutation myself" is a
+record. "Tests pass" over someone else's run is not.
+
+At Final Sign-Off, for example:
+
+- **Unchanged candidate**, or one the Publisher fast-forwarded exactly: the tree is the
+  one the evidence names. Reuse it, check it landed, and run your own focused check.
+- **Rebased after audit**: a changed candidate clears audit's sign-off and goes back
+  through Audit anyway. If you rebase it yourself, say whether the range-diff is
+  unchanged and main's new commits share nothing with it; if not, the tree differs and
+  the affected suites are rerun.
+- **Librarian documentation commit**: Audit reviewed the combined candidate. Read the
+  commit's paths; prose nothing executes needs no rerun, while embedded help,
+  executable examples, configuration or a document a test pins needs the suites that
+  read them, run by audit or by you.
+- **Migration or runtime change** since the run, such as a migration that reached main
+  first: the environment differs, so the suites that exercise it are rerun.
+- **Flaky test** noted in the evidence: rerun that test until flaky and broken can be
+  told apart, and record the counts; not the whole suite.
+- **Baseline-equivalent failures** recorded on both sides with matching failure points:
+  reuse the comparison. Uncompared red suites are a reason to compare them.
+- **Security finding**, open or fixed: confirm a test exercises that boundary; an open
+  one is not signed off.
 
 **Kill a mutant of your own.** The single most valuable review technique. Break the thing
 the ticket claims to fix and confirm the suite catches it. Choose a different mutation

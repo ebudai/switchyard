@@ -68,6 +68,9 @@ decided by the Director at no extra cost, or by a Librarian as one more model se
 
 ## Not onboarding, but nearby in the Switchyard source checkout
 
+- Switchyard source checkout `docs/documentation-map.md` — which documents are maintained
+  and normative, which are historical records, and which still need review. Start there
+  to find the current guide for a task.
 - Switchyard source checkout `docs/ticket-board-service.md` — deploying and operating the board service.
 - Switchyard source checkout `docs/team-launcher.md` — the launcher, panes, roles and first-run auth.
 - Switchyard source checkout `docs/switchyard-project-setup-design.md` — how a new project is provisioned.

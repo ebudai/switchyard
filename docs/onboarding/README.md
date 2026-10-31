@@ -1,6 +1,6 @@
 # Onboarding
 
-Read these three, in this order. They are project-agnostic — they describe Switchyard, not
+Read these in order. They are project-agnostic — they describe Switchyard, not
 any particular project.
 
 1. **[adversarial-collaborative-methodology.md](adversarial-collaborative-methodology.md)** — *why*.
@@ -27,6 +27,12 @@ any particular project.
    return a ticket, and what is never the Librarian's.
 
 ## Start here if you are new
+
+For one specific task, the Switchyard source checkout's
+`docs/documentation-map.md` is the human capability and upgrade index. The
+compact `docs/llm-operations.md` tells an LLM which live or normative surface
+to retrieve without repeating the whole manual. This copied packet remains the
+source for board mechanics and role judgment.
 
 Your board's address is already in your environment — you do not need to look it up:
 
@@ -68,6 +74,12 @@ decided by the Director at no extra cost, or by a Librarian as one more model se
 
 ## Not onboarding, but nearby in the Switchyard source checkout
 
+- Switchyard source checkout `docs/documentation-map.md` — which documents are maintained
+  and normative, which are historical records, and which current guide owns each task.
+- Switchyard source checkout `docs/llm-operations.md` — compact source-of-truth,
+  authority, evidence, wait and failure-handling index for LLM roles.
 - Switchyard source checkout `docs/ticket-board-service.md` — deploying and operating the board service.
 - Switchyard source checkout `docs/team-launcher.md` — the launcher, panes, roles and first-run auth.
-- Switchyard source checkout `docs/switchyard-project-setup-design.md` — how a new project is provisioned.
+- Switchyard source checkout `docs/ticket-board-project-provisioning.md` — the current
+  per-project board provisioning contract. The similarly named setup design is
+  an unimplemented historical draft.

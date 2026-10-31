@@ -1,5 +1,11 @@
 # SYRD-624: an optional documentation gate before Audit, decided by a Librarian or the Director
 
+> **Historical design and rollout evidence.** This ticket record describes the
+> revision that introduced the documentation gate; it is not the current
+> operating contract. Use the [Librarian guide](onboarding/switchyard-librarian-guide.md),
+> the [launcher guide](team-launcher.md#new-project), and
+> `switchyard documentation-gate --help` before acting.
+
 ## The ask
 
 Tickets that add, change or retire something a person reads about (CLI help,

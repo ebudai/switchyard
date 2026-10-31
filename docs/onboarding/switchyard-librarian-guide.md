@@ -100,6 +100,22 @@ anything. So a help string in code, an example workflow or configuration a
 program reads, a test, a default or any behaviour is the implementer's: kick
 back with the exact text it should say.
 
+### Keep current instructions separate from evidence
+
+In the Switchyard source tree, `docs/documentation-map.md` is the maintained
+human capability index and current-versus-historical boundary, while
+`docs/llm-operations.md` is the compact LLM retrieval index. Keep task
+instructions in a maintained guide and link to ticket-named design or rollout
+records only for rationale and evidence. Do not turn a ticket record into a
+second command manual. A historical document may retain old facts, but its
+category must be unmistakable before a reader acts on them.
+
+Tenant onboarding files are stamped snapshots of `docs/onboarding/`, refreshed
+by the upgrade path when the installed copy was not edited. Generated
+`DIRECTOR_ONBOARDING.md` and `DESIGNER_ONBOARDING.md` content comes from
+`scripts/project_onboarding.py`; review the generated output, but return a
+needed generator change to the implementer.
+
 ## Checklist: finding stale or contradictory instructions
 
 1. **Inventory the visible change.** From the ticket and the diff, list what is

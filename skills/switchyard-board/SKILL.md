@@ -8,6 +8,11 @@ description: Read and write this project's Switchyard ticket board safely from a
 The board is the coordination record for this project. Every claim about state,
 ownership, and provenance lives there, not in chat.
 
+For broader product operation, the Switchyard source checkout keeps the human
+task index in `docs/documentation-map.md` and the compact cross-role retrieval
+index in `docs/llm-operations.md`. They do not override this skill, the live
+workflow or command help.
+
 Nothing in this skill names a project, a port, a role, a stage, or a database.
 All of that is per-project and is discovered at runtime. If you find yourself
 typing a literal prefix or address, you are guessing.

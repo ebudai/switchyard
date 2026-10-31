@@ -1,5 +1,11 @@
 # SYRD-567: an optional design stage for the designer
 
+> **Historical design and rollout evidence.** This ticket record describes the
+> revision that introduced the optional design stage; it is not the current
+> procedure. Use
+> [Giving design work its own stage](onboarding/switchyard-director-guide.md#giving-design-work-its-own-stage)
+> and `switchyard design-stage --help` before acting.
+
 Origin: Otto's report of 2026-10-07, item 14 (`OTTO-SYRD-14`). Otto's designer
 had no work stage. Its only transition was `release_draft`, so design and
 specification work ran outside ownership, review and sign-off, under a

@@ -7,6 +7,14 @@ to verify. For the mechanics of the board and `directorctl`, see
 
 This guide is project-agnostic.
 
+For a newly started or returning Director, use the Switchyard source
+checkout's `docs/documentation-map.md` to find current install, upgrade,
+recovery, publication, UAT, quota and incident procedures. Its
+`docs/llm-operations.md` is the low-context source-of-truth index. Exact
+project authority still comes from `/api/workflow`, exact moves from the
+ticket's `workflow_actions`, and exact flags from the installed command's
+`--help`.
+
 ---
 
 ## The job
@@ -466,9 +474,13 @@ as usual. `release_draft` is unchanged: a draft that needs no design still goes
 straight to triage.
 
 A designer with no pane is not notified or reminded, so tell it when work is
-waiting. Root's recorded workflow is not refreshed by this or any workflow
-write until SYRD-561 and SYRD-562 land. Details:
-[SYRD-567](../syrd-567-design-stage.md).
+waiting. A tenant workflow write does not silently replace root's independently
+held workflow record. The write reports any drift and the exact preview/apply
+`pkexec switchyard adopt-workflow` command for the operator; review and run
+that separate adoption when root's record must change. This section and
+`switchyard design-stage --help` are the current procedure;
+[SYRD-567](../syrd-567-design-stage.md) is historical design and rollout
+evidence.
 
 ## A designer that also implements
 
@@ -494,8 +506,10 @@ tickets you have flagged (`ticket-board-write set-workflow-flags <id>
 --patch-json '{"design_work": true}'`), and lists it under the ticket's
 `routing.scopes`.
 Assigning it directly stays yours, flagged or not. A designer with a scope
-cannot also claim pulled work. Details:
-[SYRD-678](../syrd-678-designer-implementer.md).
+cannot also claim pulled work. This section and
+`ticket-board-workflow enable-designer-implementation --help` are the current
+procedure; [SYRD-678](../syrd-678-designer-implementer.md) is historical
+design and rollout evidence.
 
 ## Host health the board depends on
 

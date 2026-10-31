@@ -1,5 +1,11 @@
 # SYRD-625: the Publisher
 
+> **Historical design and rollout evidence.** This ticket record explains why
+> the Publisher was introduced and what that revision changed; it is not the
+> current operating manual. Use the
+> [Director skill](../skills/switchyard-director/SKILL.md#when-the-publisher-integrates),
+> the live workflow and current command help before acting.
+
 The Director used to integrate approved work by hand: fetch, check ancestry,
 push `main` with a lease, refresh the board's cache, close. The Publisher does
 that routine mechanically, as a workflow stage. The Director keeps the

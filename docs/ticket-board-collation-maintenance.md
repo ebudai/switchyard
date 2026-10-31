@@ -1,5 +1,9 @@
 # Ticket Board Collation Maintenance
 
+> **Historical maintenance record.** The database names, observed versions and
+> expected ticket count below belong to PGU-600. Do not run them as a current
+> Switchyard procedure; inspect the live tenant and the current command help.
+
 PostgreSQL warns when a database was created with an older operating-system
 collation version than the one currently provided by libc. For the ticket board,
 this matters because btree indexes cover text-heavy lookup paths such as ticket

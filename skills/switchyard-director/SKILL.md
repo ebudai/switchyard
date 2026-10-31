@@ -35,6 +35,11 @@ For the judgment behind these controls - when to merge versus kick back, how to
 review, what to escalate - read the project's director guide in its onboarding
 packet. This skill is the control surface; that guide is the reasoning.
 
+For install, upgrade, role recovery, publication, UAT, provider quota and
+incident procedures outside one ticket, use the Switchyard source checkout's
+`docs/documentation-map.md`; `docs/llm-operations.md` is its low-context role
+index. Neither replaces the live workflow or this role-checked overlay.
+
 ## Discover your authority, do not memorise it
 
 Roles, stages, gates and operations are per-project and change. The board
@@ -454,8 +459,9 @@ Anything else lands in `publication_failed` with the exact diagnostic and the
 repairs it tried: a credential, a hook or branch protection, the publication
 target, the journal, sign-offs or size review. Fix the cause, then send the
 ticket back with `publication_retry`, or return it with `publication_kick_back`.
-Never integrate a ticket by hand while it is in `publication`. See
-`docs/syrd-625-publisher.md`.
+Never integrate a ticket by hand while it is in `publication`. This section,
+the live workflow and command help are the current operating contract;
+`docs/syrd-625-publisher.md` is historical design and rollout evidence only.
 
 ## Release, upgrade and rollback
 

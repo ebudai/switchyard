@@ -6,6 +6,12 @@ board, role launchers, repository policy hooks, and install/deploy helpers.
 [GitHub](https://github.com/ebudai/switchyard) is the canonical repository.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for pull requests and contribution terms.
 
+To find a current procedure, start with the
+[human capability and upgrade index](docs/documentation-map.md). Roles and
+automation can use the compact [LLM operations reference](docs/llm-operations.md).
+Those pages also mark the boundary between maintained instructions and dated
+ticket, design and rollout evidence.
+
 ## From Clone To Installed Command
 
 Start with a fresh clone, then run the one installer command:

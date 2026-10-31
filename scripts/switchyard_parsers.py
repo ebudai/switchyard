@@ -117,10 +117,11 @@ def _build_switchyard_new_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         dest="board_ui_users",
-        metavar="ACCOUNT",
+        metavar="ACCOUNT[=LOGIN]",
         help=(
             "a human account that may confirm Director operations in the board UI; repeat for more. "
-            "Without it the host's approved desktop owner is recorded, and a headless host records nobody"
+            "Without it the host's approved desktop owner is recorded, and a headless host records nobody. "
+            "=LOGIN also records the account's Tailscale login, for its phone over Tailscale Serve; = alone removes it"
         ),
     )
     parser.add_argument("--workflow-config", type=Path, help="declarative roles/stages JSON for the new project")
@@ -275,10 +276,11 @@ def _build_switchyard_upgrade_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         dest="board_ui_users",
-        metavar="ACCOUNT",
+        metavar="ACCOUNT[=LOGIN]",
         help=(
             "a human account that may confirm Director operations in the board UI; repeat for more. "
-            "Without it the host's approved desktop owner is recorded, and a headless host records nobody"
+            "Without it the host's approved desktop owner is recorded, and a headless host records nobody. "
+            "=LOGIN also records the account's Tailscale login, for its phone over Tailscale Serve; = alone removes it"
         ),
     )
     parser.add_argument(

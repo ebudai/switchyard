@@ -6,6 +6,7 @@ host's approved desktop owner (from the host's root-owned desktop approval, neve
 configuration), or the accounts an operator names with --board-ui-user. Root, the board service, the
 project account and role accounts are refused rather than recorded. Each decision is journalled. The
 board's unit carries the record's path on its command line, and the board accepts the record root wrote.
+SYRD-718: an approved account's tailnet login is recorded beside it, and kept until an operator changes it.
 """
 
 from __future__ import annotations
@@ -170,6 +171,47 @@ def main() -> int:
                                      journal_root=journal, print_func=said.append)
         check((registry / "pgu.json").read_text() == before and any("would record" in line for line in said),
               f"a dry run writes nothing: {said}")
+
+        # SYRD-718: an account's tailnet login, recorded beside it (ACCOUNT=LOGIN), kept by later runs while the account
+        # keeps its uid, replaced or removed (ACCOUNT=) only when an operator says so, and read by the board.
+        login, entry = "uat-user@example.com", {"account": human.pw_name, "uid": human.pw_uid}
+
+        def users_after(operator_users: list[str], **kwargs) -> tuple[list, list]:
+            said.clear()
+            problems = record.record_board_ui_users(project(), registry_dir=registry, operator_users=operator_users,
+                                                    journal_root=journal, print_func=said.append, **kwargs)
+            return problems, registered()[record.RECORD_KEY]["users"]
+
+        problems, users = users_after([f"{human.pw_name}={login}"])
+        check(problems == [] and users == [{**entry, "tailnet_login": login}]
+              and said[-1].endswith(f"{human.pw_name} (uid {human.pw_uid}, tailnet {login}) (operator (--board-ui-user))"),
+              f"--board-ui-user ACCOUNT=LOGIN records the login beside the account: {problems} {users} {said}")
+        ui_user_identity.RECORD_PATH = registry / "pgu.json"
+        ui_user_identity.TRUSTED_OWNER_UIDS = frozenset({0, os.getuid()})
+        check(ui_user_identity.configured({}).tailnet_logins == frozenset({login}), "and the board reads it")
+        check(users_after([], approval_path=approval)[1] == [{**entry, "tailnet_login": login}]
+              and users_after([human.pw_name])[1] == [{**entry, "tailnet_login": login}],
+              "an upgrade naming nobody (the desktop owner), or the account alone, keeps its login")
+        held = registered()
+        held[record.RECORD_KEY]["users"] = [{**entry, "uid": human.pw_uid + 1, "tailnet_login": login}]
+        (registry / "pgu.json").write_text(json.dumps(held))
+        check(users_after([], approval_path=approval)[1] == [entry],
+              "a login recorded for another uid of that name is not carried to this one")
+        users_after([f"{human.pw_name}={login}"])
+        before = (registry / "pgu.json").read_text()
+        problems, users = users_after([f"{human.pw_name}=uat user"])
+        check(len(problems) == 1 and "'uat user' is not a tailnet login" in problems[0]
+              and problems[0].endswith("pgu's board UI users were left as they were")
+              and (registry / "pgu.json").read_text() == before,
+              f"a login Tailscale would never name is refused, and the record is unchanged: {problems}")
+        problems, users = users_after([f"{human.pw_name}="])
+        check(problems == [] and users == [entry] and ui_user_identity.configured({}).tailnet_logins == frozenset(),
+              f"ACCOUNT= removes it: {users}")
+        held = registered()
+        held[record.RECORD_KEY]["users"] = [{**entry, "tailnet_login": ["uat-user@example.com"]}]
+        (registry / "pgu.json").write_text(json.dumps(held))
+        check("is malformed" in ui_user_identity.configured({}).problem, "a login that is not text turns the record off")
+        users_after([], approval_path=approval)
 
         # The board reads exactly what root wrote, from the path its unit names.
         record.record_board_ui_users(project(), registry_dir=registry, approval_path=approval, journal_root=journal,

@@ -287,6 +287,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
     def require_http_write_token(self) -> None:
         if self.role_authority is not None:
             return
+        ui_delegation.require_user_channel(self)  # SYRD-718: through a proxy, only the User's own tailnet login
         raw = self.headers.get(WRITE_TOKEN_HEADER, "") or self.headers.get(LEGACY_WRITE_TOKEN_HEADER, "")
         if not raw or not secrets.compare_digest(raw, self.write_token):
             raise PermissionError(f"missing or invalid {WRITE_TOKEN_HEADER}")
@@ -919,17 +920,14 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path); ui_delegation.begin_request()  # SYRD-598
         if parsed.path == "/":
+            token = json.dumps(ui_delegation.page_write_token(self))  # SYRD-718: none for a page that is not the User's
             token_script = (
-                f"  <script>window.TICKET_BOARD_WRITE_TOKEN = {json.dumps(self.write_token)};"
-                f" window.PGU_TICKET_BOARD_WRITE_TOKEN = {json.dumps(self.write_token)};"
+                f"  <script>window.TICKET_BOARD_WRITE_TOKEN = {token}; window.PGU_TICKET_BOARD_WRITE_TOKEN = {token};"
                 f" window.TICKET_BOARD_BUILD_ID = {json.dumps(self.server.build_id)};"
                 f" window.PGU_TICKET_BOARD_BUILD_ID = {json.dumps(self.server.build_id)};</script>\n"
             )
-            page = render_html(
-                project=getattr(self.app, "project", "pgu"),
-                project_name=getattr(self.app, "project_name", "PGU"),
-                ticket_prefix=getattr(self.app, "ticket_prefix", "PGU"),
-            )
+            page = render_html(project=getattr(self.app, "project", "pgu"), project_name=getattr(self.app, "project_name", "PGU"),
+                               ticket_prefix=getattr(self.app, "ticket_prefix", "PGU"))
             body = page.replace("  <script>\n", token_script + "  <script>\n", 1).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -1019,7 +1017,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/client-config":
             self.send_json({
                 "build_id": self.server.build_id,
-                "write_token": self.write_token,
+                "write_token": ui_delegation.page_write_token(self),  # SYRD-718
                 "project": getattr(self.app, "project", "pgu"),
                 "project_name": getattr(self.app, "project_name", "PGU"),
                 "ticket_prefix": getattr(self.app, "ticket_prefix", "PGU"),

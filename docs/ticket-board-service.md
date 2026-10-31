@@ -688,6 +688,41 @@ it only while root owns it. Until an operator-run upgrade records one, the board
 UI lends nothing and says an operator must configure an approved board UI user.
 See `docs/syrd-598-board-ui-delegation.md`.
 
+### The User's phone, over Tailscale Serve (SYRD-718)
+
+The User's phone reaches the board through this host's Tailscale Serve, which
+proxies to the board's loopback port as root. The board treats such a request
+as the User only when all of these hold:
+
+- the kernel says root owns the connection, so it is tailscaled's;
+- it carries exactly one `Tailscale-User-Login` and no
+  `Tailscale-Funnel-Request`;
+- it is for the board's page by its tailnet name (`*.ts.net`) or tailnet address,
+  over HTTPS;
+- the login is one root recorded beside an approved board UI user.
+
+Record the login with `switchyard upgrade <slug> --board-ui-user
+ACCOUNT=LOGIN`, for example `--board-ui-user eric=eric@example.com`:
+
+- a later upgrade keeps it while the account keeps its uid;
+- `ACCOUNT=` removes it.
+
+That User may do the User's own actions from the phone: Ask Director, Accept
+and Send to Director. No Director operation is ever lent over the tailnet.
+
+Any other request that came through a proxy, or carries a proxy's headers or a
+name other than `127.0.0.1`, `localhost` or `[::1]`, gets no write token, on
+the page or from `/api/client-config`, and its writes are refused. That covers:
+
+- another tailnet user;
+- a tagged device;
+- Funnel;
+- the host's own traffic;
+- a local account sending the headers itself.
+
+A desktop page on loopback is unchanged. See
+`docs/syrd-718-phone-uat-authority.md`.
+
 ### Role sessions and control
 
 Because each role is a different account, each role gets its **own tmux server**

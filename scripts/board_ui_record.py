@@ -12,6 +12,10 @@ or, on a headless host, whoever the operator names with --board-ui-user. Root, t
 tenant's project account and its role accounts are never board UI users; naming one is refused rather
 than recorded, and the record is left as it was. The record also carries those exclusions, so the board need not take them from an
 environment the tenant can override. Each decision is written to the rollout journal.
+
+An approved user may also be recorded with the login Tailscale names them by (--board-ui-user ACCOUNT=LOGIN), so the
+board knows the User's own phone when it comes through this host's Tailscale Serve (SYRD-718). The login stays with
+that account, as long as it keeps its uid, until an operator records another (ACCOUNT=LOGIN) or removes it (ACCOUNT=).
 """
 
 from __future__ import annotations
@@ -45,6 +49,33 @@ def exclusions(config: Any) -> dict[str, Any]:
         "role_accounts": sorted({str(getattr(role, "run_as_user", "") or "") for role in config.roles} - {""}),
         "service_user": SERVICE_USER,
     }
+
+
+def operator_choice(operator_users: Sequence[str]) -> tuple[list[str], dict[str, str]]:
+    """(accounts, {account: tailnet login, or '' to remove one}) from --board-ui-user ACCOUNT[=LOGIN]. ValueError for
+    a login Tailscale would never name."""
+    from scripts.ticket_board.ui_user_identity import TAILNET_LOGIN
+
+    accounts, logins = [], {}
+    for entry in operator_users:
+        account, given, login = entry.strip().partition("=")
+        account, login = account.strip(), login.strip()
+        if given and login and not TAILNET_LOGIN.fullmatch(login):
+            raise ValueError(f"{login!r} is not a tailnet login (one word with an @, such as eric@example.com)")
+        accounts.append(account)
+        if given:
+            logins[account] = login
+    return accounts, logins
+
+
+def _held_logins(path: Path) -> dict[tuple[str, int], str]:
+    """The tailnet logins the record holds now, by account and uid; none when it cannot be read."""
+    try:
+        users = json.loads(path.read_text(encoding="utf-8")).get(RECORD_KEY, {}).get("users") or []
+        return {(u["account"], u["uid"]): u["tailnet_login"] for u in users
+                if isinstance(u, dict) and isinstance(u.get("tailnet_login"), str) and u["tailnet_login"]}
+    except (OSError, ValueError, AttributeError, KeyError, TypeError):
+        return {}
 
 
 def chosen_users(config: Any, *, operator_users: Sequence[str] = (), approval_path: Path | None = None) -> tuple[list[str], str, str]:
@@ -128,13 +159,20 @@ def record_board_ui_users(
 
     path = Path(registry_dir or switchyard_registry_dir()) / f"{config.project}.json"
     excluded = exclusions(config)
-    names, source, note = chosen_users(config, operator_users=operator_users, approval_path=approval_path)
     try:
+        accounts, logins = operator_choice(operator_users)
+        names, source, note = chosen_users(config, operator_users=accounts, approval_path=approval_path)
         users = resolved(names, excluded)
     except ValueError as exc:
         # Refused, not broadened: the record keeps what it had, and the rest of new or upgrade goes on.
         return [f"{exc}; {config.project}'s board UI users were left as they were"]
-    who = ", ".join(f"{u['account']} (uid {u['uid']})" for u in users) or "nobody"
+    held = _held_logins(path)
+    for user in users:
+        login = logins.get(user["account"], held.get((user["account"], user["uid"]), ""))
+        if login:
+            user["tailnet_login"] = login
+    who = ", ".join(f"{u['account']} (uid {u['uid']}" + (f", tailnet {u['tailnet_login']}" if "tailnet_login" in u else "")
+                    + ")" for u in users) or "nobody"
     if dry_run:
         print_func(f"switchyard: would record {config.project}'s board UI users: {who}")
         return [note] if note else []

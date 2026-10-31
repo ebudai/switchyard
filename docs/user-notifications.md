@@ -33,9 +33,12 @@ or an attachment.
 
 - **Advisory only.** Receiving, opening or dismissing a notification signs nothing off, acknowledges nothing and
   authorizes nothing. You act on the board, as before.
-- **The link is not a login.** It opens the board's own page. The board decides what you may do there:
-  - over the tailnet you act as the User, exactly as anyone who reaches the board page does;
-  - the board lends no Director operation over the tailnet, because that connection is not your desktop account's.
+- **The link is not a login.** It opens the board's own page, and the board decides what you may do there:
+  - **as the User**, only for the tailnet login root recorded for you (step 4 of "Setting it up"). You can then Ask
+    Director, Accept and Send to Director from your phone. Anyone else who opens the link sees the board but cannot
+    act on it. That includes another tailnet user, a tagged device and a copied link.
+  - **No Director operation over the tailnet.** The board never lends one there, because that connection is not your
+    desktop account's.
 - **No write token in the link.** No link ever contains a write token.
 - **Private only.** Links go only to a tailnet host (`*.ts.net`, or a tailnet address), so who can open them is
   whatever your Tailscale ACLs allow. A board that Tailscale Funnel would publish to the internet gets no link, and
@@ -123,7 +126,18 @@ below call it `notify`. On its own, each change command only previews; add `--ap
    - It is written to `/etc/switchyard/user-notify/pushover.json`, readable by root only.
    - To rotate it, run the same command again. The next message uses the new credential, with no restart.
 
-3. **Serve each board on the tailnet.** The configuration preview prints the one command each board still needs,
+3. **Record your tailnet login for each board**, so its page lets your phone act as you. Use your desktop account and the
+   login Tailscale shows for you on the admin console's Users page:
+
+   ```
+   sudo switchyard upgrade <project> --board-ui-user eric=eric@example.com
+   ```
+
+   - Later upgrades keep the login while that account keeps its uid.
+   - `--board-ui-user eric=` removes it.
+   - Without a recorded login, your phone can read the board but not act on it.
+
+4. **Serve each board on the tailnet.** The configuration preview prints the one command each board still needs,
    for example:
 
    ```
@@ -132,7 +146,7 @@ below call it `notify`. On its own, each change command only previews; add `--ap
 
    Use `serve`, never `funnel`.
 
-4. **Configure** your operator name (as `operator:<name>` blockers write it) and the tailnet base URL, with no port:
+5. **Configure** your operator name (as `operator:<name>` blockers write it) and the tailnet base URL, with no port:
 
    ```
    sudo notify configure --operator eric --base-url https://<machine>.<tailnet>.ts.net
@@ -144,7 +158,7 @@ below call it `notify`. On its own, each change command only previews; add `--ap
    - `--outage-minutes N` sets how long a running board may stay silent before it counts as an outage (5–1440).
    - The preview prints the configuration and, for each board, whether its private link is served.
 
-5. **Test**, then **enable**:
+6. **Test**, then **enable**:
 
    ```
    sudo notify test               # sends one test notification now, even while disabled
@@ -183,7 +197,7 @@ A transport has a `name` and `send(message, credential)`, and returns `sent`, `r
 You need: the release with this change installed and deployed to the board you test with, the Pushover app on your
 phone, and the phone on your tailnet.
 
-1. **Set it up.** Follow "Setting it up", steps 1–4.
+1. **Set it up.** Follow "Setting it up", steps 1–5.
 2. **One test push.**
    - Run `sudo notify test`.
    - Within a few seconds your phone shows "switchyard: test notification".
@@ -196,8 +210,13 @@ phone, and the phone on your tailnet.
    - Within about a minute your phone shows "<project>: <ticket> needs your review", with the ticket's title.
    - Tap "Open <ticket>". The board opens over the tailnet with that ticket's details showing.
    - Nothing on the ticket has changed because you received or opened the notification.
+   - The ticket shows Ask Director, Accept and Send to Director. Tap Accept and confirm. The ticket moves on, and
+     shows as accepted on your desktop's board too.
 5. **Tidy up.** Ask the Director to cancel the throwaway ticket. If you do not want notifications yet, run
    `sudo notify disable`.
 
-**Pass:** both notifications arrived, the link opened the right ticket on your board over the tailnet, and
-`sudo notify status` shows two sent messages and no dead letters.
+**Pass:**
+- both notifications arrived;
+- the link opened the right ticket on your board over the tailnet;
+- Accept on the phone moved that ticket on;
+- `sudo notify status` shows two sent messages and no dead letters.

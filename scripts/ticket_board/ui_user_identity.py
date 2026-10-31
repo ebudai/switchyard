@@ -14,6 +14,15 @@ environment, which the tenant's EnvironmentFile can override. Nothing the tenant
 Root, the board service, the tenant's project account and its role accounts are never board UI users --
 the record names the last two, and the environment may only add to them -- and a record naming one is
 refused whole, so a stale or malformed record turns delegation off rather than widening it.
+
+The User's phone reaches the board through this host's Tailscale Serve (SYRD-718), which proxies to the board over
+loopback as root: the kernel names root, not the User's account. What tailscaled adds is the requester's tailnet
+login (Tailscale-User-Login), and only tailscaled can add it: it strips any the client sent, sets it only for an
+untagged tailnet peer -- never for Funnel, which it marks, nor for the host's own traffic -- and no account but root
+can own its connection. So the board believes that header only on a connection the kernel says root owns, for a page
+named by its tailnet name (`*.ts.net`) or tailnet address over HTTPS -- never a name a rebinding site could give it --
+and only for a login root recorded beside an approved board UI user. That is the User,
+for the User's own actions; the board UI's Director operations stay the desktop account's alone.
 """
 
 from __future__ import annotations
@@ -23,6 +32,7 @@ import ipaddress
 import json
 import os
 import pwd
+import re
 import socket
 import stat
 from pathlib import Path
@@ -38,11 +48,25 @@ OPERATOR_REMEDY = ("an operator must configure an approved board UI user (switch
                    "owner; a headless host names one with --board-ui-user)")
 #: An account's uid by name. A module attribute so a test can name accounts that exist only in its namespace.
 account_uid: Callable[[str], int] = lambda name: pwd.getpwnam(name).pw_uid
+#: Who owns Tailscale Serve's connection to the board: tailscaled runs as root. Only a test, standing in its own
+#: proxy for tailscaled, sets this.
+TAILNET_PROXY_UIDS = frozenset({0})
+#: What a proxy in front of the board adds. A request carrying any came through one, or says it did.
+PROXY_HEADERS = ("Tailscale-User-Login", "Tailscale-User-Name", "Tailscale-User-Profile-Pic", "Tailscale-Funnel-Request",
+                 "Tailscale-Headers-Info", "Tailscale-App-Capabilities", "X-Forwarded-For", "X-Forwarded-Host",
+                 "X-Forwarded-Proto", "Forwarded")
+LOOPBACK_NAMES = frozenset({"127.0.0.1", "localhost", "[::1]"})
+#: A tailnet login as root records it: one word with an @, as Tailscale names its users (eric@example.com,
+#: eric@github); tailscaled sends such a login as it is.
+TAILNET_LOGIN = re.compile(r"[!-?A-~]+@[!-?A-~]+")
+TAILNET_NAME = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+ts\.net")
+TAILNET_NETWORKS = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48"))
 
 
 class UiUsers(NamedTuple):
     uids: frozenset[int]
     problem: str  # why the board UI lends nothing, or ''
+    tailnet_logins: frozenset[str] = frozenset()  # casefolded, each recorded beside an approved user (SYRD-718)
 
 
 def _hex_endpoint(host: str, port: int) -> set[str]:
@@ -154,10 +178,13 @@ def configured(environ: Mapping[str, str] | None = None) -> UiUsers:
         return UiUsers(frozenset(), f"no approved board UI user is recorded in {path}; {OPERATOR_REMEDY}")
     excluded = excluded_uids(record, source)
     uids: set[int] = set()
+    logins: set[str] = set()
     for entry in entries:
         account = entry.get("account") if isinstance(entry, dict) else None
         uid = entry.get("uid") if isinstance(entry, dict) else None
-        if not isinstance(account, str) or type(uid) is not int:
+        login = entry.get("tailnet_login", "") if isinstance(entry, dict) else None
+        if not isinstance(account, str) or type(uid) is not int or not isinstance(login, str) \
+                or (login and not TAILNET_LOGIN.fullmatch(login)):
             return UiUsers(frozenset(), f"the project record's {RECORD_KEY} is malformed; {OPERATOR_REMEDY}")
         try:
             current = account_uid(account)
@@ -171,7 +198,9 @@ def configured(environ: Mapping[str, str] | None = None) -> UiUsers:
                                         f"never a board UI user; board UI delegation is off until it is corrected: "
                                         f"{OPERATOR_REMEDY}")
         uids.add(uid)
-    return UiUsers(frozenset(uids), "")
+        if login:
+            logins.add(login.casefold())
+    return UiUsers(frozenset(uids), "", frozenset(logins))
 
 
 def _account(uid: int | None) -> str:
@@ -193,3 +222,53 @@ def refusal(connection: Any, environ: Mapping[str, str] | None = None) -> str:
         return ""
     return (f"this connection belongs to {_account(uid)}, not an approved board UI user; the board UI lends "
             f"Director operations only to {', '.join(_account(u) for u in sorted(users.uids))}")
+
+
+def _host_name(host: str) -> str:
+    """A Host header's name, without its port."""
+    if host.startswith("["):
+        return host.partition("]")[0] + "]"
+    return host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+
+
+def proxied(headers: Any) -> bool:
+    """Whether a request came through a proxy in front of the board, or says it did: it carries a proxy's header,
+    or names the board by anything but a loopback name. A browser on this host never does either."""
+    host = (headers.get("Host") or "").strip().lower()
+    return any(headers.get(name) is not None for name in PROXY_HEADERS) or bool(host and _host_name(host) not in LOOPBACK_NAMES)
+
+
+def _tailnet(address: str) -> bool:
+    try:
+        return any(ipaddress.ip_address(address) in network for network in TAILNET_NETWORKS)
+    except ValueError:
+        return False
+
+
+def _tailnet_host(host: str) -> bool:
+    """Whether a Host header names this board's page by its tailnet name or tailnet address, with any port."""
+    name = _host_name(host)
+    return bool(TAILNET_NAME.fullmatch(name)) or _tailnet(name[1:-1] if name.startswith("[") else name)
+
+
+def tailnet_refusal(connection: Any, headers: Any, environ: Mapping[str, str] | None = None) -> str:
+    """Why this request is not the approved User's through this host's Tailscale Serve, or '' when it is (SYRD-718)."""
+    uid = tcp_peer_uid(connection)
+    if uid is None or uid not in TAILNET_PROXY_UIDS:
+        return (f"this connection belongs to {_account(uid)}, not this host's Tailscale Serve; a proxy's headers "
+                "count only from tailscaled")
+    if headers.get("Tailscale-Funnel-Request") is not None:
+        return "a request through Tailscale Funnel is the internet's, never the User's"
+    if not _tailnet_host((headers.get("Host") or "").strip().lower()) \
+            or (headers.get("X-Forwarded-Proto") or "").strip().lower() != "https":
+        return "only the board's own page, by its tailnet name (*.ts.net) or address over HTTPS, is the User's over the tailnet"
+    login = (headers.get("Tailscale-User-Login") or "").strip()
+    if not login:
+        return "Tailscale named no tailnet user for this request (a tagged device, or the host's own traffic)"
+    users = configured(environ)
+    if users.problem:
+        return users.problem
+    if login.casefold() not in users.tailnet_logins:
+        return (f"the tailnet user {login} is not one root recorded for an approved board UI user "
+                "(switchyard upgrade --board-ui-user ACCOUNT=LOGIN)")
+    return ""

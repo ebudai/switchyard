@@ -24,6 +24,14 @@ Director-only checks accept the User only for the operation that grant names.
 The decision stays the User's: the action runs with caller role `user`, so every
 comment, field audit and "changed by" names the User, and the grant records that
 the control role's operation permission was used through the board UI.
+
+Over the tailnet (SYRD-718) the page reaches the board through this host's
+Tailscale Serve. Such a request is the User's only when it is the approved User's
+tailnet login, as tailscaled names it on a connection the kernel says is root's
+(`ui_user_identity.tailnet_refusal`). Anything else that came through a proxy, or
+says it did, is given no write token and may not write. The User's own actions --
+Ask Director, Accept, Send to Director -- are then offered and done as on the
+desktop; the control role's operations are never lent over the tailnet.
 """
 
 from __future__ import annotations
@@ -115,9 +123,36 @@ def _session(handler: Any) -> str:
 def _from_the_user(handler: Any) -> None:
     """The board page, as the User: this board's own origin, from a connection a board UI user owns."""
     _same_origin(handler)
-    why = ui_user_identity.refusal(handler.connection)
+    why = lending_refusal(handler)
     if why:
         raise PermissionError(f"a board UI confirmation is the User's own: {why}")
+
+
+def lending_refusal(handler: Any) -> str:
+    """Why the board UI lends this request no Director operation, or '': only the desktop's own connection."""
+    if ui_user_identity.proxied(handler.headers):
+        return "the board UI lends Director operations only on the desktop, never over the tailnet"
+    return ui_user_identity.refusal(handler.connection)
+
+
+def user_channel_refusal(handler: Any) -> str:
+    """Why this HTTP request may not act as the User at all, or '' (SYRD-718). A request through a proxy, or one
+    that says it came through one, is the User's only as the approved User's tailnet login; a direct loopback
+    request is as it was."""
+    if handler.role_authority is not None or not ui_user_identity.proxied(handler.headers):
+        return ""
+    return ui_user_identity.tailnet_refusal(handler.connection, handler.headers)
+
+
+def page_write_token(handler: Any) -> str:
+    """The write token the board page is given: none for a request that may not act as the User."""
+    return "" if user_channel_refusal(handler) else handler.write_token
+
+
+def require_user_channel(handler: Any) -> None:
+    why = user_channel_refusal(handler)
+    if why:
+        raise PermissionError(f"over the tailnet the board acts only for the User's own tailnet login: {why}")
 
 
 def _same_origin(handler: Any) -> None:
@@ -125,9 +160,15 @@ def _same_origin(handler: Any) -> None:
         raise PermissionError("board UI confirmations are only for the board page over HTTP")
     host = handler.headers.get("Host", "").strip().lower()
     port = handler.server.server_address[1]
-    if host not in {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}:
+    if ui_user_identity.proxied(handler.headers):
+        # The board's page over the tailnet (SYRD-718): every write has already been refused unless it is the User's
+        # own tailnet login (require_user_channel), and that page is served over HTTPS.
+        scheme = "https"
+    elif host not in {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}:
         raise PermissionError("a board UI confirmation must come from this board's own page")
-    if handler.headers.get("Origin", "").strip().lower() != f"http://{host}":
+    else:
+        scheme = "http"
+    if handler.headers.get("Origin", "").strip().lower() != f"{scheme}://{host}":
         raise PermissionError("a board UI confirmation must come from this board's own page")
     fetch_site = handler.headers.get("Sec-Fetch-Site")
     if fetch_site is not None and fetch_site.strip().lower() != "same-origin":
@@ -272,7 +313,7 @@ def describe(handler: Any, ticket_id: str) -> dict[str, Any]:
     authority = control_role(app)
     reason = _field("reason", "text", "Why", required=True)
     # Anyone may read what the User may do; only a board UI user's connection is offered the lent operations.
-    unavailable = ui_user_identity.refusal(handler.connection)
+    unavailable = lending_refusal(handler)
 
     def lendable(operation: str) -> bool:
         if unavailable:

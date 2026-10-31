@@ -1039,11 +1039,12 @@ class TicketBoardWriteClient:
         reason: str,
         target_assignee: str = "",
         caller_role: str | None = None,
+        action: str = "audit_kick_back",  # or audit_documentation_kick_back, the documentation-only return (SYRD-719)
     ) -> dict[str, Any]:
         payload = {"reason": reason}
         if target_assignee:
             payload["target_assignee"] = target_assignee
-        return self._ticket_action(ticket_id, "audit_kick_back", payload, caller_role=caller_role)
+        return self._ticket_action(ticket_id, action, payload, caller_role=caller_role)
 
     def director_dat_sign_off(self, ticket_id: str, *, text: str = "", caller_role: str | None = None) -> dict[str, Any]:
         payload = {"text": text} if text else None

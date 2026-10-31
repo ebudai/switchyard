@@ -7,7 +7,7 @@ import json
 import re
 from typing import Any
 
-from .documentation_gate import validate_documentation_gate
+from .documentation_gate import audit_documentation_return, validate_documentation_gate
 from .publisher_stage import validate_publisher
 from .router_role import router_holds, validate_router
 from .user_wait import validate_user_waits
@@ -827,7 +827,7 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
         )
         need(
             tr["primitive"] != "return" or stages[b]["kind"] == "implementation"
-            or _review_hands_back(cfg["transitions"], stages, a, b),
+            or _review_hands_back(cfg["transitions"], stages, a, b) or audit_documentation_return(tr, stages),
             "return must target the implementation stage, or a stage that submits into the review it leaves",
         )
         need(

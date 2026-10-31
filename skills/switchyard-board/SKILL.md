@@ -303,11 +303,17 @@ to be able to reconstruct the decision from the ticket alone.
 Sign off on what you actually verified. "Tests pass" is only true if you ran them
 and read the output; say what you ran and what it printed.
 
-Audit's kick-back returns the work to whoever produced the revision Audit
-reviewed: an implementer, a designer, the Librarian. The ticket's
-`audit_return` says who. When the board does not know, the kick-back is refused
-and moves nothing; ask the director with `request-dependency`, and kick back
-once the return is recorded.
+Audit's kick-back returns the work to its substantive origin: the implementer
+or designer who produced it, never the Librarian whose documentation commit
+sits on top of it. It is the default, and the only return for any finding that
+is not documentation-only: code, tests, configuration, executable examples,
+embedded CLI help, security, or a mix. Where the project runs the
+documentation gate, `audit-documentation-kick-back` returns a
+documentation-only finding to the Documentation owner the ticket passed, on the
+candidate Audit reviewed. Audit chooses between them; the board never guesses.
+The ticket's `audit_return` says where each goes. When the board does not know,
+that return is refused and moves nothing: for the kick-back, ask the director
+with `request-dependency`, and kick back once the return is recorded.
 
 ## When you are told to act
 

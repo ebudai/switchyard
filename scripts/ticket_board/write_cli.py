@@ -730,8 +730,11 @@ def _build_parser() -> argparse.ArgumentParser:
     clear_awaiting.add_argument("ticket_id")
 
     audit_kick = subparsers.add_parser(
-        "audit-kick-back", help="return the ticket to the stage and owner that produced the revision under review (SYRD-673); refused, "
-                                "moving nothing, while the board has no valid record of that: the Director's set-audit-return")
+        "audit-kick-back", help="return the ticket to the substantive origin of the work under review: the stage and owner that "
+                                "produced it (SYRD-673), never the Librarian's documentation layer (SYRD-719). The default for "
+                                "every finding that is not documentation-only: code, tests, configuration, executable examples, "
+                                "embedded CLI help, security, or a mix. Refused, moving nothing, while the board has no valid "
+                                "record of that origin: the Director's set-audit-return")
     audit_kick.add_argument("ticket_id")
     add_free_text_argument(audit_kick, "--reason", required=True)
     audit_kick.add_argument(
@@ -739,6 +742,18 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         help="optional confirmation: under a declared workflow Audit's kick-back returns the ticket to the owner that produced its revision, so this must name that owner; to hand it to someone else, the Director reassigns after the kick-back",
     )
+
+    audit_docs = subparsers.add_parser(
+        "audit-documentation-kick-back", help="return a documentation-only finding to the Documentation stage and owner the "
+                                              "ticket passed, on the candidate you audited (SYRD-719). Only for prose a person "
+                                              "reads that the Librarian may change; embedded help, executable examples or "
+                                              "configuration, tests, code, security and mixed findings are substantive: use "
+                                              "audit-kick-back. Refused, moving nothing, unless the ticket passed an active "
+                                              "Documentation stage with the revision under review")
+    audit_docs.add_argument("ticket_id")
+    add_free_text_argument(audit_docs, "--reason", required=True, help="the documentation-only findings")
+    audit_docs.add_argument("--target-assignee", default="",
+                            help="optional confirmation: must name the Documentation owner the ticket passed")
 
     dat_sign = subparsers.add_parser("director-dat-sign-off")
     dat_sign.add_argument("ticket_id")
@@ -1026,8 +1041,9 @@ def main(argv: list[str] | None = None) -> int:
             response = client.clear_awaiting_role(args.ticket_id)
         elif command == "audit_sign_off":
             response = client.audit_sign_off(args.ticket_id, text=args.text)
-        elif command == "audit_kick_back":
-            response = client.audit_kick_back(args.ticket_id, reason=args.reason, target_assignee=args.target_assignee)
+        elif command in {"audit_kick_back", "audit_documentation_kick_back"}:
+            response = client.audit_kick_back(args.ticket_id, reason=args.reason, target_assignee=args.target_assignee,
+                                              action=command)
         elif command == "director_dat_sign_off":
             response = client.director_dat_sign_off(args.ticket_id, text=args.text)
         elif command == "director_dat_kick_back":

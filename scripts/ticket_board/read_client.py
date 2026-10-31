@@ -290,8 +290,21 @@ def format_audit_return(ticket: dict[str, Any]) -> list[str]:
     came = f"  entered from: {entered.get('stage')}/{entered.get('assignee')} by {entered.get('action')}" if entered else None
     if status.get("valid"):
         by = f"recorded by {status['recorded_by']}: {status.get('reason')}" if status.get("recorded_by") else f"by {status.get('action')}"
-        return ["Kick-back returns to:", f"  {status.get('stage')}/{status.get('assignee')} ({by})", *filter(None, [came]), ""]
-    return ["Kick-back refused:", f"  problem: {status.get('problem')}", f"  repair: {status.get('repair')}", *filter(None, [came]), ""]
+        lines = ["Kick-back returns to:", f"  {status.get('stage')}/{status.get('assignee')} ({by})", *filter(None, [came])]
+    else:
+        lines = ["Kick-back refused:", f"  problem: {status.get('problem')}", f"  repair: {status.get('repair')}", *filter(None, [came])]
+    return [*lines, *format_documentation_return(status.get("documentation")), ""]
+
+
+def format_documentation_return(docs: Any) -> list[str]:
+    """Where Audit's documentation-only return goes (SYRD-719): the Documentation owner it passed, or why not."""
+    if not isinstance(docs, dict):
+        return []
+    if not docs.get("valid"):
+        return ["Documentation return refused:", f"  problem: {docs.get('problem')}", f"  instead: {docs.get('otherwise')}"]
+    layer = "no change" if docs.get("commit") == docs.get("base") else f"commit {docs.get('commit')} on {docs.get('base')}"
+    return ["Documentation return (audit-documentation-kick-back) goes to:",
+            f"  {docs.get('stage')}/{docs.get('assignee')} (by {docs.get('by')}: {layer})"]
 
 
 def format_queue_hold(ticket: dict[str, Any]) -> list[str]:

@@ -32,7 +32,15 @@ the stage: the board's ordinary gate walk skips it.
     documentation commit cannot be formed or published as above;
 * a defer (and any other Director-only exit to parking or a terminal stage)
   from the new stage, under the names the document already uses for the
-  stage the submissions went to.
+  stage the submissions went to;
+* Audit's documentation return (SYRD-719), `audit_documentation_kick_back`,
+  out of each stage `audit_kick_back` leaves and into this one, by the same
+  actors: Audit's explicit choice for a documentation-only finding. It goes to
+  the stage and owner the ticket passed with the revision Audit reviewed,
+  keeping that candidate, and clears what Audit's kick-back clears and this
+  stage's sign-off. Every other finding -- code, tests, configuration,
+  executable examples, embedded help, security, or a mix -- is the ordinary
+  kick-back's, to the work's substantive origin.
 
 Who decides depends on the project. With a Librarian (`librarian` given), a
 `librarian` role of kind `reviewer` owns the stage. It holds no capability but
@@ -71,6 +79,9 @@ SIGN_OFF = "documentation_sign_off"
 NO_CHANGE = "documentation_no_change"
 KICK_BACK = "documentation_kick_back"
 GATE_ACTIONS = (SIGN_OFF, NO_CHANGE, KICK_BACK)
+#: Audit's documentation-only return into the stage (SYRD-719), and the kick-back it sits beside.
+AUDIT_RETURN = "audit_documentation_kick_back"
+AUDIT_KICK_BACK = "audit_kick_back"
 #: Everything a Librarian may hold. Its decisions are transitions, which need no
 #: capability; a comment is how it records findings it is not yet returning.
 LIBRARIAN_CAPABILITIES = ("add_comment",)
@@ -206,6 +217,25 @@ def _gate_transitions(cfg: dict[str, Any], impl: str, after: str, owner: str) ->
     ]
 
 
+def _audit_returns(cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    """Audit's documentation return out of each stage its kick-back leaves, by the same actors (SYRD-719)."""
+    return [dict(_transition(k["from"], DOCUMENTATION_STAGE, AUDIT_RETURN, "Return documentation-only findings",
+                             list(k["actors"]), primitive="return", require_reason=True,
+                             clear_signoffs=sorted(set(k["clear_signoffs"]) | {SIGNOFF})),
+                 owner_scoped=k["owner_scoped"])
+            for k in cfg["transitions"] if k["action"] == AUDIT_KICK_BACK and k["primitive"] == "return"]
+
+
+def audit_documentation_return(transition: dict[str, Any], stages: dict[str, Any]) -> bool:
+    """Whether `transition` is Audit's documentation return into the documentation gate's stage (SYRD-719).
+
+    The one `return` into a review stage the board admits; validate_documentation_gate holds its exact shape.
+    """
+    stage = stages.get(transition.get("to"), {})
+    return (transition.get("action") == AUDIT_RETURN and transition.get("to") == DOCUMENTATION_STAGE
+            and stage.get("kind") == "review" and stage.get("gate") == GATE)
+
+
 def with_documentation_gate(document: dict[str, Any], *, librarian: dict[str, Any] | None = None) -> dict[str, Any]:
     """`document` with the documentation gate, owned by a Librarian when `librarian` is given, else the Director.
 
@@ -219,7 +249,7 @@ def with_documentation_gate(document: dict[str, Any], *, librarian: dict[str, An
         raise ValueError(f"documentation gate: this workflow already has a {DOCUMENTATION_STAGE} stage, owned by "
                          f"{gate_owner(cfg) or 'nobody'}; disable it first to change who decides")
     taken = sorted({GATE, SIGNOFF} & set(cfg["flags"]))
-    clashing = sorted(t["action"] for t in cfg["transitions"] if t["action"] in GATE_ACTIONS)
+    clashing = sorted(t["action"] for t in cfg["transitions"] if t["action"] in (*GATE_ACTIONS, AUDIT_RETURN))
     if taken or clashing:
         raise ValueError(f"documentation gate: this workflow already declares {', '.join(taken + clashing)}; "
                          "nothing was changed")
@@ -278,7 +308,7 @@ def with_documentation_gate(document: dict[str, Any], *, librarian: dict[str, An
     if not any(t["to"] in parking for t in exits):
         raise ValueError(f"documentation gate: the Director cannot defer work out of {after}, so the new stage "
                          "would have no way to put work down; add the stage by hand instead")
-    cfg["transitions"] += _gate_transitions(cfg, impl["name"], after, owner) + exits
+    cfg["transitions"] += _gate_transitions(cfg, impl["name"], after, owner) + exits + _audit_returns(cfg)
     # Turned off earlier: the stage is declared again, so its removal no longer stands.
     cfg["remove_stages"] = [name for name in cfg.get("remove_stages") or [] if name != DOCUMENTATION_STAGE]
     return validate(canonical_publisher_returns(cfg))
@@ -294,7 +324,7 @@ def without_documentation_gate(document: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("documentation gate: this workflow has no documentation stage; nothing was changed")
     after = stage["skip_to"]
     cfg["stages"] = [s for s in cfg["stages"] if s["name"] != DOCUMENTATION_STAGE]
-    cfg["transitions"] = [t for t in cfg["transitions"] if t["from"] != DOCUMENTATION_STAGE]
+    cfg["transitions"] = [t for t in cfg["transitions"] if t["from"] != DOCUMENTATION_STAGE and t["action"] != AUDIT_RETURN]
     for t in cfg["transitions"]:
         if t["to"] == DOCUMENTATION_STAGE:
             t["to"] = after
@@ -326,8 +356,10 @@ def validate_documentation_gate(cfg: dict[str, Any], need: Callable[[bool, str],
                      and t["action"] not in GATE_ACTIONS for t in cfg["transitions"]),
              "invalid librarian: its only moves are the documentation decisions")
     gate_moves = [t for t in cfg["transitions"] if t["action"] in GATE_ACTIONS]
+    audit_returns = [t for t in cfg["transitions"] if t["action"] == AUDIT_RETURN]
     if stage is None:
         need(not gate_moves, "invalid documentation gate: its decisions need the documentation stage")
+        need(not audit_returns, "invalid documentation gate: Audit's documentation return needs the documentation stage")
         need(not (librarian and librarian["active"]), "invalid librarian: an active librarian needs its stage")
         return
     impl = implementation_stage(cfg) or {}
@@ -358,3 +390,8 @@ def validate_documentation_gate(cfg: dict[str, Any], need: Callable[[bool, str],
          "invalid documentation gate: its three decisions are owner-scoped and exactly as composed -- sign-off "
          "carries the documentation commit and clears every later sign-off, no-change needs a reason, the return "
          "needs findings")
+    composed = sorted(_audit_returns(cfg), key=lambda t: t["from"])
+    need(sorted(audit_returns, key=lambda t: t["from"]) == composed,
+         "invalid documentation gate: Audit's documentation return (audit_documentation_kick_back) is declared out of "
+         "each stage audit_kick_back leaves, by its actors, into the documentation stage, with a reason, clearing what "
+         "that kick-back clears and documentation_signoff -- and nowhere else")

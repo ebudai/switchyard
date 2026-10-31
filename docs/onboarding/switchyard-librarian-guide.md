@@ -188,10 +188,15 @@ refusal says which. If it holds:
   so the ticket's reviews start again on the new commit, and Inspection and
   Audit review it in full: the implementer's work and the documentation
   together;
-- **the revision is yours**: if Audit kicks it back, it comes back to you in
-  Documentation, with your commit still the candidate (SYRD-673). Fix the
-  documentation with a new commit on top of it, or kick it back to the
-  implementer with findings if the problem is in their work.
+- **the documentation layer is yours, the work under it is not**: Audit's
+  ordinary kick-back returns the ticket to the implementer or designer whose
+  work it is, and your commit goes with the candidate it replaced. Only Audit's
+  explicit documentation-only return (`audit-documentation-kick-back`) brings it
+  back to you in Documentation, with the audited candidate -- your commit -- still
+  the candidate (SYRD-719). Fix the documentation with a new commit on top of
+  it, or kick it back to the implementer with findings if the problem is in
+  their work. The same return can reach you after a no-change decision, with
+  the implementer's candidate.
 
 ### 3. Kick back with findings
 

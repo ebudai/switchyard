@@ -619,9 +619,12 @@ on the ticket changed in between.
 ## Where Audit's kick-back returns work
 
 Audit's kick-back returns a ticket to the stage and owner that produced the
-revision Audit reviewed, which the board records. It is the
-implementer's submission, the Librarian's documentation commit, or the draft or
-implementation stage the ticket last left. Your stages and the review stages
+work Audit reviewed, which the board records: its substantive origin. It is the
+implementer's submission, or the draft or implementation stage the ticket last
+left. The Librarian's documentation commit, or its no-change decision, is
+recorded beside that as the documentation layer and never replaces it; Audit
+sends a documentation-only finding there with `audit-documentation-kick-back`
+(SYRD-719). Your stages and the review stages
 pass a ticket on without changing that, so a draft you released into triage and
 moved into Audit returns to its designer. The ticket's `audit_return` shows where
 the kick-back goes. When the board does not know who produced the revision (a
@@ -635,8 +638,13 @@ ticket-board-write set-audit-return <id> --stage <stage> --assignee <owner> --re
 ```
 
 The stage must be live (not the one being left, a parking stage or a closed
-one), and the owner an active role that owns it. Use it as well to send Audit's
-findings somewhere other than the recorded producer.
+one), not a review stage (the documentation layer is not an origin), and the
+owner an active role that owns it. Use it as well to send Audit's findings
+somewhere other than the recorded producer. A ticket upgraded while the
+Librarian's commit stood as its producer keeps that commit as its documentation
+layer and has no recorded origin; you are told once, and you record the origin
+of the work under the commit. Nothing records the documentation layer by hand:
+where the board has none, Audit uses the ordinary kick-back.
 
 ## Last-resort overrides
 

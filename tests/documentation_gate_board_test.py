@@ -568,7 +568,9 @@ def main() -> int:
         base = store.commit([], {"README.md": "base\n"}, "base")
         document = with_documentation_gate(example(), librarian={"runtime": "claude"})
         if not os.environ.get("SYRD624_SKIP_BEFORE"):
-            before = run_before(document)
+            # Main's tree predates Audit's documentation return (SYRD-719), which it would refuse to declare.
+            before = run_before({**document, "transitions": [t for t in document["transitions"]
+                                                             if t["action"] != "audit_documentation_kick_back"]})
             check(before["entered"]["state"] == "documentation",
                   f"main's board takes the declared gate as it is, with no migration: {before['entered']}")
             check(before["answer"] == "ok" and before["after"]["commit"] == before["unrelated"],

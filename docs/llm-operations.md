@@ -118,8 +118,16 @@ its owner. The awaited role acting clears a role wait; merely replying may not.
   reassign work.
 - Findings name the surface, observed behavior, expected behavior and evidence
   needed to act without another conversation.
-- Audit returns to the producer recorded in `audit_return`. If that record is
-  absent or invalid, Audit requests the Director; it does not guess.
+- Audit's `audit-kick-back` returns to the work's substantive origin recorded in
+  `audit_return` (the implementer or designer, never the Librarian's
+  documentation layer). It is the default for every finding that is not
+  documentation-only: code, tests, configuration, executable examples,
+  embedded help, security or a mix. If that record is absent or invalid, Audit
+  requests the Director; it does not guess.
+- `audit-documentation-kick-back` returns a documentation-only finding to the
+  Documentation owner the ticket passed (`audit_return.documentation`), on the
+  audited candidate. Audit chooses it explicitly; without that record it is
+  refused, and the ordinary kick-back is the way back.
 - The Librarian either approves unchanged with a reason, publishes one
   documentation-only child of the exact candidate and signs off, or returns
   concrete findings.

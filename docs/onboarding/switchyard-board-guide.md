@@ -134,14 +134,27 @@ system working, not a bug to route around.
 
 **Audit**
 - `audit-sign-off` — audit → dat (or → director_review when the DAT gate is unset)
-- `audit-kick-back` — audit → the stage and owner that produced the revision Audit
-  reviewed (SYRD-673): the implementer who submitted it, the designer whose draft it is,
-  the Librarian whose documentation commit it carries. Review stages and the Director's
-  stages pass a ticket on without changing who produced it. The ticket's `audit_return`
-  says where the kick-back goes and how the ticket entered Audit. When the board does not
-  know who produced the revision, or the workflow no longer lets the work go back there,
+- `audit-kick-back` — audit → the work's substantive origin (SYRD-673, SYRD-719): the
+  implementer who submitted it, or the designer whose draft it is. The Librarian's
+  documentation commit is a layer on top of that work, never its origin. Review stages
+  and the Director's stages pass a ticket on without changing its origin. This is the
+  default, and the only return for any finding that is not documentation-only: code,
+  tests, configuration, executable examples, embedded CLI help or usage text, security,
+  and any mix of documentation with one of those. It clears the Documentation sign-off
+  too, so the resubmission passes the documentation gate again. The ticket's
+  `audit_return` says where the kick-back goes and how the ticket entered Audit. When the
+  board does not know the origin, or the workflow no longer lets the work go back there,
   the kick-back is refused and nothing moves: ask the Director with `request-dependency`,
   who records the return with `set-audit-return`, then kick back as usual.
+- `audit-documentation-kick-back` — audit → documentation, where the project runs the
+  documentation gate: a documentation-only finding, which the Librarian can resolve by
+  changing prose a person reads, goes back to the Documentation owner the ticket passed,
+  on the exact candidate you audited, with your findings as the required `--reason`. It
+  clears Audit's and Documentation's sign-offs. You choose it explicitly; the board never
+  infers it from the wording, the files or who made the last commit. It is refused, and
+  nothing moves, unless the ticket passed Documentation with the revision you reviewed
+  and that stage and owner still take work. `audit_return.documentation` says where it
+  goes, or why not. When in doubt, use `audit-kick-back`.
 - `file-bug` — create a defect ticket without going through the director. The new ticket
   is linked to the source ticket and lands in `analysis`.
 - Audit **cannot** re-assign or route. It is a gate, not an implementer, and it is

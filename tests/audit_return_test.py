@@ -18,7 +18,8 @@ service's own connection. The real notify listener delivers.
 - **Draft to Audit:** by the designer's own submission, and by release into
   triage and the Director's override: the designer gets it back, every round.
 - **Documentation to Audit:** with no change, the implementer; with the
-  Librarian's own commit, the Librarian, keeping that commit.
+  Librarian's own commit, still the implementer, the work's substantive origin
+  (SYRD-719: the commit is the documentation layer beside it).
 - **User Review to Audit:** the Director's override back with the candidate
   unchanged returns it to its author.
 - **A revision nobody known produced, a retired or changed owner, a ticket in
@@ -209,7 +210,7 @@ def scenario(root: Path, prefix: str, before_root: Path | None = None) -> dict:
             seen["design_override_told"] = delivered(b)
             finished(b, "PGU-12")
 
-            # --- Documentation to Audit: no change keeps the implementer; the Librarian's commit is the Librarian's. ---
+            # --- Documentation to Audit: the implementer, with no change and with the Librarian's commit (SYRD-719). ---
             fixture.seed_postgres_ticket(b.admin, "PGU-3", title="Documented", state="in_progress", assignee="ops")
             b.act("PGU-3", "set_workflow_flags", "director", needs_documentation=True)
             seen["doc_submit"] = [short(b.act("PGU-3", "submit_to_audit", "ops", commit_hash=A)), state(b, "PGU-3")["where"]]
@@ -550,15 +551,18 @@ def main() -> int:
           and after["doc_no_change_told"] == ["pgu-ops:0.0"],
           f"through the Librarian with no change, the implementer's revision returns to the implementer: {status}")
     status = after["doc_signed_status"] or {}
+    layer = status.get("documentation") or {}
     check(after["doc_signed"] == {"ok": True} and after["doc_signed_at"]["commit"] == B
-          and (status.get("stage"), status.get("assignee"), status.get("commit")) == ("documentation", "librarian", B),
-          f"the Librarian's own commit makes the Librarian its producer: {status}")
+          and (status.get("stage"), status.get("assignee"), status.get("commit")) == ("in_progress", "ops", A)
+          and (layer.get("stage"), layer.get("assignee"), layer.get("commit"), layer.get("base"))
+          == ("documentation", "librarian", B, A),
+          f"the Librarian's own commit is the documentation layer over ops's work, which stays the origin (SYRD-719): {status}")
     returned = after["doc_signed_returned"]
     check(after["doc_gate_off"] == "ok" and after["doc_signed_kick"] == "ok"
-          and returned["where"] == "documentation/librarian" and returned["commit"] == B
+          and returned["where"] == "in_progress/ops" and returned["commit"] == ""
           and returned["flags"]["documentation_signoff"] is False and returned["flags"]["audit_signoff"] is False
-          and after["doc_signed_told"] == ["pgu-librarian:0.0"],
-          f"and gets it back with that commit to review on, its sign-off owed again: {returned} {after['doc_signed_told']}")
+          and after["doc_signed_told"] == ["pgu-ops:0.0"],
+          f"Audit's kick-back returns it to ops, every sign-off owed again (SYRD-719): {returned} {after['doc_signed_told']}")
 
     # User Review to Audit.
     status = after["uat_status"] or {}

@@ -42,7 +42,7 @@ So:
 |---|---|
 | Implementation (submission) | that implementer |
 | Implementation, then Documentation with no change | the implementer |
-| Implementation, then the Librarian's documentation commit | Documentation / Librarian, keeping that commit |
+| Implementation, then the Librarian's documentation commit | Documentation / Librarian, keeping that commit (superseded by SYRD-719: the implementer; see `docs/syrd-719-audit-return-layers.md`) |
 | Draft, by the designer's submission | Draft / designer |
 | Draft, released to Analysis, then the Director's override | Draft / designer |
 | User Review, sent back by the Director, candidate unchanged | its author |

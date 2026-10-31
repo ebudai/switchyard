@@ -172,6 +172,14 @@ sudo env sh -c 'command -v switchyard'
 The installer exports the requested commit into
 `/opt/switchyard/releases/<commit>`, writes `.switchyard-release.json`, canaries
 the release directly with `switchyard --version`, and then repoints `current`.
+Release modes are the installer's, never the caller's umask: every directory is
+0755, every file readable by all and writable by its owner alone, and the
+marker is exactly 0644, so a tenant can read it under a root packet's
+`umask 077`. Before it activates anything, the installer checks the marker of
+every installed release as root and widens one that is too narrow, such as the
+0600 an earlier install left. A marker that is a link, another account's,
+hard-linked, wider than 0644 or naming another commit refuses the install
+instead. See [SYRD-710](syrd-710-release-marker-modes.md).
 Rollback is deliberately just:
 
 ```bash

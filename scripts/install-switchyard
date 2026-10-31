@@ -320,19 +320,114 @@ print(json.dumps({"commit": sys.argv[1], "source_repo": sys.argv[2], "source_ref
 PY
 }
 
-verify_release_marker() {
-    local release_dir="$1"
+release_markers() {
+    # Verify, and where it is only too narrow repair, the marker of every release under the shared root (SYRD-710).
+    # Run as the installing account (root under sudo). Nothing is trusted before it is checked: every directory from
+    # the shared root down is opened without following a link and must be that account's and writable by nobody
+    # else; a marker must be a regular file of that account's with one link, naming its own release's commit. Only
+    # then is a marker whose mode is a narrower 0644 -- the 0600 a umask of 077 left -- set to 0644, through the
+    # descriptor that was checked. Anything else refuses before a single mode is changed.
+    local shared_root="$1"
     local commit="$2"
-    local marker="$release_dir/.switchyard-release.json"
-    [[ -f "$marker" ]] || die "release $release_dir is missing .switchyard-release.json"
-    python3 - "$marker" "$commit" <<'PY'
+    python3 - "$shared_root" "$commit" <<'PY'
 import json
+import os
+import re
+import stat
 import sys
 
-with open(sys.argv[1], encoding="utf-8") as handle:
-    payload = json.load(handle)
-if payload.get("commit") != sys.argv[2]:
+shared_root, wanted = sys.argv[1], sys.argv[2]
+owner = os.geteuid()
+NAME = ".switchyard-release.json"
+COMMIT = re.compile(r"[0-9a-f]{40}")
+DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def die(message):
+    if not message.startswith("refusing to install"):
+        message = f"refusing to install; nothing was changed: {message}"
+    sys.stderr.write(f"install-switchyard: ERROR: {message}\n")
     raise SystemExit(1)
+
+
+def trusted(fd, what):
+    info = os.fstat(fd)
+    if info.st_uid != owner:
+        die(f"{what} belongs to uid {info.st_uid}, not {owner}: refusing to trust it")
+    if info.st_mode & 0o022:
+        die(f"{what} is writable by group or others (mode {stat.S_IMODE(info.st_mode):04o}): refusing to trust it")
+
+
+def opened(name, what, parent=None):
+    try:
+        return os.open(name, DIRECTORY, dir_fd=parent)
+    except OSError as exc:
+        die(f"{what} cannot be opened as a directory without following a link: {exc.strerror or exc}")
+
+
+root_fd = opened(shared_root, shared_root)
+trusted(root_fd, shared_root)
+releases_fd = opened("releases", f"{shared_root}/releases", root_fd)
+trusted(releases_fd, f"{shared_root}/releases")
+repairs, problems, seen = [], [], False
+for name in sorted(os.listdir(releases_fd)):
+    if not COMMIT.fullmatch(name):
+        continue  # a staging directory, or nothing the installer made
+    release = f"{shared_root}/releases/{name}"
+    try:
+        release_fd = os.open(name, DIRECTORY, dir_fd=releases_fd)
+    except OSError as exc:
+        problems.append(f"{release} is not a directory reached without following a link: {exc.strerror or exc}")
+        continue
+    info = os.fstat(release_fd)
+    if info.st_uid != owner or info.st_mode & 0o022:
+        problems.append(f"{release} is uid {info.st_uid}, mode {stat.S_IMODE(info.st_mode):04o}: not the installer's alone")
+        continue
+    marker = f"{release}/{NAME}"
+    try:
+        fd = os.open(NAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=release_fd)
+    except FileNotFoundError:
+        if name == wanted:
+            problems.append(f"{marker} is missing")
+        continue
+    except OSError as exc:
+        problems.append(f"{marker} cannot be opened without following a link: {exc.strerror or exc}")
+        continue
+    info = os.fstat(fd)
+    mode = stat.S_IMODE(info.st_mode)
+    if not stat.S_ISREG(info.st_mode):
+        problems.append(f"{marker} is not a regular file")
+    elif info.st_uid != owner:
+        problems.append(f"{marker} belongs to uid {info.st_uid}, not {owner}")
+    elif info.st_nlink != 1:
+        problems.append(f"{marker} has {info.st_nlink} links")
+    elif mode & ~0o644:
+        problems.append(f"{marker} has mode {mode:04o}, which is more than 0644")
+    elif info.st_size > 65536:
+        problems.append(f"{marker} is {info.st_size} bytes")
+    else:
+        try:
+            payload = json.loads(os.read(fd, 65537).decode("utf-8"))
+        except (OSError, ValueError) as exc:
+            problems.append(f"{marker} is not readable JSON: {exc}")
+        else:
+            recorded = payload.get("commit") if isinstance(payload, dict) else None
+            if recorded != name:
+                problems.append(f"{marker} names commit {recorded!r}, not its release {name}")
+            elif mode != 0o644:
+                repairs.append((fd, marker, mode))
+                seen = seen or name == wanted
+                continue
+            seen = seen or name == wanted
+    os.close(fd)
+if not seen and not problems:
+    problems.append(f"{shared_root}/releases/{wanted}/{NAME} was not found or not verified")
+if problems:
+    die("refusing to install; nothing was changed. Release markers that cannot be trusted:\n  " + "\n  ".join(problems))
+for fd, marker, mode in repairs:
+    os.fchmod(fd, 0o644)
+    os.close(fd)
+    print(f"repaired release marker {marker}: mode {mode:04o} -> 0644", file=sys.stderr)
 PY
 }
 
@@ -346,12 +441,17 @@ export_release() {
         tmp_dir="$(mktemp -d "$releases_dir/.tmp.$commit.XXXXXX")"
         run_shell_cmd "git -C $(quote "$SOURCE_REPO") archive $(quote "$commit") | tar -C $(quote "$tmp_dir") -x"
         release_marker_json "$commit" >"$tmp_dir/.switchyard-release.json"
+        # Modes are set, never left to the caller's umask: a root packet's 077 made the marker 0600, and no tenant
+        # could read it (SYRD-710). Every file is readable by all and writable by its owner alone.
         run_cmd find "$tmp_dir" -type d -exec chmod 0755 {} +
-        run_cmd find "$tmp_dir" -type f -exec chmod go-w {} +
+        run_cmd find "$tmp_dir" -type f -exec chmod go=u-w {} +
+        run_cmd chmod 0644 "$tmp_dir/.switchyard-release.json"
         run_cmd chmod 0755 "$tmp_dir/switchyard" "$tmp_dir/scripts/team-launcher" "$tmp_dir/scripts/install-switchyard" "$tmp_dir/scripts/switchyard-pane-window"
         run_cmd mv "$tmp_dir" "$release_dir"
     fi
-    verify_release_marker "$release_dir" "$commit"
+    # Explicitly fatal: this runs inside `$(export_release ...)`, where bash ignores `set -e`, so a refusal here once
+    # fell through to activating the release anyway (SYRD-710).
+    release_markers "$SHARED_ROOT" "$commit" || exit 1
     [[ -x "$release_dir/switchyard" ]] || die "release switchyard is not executable: $release_dir/switchyard"
     printf '%s\n' "$release_dir"
 }

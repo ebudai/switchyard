@@ -31,6 +31,8 @@ The core insight: LLMs are better collaborators than solo performers. A single i
 **1. Separation of authorship and criticism.**
 The instance that wrote something must not be the sole judge of its quality. Different models have different failure modes; exploiting that diversity is the point.
 
+Separation means an independent *judgment*, not a duplicated computation. A critic reads the work, checks that the author's recorded test evidence is about this exact artifact, and runs the checks its own review calls for. It does not repeat an exact, applicable full test run merely because the work reached it; it reruns when it can name what might make the result differ, and records that reason first. `switchyard-board-guide.md`, "Test evidence", gives the current rule and examples.
+
 **2. The human is the driver, not a passenger.**
 The human makes every substantive *design* decision and retains final authority at all times. During design and review (Phases 1-3), the human is deeply involved in every decision. During implementation (Phase 4), the human's oversight mechanism shifts from code review to functional testing through the UI — the adversarial process between LLMs generates technical detail faster than any human can absorb, so the human exercises judgment through the software's behavior, not through its source code. The human adjudicates impasses, makes abort/reset decisions, and catches problems that manifest as incorrect behavior. The invariant is not that the human reads every line, but that the human retains meaningful oversight through a feedback mechanism that scales with the pace of development.
 
@@ -326,7 +328,7 @@ For each work packet:
 3. **First reviewer** (different model) critiques the implementation. Implementer and reviewer debate until consensus or impasse — or, under the asynchronous variant, the reviewer/auditor produces a findings report and the director triages disposition.
 4. **Second reviewer** (different model again) critiques the post-first-review code. Same protocol.
 5. When all reviewers are satisfied (or impasses are escalated), the block is committed. Under the asynchronous variant, "satisfied" means the reviewer/auditor has confirmed each incorporated fix in a follow-up pass, not merely that the director judged the fix adequate.
-6. Director inspects the result, runs tests, and advances to the next packet.
+6. Director inspects the result, runs focused checks of its own (a full-suite rerun only for a recorded reason the result could differ; see Principle 1), and advances to the next packet.
 7. If the completed packet has a corresponding UI feature, the wiring notification fires and the human tests it.
 
 **Implementer protocol:**

@@ -187,7 +187,10 @@ refusal says which. If it holds:
 - **every later sign-off is cleared** - Inspection's, Audit's and the User's -
   so the ticket's reviews start again on the new commit, and Inspection and
   Audit review it in full: the implementer's work and the documentation
-  together;
+  together. Prose that nothing executes changes no test result, so they reuse
+  the implementer's test evidence for the work under it; a commit touching
+  anything a test or program reads is their reason to rerun the suites that
+  read it (`switchyard-board-guide.md`, "Test evidence");
 - **the documentation layer is yours, the work under it is not**: Audit's
   ordinary kick-back returns the ticket to the implementer or designer whose
   work it is, and your commit goes with the candidate it replaced. Only Audit's

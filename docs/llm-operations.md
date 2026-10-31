@@ -80,8 +80,15 @@ and dashes in CLI subcommands.
   real reason, when finished work legitimately produced no commit.
 - A review verdict covers the exact candidate and evidence it names. A changed
   candidate clears later sign-offs.
-- Say what you ran, where, at which SHA, and what it printed. “Tests pass” is
-  not evidence when the run belonged to someone else or another tree.
+- Say what you ran, where, at which SHA, and what it printed, and what you
+  reused. “Tests pass” is not evidence when the run belonged to another tree,
+  or names no commit, commands or output.
+- The implementer records the complete validation exactly (commit and tree,
+  base, commands, environment, outcomes, baseline comparison). Audit verifies
+  it applies and runs focused checks; Final Sign-Off verifies the exact
+  candidate, decisions and gates. Neither reruns the complete suite merely
+  because the ticket entered its stage: a rerun needs a named reason the result
+  could differ, recorded on the ticket first (board guide, “Test evidence”).
 - Workflows, examples and configuration consumed by programs are product
   inputs, not prose. A documentation role reviews them but does not edit them.
 - Commit and publish from the checkout that actually contains the candidate.

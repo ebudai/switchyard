@@ -9,7 +9,8 @@ any particular project.
 
 2. **[switchyard-board-guide.md](switchyard-board-guide.md)** — *mechanics*. Stages,
    transitions, who may do what, how to read and write the board, `directorctl`, and the
-   behaviours that surprise people. Everyone reads this one.
+   behaviours that surprise people. Its **Test evidence** section says what the implementer
+   records and when Audit or the Director reruns a suite. Everyone reads this one.
 
 3. **[switchyard-director-guide.md](switchyard-director-guide.md)** — *judgment*. Writing a
    ticket, review discipline, merge versus kick back, working with audit, routing and

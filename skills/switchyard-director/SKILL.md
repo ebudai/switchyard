@@ -35,6 +35,11 @@ For the judgment behind these controls - when to merge versus kick back, how to
 review, what to escalate - read the project's director guide in its onboarding
 packet. This skill is the control surface; that guide is the reasoning.
 
+For install, upgrade, role recovery, publication, UAT, provider quota and
+incident procedures outside one ticket, use the Switchyard source checkout's
+`docs/documentation-map.md`; `docs/llm-operations.md` is its low-context role
+index. Neither replaces the live workflow or this role-checked overlay.
+
 ## Discover your authority, do not memorise it
 
 Roles, stages, gates and operations are per-project and change. The board

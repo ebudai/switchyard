@@ -1,5 +1,12 @@
 # Ticket Board Service
 
+This guide covers the current generic board deployment path and retained PGU
+compatibility. Literal `pgu`, `agent`, port `8770` and
+`/home/agent/pgu-ticketboard-live` values below describe that legacy tenant;
+they are not defaults for a new project. New tenants take their service,
+database, socket, port and release paths from their registered project
+artifacts and normally run as children of the board supervisor.
+
 A tenant can instead have its board run by the host board supervisor,
 `switchyard-board-supervisor.service`. Its unit then stays installed but
 disabled, and `start`, `stop`, `restart`, `status` and `deploy-restart` below
@@ -11,16 +18,14 @@ The deploy tooling auto-targets the live board unit:
   restart/status operate that system unit
 - otherwise the scripts fall back to the legacy `agent` user unit
 
-Today the production board is the privileged `boardsvc` system unit on
-`127.0.0.1:8770`.
+PGU's privileged `boardsvc` system-unit cutover is retained as historical
+evidence in `docs/ticket-board-boardsvc-peer-auth-runbook.md`. Do not use that
+prep package as the install path for another tenant. Where the PGU system unit
+exists, `scripts/ticket-board-service.sh` targets it instead of the shadow
+`--user` unit.
 
-The `boardsvc` cutover package lives in
-`docs/ticket-board-boardsvc-peer-auth-runbook.md`. Once that system unit
-exists, `scripts/ticket-board-service.sh` must restart it rather than the
-shadow `--user` unit.
-
-The live service does **not** run from a mutable git checkout anymore. It runs
-from a controlled export root:
+Deployed services do **not** run from mutable git checkouts. PGU's retained
+controlled export root is:
 
 - deploy root: `/home/agent/pgu-ticketboard-live`
 - active release: `/home/agent/pgu-ticketboard-live/current`

@@ -1,15 +1,15 @@
 # Switchyard Launcher
 
 `switchyard` is the public project entrypoint. With no arguments it prints
-`new...` followed by configured projects. `switchyard --help` lists the public
-verbs: `new`, `register`, `upgrade`, `add-role`, `set-vcs-close-role`, `stop`,
-`status`, and `validate-models`. `switchyard My Project Name` joins all
+`new...` followed by configured projects. `switchyard --help` is the current
+list of public verbs, and each verb's own `--help` is the source for its flags;
+the generated copy in `README.md` is checked against that output. Do not keep a
+second hand-written verb list here. `switchyard My Project Name` joins all
 arguments, matches an existing project case-insensitively by display name or
-slug, and runs today's idempotent start/resume behavior. A bare project name is
+slug, and runs the idempotent start/resume behavior. A bare project name is
 the start/attach form; there is no separate `switchyard <project> attach` verb.
-Leading verbs are reserved, so a project literally named `new`, `register`,
-`upgrade`, `add-role`, `set-vcs-close-role`, `stop`, `status`, or
-`validate-models` collides with the command namespace.
+Names printed as recognized commands by `switchyard --help` are reserved, so a
+project with one of those slugs collides with the command namespace.
 
 The installed `/usr/local/bin/switchyard` trampoline does not elevate top-level
 discoverability commands: no arguments, `--help`, and `--version`. Bare project
@@ -1254,18 +1254,8 @@ pane identity is treated as caller state, not target state. The launcher strips
 pane target, caller-role, pane-session, and pane-state environment
 from the spawned role process, then supplies the target role's own values. If an
 ambient pane-session id disagrees with the target role's recorded session id,
-the launcher refuses before killing or starting a tmux session. Until a fixed
-launcher is deployed, use this workaround when running pane commands from inside
-a pane:
-
-```bash
-env -u PGU_PANE_SESSION_ID -u TICKET_BOARD_PANE_SESSION_ID \
-    -u TICKET_BOARD_PANE_SESSION_DIR -u TICKET_BOARD_PANE_STATE_DIR \
-    -u PGU_TICKET_BOARD_PANE_SESSION_DIR -u PGU_TICKET_BOARD_PANE_STATE_DIR \
-    -u TICKET_BOARD_PANE_TARGET -u PGU_PANE_TARGET \
-    -u TICKET_BOARD_CALLER_ROLE \
-    team-launcher <project> pane start <role>
-```
+the launcher refuses before killing or starting a tmux session. No caller-side
+environment workaround is needed for launcher pane commands.
 
 For real one-shot CLI probes, also clear `TMUX` and `TMUX_PANE` and point
 `TICKET_BOARD_PANE_STATE_DIR` and `TICKET_BOARD_PANE_SESSION_DIR` at throwaway

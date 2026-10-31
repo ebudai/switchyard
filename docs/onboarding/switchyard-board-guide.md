@@ -10,6 +10,14 @@ see the Switchyard source checkout's `docs/ticket-board-service.md`.
 
 This guide is project-agnostic. Examples use `PGU-123`; your project has its own prefix.
 
+**Use the live contract for exact actions.** The stage table and examples below
+explain the shipped workflow, but a tenant can declare another one. For a real
+ticket, `workflow_actions` is the authoritative list of legal moves; for the
+whole project, read `$TICKET_BOARD_URL/api/workflow`. Command names, flags and
+defaults come from the installed command's `--help`. The Switchyard source
+checkout's `docs/llm-operations.md` is the compact retrieval index for these
+surfaces; `docs/documentation-map.md` routes human operators by task.
+
 ---
 
 ## The model
@@ -61,7 +69,7 @@ available for the built-in `pgu` board.
 
 ---
 
-## The pipeline
+## The shipped pipeline
 
 | Stage | Board label | Who owns it |
 |---|---|---|
@@ -79,7 +87,9 @@ available for the built-in `pgu` board.
 | `director_review` | Final Sign-Off | director |
 | `done` / `cancelled` | Done / Cancelled | terminal |
 
-The normal path is **backlog → analysis → in_progress → audit → director_review → done**.
+The common shipped path is **backlog → analysis → in_progress → audit →
+director_review → done**. Treat it as orientation, not permission to take a
+move absent from the ticket's live actions.
 
 `inspection`, `audit` and `dat` are **gated**: a ticket only enters them if the
 corresponding flag is set, otherwise it skips straight past. `user_review` uses the
@@ -244,8 +254,8 @@ covering the same tool usage and safety rules in the compact form an agent loads
 while working. Directors have a second one, `switchyard-director`, overlaying it
 with the controls only they may use; other roles are not pointed at it, and the
 board refuses those operations from anyone else regardless of what a session has
-read. It is a projection of one source, so it says the same thing on all
-four runtimes. Load it when you are about to touch the board; read this guide when
+read. It is a projection of one source, so it says the same thing on every
+supported runtime. Load it when you are about to touch the board; read this guide when
 you need the mechanics behind it. If a session reports it cannot find the skill,
 `switchyard board-skill verify` says which runtime is missing it and
 `switchyard board-skill install` restores it.
@@ -277,12 +287,16 @@ it does not have the address.
 
 Two equivalent paths. Both enforce the same rules.
 
-**Shell:**
+**Shell, from the role's pane:**
 
 ```bash
-scripts/ticket-board-write --caller-role ops submit-to-audit PGU-123 --commit-hash abc1234
-scripts/ticket-board-write --caller-role audit audit-sign-off PGU-123 --text "..."
+ticket-board-write submit-to-audit PGU-123 --commit-hash abc1234
+ticket-board-write audit-sign-off PGU-123 --text "..."
 ```
+
+The pane supplies `TICKET_BOARD_CALLER_ROLE`; do not replace it with another
+role. `--caller-role` only makes the identity you already hold explicit. It is
+not a way to act for somebody else.
 
 Subcommands are the operation name with dashes: `submit-to-audit`, `audit-sign-off`,
 `mark-done`, `set-blockers`.
@@ -469,9 +483,10 @@ the board's roles.
 **Python:**
 
 ```python
+import os
 import sys; sys.path.insert(0, "scripts")
 from ticket_board.write_client import TicketBoardWriteClient
-c = TicketBoardWriteClient(caller_role="director")   # address comes from the environment
+c = TicketBoardWriteClient(caller_role=os.environ["TICKET_BOARD_CALLER_ROLE"])
 c.add_comment("PGU-123", text="...")
 c.mark_done("PGU-123", commit_hash="abc1234")
 ```
@@ -481,7 +496,7 @@ c.mark_done("PGU-123", commit_hash="abc1234")
 Use a **quoted heredoc**. In a double-quoted `--body`, backticks execute:
 
 ```bash
-scripts/ticket-board-write --caller-role director create-ticket --title "..." --body "$(cat <<'EOF'
+ticket-board-write create-ticket --title "..." --body "$(cat <<'EOF'
 Body text with `backticks` and $variables, safely inert.
 EOF
 )"
@@ -552,7 +567,9 @@ pane that was scrolled up still receives and submits the message.
 pane target, and installed hooks write state to the pane the *environment* says you are —
 not the pane you meant.
 
-Before launching a CLI or a probe from inside a pane, clear the identity variables:
+Before launching another agent CLI or a neutral probe from inside a pane, clear
+the identity variables. Do **not** clear them for `ticket-board-read` or
+`ticket-board-write`; those commands need the pane's real identity.
 
 ```bash
 env -u PGU_PANE_SESSION_ID -u TICKET_BOARD_PANE_SESSION_ID \

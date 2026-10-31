@@ -1,5 +1,10 @@
 # Ticket Board boardsvc Peer-Auth Cutover
 
+> **Historical cutover package.** This PGU-specific prep record is not the
+> current board installation runbook. Use
+> [`ticket-board-service.md`](ticket-board-service.md) and
+> [`board-supervisor.md`](board-supervisor.md) for current operation.
+
 PGU-197 is a prep-only package. Do not run these commands until the supervised
 cutover. The goal is to run `pgu-ticket-board.service` as a dedicated `boardsvc`
 OS user and let PostgreSQL peer-auth that process to the `ticket_board_service`

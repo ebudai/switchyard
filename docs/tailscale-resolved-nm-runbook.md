@@ -1,5 +1,9 @@
 # Tailscale NetworkManager/systemd-resolved Health
 
+> **Historical host repair.** This records PGU-583's machine-specific DNS
+> contract and probes. It is not maintained as a general Switchyard procedure;
+> verify current host policy and tool help before reusing any command.
+
 PGU-583 fixes the host DNS ownership contract that Tailscale expects on Linux:
 NetworkManager should delegate DNS to `systemd-resolved`, and
 `/etc/resolv.conf` should point at resolved's stub resolver. MagicDNS currently

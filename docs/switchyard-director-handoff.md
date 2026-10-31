@@ -1,6 +1,12 @@
 # Switchyard Director Handoff
 
-This is the Switchyard-specific handoff for the incoming director. It does not
+> **Historical project handoff.** This records one Switchyard project state and
+> tenant map at a point in time. It is retained as evidence, not maintained
+> operational instruction. Start with
+> [`documentation-map.md`](documentation-map.md) and the current Director guide
+> before acting on any command, path or host fact below.
+
+This was the Switchyard-specific handoff for the incoming director. It does not
 replace `docs/onboarding/`; use onboarding for the generic director method and
 this document for the project state, tenant map, and decisions that should not
 be rediscovered.

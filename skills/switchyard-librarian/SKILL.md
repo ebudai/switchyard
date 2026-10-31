@@ -23,6 +23,11 @@ skill is how to use them well. The full guide, with the reasons behind each
 rule, is `docs/onboarding/switchyard-librarian-guide.md` in Switchyard, copied
 into every project `switchyard new` creates.
 
+In the Switchyard source tree, `docs/documentation-map.md` owns the human task
+index and current-versus-historical boundary; `docs/llm-operations.md` is the
+compact role retrieval index. Reconcile them when a ticket changes those
+boundaries, without treating either as permission beyond this overlay.
+
 ## What reaches you, and what you read
 
 A ticket reaches you only when the Director asked for documentation review -

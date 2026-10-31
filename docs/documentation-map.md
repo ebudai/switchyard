@@ -1,92 +1,122 @@
-# Documentation map
+# Switchyard documentation
 
-Which Switchyard documents are maintained and normative, which are historical
-records, and which still need review. This is the seed for SYRD-716's
-reconciliation: it inventories what exists on main, without rewriting any of it.
-The Librarian owns the reconciliation that follows, and keeps this map current.
+Use this page to find the current way to operate Switchyard. It is both the
+human-facing capability index and the boundary between maintained instructions
+and historical evidence.
 
-**How to read a document's status:**
-- **Normative** documents describe how Switchyard behaves now, and are
-  corrected when it changes.
-- **Historical** documents record why something was built, or what was
-  measured at the time. They may describe behaviour that has since changed. Do
-  not act on them without checking a normative surface.
-- Where the two disagree, the normative surface, the code, and the CLI's own
-  `--help` win.
+## What is authoritative
 
-"Last changed" is the date of the file's last commit on main when this map was
-written. It is evidence of age, not of accuracy.
+When two surfaces disagree, use this order:
 
-## Start here
+1. The installed command's `--help` for its names, flags and defaults.
+2. A ticket's live `workflow_actions` and the board's `/api/workflow` document
+   for stages, actors, gates and transitions in that project.
+3. The role skills for authority, invariants and failure handling while an LLM
+   role is working.
+4. The maintained guides below for explanations and procedures.
 
-| Reader | Read | For |
+The first two are generated from the release and project that are actually
+running. Do not copy a transition or option from a historical ticket record.
+
+## Find a task
+
+| I need to | Start here | Confirm with |
 |---|---|---|
-| Anyone | [`README.md`](../README.md) | What Switchyard is, and where to go next |
-| Operator, new host | [`docs/fresh-machine-install.md`](fresh-machine-install.md) | Installing Switchyard and its prerequisites |
-| Every role | [`docs/onboarding/README.md`](onboarding/README.md) | The onboarding packet, in reading order |
-| Every role, exact commands | `switchyard --help`, `ticket-board-read --help`, `ticket-board-write --help`, `directorctl --help` | Flags and verbs as the installed release has them |
+| Install Switchyard on a new host | [Fresh-machine install](fresh-machine-install.md) | `./install --help`; `sudo ./install --dry-run` |
+| Create and onboard a project | [Onboarding index](onboarding/README.md), then [project provisioning](ticket-board-project-provisioning.md) | `switchyard new --help` |
+| See projects and attach to a role | [Launcher: attaching](team-launcher.md#attaching-to-a-role) | `switchyard status --help`; `switchyard attach --help` |
+| Start or stop a whole project | [Launcher](team-launcher.md) | `switchyard start --help`; `switchyard stop --help` |
+| Route, review or move a ticket | [Board guide](onboarding/switchyard-board-guide.md) | the ticket's `workflow_actions`; `ticket-board-write <action> --help` |
+| Operate as the Director | [Director guide](onboarding/switchyard-director-guide.md) | the `switchyard-director` skill and `/api/workflow` |
+| Recover a role, pane or display | [Role runtime](role-runtime.md), [runtime presentation](runtime-presentation.md), and [launcher](team-launcher.md) | `switchyard status --json`; `switchyard attach`, `recover-display`, `set-role-runtime` or `start --help` |
+| Upgrade a tenant | [Launcher: upgrading](team-launcher.md#upgrading-a-tenant) | `switchyard upgrade --dry-run <project>`; `switchyard release-status <project>` |
+| Operate or recover a board service | [Board service](ticket-board-service.md) and [board supervisor](board-supervisor.md) | `switchyard release-status`; the service and supervisor status commands in those guides |
+| Configure routing or review gates | [Board guide](onboarding/switchyard-board-guide.md) | `switchyard router-role`, `documentation-gate`, `publisher`, and `design-stage --help` |
+| Publish approved work | [Board guide: Publisher](onboarding/switchyard-board-guide.md#who-may-do-what) and [board service: publishing](ticket-board-service.md#publishing-a-push-by-the-implementer) | `switchyard publisher --help`; the ticket and publication comment |
+| Prepare User acceptance | [Director guide: routing and holding](onboarding/switchyard-director-guide.md#routing-and-holding) | `ticket-board-write uat-instructions --help` and the ticket's User Review action |
+| Handle provider quota or a quiet role | [Director guide: quota-safe monitoring](onboarding/switchyard-director-guide.md#after-routing-yield-quota-safe-monitoring) | `ticket-board-read holds`, `cohorts`, `leases` and `stall` |
+| Diagnose an incident | [Fresh-machine incident settings](fresh-machine-install.md#host-settings-for-diagnosing-an-incident), then the affected service guide | `switchyard status --json`; `switchyard release-status`; service journals |
+| Configure desktop, clipboard or screenshots | [Desktop access](desktop-access.md) | `switchyard approve-desktop --help`; `switchyard paste-image --help` |
+| Configure User phone notifications | [User notifications](user-notifications.md) | the setup and UAT commands in that guide |
+| Change a role's agent or model | [Role runtime](role-runtime.md) | `switchyard set-role-runtime --help`; `switchyard reconcile-role-models --help` |
+| Run or add tests | [Testing](testing.md) and [contributing](../CONTRIBUTING.md) | the repository's current test entry points |
 
-## Normative: role and LLM-facing
+For a low-context route through authority, evidence and failure handling, use
+the [LLM operations reference](llm-operations.md).
 
-These are the surfaces a role reads while working. They are kept short and
-exact.
+## Discover what changed before an upgrade
 
-| Surface | What it is | Last changed |
-|---|---|---|
-| [`skills/switchyard-board/SKILL.md`](../skills/switchyard-board/SKILL.md) | Every role's board manual: reading, legal moves, writing, provenance, blockers, background commands | 2026-10-25 |
-| [`skills/switchyard-director/SKILL.md`](../skills/switchyard-director/SKILL.md) | The Director's overlay on the board skill | 2026-10-25 |
-| [`skills/switchyard-librarian/SKILL.md`](../skills/switchyard-librarian/SKILL.md) | The Librarian's overlay on the board skill | 2026-10-21 |
-| [`docs/board-skill.md`](board-skill.md) | How one canonical skill body is projected into each agent CLI | 2026-10-21 |
-| [`docs/onboarding/`](onboarding/README.md) | The packet `switchyard new` copies into each project: methodology, board guide, Director guide, Librarian guide | 2026-10-26 |
-| A ticket's `workflow_actions` (`ticket-board-read ticket <id> --json`) | Which transitions exist right now, and who may take them | live |
+Switchyard installs the checkout you selected; pulling a checkout does not
+change the installed release. Before upgrading a tenant:
 
-`switchyard new` also generates `DIRECTOR_ONBOARDING.md` and
-`DESIGNER_ONBOARDING.md` in each project (`scripts/project_onboarding.py`). They
-are generated, so correct their source rather than a copy.
+1. Read the commits and maintained-document diffs between the installed source
+   and the candidate source. Ticket records explain individual changes, but
+   are evidence, not current instructions.
+2. Run `switchyard upgrade <project> --dry-run` from the candidate release.
+   It reports the generated artifacts and migrations it would change.
+3. Run `switchyard release-status <project>` to compare the shared release,
+   deployed board, live build and upgrade journals.
+4. Check the current help for any command you will use. New capabilities are
+   discoverable from `switchyard --help`; exact flags live under the
+   subcommand's own `--help`.
+5. Follow [Upgrading a tenant](team-launcher.md#upgrading-a-tenant). The root
+   phase and Director-owned phase are separate; do not improvise around a
+   refusal or incomplete journal.
 
-## Normative: operator guides and runbooks
+There is no hand-maintained release-note list that duplicates every command.
+The command help, this task index, and the diff of maintained documents are the
+upgrade discovery surfaces.
 
-| Document | Scope | Last changed |
-|---|---|---|
-| [`docs/team-launcher.md`](team-launcher.md) | The `switchyard` command, launcher, panes, roles, first-run auth, lifecycle verbs | 2026-10-31 |
-| [`docs/ticket-board-service.md`](ticket-board-service.md) | Deploying and operating a tenant's board service | 2026-10-21 |
-| [`docs/board-supervisor.md`](board-supervisor.md) | The host board supervisor that runs every tenant board | 2026-10-12 |
-| [`docs/ticket-board-project-provisioning.md`](ticket-board-project-provisioning.md) | Per-project board provisioning artifacts | 2026-10-24 |
-| [`docs/fresh-machine-install.md`](fresh-machine-install.md) | Fresh-host install and version notices | 2026-10-30 |
-| [`docs/switchyard-new-host-dependencies.md`](switchyard-new-host-dependencies.md) | What `switchyard new` needs from the host | 2026-09-22 |
-| [`docs/role-runtime.md`](role-runtime.md) | `switchyard set-role-runtime`: changing a role's agent CLI | 2026-10-27 |
-| [`docs/runtime-presentation.md`](runtime-presentation.md) | `switchyard present`: which role sessions a window shows | 2026-09-21 |
-| [`docs/desktop-access.md`](desktop-access.md) | Desktop policy: screenshots and clipboard, or headless | 2026-10-18 |
-| [`docs/user-notifications.md`](user-notifications.md) | Phone notifications for the User (Pushover) | 2026-10-31 |
-| [`docs/git-update-hook.md`](git-update-hook.md) | Repository policy hooks on managed repositories | 2026-09-24 |
-| [`docs/testing.md`](testing.md) | Running the test suites | 2026-09-06 |
-| [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Where and how to contribute | 2026-09-06 |
-| [`examples/workflows/inspection.json`](../examples/workflows/inspection.json) | An example declared workflow | 2026-10-20 |
+## Maintained, normative surfaces
 
-## Needs review
+These files describe current behavior and must change when that behavior
+changes.
 
-These read as operational guidance, but their own text ties them to one
-cutover, host or date. The Librarian decides whether each is still normative,
-should be folded into a guide above, or is historical.
-
-| Document | Why it needs review | Last changed |
-|---|---|---|
-| [`docs/switchyard-director-handoff.md`](switchyard-director-handoff.md) | A Switchyard-specific handoff "for the incoming director", written for one moment | 2026-09-07 |
-| [`docs/ticket-board-boardsvc-peer-auth-runbook.md`](ticket-board-boardsvc-peer-auth-runbook.md) | States it is a prep-only package for one supervised cutover (PGU-197) | 2026-09-03 |
-| [`docs/tailscale-resolved-nm-runbook.md`](tailscale-resolved-nm-runbook.md) | One host DNS contract (PGU-583) | 2026-08-22 |
-| [`docs/ticket-board-collation-maintenance.md`](ticket-board-collation-maintenance.md) | A PostgreSQL collation-version procedure | 2026-08-22 |
-
-## Historical records (not normative)
-
-| Records | What they are |
+| Surface | Scope |
 |---|---|
-| `docs/syrd-*.md` (128 files), `docs/pgu-*.md` (14 files) | One per ticket: what happened, the design chosen, and the evidence at the time. Normative guides link to them for the why. |
-| [`docs/switchyard-project-setup-design.md`](switchyard-project-setup-design.md) | A design draft; its own status line reads "DRAFT … Nothing here is implemented." |
-| [`docs/board_workflow_engine_design.md`](board_workflow_engine_design.md) | A design spike (PGU-516), "no implementation" |
-| [`docs/refactor/`](refactor/) | The SYRD-272 launcher refactor's inventory and final report |
-| [`docs/size-review/`](size-review/) | The carried size exceptions passed to `ticket-board-write enable-size-review --carried-file` (SYRD-541): data, not prose |
-| [`docs/director-handoff.md`](director-handoff.md), [`docs/director-handoff-2026-06-28-packet-36-36.md`](director-handoff-2026-06-28-packet-36-36.md), [`docs/director-handoff-2026-07-02-current.md`](director-handoff-2026-07-02-current.md) | Handoffs from a different, unrelated project, as their own provenance notes say |
-| [`docs/validator_audit.md`](validator_audit.md) | A retroactive audit report of another codebase's commit |
-| [`docs/otto-milestone-1-hand-standup.md`](otto-milestone-1-hand-standup.md) | One dated standup runbook (PGU-590, PGU-601) |
-| [`docs/board-ui-functional-audit-PGU-504.md`](board-ui-functional-audit-PGU-504.md) | One dated board UI audit |
-| [`docs/Sample_Implementer_Prompt.md`](Sample_Implementer_Prompt.md), [`docs/audit_is_ready_prompt.md`](audit_is_ready_prompt.md) | Prompt samples from earlier packets |
+| [`README.md`](../README.md) | Installation, version selection and the generated top-level command list |
+| [`docs/onboarding/`](onboarding/README.md) | Project-agnostic onboarding copied into new projects; board, Director, Librarian and methodology guides |
+| [`skills/switchyard-board/SKILL.md`](../skills/switchyard-board/SKILL.md) | Shared role authority, board operations, evidence and wait handling |
+| [`skills/switchyard-director/SKILL.md`](../skills/switchyard-director/SKILL.md) | Director-only controls and recovery procedures |
+| [`skills/switchyard-librarian/SKILL.md`](../skills/switchyard-librarian/SKILL.md) | Librarian-only documentation decision contract |
+| [LLM operations reference](llm-operations.md) | Small retrieval index into the skills, live workflow and command help |
+| [Launcher guide](team-launcher.md) | Project lifecycle, roles, panes, provisioning and upgrades |
+| [Board service](ticket-board-service.md), [supervisor](board-supervisor.md), and [provisioning](ticket-board-project-provisioning.md) | Board installation, operation, migration and tenant artifacts |
+| [Fresh-machine install](fresh-machine-install.md) and [host dependencies](switchyard-new-host-dependencies.md) | Host preparation and installation |
+| [Role runtime](role-runtime.md), [runtime presentation](runtime-presentation.md), and [desktop access](desktop-access.md) | Agent runtime, display slots and desktop policy |
+| [User notifications](user-notifications.md) | User phone notification setup and operation |
+| [Git update hook](git-update-hook.md), [testing](testing.md), and [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Repository policy and contribution checks |
+| [`examples/workflows/inspection.json`](../examples/workflows/inspection.json) | Executable example workflow; validate it as configuration, not prose |
+
+The onboarding copies in a tenant carry a source-commit header. They are
+snapshots, not a second source: edit `docs/onboarding/` here and let the upgrade
+path refresh unchanged copies. `DIRECTOR_ONBOARDING.md` and
+`DESIGNER_ONBOARDING.md` are generated by `scripts/project_onboarding.py`; fix
+their generator rather than an installed copy.
+
+## Historical and evidence records
+
+Everything in this section is non-normative. It may accurately explain why a
+decision was made while naming commands, paths or behavior that no longer
+exist.
+
+| Records | Meaning |
+|---|---|
+| `docs/syrd-*.md` and `docs/pgu-*.md` | Ticket-specific designs, results and rollout evidence |
+| [`docs/switchyard-director-handoff.md`](switchyard-director-handoff.md) and the dated `docs/director-handoff*.md` files | Point-in-time project handoffs, tenant maps and host state |
+| [`docs/ticket-board-boardsvc-peer-auth-runbook.md`](ticket-board-boardsvc-peer-auth-runbook.md), [`docs/tailscale-resolved-nm-runbook.md`](tailscale-resolved-nm-runbook.md), and [`docs/ticket-board-collation-maintenance.md`](ticket-board-collation-maintenance.md) | One-host or one-cutover runbooks retained as evidence |
+| [`docs/switchyard-project-setup-design.md`](switchyard-project-setup-design.md) and [`docs/board_workflow_engine_design.md`](board_workflow_engine_design.md) | Unimplemented or superseded design drafts |
+| [`docs/refactor/`](refactor/) | SYRD-272 refactor inventory and final report |
+| [`docs/size-review/`](size-review/) | Machine-consumed carried-exception data, not guidance |
+| `docs/validator_audit.md`, `docs/otto-milestone-1-hand-standup.md`, `docs/board-ui-functional-audit-PGU-504.md`, and the two prompt samples | Dated audits, exercises and packet samples |
+
+If a maintained guide links to one of these, use it for rationale or evidence
+only. Return here or to command help before acting.
+
+## Maintenance rule
+
+Add a new current procedure to an existing maintained guide whenever possible.
+If a ticket needs a durable evidence record, name it with its ticket ID and
+link back to the maintained guide it informed. Do not promote a ticket record
+into a second command manual. When behavior retires, remove it from every
+maintained surface and leave any historical account clearly in this category.

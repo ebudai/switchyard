@@ -16,6 +16,12 @@ exit 128`.
   refused rather than reset.
 - **Teardown** lists the store and worktrees it keeps, with the consequence.
 - **`switchyard new`** warns about them before it creates anything.
+- **SYRD-715:** a store whose remote is the repository the checkout itself
+  follows -- the same URL, or one github.com `owner/repository` in any form -- and
+  whose role worktrees are all its own, is this project's, and is used without
+  being repointed. Another owner or repository of the same name, a host not
+  proven equivalent across forms, or a checkout that proves nothing, is refused
+  before any git, as before.
 
 Real git repositories on disk throughout, through the real owner-correct git
 chokepoint; nothing outside a temporary directory is touched.
@@ -38,7 +44,7 @@ for entry in (ROOT, ROOT / "tests"):
         sys.path.insert(0, str(entry))
 
 from team_launcher_test_helpers import _make_origin_backed_repo, _run_git  # noqa: E402
-from scripts import team_launcher  # noqa: E402
+from scripts import project_worktrees, team_launcher  # noqa: E402
 
 PROJECT = "testing"
 ROLES = ("main", "ops")
@@ -47,7 +53,8 @@ CHECKS = 0
 
 def check(condition: object, detail: str) -> None:
     global CHECKS
-    assert condition, detail
+    if not condition:
+        raise AssertionError(f"FAILED CHECK: {detail}")
     CHECKS += 1
 
 
@@ -326,6 +333,226 @@ def test_new_warns_before_creating_anything() -> None:
     line = next((l for l in warned if l.startswith("switchyard: warning:")), "")
     check(str(store) in line and str(worktrees) in line and "otto_scheduler" in line and "refuses" in line,
           f"leftovers are named before anything is created, with what the launch will do: {warned}")
+
+
+def _set_url(repository: Path, url: str, remote: str = "origin") -> None:
+    _run_git(["git", "-C", str(repository), "config", f"remote.{remote}.url", url])
+
+
+def _following_canonical(tmp: Path):
+    """syrd's shape (SYRD-715): the store fetches the repository the checkout itself follows, not the checkout."""
+    checkout, control = _first_project(tmp)
+    canonical = checkout.parent / "origin.git"
+    config = _config(tmp, checkout)
+    created = team_launcher.ensure_control_role_worktrees(config, refresh=True, runner=Recorder())
+    assert created.ok, created.failed_roles
+    _set_url(control, str(canonical))
+    return checkout, control, canonical, config
+
+
+def test_a_store_following_the_checkouts_own_remote_is_this_projects() -> None:
+    """The ticket's reproduction: the checkout's origin is the store's origin, and config names the checkout."""
+    with tempfile.TemporaryDirectory(prefix="syrd715-same.") as raw:
+        tmp = Path(raw)
+        checkout, control, canonical, config = _following_canonical(tmp)
+        check(_origin_of(checkout) == _origin_of(control) == str(canonical) and str(config.repository) == str(checkout),
+              "the checkout and the store follow one repository, and config names the checkout")
+        runner = Recorder()
+        result = team_launcher.ensure_control_repository(config, runner=runner)
+        added = team_launcher.ensure_control_role_worktrees(config, refresh=True, runner=Recorder())
+        after = _origin_of(control)
+    check(result.ok and [c[3:5] for c in runner.calls if c[:1] == ["git"]] == [["config", "--replace-all"], ["fetch", "origin"]],
+          f"the store is used as it is, fetching the repository it follows: {result.failed_roles} {runner.calls}")
+    check(after == str(canonical), f"and is never repointed at the checkout: {after}")
+    check(added.ok, f"its worktrees refresh, as a new role's would be added: {added.failed_roles}")
+
+
+def test_one_github_repository_in_any_of_its_forms_is_the_same() -> None:
+    with tempfile.TemporaryDirectory(prefix="syrd715-github.") as raw:
+        tmp = Path(raw)
+        checkout, control, _canonical, config = _following_canonical(tmp)
+        for store_url, checkout_url in (
+                ("https://github.com/acme/project.git", "git@github.com:acme/project.git"),
+                ("https://github.com/acme/project.git", "ssh://git@github.com/Acme/Project"),
+                ("ssh://git@github.com:22/acme/project", "https://github.com/acme/project")):
+            _set_url(control, store_url)
+            _set_url(checkout, checkout_url)
+            said = project_worktrees.control_repository_origin_mismatch(config)
+            check(said == "", f"{store_url} and {checkout_url} are one GitHub repository: {said}")
+
+
+def test_an_unrelated_repository_of_the_same_name_is_still_refused_before_any_git() -> None:
+    with tempfile.TemporaryDirectory(prefix="syrd715-other.") as raw:
+        tmp = Path(raw)
+        checkout, control, _canonical, config = _following_canonical(tmp)
+        for store_url, checkout_url, why in (
+                ("https://github.com/other/project.git", "git@github.com:acme/project.git", "another owner, same name"),
+                ("https://github.com/acme/project-old.git", "git@github.com:acme/project.git", "another repository"),
+                ("https://git.example.org/acme/project.git", "git@git.example.org:acme/project.git",
+                 "a host nothing here proves equivalent across forms"),
+                ("git@github-not-github:acme/project.git", "https://github.com/acme/project.git",
+                 "an SSH alias named like GitHub, which may resolve anywhere (Audit)"),
+                ("git@github-acme:acme/project.git", "git@github.com:acme/project.git", "a github-* alias against github.com"),
+                ("https://ssh.github.com/acme/project.git", "git@github.com:acme/project.git", "a subdomain against github.com"),
+                (str(tmp / "elsewhere" / "project.git"), str(tmp / "other" / "project.git"), "two local paths, one basename")):
+            _set_url(control, store_url)
+            _set_url(checkout, checkout_url)
+            before = _refs(control)
+            runner = Recorder()
+            result = team_launcher.ensure_control_repository(config, runner=runner)
+            reason = next(iter(result.failed_roles.values()), "")
+            check(not result.ok and f"its origin is {store_url}" in reason and "another checkout's commit store" in reason,
+                  f"{why}: refused, as SYRD-545 refuses it: {reason}")
+            check(not any(c[:1] == ["git"] for c in runner.calls) and _refs(control) == before and _origin_of(control) == store_url,
+                  f"{why}: before any git, the store untouched: {runner.calls}")
+
+
+def test_a_matching_remote_without_the_rest_of_the_proof_is_refused() -> None:
+    with tempfile.TemporaryDirectory(prefix="syrd715-proof.") as raw:
+        tmp = Path(raw)
+        checkout, control, canonical, config = _following_canonical(tmp)
+        # A role worktree another store added: the store does not back this project's worktrees.
+        other = tmp / "elsewhere" / "control.git"
+        _run_git(["git", "clone", "-q", "--bare", str(checkout), str(other)])
+        ops = Path(next(r.workdir for r in config.roles if r.role == "ops"))
+        _run_git(["git", "--git-dir", str(control), "worktree", "remove", "--force", str(ops)])
+        _run_git(["git", "--git-dir", str(other), "worktree", "add", "-q", "--detach", str(ops)])
+        foreign = project_worktrees.control_repository_origin_mismatch(config)
+        check("another checkout's commit store" in foreign, f"a matching remote, a foreign role worktree: refused: {foreign}")
+        shutil.rmtree(ops)
+        check(project_worktrees.control_repository_origin_mismatch(config) == "", "with that worktree gone, it is this project's")
+        # The checkout's own remote of that name is what proves it: another remote, or none, does not.
+        _run_git(["git", "-C", str(checkout), "remote", "rename", "origin", "upstream"])
+        check("another checkout's commit store" in project_worktrees.control_repository_origin_mismatch(config),
+              "a checkout whose origin is gone proves nothing")
+        _run_git(["git", "-C", str(checkout), "remote", "rename", "upstream", "origin"])
+        # A checkout that is not a repository of its own (its .git a file, or absent) proves nothing either.
+        shutil.move(str(checkout / ".git"), str(tmp / "moved-dot-git"))
+        (checkout / ".git").write_text(f"gitdir: {tmp / 'moved-dot-git'}\n", encoding="utf-8")
+        check("another checkout's commit store" in project_worktrees.control_repository_origin_mismatch(config),
+              "a checkout whose .git is a pointer is not read through")
+        (checkout / ".git").unlink()
+        check("another checkout's commit store" in project_worktrees.control_repository_origin_mismatch(config),
+              "and one with no .git proves nothing")
+        check(_origin_of(control) == str(canonical), "the store's remote was never touched")
+
+
+def test_an_existing_worktree_that_proves_nothing_refuses_before_any_git() -> None:
+    """Audit, SYRD-715: inconclusive worktree metadata is no proof the store backs it; only an absent directory is."""
+    with tempfile.TemporaryDirectory(prefix="syrd715-inconclusive.") as raw:
+        tmp = Path(raw)
+        checkout, control, canonical, config = _following_canonical(tmp)
+        ops = Path(next(r.workdir for r in config.roles if r.role == "ops"))
+        dot_git = ops / ".git"
+        good = dot_git.read_text(encoding="utf-8")
+        entry = Path(good.split(":", 1)[1].strip())
+
+        def restore() -> None:
+            if ops.is_symlink():
+                ops.unlink()
+                shutil.move(str(tmp / "real-ops"), str(ops))
+            if dot_git.is_symlink() or dot_git.exists():
+                dot_git.chmod(0o644) if not dot_git.is_symlink() else None
+                dot_git.unlink()
+            dot_git.write_text(good, encoding="utf-8")
+            (entry / "gitdir").write_text(f"{dot_git}\n", encoding="utf-8")
+
+        def link_role_directory() -> None:
+            shutil.move(str(ops), str(tmp / "real-ops"))
+            ops.symlink_to(tmp / "real-ops", target_is_directory=True)
+
+        cases = [
+            ("a .git that is not a gitdir record", lambda: dot_git.write_text("not a gitdir record\n", encoding="utf-8")),
+            ("a missing .git", lambda: dot_git.unlink()),
+            ("a .git that is a link", lambda: (dot_git.unlink(), (tmp / "moved.git").write_text(good, encoding="utf-8"),
+                                               dot_git.symlink_to(tmp / "moved.git"))),
+            ("a store entry that names another worktree back", lambda: (entry / "gitdir").write_text(f"{tmp / 'x' / '.git'}\n",
+                                                                                                    encoding="utf-8")),
+            ("a role directory that is a link", link_role_directory),
+        ]
+        if os.geteuid() != 0:
+            cases.append(("an unreadable .git", lambda: dot_git.chmod(0)))
+        for label, make in cases:
+            make()
+            said = project_worktrees.control_repository_origin_mismatch(config)
+            runner = Recorder()
+            result = team_launcher.ensure_control_repository(config, runner=runner)
+            check("another checkout's commit store" in said and not result.ok,
+                  f"{label}: the store is not proven this project's, and is refused: {said or result.failed_roles}")
+            check(not any(c[:1] == ["git"] for c in runner.calls), f"{label}: before any git: {runner.calls}")
+            restore()
+            check(project_worktrees.control_repository_origin_mismatch(config) == "", f"restored, it is accepted ({label})")
+        check(_origin_of(control) == str(canonical), "the store's remote was never touched")
+
+
+def test_as_root_membership_is_read_by_descriptor_and_compared_as_written() -> None:
+    """The root branch (SYRD-630's reads) of the same proof: the owner's reads stood in by no-follow ones."""
+    from dataclasses import replace
+    from scripts import owner_writes
+
+    with tempfile.TemporaryDirectory(prefix="syrd715-root.") as raw:
+        tmp = Path(raw)
+        checkout, control, canonical, config = _following_canonical(tmp)
+        config = replace(config, run_as_user="owner715")
+        seen: list[str] = []
+
+        def status(owner, path):
+            seen.append(f"status {path}")
+            for parent in Path(path).parents:  # a link above it is refused, as the descriptor walk refuses it
+                if parent.is_symlink():
+                    raise SystemExit(f"refusing {path}: {parent} is a link")
+            try:
+                return os.lstat(path)
+            except FileNotFoundError:
+                return None
+
+        def read(owner, path):
+            seen.append(f"read {path}")
+            if status(owner, path) is None:
+                return None
+            if Path(path).is_symlink():
+                raise SystemExit(f"refusing {path}: it is a link")
+            return Path(path).read_bytes()
+
+        saved = (team_launcher.root_writes_for, owner_writes.owner_entry_status, owner_writes.read_owner_bytes)
+        team_launcher.root_writes_for = lambda user: user == "owner715"
+        owner_writes.owner_entry_status, owner_writes.read_owner_bytes = status, read
+        try:
+            check(project_worktrees.control_repository_origin_mismatch(config) == "",
+                  "as root, a store following the checkout's own remote, with its own worktrees, is this project's")
+            check(any(entry.startswith("read ") and entry.endswith("/.git") for entry in seen)
+                  and any(entry.startswith("read ") and entry.endswith("/gitdir") for entry in seen),
+                  f"each worktree's .git and the store entry's back-pointer were read through the owner's reads: {seen[-6:]}")
+            ops = Path(next(r.workdir for r in config.roles if r.role == "ops"))
+            good = (ops / ".git").read_text(encoding="utf-8")
+            entry = Path(good.split(":", 1)[1].strip())
+            for label, make, undo in (
+                    ("a .git that is not a gitdir record", lambda: (ops / ".git").write_text("nonsense\n", encoding="utf-8"),
+                     lambda: (ops / ".git").write_text(good, encoding="utf-8")),
+                    ("a gitdir named through '..'", lambda: (ops / ".git").write_text(
+                        f"gitdir: {control}/worktrees/../worktrees/{entry.name}\n", encoding="utf-8"),
+                     lambda: (ops / ".git").write_text(good, encoding="utf-8")),
+                    ("a store entry naming another worktree back", lambda: (entry / "gitdir").write_text("/elsewhere/.git\n",
+                                                                                                         encoding="utf-8"),
+                     lambda: (entry / "gitdir").write_text(f"{ops / '.git'}\n", encoding="utf-8")),
+                    ("a .git that is a link", lambda: ((ops / ".git").rename(tmp / "moved.git"), (ops / ".git").symlink_to(tmp / "moved.git")),
+                     lambda: ((ops / ".git").unlink(), (tmp / "moved.git").rename(ops / ".git")))):
+                make()
+                said = project_worktrees.control_repository_origin_mismatch(config)
+                check("another checkout's commit store" in said, f"as root, {label} proves nothing: {said}")
+                undo()
+                check(project_worktrees.control_repository_origin_mismatch(config) == "", f"as root, restored ({label})")
+            # The owner's reads refuse a link above a worktree; a refusal is no proof either.
+            base = Path(str(config.worktree_base))
+            base.rename(tmp / "real-worktrees")
+            base.symlink_to(tmp / "real-worktrees", target_is_directory=True)
+            said = project_worktrees.control_repository_origin_mismatch(config)
+            check("another checkout's commit store" in said, f"as root, worktrees reached through a link prove nothing: {said}")
+            base.unlink()
+            (tmp / "real-worktrees").rename(base)
+            check(project_worktrees.control_repository_origin_mismatch(config) == "", "as root, restored (the link)")
+        finally:
+            team_launcher.root_writes_for, owner_writes.owner_entry_status, owner_writes.read_owner_bytes = saved
 
 
 def main() -> int:

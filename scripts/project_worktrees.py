@@ -542,6 +542,111 @@ def _same_local_repository(recorded: str, repository: Path, *, base: Path, by_na
     return path.resolve(strict=False) == repository.expanduser().resolve(strict=False)
 
 
+def _github_repository(url: str) -> str:
+    """The `owner/repository` a remote on github.com itself names, casefolded, or "" (SYRD-715).
+
+    `https://github.com/o/r.git`, `ssh://git@github.com/o/r` and
+    `git@github.com:o/r.git` all name `o/r`; the whole path is compared, never a
+    basename. Only the host github.com counts: an SSH alias (`github-...`) or a
+    subdomain may resolve anywhere, and nothing here proves where (Audit).
+    """
+    from scripts.ticket_board.project_provision import DEFAULT_GITHUB_HOST, publication_remote_host
+
+    value = url.strip()
+    if publication_remote_host(value) != DEFAULT_GITHUB_HOST:
+        return ""
+    path = value.partition("://")[2].partition("/")[2] if "://" in value else value.partition(":")[2]
+    path = path.strip("/")
+    path = path[:-len(".git")] if path.endswith(".git") else path
+    parts = path.split("/")
+    return path.casefold() if len(parts) == 2 and all(parts) else ""
+
+
+def _same_remote_repository(first: str, second: str) -> bool:
+    """Whether two recorded remote URLs name one repository: the same URL, or one github.com `owner/repository`."""
+    if first.strip() == second.strip():
+        return bool(first.strip())  # two empty URLs name nothing
+    named = _github_repository(first)
+    return bool(named) and named == _github_repository(second)
+
+
+def _role_worktree_membership(config: ProjectConfig, role: RoleConfig) -> bool | None:
+    """Whether a role's directory is positively one of this store's worktrees; None when it is absent (SYRD-715).
+
+    Proof, not the absence of a refusal (`role_worktree_foreign_store` answers
+    "" for a `.git` it cannot read): a real directory whose `.git` is a regular
+    file naming `gitdir: <store>/worktrees/<name>`, that entry a directory of
+    the store, and its `gitdir` naming this `.git` back. As root, read by
+    descriptor from the owner's root and compared as written. Anything else,
+    a failed read included, is no proof.
+    """
+    from scripts import team_launcher as launcher
+
+    workdir = Path(role.workdir)
+    store = Path(str(config.control_repository))
+    if launcher.root_writes_for(config.run_as_user):
+        from scripts import owner_writes
+        from scripts.owner_git import _lexical
+
+        owner = config.run_as_user
+        try:
+            status = owner_writes.owner_entry_status(owner, workdir)
+            if status is None:
+                return None
+            if not stat.S_ISDIR(status.st_mode):
+                return False
+            dot_git = workdir / ".git"
+            marker = owner_writes.owner_entry_status(owner, dot_git)
+            if marker is None or not stat.S_ISREG(marker.st_mode):
+                return False
+            text = (owner_writes.read_owner_bytes(owner, dot_git) or b"").decode("utf-8", "replace").strip()
+            if not text.startswith("gitdir:"):
+                return False
+            named = text[len("gitdir:"):].strip()
+            gitdir = PurePosixPath(named if named.startswith("/") else f"{str(workdir).rstrip('/')}/{named}")
+            if not (_lexical(gitdir) and _lexical(PurePosixPath(str(store)))
+                    and gitdir.parent == PurePosixPath(str(store)) / "worktrees"):
+                return False
+            entry = owner_writes.owner_entry_status(owner, Path(str(gitdir)))
+            if entry is None or not stat.S_ISDIR(entry.st_mode):
+                return False
+            back = (owner_writes.read_owner_bytes(owner, Path(str(gitdir)) / "gitdir") or b"").decode("utf-8", "replace")
+            return back.strip() == str(dot_git)
+        except (OSError, SystemExit):
+            return False
+    try:
+        status = os.lstat(workdir)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return False
+    try:
+        if not stat.S_ISDIR(status.st_mode):
+            return False
+        dot_git = workdir / ".git"
+        if not stat.S_ISREG(os.lstat(dot_git).st_mode):
+            return False
+        text = dot_git.read_text(encoding="utf-8").strip()
+        if not text.startswith("gitdir:"):
+            return False
+        gitdir = Path(text[len("gitdir:"):].strip()).expanduser()
+        if not gitdir.is_absolute():
+            gitdir = workdir / gitdir
+        gitdir = gitdir.resolve(strict=False)
+        resolved_store = store.expanduser().resolve(strict=False)
+        if gitdir.parent != resolved_store / "worktrees" or not gitdir.is_dir():
+            return False
+        back = Path((gitdir / "gitdir").read_text(encoding="utf-8").strip()).expanduser()
+        return back.resolve(strict=False) == dot_git.resolve(strict=False)
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
+def _store_backs_these_worktrees(config: ProjectConfig) -> bool:
+    """Whether every role directory already on disk is positively one of this store's worktrees."""
+    return all(_role_worktree_membership(config, role) is not False for role in config.roles)
+
+
 def control_repository_origin_mismatch(config: ProjectConfig) -> str:
     """Why an existing commit store belongs to another checkout, or "".
 
@@ -555,7 +660,8 @@ def control_repository_origin_mismatch(config: ProjectConfig) -> str:
 
     Only a recorded URL naming another place is evidence. No URL, or a store
     this cannot read, is left to the fetch as before, which says what is wrong
-    in git's words.
+    in git's words. A URL naming the repository the checkout itself follows is
+    no evidence either, once that is proven (SYRD-715).
     """
     from scripts import team_launcher as launcher
 
@@ -566,6 +672,12 @@ def control_repository_origin_mismatch(config: ProjectConfig) -> str:
     recorded = _control_remote_url(config.control_repository, config.worktree_remote, owner_user=owner)
     if not recorded or _same_local_repository(recorded, config.repository, base=config.control_repository,
                                               by_name=as_root):
+        return ""
+    # The store may follow the repository the checkout itself follows (syrd's fetches public main; config names the
+    # local checkout): this project's when the checkout's own remote is the same URL or github.com `owner/repository`,
+    # and every role worktree already on disk is positively this store's (SYRD-715).
+    followed = _control_remote_url(config.repository / ".git", config.worktree_remote, owner_user=owner)
+    if _same_remote_repository(recorded, followed) and _store_backs_these_worktrees(config):
         return ""
     control = config.control_repository
     worktrees = f" and the role worktrees under {config.worktree_base}" if config.worktree_base is not None else ""

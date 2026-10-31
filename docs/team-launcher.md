@@ -1344,7 +1344,12 @@ before it creates anything, and the launch refuses a store whose remote is not
 the project's repository -- naming the store, both checkouts and the remedy --
 rather than fetching from the earlier project's checkout. A role worktree added
 from another store, or from a store since replaced, is refused the same way
-instead of being reset (SYRD-545).
+instead of being reset (SYRD-545). A store whose remote is the repository the
+checkout itself follows is not refused: the checkout's own remote of that name
+must be the same URL, or the same `owner/repository` on github.com in any form,
+and every role worktree already on disk must be the store's own. syrd's store
+fetches canonical public main while its config names the local checkout
+([SYRD-715](syrd-715-control-store-identity.md)).
 
 `switchyard start <project>` is the other half of `stop`: it starts the board,
 then the listener, then restores the sessions and opens the presentation --

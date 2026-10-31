@@ -49,7 +49,11 @@ class Host:
         for path in (self.hba, self.ident):
             path.chmod(0o640)
         self.loaded = (self.hba.read_text(), self.ident.read_text())
-        self.databases = list(databases)
+        # Each database and whether it accepts connections (`datallowconn`); a plain list accepts them all.
+        self.databases = dict(databases) if isinstance(databases, dict) else {name: True for name in databases}
+        self.violations: list[str] = []  # anything done to a database that accepts no connections (SYRD-712)
+        self.flip_on_reload = ""  # a sealed database something reopens while the transition runs
+        self.drop_on_reload = ""  # a sealed database something drops while the transition runs
         self.cron = [[13, "ticket_board_due_nudges", "localhost"], [14, "ticket_board_notification_trace_prune",
                                                                    "localhost"]] if cron else None
         self.log: list[str] = []
@@ -86,6 +90,11 @@ class Host:
         assert argv[:2] == ["runuser", "-u"] and argv[3:6] == ["--", "env", "-i"] and kwargs.get("cwd") == "/", argv
         assert "PGPASSFILE=/dev/null" in argv and "-w" in argv, argv
         account, conninfo, sql = argv[2], argv[-3], argv[-1]
+        target = dict(part.split("=", 1) for part in conninfo.split()).get("dbname", "")
+        if target in self.databases and not self.databases[target]:
+            self.violations.append(f"connected to sealed {target}: {sql}")
+        if re.search(r"(?i)\b(ALTER|DROP)\s+DATABASE\b|\bRENAME\b|pg_dump|datallowconn\s*=", sql) or "pg_dump" in argv:
+            self.violations.append(f"changed or dumped a database: {sql}")
         done = lambda out="", code=0, err="": subprocess.CompletedProcess(argv, code, out, err)  # noqa: E731
         if "/var/run/postgresql" not in conninfo:  # a probe, at the server's own socket or over TCP
             ok, why = self.allowed(account, conninfo)
@@ -103,8 +112,11 @@ class Host:
             return done(str(self.ident))
         if sql == "SHOW unix_socket_directories":
             return done("/run/postgresql")
-        if sql.startswith("SELECT datname FROM pg_database"):
+        if sql.startswith("SELECT datname FROM pg_database"):  # main's planner, before SYRD-712
             return done("\n".join(self.databases))
+        if sql.startswith("SELECT coalesce(json_agg(json_build_array(datname, datallowconn)"):
+            self.log.append("read databases")
+            return done(json.dumps([[name, allowed] for name, allowed in sorted(self.databases.items())]))
         if sql == "SHOW cron.database_name":
             return done("pgu") if self.cron is not None else done("", 1, 'unrecognized configuration parameter')
         if sql.startswith("SELECT coalesce(json_agg(json_build_array(jobid"):
@@ -133,6 +145,10 @@ class Host:
                 return done("", 2, "reload refused")
             self.loaded = (self.hba.read_text(), self.ident.read_text())
             self.log.append("reload")
+            if self.flip_on_reload:
+                self.databases[self.flip_on_reload] = True
+            if self.drop_on_reload:
+                self.databases.pop(self.drop_on_reload, None)
             return done("t")
         if sql == "SELECT 1":
             return done("1")

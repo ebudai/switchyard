@@ -7,7 +7,10 @@ pane pre-authorizes either.
 - **The plan** is read, never guessed: the files the cluster names (`SHOW hba_file`, `SHOW ident_file`), the tenants
   root's own provision records name (owner and database, each checked against root's registry), every board database
   the cluster holds, and the pg_cron jobs that still connect over TCP. `database_auth` renders the replacement. A
-  database no root record accounts for -- a legacy board -- is a refusal: its listener would be cut off.
+  database no root record accounts for -- a legacy board -- is a refusal: its listener would be cut off. Unless the
+  cluster refuses every connection to it (`datallowconn = false`): then it is sealed offline, named in the plan, its
+  digest and its preview, granted nothing, never connected to, and proved still sealed after apply and restore
+  (SYRD-712).
 - **The preview** is that plan, exactly: both files' diffs, the jobs moved, the probes, the backup and the way back,
   and the plan's digest, which covers the current files too.
 - **The apply** recomputes the plan and refuses unless its digest is the one the User accepted. It backs up both files
@@ -61,6 +64,9 @@ class Plan:
     socket: str = SOCKET_DIR
     tenants: list[database_auth.Tenant] = field(default_factory=list)
     unaccounted: list[str] = field(default_factory=list)
+    #: Databases no root record accounts for that the cluster refuses every connection to (`datallowconn = false`):
+    #: preserved evidence, sealed offline. Granted nothing, never connected to, and proved still sealed (SYRD-712).
+    sealed: list[str] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
     cron_database: str = ""
     cron_moves: list[list[Any]] = field(default_factory=list)
@@ -73,6 +79,7 @@ class Plan:
             "hba_after": self.hba_after, "ident_after": self.ident_after,
             "tenants": [[t.project, t.owner, t.database] for t in self.tenants],
             "cron": [self.cron_database, self.socket, self.cron_moves],
+            "sealed": self.sealed,
         }
         return hashlib.sha256(json.dumps(document, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -146,6 +153,24 @@ def root_tenants(*, provision_root: Path, registry: Path = REGISTRY, owner_uid: 
     return tenants, problems
 
 
+#: Every database a tenant could own, and whether the cluster accepts connections to it. Read from `postgres`'s own
+#: catalogue: a database that accepts none is never connected to, and this is how it is known to be so.
+DATABASES = ("SELECT coalesce(json_agg(json_build_array(datname, datallowconn) ORDER BY datname), '[]') "
+             "FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres'")
+
+
+def databases(*, runner: Callable[..., Any]) -> dict[str, bool]:
+    """Each database, and whether it accepts connections (`datallowconn`)."""
+    return {str(name): allowed is True for name, allowed in json.loads(query(DATABASES, runner=runner) or "[]")}
+
+
+def unsealed(sealed: Sequence[str], *, runner: Callable[..., Any]) -> list[str]:
+    """Each database the plan holds sealed offline that is gone, or that now accepts connections."""
+    now = databases(runner=runner)
+    return [f"{database} is no longer sealed offline ({'gone' if database not in now else 'it accepts connections'})"
+            for database in sealed if now.get(database, True)]
+
+
 def build_plan(*, runner: Callable[..., Any], provision_root: Path, registry: Path = REGISTRY, owner_uid: int = 0,
                read: Callable[[str], str] | None = None) -> Plan:
     """What the transition would do, from what the cluster and root's records say now. Changes nothing."""
@@ -154,13 +179,18 @@ def build_plan(*, runner: Callable[..., Any], provision_root: Path, registry: Pa
     reader = read or (lambda path: Path(path).read_text(encoding="utf-8"))
     plan = Plan(hba_file, ident_file, reader(hba_file), reader(ident_file), socket=socket)
     tenants, plan.problems = root_tenants(provision_root=provision_root, registry=registry, owner_uid=owner_uid)
-    databases = [line for line in query(
-        "SELECT datname FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres' ORDER BY 1",
-        runner=runner).splitlines() if line]
-    plan.tenants = [tenant for tenant in tenants if tenant.database in databases]
+    state = databases(runner=runner)
+    plan.tenants = [tenant for tenant in tenants if tenant.database in state]
     accounted = {tenant.database for tenant in plan.tenants}
-    plan.unaccounted = [database for database in databases if database not in accounted]
-    for database in plan.unaccounted:
+    for database, connectable in state.items():
+        if database in accounted:
+            continue
+        if not connectable:
+            # Nobody reaches it now, as nobody will after: it needs no rule, and its contents are not this
+            # transition's to read or change (SYRD-712).
+            plan.sealed.append(database)
+            continue
+        plan.unaccounted.append(database)
         plan.problems.append(f"{database} is a database no root record accounts for: its listener and every other "
                              "account reaching it now would be cut off. Give it root's records (its provisioning or "
                              "cutover) or drop it, then preview again")
@@ -235,6 +265,11 @@ def preview(plan: Plan) -> str:
     lines = [f"database-auth preview, digest {plan.digest}", ""]
     if plan.problems:
         lines += ["REFUSED -- this plan cannot be applied:", *(f"  - {problem}" for problem in plan.problems), ""]
+    if plan.sealed:
+        lines += ["SEALED OFFLINE -- no root record accounts for these, and the cluster refuses every connection to "
+                  "them (datallowconn = false). No rule is granted for them, nothing here connects to, dumps, drops, "
+                  "renames or reopens them, and the apply refuses unless each is still sealed before and after:",
+                  *(f"  - {database}" for database in plan.sealed), ""]
     lines += [f"tenants (root's records): " + (", ".join(f"{t.project} ({t.owner} -> {t.database})"
                                                          for t in plan.tenants) or "none")]
     for name, before, after in ((plan.hba_file, plan.hba_before, plan.hba_after),
@@ -288,9 +323,10 @@ def restore(backup: Path, *, runner: Callable[..., Any]) -> list[str]:
             _set_cron_hosts(plan, record.get("cron_moves", []), runner=runner)
         query("SELECT pg_reload_conf()", runner=runner)
         query("SELECT 1", runner=runner)
+        # Restoring touches no database, so a sealed one is still sealed; proved, not assumed (SYRD-712).
+        return unsealed(record.get("sealed", []), runner=runner)
     except (OSError, ValueError, KeyError, TransitionError) as exc:
         return [f"restoring {backup} failed: {exc}"]
-    return []
 
 
 def apply(digest: str, *, runner: Callable[..., Any], provision_root: Path, registry: Path = REGISTRY,
@@ -310,7 +346,8 @@ def apply(digest: str, *, runner: Callable[..., Any], provision_root: Path, regi
     (backup / "pg_ident.conf").write_text(plan.ident_before, encoding="utf-8")
     (backup / "record.json").write_text(json.dumps({
         "digest": plan.digest, "hba_file": plan.hba_file, "ident_file": plan.ident_file,
-        "cron_database": plan.cron_database, "cron_moves": plan.cron_moves}, indent=1), encoding="utf-8")
+        "cron_database": plan.cron_database, "cron_moves": plan.cron_moves, "sealed": plan.sealed}, indent=1),
+        encoding="utf-8")
 
     def back(why: str) -> int:
         problems = restore(backup, runner=runner)
@@ -335,6 +372,10 @@ def apply(digest: str, *, runner: Callable[..., Any], provision_root: Path, regi
     except TransitionError as exc:
         return back(f"moving the jobs or reloading failed ({exc})")
     failures = run_probes(plan, runner=runner)
+    try:
+        failures += unsealed(plan.sealed, runner=runner)
+    except TransitionError as exc:
+        failures.append(f"the sealed databases' state could not be read ({exc})")
     if failures:
         return back("a probe did not hold: " + "; ".join(failures))
     print_func(f"switchyard: hardened {plan.hba_file} and {plan.ident_file} ({plan.digest}); every probe held. "

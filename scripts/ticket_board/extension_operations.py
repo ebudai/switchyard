@@ -8,17 +8,20 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import (audit_return, cohort_ops, provider_hold_ops, context_continuation, documentation_candidate, execution_lease_ops, pull_queue, reminder_snooze,
-               report_intake, router_role, size_review, uat_instructions, ui_delegation, user_wait)
+from . import (audit_return, cohort_ops, provider_hold_ops, context_continuation, director_notice, documentation_candidate, execution_lease_ops, pull_queue, reminder_snooze,
+               report_intake, router_role, size_review, uat_instructions, ui_delegation, user_events, user_wait)
 
 OPERATIONS = (reminder_snooze.OPERATIONS | size_review.OPERATIONS | report_intake.OPERATIONS
               | router_role.OPERATIONS | ui_delegation.OPERATIONS | context_continuation.OPERATIONS
               | uat_instructions.OPERATIONS | execution_lease_ops.OPERATIONS | cohort_ops.OPERATIONS
-              | provider_hold_ops.OPERATIONS | user_wait.OPERATIONS | audit_return.OPERATIONS)
+              | provider_hold_ops.OPERATIONS | user_wait.OPERATIONS | audit_return.OPERATIONS | director_notice.OPERATIONS)
 
 
 def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: str,
-            ticket_id: str | None = None) -> dict[str, Any]:
+            ticket_id: str | None = None, handler: Any = None) -> dict[str, Any]:
+    if operation in director_notice.OPERATIONS:  # SYRD-714: the calling pane is the handler's to name
+        return director_notice.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id,
+                                       handler=handler)
     if operation in reminder_snooze.OPERATIONS:
         if ticket_id is not None:
             raise ValueError(f"{operation} names its tickets in the request, not the path")
@@ -132,6 +135,14 @@ def provider_hold_status(app: Any) -> dict[str, Any]:
 def cohort_status(app: Any) -> dict[str, Any]:
     """SYRD-628: GET /api/cohorts, read-only."""
     return cohort_ops.status(app)
+
+
+#: Read-only routes answered from here: the path, and what answers it from the app and the query string.
+READ_ROUTES = {
+    "/api/cohorts": lambda app, _query: cohort_status(app),  # SYRD-628
+    "/api/provider-holds": lambda app, _query: provider_hold_status(app),  # SYRD-644
+    user_events.PATH: user_events.read,  # SYRD-714: the phone bridge's read; changes nothing
+}
 
 
 def board_stall_status(app: Any) -> dict[str, Any]:

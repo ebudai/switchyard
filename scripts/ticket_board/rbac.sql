@@ -293,6 +293,13 @@ REVOKE EXECUTE ON FUNCTION ticket_board.finished_privileged_jobs() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION ticket_board.record_privileged_job(jsonb) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.ticket_privileged_jobs(text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.finished_privileged_jobs() TO ticket_board_service;
+-- SYRD-714: the events that need the User are recorded by triggers alone; the service only reads them, for the
+-- host's phone bridge.
+REVOKE ALL ON ticket_board.user_events, ticket_board.user_event_operator_waits, ticket_board.director_notices FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ticket_board.user_events_after(bigint, integer) TO ticket_board_service;
+-- The Director's ad hoc notification: the function checks the control role and its registered live pane.
+GRANT EXECUTE ON FUNCTION ticket_board.record_director_notice(bigint, bigint, bigint, text, text, text, boolean, text,
+                                                              text) TO ticket_board_service;
 
 -- SYRD-589: work delivered to a replaced provider, told to its replacement once.
 REVOKE EXECUTE ON FUNCTION ticket_board.redeliver_replaced_work(jsonb, timestamptz) FROM PUBLIC;

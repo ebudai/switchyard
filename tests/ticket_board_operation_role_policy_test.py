@@ -106,6 +106,8 @@ def test_server_keeps_identical_aliases_and_no_reverse_import() -> None:
         "await_user": frozenset({"add_comment", "await_role", "merge", "set_blockers", "set_manually_controlled"}),
         # SYRD-673: where Audit's kick-back returns a ticket is the control role's record.
         "set_audit_return": frozenset({"set_manually_controlled", "merge"}),
+        # SYRD-714: the Director's ad hoc phone notification is the control role's.
+        "notify_user": frozenset({"set_manually_controlled", "merge"}),
     }
 
 
@@ -137,7 +139,8 @@ def test_default_environment() -> None:
     assert table["clear_provider_hold"] == ["director"]
     assert table["await_user"] == ["director"]
     assert table["set_audit_return"] == ["director"]
-    assert len(table) == 59, len(table)  # SYRD-548: set_report_intake; SYRD-598: withdraw_signoff; SYRD-626; SYRD-629; SYRD-616: extend_lease, interrupt_lease; SYRD-628: five cohort operations; SYRD-644: clear_provider_hold; SYRD-662: await_user; SYRD-673: set_audit_return
+    assert table["notify_user"] == ["director"]
+    assert len(table) == 60, len(table)  # SYRD-548: set_report_intake; SYRD-598: withdraw_signoff; SYRD-626; SYRD-629; SYRD-616: extend_lease, interrupt_lease; SYRD-628: five cohort operations; SYRD-644: clear_provider_hold; SYRD-662: await_user; SYRD-673: set_audit_return; SYRD-714: notify_user
 
 
 def test_role_environment_is_read_at_import() -> None:

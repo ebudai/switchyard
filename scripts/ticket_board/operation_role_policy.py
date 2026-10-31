@@ -106,6 +106,8 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
     "await_user": {"director"},
     # SYRD-673: where Audit's kick-back returns a ticket with no valid origin is the Director's record.
     "set_audit_return": {"director"},
+    # SYRD-714: the Director's ad hoc phone notification; the database checks control authority and the live pane.
+    "notify_user": {"director"},
 }
 
 #: The two operations that exist to move a ticket the declared workflow will
@@ -179,6 +181,9 @@ COMPOSED_OPERATION_CAPABILITIES = {
     # SYRD-673: recording where Audit's kick-back returns a ticket is the control role's, like withdrawing a
     # sign-off; the database checks role_controls_project itself.
     "set_audit_return": frozenset({"set_manually_controlled", "merge"}),
+    # SYRD-714: an ad hoc phone notification is the control role's, like withdrawing a sign-off; the database checks
+    # role_controls_project and that the caller is that role's registered live process.
+    "notify_user": frozenset({"set_manually_controlled", "merge"}),
 }
 
 #: SYRD-93: publication is admitted by declared capability, never by role name.

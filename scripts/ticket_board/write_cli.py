@@ -653,6 +653,17 @@ def _build_parser() -> argparse.ArgumentParser:
     await_user.add_argument("ticket_id")
     add_free_text_argument(await_user, "--reason", required=True, help="why only the User can act or decide next")
     add_free_text_argument(await_user, "--request", required=True, help="the action or decision asked of the User")
+    notify = subparsers.add_parser(
+        "notify-user", help="Director: an ad hoc phone notification to the User through the host bridge; previews "
+                            "unless --confirm names the previewed digest. Advisory: it changes no ticket (SYRD-714)",
+    )
+    add_free_text_argument(notify, "--title", required=True, help="a short title (80 characters)")
+    add_free_text_argument(notify, "--message", required=True, help="the message (300 characters)")
+    notify.add_argument("--ticket", default="", help="a ticket of this board for the bridge to link")
+    notify.add_argument("--urgent", action="store_true", help="ask for priority delivery (needs --reason; the host "
+                                                              "operator decides whether it breaks quiet hours)")
+    add_free_text_argument(notify, "--reason", help="why it is urgent")
+    notify.add_argument("--confirm", default="", help="the digest of the preview to send")
     audit_return = subparsers.add_parser(
         "set-audit-return", help="Director: record where Audit's kick-back returns a ticket in review, when the board has "
                                  "no valid record of who produced its revision; moves nothing (SYRD-673)",
@@ -993,6 +1004,9 @@ def main(argv: list[str] | None = None) -> int:
                                                    then_choose=args.then_choose or "", reconfirm=args.reconfirm)
         elif command == "await_user":
             response = client.await_user(args.ticket_id, reason=args.reason, request=args.request)
+        elif command == "notify_user":
+            response = client.notify_user({"title": args.title, "message": args.message, "ticket": args.ticket.upper(),
+                                           "urgent": args.urgent, "reason": args.reason or "", "confirm": args.confirm})
         elif command == "set_audit_return":
             response = client.set_audit_return(args.ticket_id, stage=args.stage, assignee=args.assignee, reason=args.reason)
         elif command == "withdraw_signoff":
@@ -1061,7 +1075,7 @@ def main(argv: list[str] | None = None) -> int:
                    "snooze_reminders", "clear_reminder_snooze", "claim_next", "approve_size_exception",
                    "enable_size_review", "measure_size", "set_report_intake", "force_fresh_context",
                    "uat_instructions", "extend_lease", "interrupt_lease", "set_cohort_quota", "clear_cohort_quota",
-                   "clear_provider_hold", "await_user", "set_audit_return", "report_follow_up"}:
+                   "clear_provider_hold", "await_user", "set_audit_return", "report_follow_up", "notify_user"}:
         print(json.dumps(response))
     else:
         print(json.dumps(_ticket_from_response(response)))

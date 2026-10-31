@@ -211,7 +211,11 @@ SCRIPT_APP = """    function ticketBoardWriteToken() {
       state.assignees = payload.assignees;
       state.callerRoles = payload.caller_roles || [];
       state.workflow = payload.workflow || null;
-      if (state.selectedId && !state.tickets.some((ticket) => ticket.id === state.selectedId)) {
+      // SYRD-714: a phone notification links one ticket of this board (#ticket=PREFIX-N); it opens once, on arrival.
+      const linked = state.linkOpened ? null : /^#ticket=([A-Z][A-Z0-9]*-[0-9]+)$/.exec(window.location.hash);
+      state.linkOpened = true;
+      if (linked && state.tickets.some((ticket) => ticket.id === linked[1])) { state.selectedId = linked[1]; state.detailOpen = true; }
+      if (state.selectedId &&!state.tickets.some((ticket) => ticket.id === state.selectedId)) {
         clearDetailDraft();
         state.selectedId = null;
         state.detailOpen = false;
@@ -1044,6 +1048,7 @@ SCRIPT_APP = """    function ticketBoardWriteToken() {
         state.eventSource = null;
       }
     });
+    window.addEventListener('hashchange', () => { state.linkOpened = false; void requestBoardReload(); });  // SYRD-714
 
     boot();
 """

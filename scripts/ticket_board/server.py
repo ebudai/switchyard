@@ -561,7 +561,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             return self.send_json(pull_queue.perform(self.app, operation, payload, caller_role=caller))
         self.require_operation_allowed(operation, ui_delegation.authority_for(self, operation, caller, ticket_id, payload), ticket_id)
         if operation in extension_operations.OPERATIONS:  # SYRD-537, SYRD-541
-            self.send_json(extension_operations.perform(self.app, operation, payload, caller_role=caller, ticket_id=ticket_id))
+            self.send_json(extension_operations.perform(self.app, operation, payload, caller_role=caller, ticket_id=ticket_id, handler=self))
             return
 
         cfg = getattr(self.app, "workflow_configuration", lambda: None)()
@@ -966,9 +966,9 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/board-stall":  # SYRD-637: why the stall alert did or did not fire
             self.send_json(extension_operations.board_stall_status(self.app))
             return
-        if parsed.path in ("/api/cohorts", "/api/provider-holds"):  # SYRD-628, SYRD-644: read-only
-            self.send_json(extension_operations.cohort_status(self.app) if parsed.path == "/api/cohorts"
-                           else extension_operations.provider_hold_status(self.app))
+        if parsed.path in extension_operations.READ_ROUTES:  # SYRD-628, SYRD-644, SYRD-714: read-only
+            try: self.send_json(extension_operations.READ_ROUTES[parsed.path](self.app, urllib.parse.parse_qs(parsed.query)))
+            except ValueError as exc: self.send_text(str(exc), HTTPStatus.BAD_REQUEST)
             return
         if parsed.path == "/api/execution-leases":  # SYRD-616
             self.send_json(extension_operations.execution_lease_status(self.app, urllib.parse.parse_qs(parsed.query)))

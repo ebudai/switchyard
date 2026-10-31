@@ -1,0 +1,3 @@
+#!/bin/sh
+# The host phone bridge's command (SYRD-714); see docs/user-notifications.md.
+exec /usr/bin/python3 -I -B "$(dirname "$(readlink -f "$0")")/user_notify.py" "$@"

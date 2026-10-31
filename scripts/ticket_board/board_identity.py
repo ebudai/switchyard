@@ -131,6 +131,35 @@ def unit_endpoint(project: str, *, unit_dir: Path | None = None, owner_uid: int 
     return sockets[0], user
 
 
+def unit_board_address(project: str, *, unit_dir: Path | None = None, owner_uid: int | None = None,
+                       anchor: Path | None = None) -> tuple[int, str]:
+    """(the board's loopback TCP port, its ticket prefix), from root's unit for this project alone (SYRD-714)."""
+    unit = (unit_dir or UNIT_DIR) / unit_name(project)
+    text = _read_unit(unit, owner_uid=TRUSTED_OWNER_UID if owner_uid is None else owner_uid, anchor=anchor or ANCHOR)
+    argv: list[str] = []
+    prefix = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("ExecStart="):
+            try:
+                argv = shlex.split(stripped[len("ExecStart="):])
+            except ValueError:
+                argv = []
+        elif stripped.startswith("Environment="):
+            try:
+                words = shlex.split(stripped[len("Environment="):])
+            except ValueError:
+                words = []
+            prefix = next((w.partition("=")[2] for w in words if w.startswith("TICKET_BOARD_TICKET_PREFIX=")), prefix)
+    hosts = [argv[i + 1] for i, token in enumerate(argv[:-1]) if token == "--host"]
+    ports = [argv[i + 1] for i, token in enumerate(argv[:-1]) if token == "--port"]
+    if hosts != ["127.0.0.1"] or len(ports) != 1 or not ports[0].isdigit() or not 0 < int(ports[0]) < 65536:
+        raise BoardIdentityError(f"{unit} does not name exactly one --host 127.0.0.1 and --port for its board")
+    if not re.fullmatch(r"[A-Z][A-Z0-9]{0,15}", prefix):
+        raise BoardIdentityError(f"{unit} names no ticket prefix (TICKET_BOARD_TICKET_PREFIX) for its board")
+    return int(ports[0]), prefix
+
+
 def unit_main_pid(unit: str, *, runner: Callable[..., Any] = subprocess.run) -> int:
     """The unit's main process as systemd knows it; 0 when it is not running."""
     try:
@@ -445,7 +474,7 @@ def board_get_for(project: str, *, unit_dir: Path | None = None, owner_uid: int 
                 f"root release {expected_build}"
             )
 
-    def get(_board_url: str, request_path: str) -> Any:
-        return request(request_path)
+    def get(_board_url: str, request_path: str, limit: int = MAX_ANSWER_BYTES) -> Any:
+        return request(request_path, min(limit, MAX_ANSWER_BYTES))
 
     return get

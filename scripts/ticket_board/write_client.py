@@ -20,12 +20,7 @@ REPORT_TOKEN_HEADER = "X-Ticket-Board-Report-Token"
 LEGACY_CALLER_ROLE_HEADER = "X-PGU-Caller-Role"
 LIVE_BOARD_URL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 LIVE_BOARD_URL_PORT = 8770
-LIVE_BOARD_SOCKET_PATHS = frozenset(
-    {
-        "/run/pgu-ticket-board/ticket-board.sock",
-        "/tmp/pgu-ticket-board.sock",
-    }
-)
+LIVE_BOARD_SOCKET_PATHS = frozenset({"/run/pgu-ticket-board/ticket-board.sock", "/tmp/pgu-ticket-board.sock"})
 ALLOW_PRODUCTION_WRITES_UNDER_TEST_ENV = "TICKET_BOARD_ALLOW_PRODUCTION_WRITES_UNDER_TEST"
 TEST_INTERPRETER_NAMES = frozenset(
     {
@@ -1214,6 +1209,10 @@ class TicketBoardWriteClient:
         """The User's UAT steps for a ticket, or a reconfirmation of the current ones (SYRD-629). The Director's."""
         payload = {"do_this": do_this, "you_should_see": you_should_see, "then_choose": then_choose, "reconfirm": reconfirm}
         return self._ticket_action(ticket_id, "set_uat_instructions", payload, caller_role=caller_role)
+
+    def notify_user(self, payload: dict[str, Any], *, caller_role: str | None = None) -> dict[str, Any]:
+        """The Director's ad hoc phone notification (SYRD-714): a preview, or with `confirm` the send it previewed."""
+        return self._post("/actions/notify_user", payload, caller_role=caller_role)
 
     def await_user(self, ticket_id: str, *, reason: str, request: str, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "await_user", {"reason": reason, "request": request}, caller_role=caller_role)

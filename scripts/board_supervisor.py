@@ -57,6 +57,8 @@ if __name__ == "__main__" and not __package__:
     # imported as the `scripts` package, once (SYRD-586).
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+sys.dont_write_bytecode = True
+
 from scripts import board_supervisor_spec as spec_mod  # noqa: E402
 
 SANDBOX = Path(__file__).resolve().with_name("board_supervisor_sandbox.py")

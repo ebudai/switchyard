@@ -45,6 +45,8 @@ import urllib.request
 from pathlib import Path
 from typing import NoReturn
 
+sys.dont_write_bytecode = True
+
 PROGRAM = "switchyard-publish-candidate"
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 REF_SEGMENT = re.compile(r"[0-9A-Za-z._-]+")

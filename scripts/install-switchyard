@@ -431,6 +431,158 @@ for fd, marker, mode in repairs:
 PY
 }
 
+release_caches() {
+    # Verify, and with `remove` take out, every bytecode cache under the shared root's releases (SYRD-711). A release
+    # is its commit's archive exactly; root-side imports without -B once left root-owned `__pycache__` directories in
+    # them. Every directory is opened without following a link. A `__pycache__` directory or `.pyc` file is removed
+    # only when it, and every directory from its release down to it, is the installing account's and writable by
+    # nobody else, and a cache holds only that account's single-link `.pyc` files. `check` refuses the install on
+    # anything else before a single file is changed; `remove` checks each again as it removes it, then proves every
+    # release holds none.
+    local shared_root="$1"
+    local action="$2"
+    python3 -B - "$shared_root" "$action" <<'PY'
+import os
+import re
+import stat
+import sys
+
+shared_root, action = sys.argv[1], sys.argv[2]
+owner = os.geteuid()
+COMMIT = re.compile(r"[0-9a-f]{40}")
+DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+CACHE = "__pycache__"
+
+
+def die(message):
+    changed = "nothing was changed" if action == "check" else "the caches named above were removed"
+    sys.stderr.write(f"install-switchyard: ERROR: refusing to install; {changed}: {message}\n")
+    raise SystemExit(1)
+
+
+def alone(info):
+    return info.st_uid == owner and not info.st_mode & 0o022
+
+
+def described(info):
+    return f"uid {info.st_uid}, mode {stat.S_IMODE(info.st_mode):04o}"
+
+
+def opened(name, what, parent=None):
+    try:
+        return os.open(name, DIRECTORY, dir_fd=parent)
+    except OSError as exc:
+        die(f"{what} cannot be opened as a directory without following a link: {exc.strerror or exc}")
+
+
+def cache(parent, where):
+    """(problems, descriptor, file names) for the `__pycache__` directory in `parent`."""
+    try:
+        fd = os.open(CACHE, DIRECTORY, dir_fd=parent)
+    except OSError as exc:
+        return [f"{where} cannot be opened as a directory without following a link: {exc.strerror or exc}"], None, []
+    info = os.fstat(fd)
+    if not alone(info):
+        return [f"{where} is {described(info)}: not the installer's alone"], fd, []
+    problems, files = [], []
+    for name in sorted(os.listdir(fd)):
+        entry = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        if not stat.S_ISREG(entry.st_mode):
+            problems.append(f"{where}/{name} is not a regular file")
+        elif not name.endswith(".pyc"):
+            problems.append(f"{where}/{name} is not a .pyc file")
+        elif entry.st_uid != owner:
+            problems.append(f"{where}/{name} belongs to uid {entry.st_uid}, not {owner}")
+        elif entry.st_nlink != 1:
+            problems.append(f"{where}/{name} has {entry.st_nlink} links")
+        else:
+            files.append(name)
+    return problems, fd, files
+
+
+def scan(release_fd, release, remove):
+    """(problems, caches found, caches removed) under one release, judging the trust of the path down to each."""
+    problems, found, removed = [], [], []
+    # The walk is top-down: each directory carries the nearest one at or above it, from the release itself down, that
+    # is not the installer's alone. A safe parent under a writable grandparent is no safer than the grandparent.
+    untrusted = {}
+    for top, dirs, files, top_fd in os.fwalk(".", dir_fd=release_fd, follow_symlinks=False):
+        here = os.path.normpath(os.path.join(release, top))
+        info = os.fstat(top_fd)
+        above = untrusted.get(os.path.dirname(top)) if top != "." else None
+        untrusted[top] = above or (None if alone(info) else (here, info))
+        for name in [*dirs, *files]:
+            if name != CACHE and not name.endswith(".pyc"):
+                continue
+            where = f"{here}/{name}"
+            found.append(where)
+            entry = os.stat(name, dir_fd=top_fd, follow_symlinks=False)
+            if untrusted[top]:
+                ancestor, ancestry = untrusted[top]
+                problems.append(f"{where} is under {ancestor}, which is {described(ancestry)}: not the installer's alone")
+            elif stat.S_ISLNK(entry.st_mode):
+                problems.append(f"{where} is a symbolic link")
+            elif name == CACHE and stat.S_ISDIR(entry.st_mode):
+                wrong, fd, names = cache(top_fd, where)
+                problems += wrong
+                if fd is not None:
+                    if remove and not wrong:
+                        for each in names:
+                            os.unlink(each, dir_fd=fd)
+                        os.rmdir(CACHE, dir_fd=top_fd)
+                        removed.append(f"{where} ({len(names)} files)")
+                    os.close(fd)
+            elif stat.S_ISREG(entry.st_mode) and name.endswith(".pyc"):
+                if entry.st_uid != owner:
+                    problems.append(f"{where} belongs to uid {entry.st_uid}, not {owner}")
+                elif entry.st_nlink != 1:
+                    problems.append(f"{where} has {entry.st_nlink} links")
+                elif remove:
+                    os.unlink(name, dir_fd=top_fd)
+                    removed.append(where)
+            else:
+                problems.append(f"{where} is neither a {CACHE} directory nor a regular .pyc file")
+        # A cache is judged above, never descended into; fwalk itself never follows a link.
+        dirs[:] = [d for d in dirs if d != CACHE]
+    return problems, found, removed
+
+
+def trusted(fd, what):
+    # In release_markers' words, which run on the same two directories (SYRD-710).
+    info = os.fstat(fd)
+    if info.st_uid != owner:
+        die(f"{what} belongs to uid {info.st_uid}, not {owner}: refusing to trust it")
+    if info.st_mode & 0o022:
+        die(f"{what} is writable by group or others (mode {stat.S_IMODE(info.st_mode):04o}): refusing to trust it")
+
+
+root_fd = opened(shared_root, shared_root)
+trusted(root_fd, shared_root)
+releases_fd = opened("releases", f"{shared_root}/releases", root_fd)
+trusted(releases_fd, f"{shared_root}/releases")
+problems = []
+for name in sorted(os.listdir(releases_fd)):
+    if not COMMIT.fullmatch(name):
+        continue  # a staging directory, or nothing the installer made
+    release = f"{shared_root}/releases/{name}"
+    try:
+        release_fd = os.open(name, DIRECTORY, dir_fd=releases_fd)
+    except OSError as exc:
+        problems.append(f"{release} is not a directory reached without following a link: {exc.strerror or exc}")
+        continue
+    wrong, _found, removed = scan(release_fd, release, action == "remove")
+    problems += wrong
+    for what in removed:
+        print(f"removed bytecode cache {what}", file=sys.stderr)
+    if action == "remove" and not wrong:
+        left = scan(release_fd, release, False)[1]
+        problems += [f"{what} is still there after its removal" for what in left]
+    os.close(release_fd)
+if problems:
+    die("bytecode caches that cannot be removed safely:\n  " + "\n  ".join(problems))
+PY
+}
+
 export_release() {
     local commit="$1"
     local releases_dir="$SHARED_ROOT/releases"
@@ -450,8 +602,11 @@ export_release() {
         run_cmd mv "$tmp_dir" "$release_dir"
     fi
     # Explicitly fatal: this runs inside `$(export_release ...)`, where bash ignores `set -e`, so a refusal here once
-    # fell through to activating the release anyway (SYRD-710).
+    # fell through to activating the release anyway (SYRD-710). Every cache is checked before any marker is repaired,
+    # and removed after (SYRD-711).
+    release_caches "$SHARED_ROOT" check || exit 1
     release_markers "$SHARED_ROOT" "$commit" || exit 1
+    release_caches "$SHARED_ROOT" remove || exit 1
     [[ -x "$release_dir/switchyard" ]] || die "release switchyard is not executable: $release_dir/switchyard"
     printf '%s\n' "$release_dir"
 }

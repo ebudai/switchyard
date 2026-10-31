@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+sys.dont_write_bytecode = True
+
 from ticket_board.worktree_cleanup import (
     default_protected_prefixes,
     execute_plan,

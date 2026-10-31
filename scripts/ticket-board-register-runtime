@@ -8,6 +8,8 @@ import json
 import os
 import sys
 
+sys.dont_write_bytecode = True
+
 from ticket_board.write_client import UnixHTTPConnection
 
 

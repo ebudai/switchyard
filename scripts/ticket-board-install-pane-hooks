@@ -14,6 +14,8 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+sys.dont_write_bytecode = True
+
 from ticket_board.codex_hook_trust import (
     codex_command_hook_trust_entries,
     codex_trusted_hashes,

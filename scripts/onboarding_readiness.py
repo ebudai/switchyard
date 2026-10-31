@@ -22,6 +22,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+sys.dont_write_bytecode = True
+
 from scripts.ticket_board.workflow_config import (  # noqa: E402
     DIRECTOR_IDENTIFYING_CAPABILITIES,
     DIRECTOR_ONBOARDING_MIGRATION,

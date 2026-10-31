@@ -46,6 +46,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
+sys.dont_write_bytecode = True
+
 STATE_NAME = "worker-admission.json"
 LOCK_NAME = ".worker-admission.lock"
 LOG_NAME = "worker-admission.log"

@@ -48,6 +48,8 @@ from pathlib import Path
 # Staged flat beside this program, in a directory root owns.
 sys.path.insert(0, str(Path(os.path.realpath(__file__)).parent))
 
+sys.dont_write_bytecode = True
+
 from switchyard_publication_authority import (  # noqa: E402
     COMMIT,
     PROTECTED_REFS,

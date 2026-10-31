@@ -13,6 +13,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+sys.dont_write_bytecode = True
+
 from board_skill_cli import main  # noqa: E402
 
 if __name__ == "__main__":

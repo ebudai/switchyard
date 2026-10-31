@@ -32,6 +32,8 @@ import sys
 from pathlib import Path
 from typing import Callable, Sequence
 
+sys.dont_write_bytecode = True
+
 if __package__:
     from scripts import tenant_paths
 else:  # root's helper: the release's own tenant_paths, by path, standard library only

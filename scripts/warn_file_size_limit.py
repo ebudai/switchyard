@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.dont_write_bytecode = True
+
 from report_file_size_limit import DEFAULT_LINE_LIMIT
 
 # The board's own measurement (SYRD-541): copied beside this helper in a hooks

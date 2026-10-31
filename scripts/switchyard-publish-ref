@@ -43,6 +43,8 @@ from pathlib import Path
 # from there so the two privileged operations cannot drift apart.
 sys.path.insert(0, str(Path(os.path.realpath(__file__)).parent))
 
+sys.dont_write_bytecode = True
+
 from switchyard_publication_authority import *  # noqa: F403
 from switchyard_publication_authority import (  # noqa: F401
     COMMIT,

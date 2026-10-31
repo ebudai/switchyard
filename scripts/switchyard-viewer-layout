@@ -30,6 +30,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+sys.dont_write_bytecode = True
+
 from scripts.team_launcher import viewer_layout_string  # noqa: E402
 
 

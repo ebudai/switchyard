@@ -15,6 +15,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+sys.dont_write_bytecode = True
+
 from ticket_board.board_skill import (  # noqa: E402
     SKILLS_DIR_NAME,
     CanonicalSkill,

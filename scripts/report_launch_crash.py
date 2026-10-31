@@ -8,6 +8,8 @@ import sys
 import time
 from pathlib import Path
 
+sys.dont_write_bytecode = True
+
 try:
     from ticket_board.write_client import TicketBoardWriteClient
 except ModuleNotFoundError:  # pragma: no cover - package import path

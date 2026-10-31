@@ -17,6 +17,8 @@ import sys
 import time
 from pathlib import Path
 
+sys.dont_write_bytecode = True
+
 ORPHAN_WAIT_SECONDS = 2.0
 
 CLAIM_BODY = json.dumps({"role": "director"}).encode("utf-8")

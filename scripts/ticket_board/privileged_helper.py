@@ -35,6 +35,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+sys.dont_write_bytecode = True
+
 if __package__ in (None, ""):  # pragma: no cover - direct execution as a program
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from ticket_board import (

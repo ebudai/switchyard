@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Iterable
 
 
+sys.dont_write_bytecode = True
+
 DEFAULT_LINE_LIMIT = 1250
 DEFAULT_WORKTREE_TOTAL_LIMIT = 300
 DEFAULT_WORKTREE_RECLAIMABLE_LIMIT = 100

@@ -45,6 +45,8 @@ HERE = Path(os.path.realpath(__file__)).parent
 sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
 
+sys.dont_write_bytecode = True
+
 try:  # the release tree, where this normally runs
     from scripts.ticket_board.project_provision import (
         publish_sudoers_document,

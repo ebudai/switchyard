@@ -24,6 +24,8 @@ from typing import NoReturn
 
 sys.path.insert(0, str(Path(os.path.realpath(__file__)).parent))
 
+sys.dont_write_bytecode = True
+
 try:
     from ticket_board.rollout_journal import Attempt, journal_root
 except ModuleNotFoundError:  # running from a checkout rather than the staged copy

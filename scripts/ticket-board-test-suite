@@ -104,6 +104,9 @@ LIVE_PANE_ENV_KEYS = {
 }
 SANITIZED_ENV_KEYS = LIVE_BOARD_ENV_KEYS | LIVE_PANE_ENV_KEYS
 sys.path.insert(0, str(ROOT / "tests"))
+
+sys.dont_write_bytecode = True
+
 from tmux_bus_isolation import isolated_bus_environment  # noqa: E402
 SWITCHYARD_SHARED_INSTALL_ENV = "SWITCHYARD_SHARED_INSTALL_ROOT"
 TEST_XDG_CURRENT_DESKTOP = "GNOME"

@@ -180,6 +180,17 @@ every installed release as root and widens one that is too narrow, such as the
 0600 an earlier install left. A marker that is a link, another account's,
 hard-linked, wider than 0644 or naming another commit refuses the install
 instead. See [SYRD-710](syrd-710-release-marker-modes.md).
+A release is its commit's archive and nothing else, so nothing run from one
+writes bytecode into it: every Python program in the tree sets
+`sys.dont_write_bytecode` before it loads tree code, and root's own one-off
+imports from a release use `python3 -I -B`. The installer also removes, on every
+install, the `__pycache__` directories and `.pyc` files that earlier root-side
+imports left in installed releases, each one named. It checks every one first,
+before any marker is repaired, and refuses the install, changing nothing, when
+a cache or a directory above it is a link, another account's, hard-linked or
+writable by others, or a cache holds anything but that account's `.pyc` files
+(SYRD-711). Re-running the install for the current commit repairs a host this
+way without moving `current` or restarting a board.
 Rollback is deliberately just:
 
 ```bash

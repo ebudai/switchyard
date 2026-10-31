@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.dont_write_bytecode = True
+
 DEFAULT_BOARD_URL = "http://127.0.0.1:8770"
 DEFAULT_STATE_DIR = "/data/git/pgu.git/hooks/file-size-ticket-state"
 DEFAULT_LINE_LIMIT = 1250

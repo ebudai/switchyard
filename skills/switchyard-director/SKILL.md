@@ -434,16 +434,21 @@ check, and it is usually worth more than repeating their suite.
 Re-run broader tests when, and only when, one of these holds, and record the
 reason in a ticket comment before you start:
 
-- the tree changed after Audit recorded its result (a non-mechanical rebase,
+- the tree changed after Audit recorded its result: the candidate commit or
+  tree, or its tested base, differs from the evidence (a non-mechanical rebase,
   a merge, a documentation commit that changes what a test reads);
-- the recorded environment or result is inadequate for what you are
-  integrating: incomplete, unbounded, ambiguous, failures not compared with the
-  base, or dependencies, schema, toolchain or runtime changed since;
+- the recorded environment or result is inadequate: relevant dependencies,
+  toolchain, database or schema, generated artifacts, permissions, platform or
+  runtime configuration changed;
+- the recorded run was incomplete, unbounded, interrupted or ambiguous, is
+  missing its exact commands or results, or cannot be tied to the candidate;
+- baseline and candidate failures were not compared adequately;
 - a focused check of yours contradicts their evidence;
 - review raised an untested risk, a mutation survivor, a security boundary or
   suspected flakiness;
-- an acceptance property cannot be established from the evidence;
-- repository policy requires the run.
+- a required release, host or live acceptance property cannot be established
+  from the evidence;
+- repository policy requires the run, or the ticket requires it.
 
 Not a reason by itself: entering Final Sign-Off, wanting your own copy of an
 exact result, elapsed time with nothing changed, or caution that names nothing

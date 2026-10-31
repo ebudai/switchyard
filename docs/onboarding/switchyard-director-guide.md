@@ -61,19 +61,29 @@ claim without its commit, commands and output is never evidence.
 
 Do not rerun the complete suite merely because the ticket entered Final Sign-Off. Re-run
 the broader suite yourself when you have a concrete reason the result might differ, and
-record that reason on the ticket before you start: the tree changed after audit recorded
-its result (a non-mechanical rebase, a merge, a documentation commit that changes what a
-test reads); the recorded environment or result is inadequate for what you are
-integrating (incomplete, unbounded, ambiguous, failures not compared with the base, or a
-dependency, schema, toolchain or runtime change since); a focused check of yours
-contradicts their evidence; review raised an untested risk, a mutation survivor, a
-security boundary or suspected flakiness; an acceptance property cannot be established
-from the evidence; or repository policy requires the run. Entering a new stage, wanting
-your own copy of an exact result, elapsed time with nothing changed, and caution that
-names nothing that could differ are not reasons. Then it is yours, in a throwaway
-worktree at the exact commit — green on the branch is not green on main. After a merge
-commit, a short integration smoke check is enough unless the merge needed real
-resolution or pulled in changed dependencies.
+record that reason on the ticket before you start:
+
+- the tree changed after audit recorded its result: the candidate commit or tree, or its
+  tested base, differs from the evidence (a non-mechanical rebase, a merge, or a
+  documentation commit that changes what a test reads);
+- the recorded environment or result is inadequate: a relevant dependency, toolchain,
+  database or schema, generated artifact, permission, platform or runtime configuration
+  changed;
+- the recorded run was incomplete, unbounded, interrupted or ambiguous, is missing its
+  exact commands or results, or cannot be tied to the candidate;
+- baseline and candidate failures were not compared adequately, or a focused check of
+  yours contradicts their evidence;
+- review raised an untested risk, a mutation survivor, a security boundary or suspected
+  flakiness;
+- a required release, host or live acceptance property cannot be established from the
+  evidence; or
+- repository policy requires the run, or the ticket requires it.
+
+Entering a new stage, wanting your own copy of an exact result, elapsed time with nothing
+changed, and caution that names nothing that could differ are not reasons. Then it is
+yours, in a throwaway worktree at the exact commit — green on the branch is not green on
+main. After a merge commit, a short integration smoke check is enough unless the merge
+needed real resolution or pulled in changed dependencies.
 
 **Say which is which.** Name what you ran yourself and what you reused, with the commit
 the reused result covers. "The implementer's run covers `<sha>`, tree `<tree>`, which

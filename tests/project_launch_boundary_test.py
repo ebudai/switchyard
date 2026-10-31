@@ -53,6 +53,13 @@ from scripts import project_launch as m  # noqa: E402
 
 from launcher_main_view import launcher_body  # noqa: E402
 
+# SYRD-713: whether a launch runs in one of its own roles' panes is the kernel's answer about the process running it
+# (role_self_restart.caller_pane_root). These fixtures stand in for every input the launch reads; this one too, as a
+# process in no tmux pane, so the result does not depend on whether the suite itself is run from a pane.
+from scripts import role_self_restart as _role_self_restart  # noqa: E402
+
+_role_self_restart.caller_pane_root = lambda pid=None, **_kwargs: None
+
 CHECKS = 0
 MOVED = ('launch_project',)
 #: Measured on the baseline launcher: the moved body's call-time reads of launcher globals.
@@ -489,7 +496,11 @@ def test_the_seams_read_through_the_launcher_and_nothing_bound() -> None:
         check(through == expected, f"{name}: each launcher name read through it exactly as often as before: {through}")
         imports = [ast.unparse(x) for x in ast.walk(node) if isinstance(x, (ast.Import, ast.ImportFrom))]
         first = 1 if ast.get_docstring(node) is not None else 0
-        check(imports == ["from scripts import team_launcher as launcher"] and ast.unparse(node.body[first]) == imports[0],
+        # SYRD-713: launch_project also hands the caller's own role to a successor, from a module that imports only the
+        # standard library at its top; nothing else is nested.
+        allowed = ["from scripts import team_launcher as launcher"] + (
+            ["from scripts import role_self_restart"] if name == "launch_project" else [])
+        check(imports == allowed and ast.unparse(node.body[first]) == imports[0],
               f"{name}: the launcher imported first thing, and nothing else nested (the baseline had no nested import): {imports}")
         skip = {id(y) for part in [node.returns, *(a.annotation for a in node.args.args + node.args.kwonlyargs), *[d for d in node.args.kw_defaults if d]]
                 if part is not None for y in ast.walk(part)}

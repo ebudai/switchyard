@@ -316,6 +316,8 @@ def main():
                     process_pid=50000 + index, process_start_time=60000 + index,
                     process_uid=os.getuid(), expected_generation=0,
                 )
+            # These registrations name stand-in panes, not processes: the current view admits only live ones (SYRD-713).
+            app.runtime_process_live = lambda pid, start_time: 50000 <= pid < 50100 and start_time == pid + 10000
             assert "verifier" in app.runtime_targets()
             assert t.psql(
                 admin,

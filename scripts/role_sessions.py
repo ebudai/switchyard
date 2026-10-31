@@ -321,9 +321,12 @@ def stop_role_sessions(
     see (SYRD-65).
     """
     from scripts import team_launcher as launcher
+    from scripts import role_self_restart
 
     exit_code = 0
-    for role in config.roles:
+    # The caller's own pane last: ending it ends this process, so everything else is stopped first (SYRD-713).
+    own = role_self_restart.own_pane_role(config, config.roles, runner=runner)
+    for role in role_self_restart.last(config.roles, own):
         role_runner = launcher.role_process_runner_for(config, role, runner=runner)
         exists = role_runner(launcher.tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
         if not exists:

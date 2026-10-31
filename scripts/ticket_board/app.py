@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import attachment_store, audit_return, commit_cache, extension_operations, new_asset_files, ui_delegation, workflow_locking
+from . import attachment_store, audit_return, commit_cache, extension_operations, new_asset_files, peer_identity, ui_delegation, workflow_locking
 from .commit_cache import COMMIT_REFRESH_TIMEOUT_SECONDS, PUBLISHABLE_REF, PUBLISHED_REF_NAMESPACE
 from .commit_repos import commit_git_dirs_for_project
 from .image_asset_policy import (  # re-exported: callers import these from the app
@@ -286,8 +286,21 @@ SELECT * FROM ticket_board.register_role_runtime(
                 raise RuntimeError("runtime registration returned no row")
             return dict(row)
 
+    @staticmethod
+    def runtime_process_live(pid: int, start_time: int) -> bool:
+        """Whether a registered pane process is still the process its row names: the same pid, started at the same time.
+
+        A row outlives its process. A pane that ended -- a Director that stopped its own session (SYRD-713) -- leaves
+        a pid that names nothing, or, reused, names another process with another start time. A suite replaces this.
+        """
+        return peer_identity.session_is_live(peer_identity.SessionIdentity(int(pid), int(start_time)))
+
     def runtime_targets(self) -> dict[str, dict[str, Any]]:
-        """Current routing rows used by delivery and presentation consumers."""
+        """Current routing rows used by delivery and presentation consumers: only rows whose process is still live.
+
+        The history and the row itself stay; a role whose registered process has gone is absent here, as the
+        listener already treats it (`role_runtime_unassigned`), so no reader takes a dead pane for the role (SYRD-713).
+        """
         with self._pg_connect() as conn:
             rows = conn.execute(
                 """
@@ -300,7 +313,8 @@ WHERE (r.definition->>'active')::boolean
   AND r.definition->>'target'=a.actual_target
 """
             ).fetchall()
-            return {str(row["role"]): dict(row) for row in rows}
+        return {str(row["role"]): dict(row) for row in rows
+                if self.runtime_process_live(int(row["process_pid"]), int(row["process_start_time"]))}
 
     def serial_reservations(self) -> dict[str, dict[str, str] | None]:
         """Which ticket holds each implementer's one serial slot, None for a free one.

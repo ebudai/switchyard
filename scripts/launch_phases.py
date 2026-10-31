@@ -125,6 +125,8 @@ class LaunchPreparation:
     unreconciled_roles: set[str]
     #: Stopped roles' worktrees kept rather than refreshed, and why (SYRD-555).
     kept_worktrees: dict[str, str] = field(default_factory=dict)
+    #: The caller's own role, when it needs a restart: never ended here, handed to a successor last (SYRD-713).
+    own_restart: RoleConfig | None = None
 
 
 def _prepare_launch(
@@ -154,6 +156,8 @@ def _prepare_launch(
     #: because their session could not be ended. Their record is deliberately
     #: not updated, so the next ordinary launch tries again (SYRD-191).
     unreconciled_roles: set[str] = set()
+    #: The caller's own stale role, kept running here and restarted last through a successor (SYRD-713).
+    handed_over: list[RoleConfig] = []
     if not dry_run:
         launcher.ensure_launcher_checkout_current(
             config,
@@ -169,6 +173,24 @@ def _prepare_launch(
             reconcile_home = owner_home or launcher._owner_home_for_auth(
                 config.run_as_user or launcher.current_user_name()
             )
+            # The caller's own pane is never ended here: this process runs in it, and nothing would be left to
+            # start it again. It stays up, and a stale one is handed to a successor last (SYRD-713).
+            from scripts import role_self_restart
+
+            running_roles, own, own_stale = role_self_restart.split_own_stale(
+                config, running_roles, owner_home=reconcile_home, runner=runner
+            )
+            unarmed = role_self_restart.unarmed_problem(config, own_stale) if own_stale is not None else ""
+            if unarmed:
+                print_func(unarmed)
+                return LaunchPreparation(
+                    exit_code=1,
+                    config=config,
+                    failed_roles=failed_roles,
+                    running_roles=running_roles,
+                    reconcile_home=reconcile_home,
+                    unreconciled_roles=unreconciled_roles,
+                )
             running_roles, unreconciled_roles = launcher._drop_roles_with_stale_provider_runtime(
                 config,
                 running_roles,
@@ -176,6 +198,14 @@ def _prepare_launch(
                 runner=runner,
                 print_func=print_func,
             )
+            if own is not None:
+                running_roles = [*running_roles, own]
+            if own_stale is not None:
+                handed_over.append(own_stale)
+                print_func(
+                    f"team-launcher: {own_stale.role} is running against older provider state and is this command's "
+                    "own pane; it is restarted last, through a successor, after every other role"
+                )
         launcher.ensure_configured_runtime_user(config, runner=runner)
         launcher.ensure_owner_state_dirs(config, pane_state_dir=effective_pane_state_dir, runner=runner)
         launcher.ensure_generated_project_pane_hooks(
@@ -250,6 +280,7 @@ def _prepare_launch(
         reconcile_home=reconcile_home,
         unreconciled_roles=unreconciled_roles,
         kept_worktrees=kept_worktrees,
+        own_restart=handed_over[0] if handed_over else None,
     )
 
 
@@ -356,6 +387,8 @@ class WorkerStartup:
     resolved_layout_mode: str
     #: Idle pull workers this launch left stopped (SYRD-688): no session to report for them.
     deferred_roles: tuple[str, ...] = ()
+    #: The caller's own role a reload left running, to be handed to a successor last (SYRD-713).
+    own_restart: RoleConfig | None = None
 
 
 def _start_workers_and_present(
@@ -403,8 +436,21 @@ def _start_workers_and_present(
     admission = worker_admission.for_launch(config, config_path=config_path, mode=mode, runner=runner,
                                             print_func=print_func)
     deferred_roles = tuple(name for name, decision in admission.items() if not decision.starts)
+    # A reload ends and starts each session. The caller's own is left as it is here -- this process runs in it -- and
+    # handed to a successor once everything else is done (SYRD-713).
+    own_restart = None
+    if mode == "reload":
+        from scripts import role_self_restart
+
+        own_restart = role_self_restart.own_pane_role(config, config.roles, runner=runner)
+        unarmed = role_self_restart.unarmed_problem(config, own_restart) if own_restart is not None else ""
+        if unarmed:
+            print_func(unarmed)
+            return 1
     for role in config.roles:
         if not role.detached or role.role in deferred_roles:
+            continue
+        if own_restart is not None and role.role == own_restart.role:
             continue
         if role.role in failed_roles:
             print(f"skipping detached role {role.role}: {failed_roles[role.role]}", file=sys.stderr)
@@ -444,6 +490,8 @@ def _start_workers_and_present(
         for role in viewer_roles:
             if role.role in failed_roles:
                 print(f"skipping visible role {role.role}: {failed_roles[role.role]}", file=sys.stderr)
+                continue
+            if own_restart is not None and role.role == own_restart.role:
                 continue
             if delegate_role_sessions_to_owner:
                 result = runner(
@@ -613,6 +661,7 @@ def _start_workers_and_present(
         launch_started_ns=launch_started_ns,
         resolved_layout_mode=resolved_layout_mode,
         deferred_roles=deferred_roles,
+        own_restart=own_restart,
     )
 
 

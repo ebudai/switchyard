@@ -68,6 +68,13 @@ if str(ROOT) not in sys.path:
 
 from launcher_main_view import launcher_body  # noqa: E402
 
+# SYRD-713: whether a launch runs in one of its own roles' panes is the kernel's answer about the process running it
+# (role_self_restart.caller_pane_root). These fixtures stand in for every input the launch reads; this one too, as a
+# process in no tmux pane, so the result does not depend on whether the suite itself is run from a pane.
+from scripts import role_self_restart as _role_self_restart  # noqa: E402
+
+_role_self_restart.caller_pane_root = lambda pid=None, **_kwargs: None
+
 CHECKS = 0
 EXPORTED = ("LaunchSetup", "_launch_runners_and_paths", "LaunchPreparation", "_prepare_launch",
             "_write_layout_and_plan", "WorkerStartup", "_start_workers_and_present", "_report_launch")
@@ -456,7 +463,8 @@ P5_SEAMS = ("LEGACY_NO_LAUNCHER_SELF_DEPLOY_ENV", "NO_LAUNCHER_SELF_DEPLOY_ENV",
             "ensure_generated_project_pane_hooks", "ensure_launcher_checkout_current", "ensure_owner_state_dirs",
             "fetch_project_worktree_ref", "prepare_project_desktop", "role_isolation_gaps",
             "seed_default_session_dir_from_legacy_sources", "sync_reload_config_to_live_sessions")
-P5_OUTPUTS = ("exit_code", "config", "failed_roles", "running_roles", "reconcile_home", "unreconciled_roles", "kept_worktrees")
+P5_OUTPUTS = ("exit_code", "config", "failed_roles", "running_roles", "reconcile_home", "unreconciled_roles", "kept_worktrees",
+              "own_restart")  # SYRD-713: the caller's own stale role, handed to a successor last
 PANES = Path("/nonexistent/syrd340/pane-state")
 PANE_SCRIPT = Path("/nonexistent/syrd340/pane")
 OWNER_HOME = Path("/nonexistent/syrd340/owner-home")
@@ -1178,9 +1186,9 @@ def test_the_worker_result_is_a_frozen_record_of_exactly_the_four_outputs() -> N
     from scripts.launch_phases import WorkerStartup
 
     fields = dataclasses.fields(WorkerStartup)
-    check(tuple(f.name for f in fields) == (*P78_OUTPUTS, "deferred_roles")
+    check(tuple(f.name for f in fields) == (*P78_OUTPUTS, "deferred_roles", "own_restart")
           and all(f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING for f in fields[:4])
-          and fields[4].default == (),
+          and fields[4].default == () and fields[5].default is None,  # SYRD-713: a reload's own role, none unless said
           f"WorkerStartup holds the four outputs, in the order P7+P8 assign them, with no defaults, and (SYRD-688) "
           f"the pull workers admission left stopped, none unless said: {[f.name for f in fields]}")
     result, _, _, _ = workers(Workers(), p78_config())

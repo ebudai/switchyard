@@ -628,6 +628,42 @@ what was written. A dry run says which records it would finish and writes
 nothing. Nothing here widens SYRD-191's rule -- a role whose store was fine and
 whose record is merely missing is still stale, and is still restarted.
 
+**A launch never ends the pane it runs in; it hands that role to a successor
+(SYRD-713).** A Director that runs `switchyard <project>` after an upgrade is
+itself a stale role, and ending its session ended the command, with nothing left
+to start the Director again. Whether a role is the caller's own is decided from
+the kernel only: its tmux pane process must be this process's own pane root,
+with the same start time. That role is left running while every other role is
+ended and started once, then handed over last.
+
+Before the launch stops, starts or changes anything, it arms a successor
+executor for that role, outside the pane and in its own session, or it stops
+there and changes nothing. A launch stops there when the role has no recorded
+conversation the start path would resume, or when the executor does not start,
+refuses or does not answer.
+
+The executor acts only on what the kernel shows. Its parent must be exactly the
+command that armed it, still running, inside that role's pane. An executor
+started any other way is refused, whatever it is told. It holds the role's
+successor lock, so a second request for the same role is refused.
+
+At the launch's end the executor is released, or cancelled if the role turned
+out not to need a restart. A launch that ends any other way leaves it without a
+word, and it ends nothing. Once released, it checks again that the conversation
+is unchanged and resumable, ends the predecessor once the command has finished,
+and starts the role through the ordinary start path. It records the transaction
+complete in `<pane-state>/<role>.successor.json` only when the board registers
+a live process other than the predecessor, on that same conversation, resumed.
+A successor on any other conversation is recorded failed. After one retry, a
+role still not back is recorded stopped. Both records name the one action that
+recovers the role,
+`switchyard recover-display <project>`. A reload does the same. A stop ends
+the caller's own session last. The identity cutover, which stops every role
+together, refuses to run from inside a role pane and stops nothing. The board's
+current runtime assignments (`/api/runtime-assignments`) list only
+registrations whose process is still the one recorded: a pid that is gone, or
+reused with another start time, is not served as the role.
+
 **The walk never follows a symlink, and a store root that is one is refused.**
 `follow_symlinks=False` on the `chown` protects the last component of a path
 and nothing above it. The store roots are paths the tenant controls, and

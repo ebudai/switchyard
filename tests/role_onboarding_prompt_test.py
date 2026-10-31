@@ -20,6 +20,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts import team_launcher, workflow_manage  # noqa: E402
+
+# SYRD-713: whether a launch runs in one of its own roles' panes is the kernel's answer about the process running it
+# (role_self_restart.caller_pane_root). These fixtures stand in for every input the launch reads; this one too, as a
+# process in no tmux pane, so the result does not depend on whether the suite itself is run from a pane.
+from scripts import role_self_restart as _role_self_restart  # noqa: E402
+
+_role_self_restart.caller_pane_root = lambda pid=None, **_kwargs: None
 from scripts.ticket_board.workflow_config import ONBOARDING_PROMPT_MAX_CHARS, validate  # noqa: E402
 from scripts.workflow_launcher import project_roles  # noqa: E402
 

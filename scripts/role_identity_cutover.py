@@ -935,6 +935,19 @@ def cutover_role_identities_command(
         )
         return 1
 
+    # This transaction stops every role together and restarts them only once the trees have changed hands, so a
+    # caller inside one of their panes would end with that pane, before anything brought it back. Refused while
+    # nothing is stopped; the transaction runs from outside every role pane (SYRD-713).
+    from scripts import role_self_restart
+
+    own = role_self_restart.own_pane_role(config, config.roles, runner=runner, proc_root=proc_root)
+    if own is not None:
+        print_func(
+            f"switchyard: refusing to move {config.project} onto per-role identities from {own.role}'s own pane: "
+            "the transaction stops every role, that one included, before it restarts any. Nothing was stopped. "
+            "Run it from a session outside every role pane, such as the desktop operator's."
+        )
+        return 1
     serving_before = running_role_identities(config, runner=runner)
     before = sorted(serving_before)
     if dry_run:

@@ -64,6 +64,7 @@ def launch_project(
     discard_worktree_changes: frozenset[str] = frozenset(),
 ) -> int:
     from scripts import team_launcher as launcher
+    from scripts import role_self_restart
 
     if mode == "start":
         mode = "attach-or-start"
@@ -87,6 +88,15 @@ def launch_project(
         config, config_path=config_path, mode=mode, runner=runner, print_func=print_func
     ):
         return 1
+    # Before anything is stopped, started or changed: a launch that would end the caller's own role -- this process
+    # runs in it -- arms the successor that restarts it last, or stops here (SYRD-713). Released at the end.
+    if not dry_run:
+        problem = role_self_restart.arm_for_launch(config, mode=mode, config_path=config_path, owner_home=owner_home,
+                                                   runner=runner, print_func=print_func)
+        if problem:
+            print_func(f"team-launcher: refusing to launch {config.project}: {problem}; "
+                       "no role was stopped, started or changed")
+            return 1
     if mode == "reload" and not dry_run:
         # Reload re-projects the stored document, so an unmigrated tenant would reload
         # into the same missing director onboarding forever. Run the one-time backfill
@@ -191,6 +201,15 @@ def launch_project(
     launch_started_at = worker_startup.launch_started_at
     launch_started_ns = worker_startup.launch_started_ns
     resolved_layout_mode = worker_startup.resolved_layout_mode
+    # The caller's own role, left running because this process runs in it: its successor, armed before anything
+    # changed, is released now that every other role is handled, and ends it once this launch has finished (SYRD-713).
+    # One armed but not needed after all is cancelled; a launch that stopped earlier never gets here, and its
+    # successor ends nothing.
+    own_restart = getattr(launch_preparation, "own_restart", None) or getattr(worker_startup, "own_restart", None)
+    problem = role_self_restart.release_armed(config, own_restart, print_func=print_func)
+    if problem:
+        print_func(f"team-launcher: {problem}")
+        worker_start_exit_code = worker_start_exit_code or 1
     # A window opened by an earlier release can still be running as root, and
     # the tenant cannot signal it. Saying the project is attached while that is
     # true would be the wrong report to act on (SYRD-43).

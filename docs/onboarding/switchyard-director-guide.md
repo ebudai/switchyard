@@ -477,8 +477,10 @@ A designer with no pane is not notified or reminded, so tell it when work is
 waiting. A tenant workflow write does not silently replace root's independently
 held workflow record. The write reports any drift and the exact preview/apply
 `pkexec switchyard adopt-workflow` command for the operator; review and run
-that separate adoption when root's record must change. Details:
-[SYRD-567](../syrd-567-design-stage.md).
+that separate adoption when root's record must change. This section and
+`switchyard design-stage --help` are the current procedure;
+[SYRD-567](../syrd-567-design-stage.md) is historical design and rollout
+evidence.
 
 ## A designer that also implements
 
@@ -504,8 +506,10 @@ tickets you have flagged (`ticket-board-write set-workflow-flags <id>
 --patch-json '{"design_work": true}'`), and lists it under the ticket's
 `routing.scopes`.
 Assigning it directly stays yours, flagged or not. A designer with a scope
-cannot also claim pulled work. Details:
-[SYRD-678](../syrd-678-designer-implementer.md).
+cannot also claim pulled work. This section and
+`ticket-board-workflow enable-designer-implementation --help` are the current
+procedure; [SYRD-678](../syrd-678-designer-implementer.md) is historical
+design and rollout evidence.
 
 ## Host health the board depends on
 

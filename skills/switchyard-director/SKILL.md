@@ -459,8 +459,9 @@ Anything else lands in `publication_failed` with the exact diagnostic and the
 repairs it tried: a credential, a hook or branch protection, the publication
 target, the journal, sign-offs or size review. Fix the cause, then send the
 ticket back with `publication_retry`, or return it with `publication_kick_back`.
-Never integrate a ticket by hand while it is in `publication`. See
-`docs/syrd-625-publisher.md`.
+Never integrate a ticket by hand while it is in `publication`. This section,
+the live workflow and command help are the current operating contract;
+`docs/syrd-625-publisher.md` is historical design and rollout evidence only.
 
 ## Release, upgrade and rollback
 

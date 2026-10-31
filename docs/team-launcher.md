@@ -1802,8 +1802,10 @@ workflow, as with Router (both, when both are chosen), with the gate added by th
 same `with_documentation_gate` that `switchyard documentation-gate <project>
 enable` uses; a Librarian starts detached with the other roles, and its runtime
 goes through the same agent CLI checks. Off is provisioned exactly as before, and
-`switchyard upgrade` never turns it on. See
-`docs/onboarding/switchyard-librarian-guide.md` and `docs/syrd-624-documentation-gate.md`.
+`switchyard upgrade` never turns it on. The current operating contract is the
+[Librarian guide](onboarding/switchyard-librarian-guide.md), this section and
+`switchyard documentation-gate --help`; [SYRD-624](syrd-624-documentation-gate.md)
+is historical design and rollout evidence.
 
 `switchyard add-role <project> <role> --cli <cli>` adds another implementer role
 after provisioning. `switchyard add-role <project> <role> --audit --cli <cli>`

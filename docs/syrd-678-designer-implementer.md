@@ -1,5 +1,11 @@
 # SYRD-678: a designer may also own Implementation work
 
+> **Historical design and rollout evidence.** This ticket record describes the
+> revision that allowed a designer to implement; it is not the current
+> procedure. Use
+> [A designer that also implements](onboarding/switchyard-director-guide.md#a-designer-that-also-implements)
+> and current command help before acting.
+
 ## What pie asked for
 
 pie's design review runs as an ordinary loop:

@@ -361,6 +361,36 @@ What is never counted:
 digest comes until progress closes the episode and a fresh stall runs its full
 time.
 
+The 30 minutes is a default. A project whose normal work runs longer without
+a checkpoint (long test, mutation, build or data phases) gets its own
+threshold. Use this instead of snoozing healthy work:
+
+```bash
+ticket-board-write set-board-stall-threshold --seconds 5400      # preview: changes nothing
+ticket-board-write set-board-stall-threshold --seconds 5400 --apply --expected-revision <rev>
+ticket-board-write set-board-stall-threshold --default --apply --expected-revision <rev>
+```
+
+- **Choosing a value.** Choose one longer than the project's normal bounded
+  validation phase, and keep it a finite backstop. The board accepts whole
+  seconds from 300 (5 minutes) to 86400 (24 hours) and refuses anything else,
+  leaving the old value in place.
+- **What the value is.** It is the declared workflow's `board_stall`, applied
+  like any workflow change: only you can apply it, at the revision you
+  previewed.
+- **Where to read it.** `ticket-board-read stall` shows the threshold in force,
+  and whether it is this project's own value or the default.
+- **When it takes effect.** From the next evaluation, on the same progress
+  clock. A digest already sent is never repeated. Lowering the threshold below
+  the time already elapsed brings that stall's one digest at the next pass.
+- **What it does not change.** It touches only this alert. These keep their own
+  limits:
+  - a busy pane's own stall escalation, which stays on the listener's setting;
+  - command execution leases;
+  - held notices;
+  - provider quota;
+  - outage detection.
+
 Your quota is shared operational capacity. Routing, integration and incident
 response all spend it, and every pane capture and ticket read lands in your
 context. Spending it on watching can stop coordination for the whole project

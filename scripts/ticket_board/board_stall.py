@@ -13,8 +13,9 @@ episode:
 * The board decides what is runnable now from the declared workflow and its
   own authorities -- stage shape, ownership, holds, blockers, dependencies,
   snoozes, serial slots and review lanes, pull claimability -- and when the
-  last durable progress was, from events its own triggers record. After
-  `threshold_seconds()` of runnable work with no progress it opens an episode
+  last durable progress was, from events its own triggers record. After the
+  project's declared `board_stall` threshold, or else the listener's
+  `threshold_seconds()` (SYRD-724), of runnable work with no progress it opens an episode
   and enqueues one digest to the Director, in one transaction, and closes the
   episode on progress or when nothing runnable remains.
 * What the listener sees is evidence in the digest, never a reason to stay
@@ -35,10 +36,28 @@ DEFAULT_THRESHOLD_SECONDS = 1800
 THRESHOLD_RANGE = (60, 86400)
 #: The digest's payload kind: the Director's, and current only while its episode is open.
 NOTICE_KIND = "board_stall"
+#: SYRD-724: a project's own threshold, in its declared workflow as `"board_stall": {"threshold_seconds": N}`, whole
+#: seconds from 5 minutes to 24 hours. The evaluator uses it in place of the listener's value, the default.
+DECLARED_KEY = "board_stall"
+DECLARED_RANGE = (300, 86400)
+
+
+def validate_declared(cfg: dict[str, Any], need: Any) -> None:
+    """`board_stall`, when declared: exactly a threshold in DECLARED_RANGE. Absent is the default, and stays absent."""
+    if DECLARED_KEY not in cfg:
+        return
+    policy = cfg[DECLARED_KEY]
+    need(isinstance(policy, dict) and set(policy) == {"threshold_seconds"},
+         'board_stall must be {"threshold_seconds": <seconds>}')
+    value = policy["threshold_seconds"]
+    need(isinstance(value, int) and DECLARED_RANGE[0] <= value <= DECLARED_RANGE[1],
+         f"board_stall threshold_seconds must be a whole number of seconds from {DECLARED_RANGE[0]} (5 minutes) to "
+         f"{DECLARED_RANGE[1]} (24 hours), not {value!r}")
 
 
 def threshold_seconds(environ: dict[str, str] | None = None) -> int:
-    """The one policy seam: how long runnable work may go without progress, bounded; 30 minutes by default."""
+    """The listener's policy seam, and the default a project's declared threshold replaces: how long runnable work
+    may go without progress, bounded; 30 minutes unless the host sets it."""
     raw = (os.environ if environ is None else environ).get(THRESHOLD_ENV, "").strip()
     try:
         value = int(raw) if raw else DEFAULT_THRESHOLD_SECONDS
@@ -109,12 +128,19 @@ def status(app: Any) -> dict[str, Any]:
     return {"available": True, **(json.loads(value) if isinstance(value, str) else (value or {}))}
 
 
+def threshold_source(state: dict[str, Any]) -> str:
+    """Where the threshold in force comes from (SYRD-724): the project's workflow, or the default."""
+    if state.get("threshold_source") == "workflow":
+        return f"this project's workflow; the default is {state.get('default_threshold_seconds')}s"
+    return "the default" if "threshold_source" in state else "the listener's setting"
+
+
 def describe(state: dict[str, Any]) -> str:
     """The state as a person reads it: `ticket-board-read stall`."""
     if not state.get("available", True):
         return "board stall: this board predates the stall alert (SYRD-637)"
-    lines = [f"board stall: last evaluated {state.get('evaluated_at') or 'never'}; "
-             f"threshold {state.get('threshold_seconds')}s"]
+    lines = [f"board stall: last evaluated {state.get('evaluated_at') or 'never'}; threshold "
+             f"{state.get('threshold_seconds')}s ({threshold_source(state)})"]
     last = state.get("last_progress") or {}
     lines.append(f"last progress: {last.get('event', 'none recorded')} at {last.get('at', '-')}")
     runnable = state.get("runnable") or []

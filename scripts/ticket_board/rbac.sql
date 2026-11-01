@@ -456,6 +456,8 @@ GRANT EXECUTE ON FUNCTION ticket_board.note_board_stall(jsonb, integer, timestam
 GRANT EXECUTE ON FUNCTION ticket_board.board_stall_runnable(timestamptz) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.board_stall_notice_is_current(jsonb) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.board_stall_status(timestamptz) TO ticket_board_service, ticket_board_listener;
+-- SYRD-724: root's provisioning packet applies its recorded workflow through this, as the board's writer.
+GRANT EXECUTE ON FUNCTION ticket_board.provisioned_workflow(jsonb) TO ticket_board_service;
 -- End of SYRD-637.
 
 -- SYRD-636: the listener reports a hand-over's leftover background work to the Director.

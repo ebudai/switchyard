@@ -16,8 +16,9 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from . import documentation_gate, read_client, workflow_relays, write_client
+    from . import board_stall, documentation_gate, read_client, workflow_relays, write_client
 except ImportError:  # pragma: no cover - `python write_client.py` runs outside the package
+    import board_stall
     import documentation_gate
     import read_client
     import workflow_relays
@@ -85,6 +86,46 @@ def _add_user_acceptance_relay(client: Any, *, apply: bool, expected_revision: i
     applied = client.configure_workflow(updated, expected_revision=revision, dry_run=False, same_endpoint=True)
     result.update(applied=True, revision_after=applied.get("revision"))
     return result
+
+
+def _set_board_stall_threshold(client: Any, *, seconds: int | None, apply: bool,
+                               expected_revision: int | None) -> dict[str, Any]:
+    """Preview, or apply, this project's board stall threshold: `seconds`, or None for the default (SYRD-724).
+
+    The declared workflow's `board_stall`, and nothing else in it. Read-only by default: the live revision, the
+    threshold declared before and after, the digests, and the board's own validation as a dry run. `--apply` takes
+    the revision the preview showed and is refused if the workflow moved since. Only the Director applies a workflow.
+    """
+    client = client.pinned_to_resolved_endpoint()
+    current = client.read_workflow()
+    document, revision = current.get("document"), current.get("revision")
+    if not isinstance(document, dict) or type(revision) is not int:
+        raise write_client.TicketBoardWriteError("this board runs no declared workflow, so it has no board stall "
+                                                 "threshold to set; the listener's setting applies")
+    key = board_stall.DECLARED_KEY
+    updated = {k: v for k, v in document.items() if k != key}
+    if seconds is not None:
+        updated[key] = {"threshold_seconds": seconds}
+    result: dict[str, Any] = {
+        "endpoint": client.workflow_endpoint, "revision": revision,
+        "before": (document.get(key) or {}).get("threshold_seconds") or "default",
+        "after": seconds if seconds is not None else "default",
+        "default": "the listener's setting: 1800 seconds unless the host sets TICKET_BOARD_BOARD_STALL_SECONDS",
+        "before_digest": workflow_relays.document_digest(document), "applied": False,
+    }
+    if updated == document:
+        return {**result, "unchanged": True}
+    result["after_digest"] = workflow_relays.document_digest(updated)
+    if apply and expected_revision != revision:
+        raise write_client.TicketBoardWriteError(
+            f"the workflow is at revision {revision}, not the {expected_revision} you reviewed; preview it again")
+    client.configure_workflow(updated, expected_revision=revision, dry_run=True, same_endpoint=True)  # refuses or passes
+    if not apply:
+        value = "--default" if seconds is None else f"--seconds {seconds}"
+        return {**result, "apply_with": f"ticket-board-write set-board-stall-threshold {value} --apply "
+                                        f"--expected-revision {revision}"}
+    applied = client.configure_workflow(updated, expected_revision=revision, dry_run=False, same_endpoint=True)
+    return {**result, "applied": True, "revision_after": applied.get("revision")}
 
 
 def not_connected_for_reports(environ: Any) -> str:
@@ -427,6 +468,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     relay.add_argument("--apply", action="store_true", help="apply it; requires --expected-revision from the preview")
     relay.add_argument("--expected-revision", type=int, default=None, help="the revision the preview showed")
+    stall = subparsers.add_parser(
+        "set-board-stall-threshold",
+        help="Director: preview (default) or apply how long runnable work may go without durable progress before the "
+             "board stall alert, for this project only; nothing else changes (SYRD-724)")
+    stall_value = stall.add_mutually_exclusive_group(required=True)
+    stall_value.add_argument("--seconds", type=int, help="whole seconds, 300 (5 minutes) to 86400 (24 hours): longer "
+                                                         "than the project's normal validation phase, never unbounded")
+    stall_value.add_argument("--default", action="store_true", help="remove this project's own value: the default "
+                                                                     "applies again")
+    stall.add_argument("--apply", action="store_true", help="apply it; requires --expected-revision from the preview")
+    stall.add_argument("--expected-revision", type=int, default=None, help="the revision the preview showed")
     workflow_flags = subparsers.add_parser("set-workflow-flags")
     workflow_flags.add_argument("ticket_id")
     workflow_flags.add_argument("--patch-json", required=True)
@@ -997,6 +1049,11 @@ def main(argv: list[str] | None = None) -> int:
             if args.apply and args.expected_revision is None:
                 raise write_client.TicketBoardWriteError("--apply needs --expected-revision, from the preview")
             response = _add_user_acceptance_relay(client, apply=args.apply, expected_revision=args.expected_revision)
+        elif command == "set_board_stall_threshold":
+            if args.apply and args.expected_revision is None:
+                raise write_client.TicketBoardWriteError("--apply needs --expected-revision, from the preview")
+            response = _set_board_stall_threshold(client, seconds=args.seconds,
+                                                  apply=args.apply, expected_revision=args.expected_revision)
         elif command == "set_workflow_flags":
             response = client.set_workflow_flags(args.ticket_id, json.loads(args.patch_json))
         elif command in {"documentation_sign_off", "documentation_no_change", "documentation_kick_back"}:
@@ -1128,7 +1185,7 @@ def main(argv: list[str] | None = None) -> int:
     except write_client.TicketBoardWriteError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    if command in {"merge", "dismiss_notification", "verify_caller", "add_user_acceptance_relay",
+    if command in {"merge", "dismiss_notification", "verify_caller", "add_user_acceptance_relay", "set_board_stall_threshold",
                    "snooze_reminders", "clear_reminder_snooze", "claim_next", "approve_size_exception",
                    "enable_size_review", "measure_size", "set_report_intake", "force_fresh_context",
                    "uat_instructions", "extend_lease", "interrupt_lease", "set_cohort_quota", "clear_cohort_quota",

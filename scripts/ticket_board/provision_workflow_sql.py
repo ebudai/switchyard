@@ -86,8 +86,12 @@ def render_workflow_sql(plan: ProjectBoardProvision, *, schema_sql: str | None =
         # migrated through a plan document. An artifact that changed spelling
         # on every regeneration would look like a change to every check that
         # compares what root installed with what root would install (SYRD-165).
+        # Through provisioned_workflow: a board already running one keeps its own board stall threshold, the
+        # Director's decision since root recorded this document (SYRD-724). Root's record wins everywhere else.
+        # The workflow lock first, in its own statement, as every apply takes it (workflow_locking): the next
+        # statement's snapshot then reads the board's threshold after any Director apply ahead of it commits.
         document = json.dumps(plan.workflow, sort_keys=True).replace("'", "''")
-        return "BEGIN;\nSET LOCAL ROLE ticket_board_service;\nSELECT set_config('ticket_board.project','" + plan.project + "',true);\nSELECT set_config('ticket_board.caller_role','director',true);\nSELECT ticket_board.apply_declared_workflow('" + document + "'::jsonb);\nCOMMIT;\n"
+        return "BEGIN;\nSET LOCAL ROLE ticket_board_service;\nSELECT set_config('ticket_board.project','" + plan.project + "',true);\nSELECT set_config('ticket_board.caller_role','director',true);\nSELECT pg_advisory_xact_lock(hashtext('ticket_board.workflow_configuration'));\nSELECT ticket_board.apply_declared_workflow(ticket_board.provisioned_workflow('" + document + "'::jsonb));\nCOMMIT;\n"
     if plan.workflow_seed == provision.UNVERIFIED_DECLARED_WORKFLOW:
         return f"""-- {plan.project} declares its own workflow, and root holds no verified copy of it.
 --

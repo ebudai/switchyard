@@ -11,6 +11,7 @@ from .documentation_gate import audit_documentation_return, validate_documentati
 from .publisher_stage import validate_publisher
 from .router_role import router_holds, validate_router
 from .user_wait import validate_user_waits
+from .board_stall import validate_declared as validate_board_stall
 from .role_kinds import IMPLEMENTER, has_kind, validate_role_kinds
 from .audit_return import advertise as advertise_audit_return
 
@@ -437,11 +438,7 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
     need(
         set(cfg)
         <= {
-            "schema",
-            "roles",
-            "stages",
-            "transitions",
-            "flags",
+            "schema", "roles", "stages", "transitions", "flags",
             "reassign",
             "queue",
             "project",
@@ -450,6 +447,7 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
             "reservation",
             "scheduling",
             "user_waits",  # SYRD-662
+            "board_stall",  # SYRD-724
         },
         "unknown workflow configuration field",
     )
@@ -1102,6 +1100,7 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
     validate_documentation_gate(cfg, need)
     validate_publisher(cfg, need)  # SYRD-625
     validate_user_waits(cfg, need)  # SYRD-662
+    validate_board_stall(cfg, need)  # SYRD-724
     validate_role_kinds(cfg, need)  # SYRD-678
     return cfg
 

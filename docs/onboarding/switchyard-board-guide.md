@@ -493,11 +493,11 @@ the credential column. The board service cannot read your project's files, so th
 says only whether root's records show a credential was **issued** for each ancestor (in
 `GET /api/report-ancestry`, `credential.issued`, never `usable`). Only
 `report-ancestors`, run in your pane, checks that the credential file is there, readable,
-and bound to your project. A page that says "credential issued" while `report-ancestors`
-says NOT USABLE means the file has gone or changed since root wrote it: the narrow step
-below writes it again. The page itself says so, pointing to `report-ancestors`. This is
-deliberate least privilege: the board service never reads report tokens, and no role's
-report of what it saw is shown as proof.
+and bound to your project. If the two views differ, rerun the narrow step below: it
+rewrites a missing or changed credential file, or repairs root's missing issuance record
+without rotating a current private credential. The page itself points to
+`report-ancestors`. This is deliberate least privilege: the board service never reads
+report tokens, and no role's report of what it saw is shown as proof.
 
 **One target, normally.** `file-report` without `--to` files to the immediate parent,
 exactly as before. Name one ancestor with `--to <project>`: its slug, its name or its
@@ -598,12 +598,14 @@ sudo switchyard upgrade mefp --only upstream-report --no-upstream-report   # no 
 3. It records the parent with a history entry.
 4. It issues one report-only credential for each ancestor's board.
 
-Running it again changes nothing. Removing or changing a parent erases nothing:
-credentials already issued and the project's receipts stay, so a report filed before the
-change can still be followed up. When the step writes a new link while panes are
-running, it names the panes that need a relaunch; each pane carries the link from its
-next launch. A full `switchyard upgrade` with `--upstream-report-url` still records a
-link as part of an upgrade, but no project needs one for this.
+After a complete run, running it again changes nothing. After a partial local failure, a
+retry completes the missing credential file or root issuance record without rotating a
+current private credential. Removing or changing a parent erases nothing: credentials
+already issued and the project's receipts stay, so a report filed before the change can
+still be followed up. When the step writes a new link while panes are running, it names
+the panes that need a relaunch; each pane carries the link from its next launch. A full
+`switchyard upgrade` with `--upstream-report-url` still records a link as part of an
+upgrade, but no project needs one for this.
 
 **Where a new project reports.** `switchyard new` decides before creating anything,
 and the board it connects becomes the project's report parent.

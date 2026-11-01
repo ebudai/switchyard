@@ -62,7 +62,10 @@ writes nothing, and the registry is byte-identical afterwards.
 2. records the parent with a history entry;
 3. issues a credential for each ancestor.
 
-The same declaration again changes nothing.
+After a complete run, the same declaration again changes nothing. If a partial
+failure wrote a credential file but not root's issuance record, the next run
+repairs the record without rotating the current private credential; the same
+reconciliation restores a missing credential file.
 
 **One credential per ancestor.** For each board in the chain, root writes
 `report-credentials/<ancestor>.env` beside the immediate-parent credential,

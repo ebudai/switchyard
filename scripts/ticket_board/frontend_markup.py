@@ -99,6 +99,11 @@ MARKUP = """  <div class="layout">
               <input id="showCancelledInput" type="checkbox">
               <span>Show Cancelled <span id="showCancelledCount">(0)</span></span>
             </label>
+            <div id="stageNav" class="stage-nav" hidden>
+              <button id="stageNavPrev" class="small" type="button" aria-controls="boardScroll">&lsaquo; Earlier stages</button>
+              <span id="stageNavStatus" class="stage-nav-status" aria-live="polite"></span>
+              <button id="stageNavNext" class="small" type="button" aria-controls="boardScroll">Later stages &rsaquo;</button>
+            </div>
           </div>
         </div>
         <div class="paths meta">
@@ -108,7 +113,7 @@ MARKUP = """  <div class="layout">
           <div><strong>Reports go to</strong>: <span id="reportAncestry">(loading)</span></div>
         </div>
       </div>
-      <div class="board-scroll">
+      <div id="boardScroll" class="board-scroll" tabindex="0" role="region" aria-label="Workflow stages">
         <div id="errorBox" class="error-box" hidden></div>
         <div class="board" id="board"></div>
       </div>

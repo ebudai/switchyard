@@ -97,6 +97,8 @@ function world(legacy, storageMode = 'ok') {
     refreshUpdateBannerEl: { hidden: true },
     rememberDetailDraft: () => log.push(['rememberDetailDraft']),
     detailModalIsOpen: () => flags.detail, imageLightboxIsOpen: () => flags.lightbox,
+    // SYRD-722: the stage at the strip's left edge is the stage-strip script's; it is saved beside the offsets.
+    stripStageAnchor: () => null, restoreStripStageAnchor: (anchor) => log.push(['restoreStripStageAnchor', anchor]),
   };
   vm.createContext(ctx);
   vm.runInContext(`${chunk};globalThis.f = {${NAMES.join(',')}};`, ctx);
@@ -191,6 +193,13 @@ for (const mode of ['throw', 'readonly']) {
   pending.state.lastActivityAt -= 100000; pending.f.maybeAutoRefresh();
   out.noPending = [pending.log, pending.ctx.refreshUpdateBannerEl.hidden];
 }
+{ const w = world(false);
+  w.store.set('ticket-board:demo:DEMO:scroll:b1', JSON.stringify({ boardLeft: 3, boardStage: { key: 'dat', offset: '-4' } }));
+  w.f.restoreScrollPositionAfterRefresh();
+  w.store.set('ticket-board:demo:DEMO:scroll:b1', JSON.stringify({ boardLeft: 3, boardStage: { key: 7, offset: 1 } }));
+  w.f.restoreScrollPositionAfterRefresh();
+  out.stage = w.log.filter((e) => e[0] === 'restoreStripStageAnchor');
+}
 console.log(JSON.stringify(out));
 '''
 
@@ -206,7 +215,7 @@ def run_refresh() -> dict:
     return json.loads(done.stdout)
 
 
-EXPECTED = json.loads(r'''{"normalize":["","","abc","","42"],"idle":[2500,25,60000,70,0,2500,2500,2500,12],"keys":["ticket-board:demo:DEMO:scroll:b9","ticket-board:demo:DEMO:scroll:latest","pgu-ticket-board:scroll:b9","pgu-ticket-board:scroll:latest"],"flow":{"s1":["b1",false,true],"s2":["b2",true,"b2",false,1],"r1":["new ticket draft",false],"reasons":["new ticket draft","new ticket draft","detail open","attachment preview open","unsaved detail edits",""],"activity":[true,[250]],"handled":["b2"],"store":[["ticket-board:demo:DEMO:scroll:b2","{\"windowX\":11,\"windowY\":22,\"boardLeft\":7,\"boardTop\":9}"]],"log":[["syncBodyModalState"],["syncBodyModalState"],["syncBodyModalState"],["setTimeout",1,300],["fire",1],["syncBodyModalState"],["setTimeout",2,500],["rememberDetailDraft"],["rememberDetailDraft"],["fire",2],["rememberDetailDraft"],["syncBodyModalState"],["setTimeout",3,500],["clearTimeout",3],["setTimeout",4,250],["fire",4],["rememberDetailDraft"],["syncBodyModalState"],["rememberDetailDraft"],["set","ticket-board:demo:DEMO:scroll:b2","{\"windowX\":11,\"windowY\":22,\"boardLeft\":7,\"boardTop\":9}"],["reload"],["syncBodyModalState"]]},"afterHandled":[false,"",true],"quiet":[],"nosync":[false,[]],"zeroIdle":[["rememberDetailDraft"],["syncBodyModalState"],["rememberDetailDraft"],["set","ticket-board:demo:DEMO:scroll:b3","{\"windowX\":11,\"windowY\":22,\"boardLeft\":7,\"boardTop\":9}"],["reload"]],"restore legacy=false":{"first":[["pgu-ticket-board:scroll:b1"],0,8],"second":[["pgu-ticket-board:scroll:b1"],0,8],"store":[["pgu-ticket-board:scroll:b1","{\"windowX\":1,\"windowY\":2,\"boardLeft\":3,\"boardTop\":4}"],["ticket-board:demo:DEMO:scroll:b7","{\"windowX\":11,\"windowY\":22,\"boardLeft\":0,\"boardTop\":0}"]],"log":[["get","ticket-board:demo:DEMO:scroll:b1"],["remove","ticket-board:demo:DEMO:scroll:b1"],["scrollTo",5,6],["get","ticket-board:demo:DEMO:scroll:b1"],["get","ticket-board:demo:DEMO:scroll:b1"],["remove","ticket-board:demo:DEMO:scroll:b1"],["get","ticket-board:demo:DEMO:scroll:b1"],["remove","ticket-board:demo:DEMO:scroll:b1"],["scrollTo",9,0],["set","ticket-board:demo:DEMO:scroll:b7","{\"windowX\":11,\"windowY\":22,\"boardLeft\":0,\"boardTop\":0}"]]},"restore legacy=true":{"first":[["pgu-ticket-board:scroll:b1"],0,8],"second":[[],3,4],"store":[["ticket-board:demo:DEMO:scroll:b7","{\"windowX\":11,\"windowY\":22,\"boardLeft\":0,\"boardTop\":0}"]],"log":[["get","ticket-board:demo:DEMO:scroll:b1"],["remove","ticket-board:demo:DEMO:scroll:b1"],["scrollTo",5,6],["get","ticket-board:demo:DEMO:scroll:b1"],["get","pgu-ticket-board:scroll:b1"],["remove","pgu-ticket-board:scroll:b1"],["scrollTo",1,2],["get","ticket-board:demo:DEMO:scroll:b1"],["remove","ticket-board:demo:DEMO:scroll:b1"],["get","ticket-board:demo:DEMO:scroll:b1"],["remove","ticket-board:demo:DEMO:scroll:b1"],["scrollTo",9,0],["set","ticket-board:demo:DEMO:scroll:b7","{\"windowX\":11,\"windowY\":22,\"boardLeft\":0,\"boardTop\":0}"]]},"storage throw":{"error":null,"log":[]},"storage readonly":{"error":null,"log":[["get","ticket-board:demo:DEMO:scroll:b1"],["get","pgu-ticket-board:scroll:b1"]]},"priority":["new ticket draft","detail open","attachment preview open"],"exactIdle":"","bannerNotRequired":true,"smallIdle":[["setTimeout",1,100]],"unloaded":[false,"b6",[["syncBodyModalState"]]],"noPending":[[],true]}''')
+EXPECTED = json.loads(r'''{"normalize":["","","abc","","42"],"idle":[2500,25,60000,70,0,2500,2500,2500,12],"keys":["ticket-board:demo:DEMO:scroll:b9","ticket-board:demo:DEMO:scroll:latest","pgu-ticket-board:scroll:b9","pgu-ticket-board:scroll:latest"],"flow":{"s1":["b1",false,true],"s2":["b2",true,"b2",false,1],"r1":["new ticket draft",false],"reasons":["new ticket draft","new ticket draft","detail open","attachment preview open","unsaved detail edits",""],"activity":[true,[250]],"handled":["b2"],"store":[["ticket-board:demo:DEMO:scroll:b2","{\"windowX\":11,\"windowY\":22,\"boardLeft\":7,\"boardTop\":9,\"boardStage\":null}"]],"log":[["syncBodyModalState"],["syncBodyModalState"],["syncBodyModalState"],["setTimeout",1,300],["fire",1],["syncBodyModalState"],["setTimeout",2,500],["rememberDetailDraft"],["rememberDetailDraft"],["fire",2],["rememberDetailDraft"],["syncBodyModalState"],["setTimeout",3,500],["clearTimeout",3],["setTimeout",4,250],["fire",4],["rememberDetailDraft"],["syncBodyModalState"],["rememberDetailDraft"],["set","ticket-board:demo:DEMO:scroll:b2","{\"windowX\":11,\"windowY\":22,\"boardLeft\":7,\"boardTop\":9,\"boardStage\":null}"],["reload"],["syncBodyModalState"]]},"afterHandled":[false,"",true],"quiet":[],"nosync":[false,[]],"zeroIdle":[["rememberDetailDraft"],["syncBodyModalState"],["rememberDetailDraft"],["set","ticket-board:demo:DEMO:scroll:b3","{\"windowX\":11,\"windowY\":22,\"boardLeft\":7,\"boardTop\":9,\"boardStage\":null}"],["reload"]],"restore legacy=false":{"first":[["pgu-ticket-board:scroll:b1"],0,8],"second":[["pgu-ticket-board:scroll:b1"],0,8],"store":[["pgu-ticket-board:scroll:b1","{\"windowX\":1,\"windowY\":2,\"boardLeft\":3,\"boardTop\":4}"],["ticket-board:demo:DEMO:scroll:b7","{\"windowX\":11,\"windowY\":22,\"boardLeft\":0,\"boardTop\":0,\"boardStage\":null}"]],"log":[["get","ticket-board:demo:DEMO:scroll:b1"],["remove","ticket-board:demo:DEMO:scroll:b1"],["scrollTo",5,6],["get","ticket-board:demo:DEMO:scroll:b1"],["get","ticket-board:demo:DEMO:scroll:b1"],["remove","ticket-board:demo:DEMO:scroll:b1"],["get","ticket-board:demo:DEMO:scroll:b1"],["remove","ticket-board:demo:DEMO:scroll:b1"],["scrollTo",9,0],["set","ticket-board:demo:DEMO:scroll:b7","{\"windowX\":11,\"windowY\":22,\"boardLeft\":0,\"boardTop\":0,\"boardStage\":null}"]]},"restore legacy=true":{"first":[["pgu-ticket-board:scroll:b1"],0,8],"second":[[],3,4],"store":[["ticket-board:demo:DEMO:scroll:b7","{\"windowX\":11,\"windowY\":22,\"boardLeft\":0,\"boardTop\":0,\"boardStage\":null}"]],"log":[["get","ticket-board:demo:DEMO:scroll:b1"],["remove","ticket-board:demo:DEMO:scroll:b1"],["scrollTo",5,6],["get","ticket-board:demo:DEMO:scroll:b1"],["get","pgu-ticket-board:scroll:b1"],["remove","pgu-ticket-board:scroll:b1"],["scrollTo",1,2],["get","ticket-board:demo:DEMO:scroll:b1"],["remove","ticket-board:demo:DEMO:scroll:b1"],["get","ticket-board:demo:DEMO:scroll:b1"],["remove","ticket-board:demo:DEMO:scroll:b1"],["scrollTo",9,0],["set","ticket-board:demo:DEMO:scroll:b7","{\"windowX\":11,\"windowY\":22,\"boardLeft\":0,\"boardTop\":0,\"boardStage\":null}"]]},"storage throw":{"error":null,"log":[]},"storage readonly":{"error":null,"log":[["get","ticket-board:demo:DEMO:scroll:b1"],["get","pgu-ticket-board:scroll:b1"]]},"priority":["new ticket draft","detail open","attachment preview open"],"exactIdle":"","bannerNotRequired":true,"smallIdle":[["setTimeout",1,100]],"unloaded":[false,"b6",[["syncBodyModalState"]]],"noPending":[[],true],"stage":[["restoreStripStageAnchor",{"key":"dat","offset":-4}]]}''')
 
 
 def test_refresh_and_scroll_behaviour() -> None:
@@ -224,12 +233,12 @@ def test_refresh_and_scroll_behaviour() -> None:
     assert flow["reasons"] == ["new ticket draft", "new ticket draft", "detail open", "attachment preview open",
                                "unsaved detail edits", ""]
     assert flow["activity"] == [True, [250]] and flow["handled"] == ["b2"]
-    assert flow["store"] == [["ticket-board:demo:DEMO:scroll:b2", '{"windowX":11,"windowY":22,"boardLeft":7,"boardTop":9}']]
+    assert flow["store"] == [["ticket-board:demo:DEMO:scroll:b2", '{"windowX":11,"windowY":22,"boardLeft":7,"boardTop":9,"boardStage":null}']]
     assert [e for e in flow["log"] if e[0] in ("setTimeout", "clearTimeout", "fire", "reload")] == [
         ["setTimeout", 1, 300], ["fire", 1], ["setTimeout", 2, 500], ["fire", 2], ["setTimeout", 3, 500],
         ["clearTimeout", 3], ["setTimeout", 4, 250], ["fire", 4], ["reload"]]
     assert flow["log"][-4:] == [["rememberDetailDraft"], ["set", "ticket-board:demo:DEMO:scroll:b2",
-                                '{"windowX":11,"windowY":22,"boardLeft":7,"boardTop":9}'], ["reload"], ["syncBodyModalState"]]
+                                '{"windowX":11,"windowY":22,"boardLeft":7,"boardTop":9,"boardStage":null}'], ["reload"], ["syncBodyModalState"]]
     assert out["afterHandled"] == [False, "", True]
     assert out["quiet"] == [] and out["nosync"] == [False, []]
     assert out["zeroIdle"][-1] == ["reload"] and not any(e[0] == "setTimeout" for e in out["zeroIdle"])
@@ -239,7 +248,7 @@ def test_refresh_and_scroll_behaviour() -> None:
     assert ["get", "pgu-ticket-board:scroll:b1"] not in plain["log"] and ["scrollTo", 1, 2] in legacy["log"]
     assert plain["log"][:3] == [["get", "ticket-board:demo:DEMO:scroll:b1"], ["remove", "ticket-board:demo:DEMO:scroll:b1"], ["scrollTo", 5, 6]]
     assert ["scrollTo", 9, 0] in plain["log"]
-    assert plain["store"][-1] == ["ticket-board:demo:DEMO:scroll:b7", '{"windowX":11,"windowY":22,"boardLeft":0,"boardTop":0}']
+    assert plain["store"][-1] == ["ticket-board:demo:DEMO:scroll:b7", '{"windowX":11,"windowY":22,"boardLeft":0,"boardTop":0,"boardStage":null}']
     assert out["storage throw"] == {"error": None, "log": []}
     assert out["storage readonly"] == {"error": None, "log": [["get", "ticket-board:demo:DEMO:scroll:b1"], ["get", "pgu-ticket-board:scroll:b1"]]}
     assert out["priority"] == ["new ticket draft", "detail open", "attachment preview open"]
@@ -247,6 +256,8 @@ def test_refresh_and_scroll_behaviour() -> None:
     assert out["smallIdle"] == [["setTimeout", 1, 100]]
     assert out["unloaded"] == [False, "b6", [["syncBodyModalState"]]]
     assert out["noPending"] == [[], True]
+    # SYRD-722: a saved stage is put back after the offsets; a malformed one is ignored.
+    assert out["stage"] == [["restoreStripStageAnchor", {"key": "dat", "offset": -4}]]
     assert out == EXPECTED
 
 

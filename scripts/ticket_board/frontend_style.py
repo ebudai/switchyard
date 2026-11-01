@@ -1029,7 +1029,9 @@ STYLE = """    :root {
         margin-left: 0;
       }
     }
-    @media (max-width: 980px) {
+    /* The composer stacks above the board only where the lanes stack too (900px, mobileSectionMedia): wider, the
+       lanes are a horizontal strip, which needs the board held to the window beside the composer (SYRD-722). */
+    @media (max-width: 900px) {
       .layout { grid-template-columns: 1fr; }
       aside { min-height: 0; border-right: 0; border-left: 0; }
       aside { border-bottom: 1px solid var(--border); }

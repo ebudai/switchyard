@@ -6,7 +6,8 @@ board reloads itself once it is safe: after the idle delay
 no create draft, open detail or preview, and no unsaved detail edits. Until
 then the refresh banner shows why it is waiting. The window and board scroll
 positions survive the reload through sessionStorage, under the board's
-namespace or the legacy PGU key. SCRIPT_CORE splices this in at its original
+namespace or the legacy PGU key, and so does the stage at the strip's left edge
+(SYRD-722). SCRIPT_CORE splices this in at its original
 position; it uses SCRIPT_CORE's shared state, storage namespaces, create-form
 inputs, banner element and detail, lightbox and body-modal helpers, and
 SCRIPT_APP wires its events.
@@ -48,6 +49,7 @@ SCRIPT_REFRESH = """    function normalizeBuildId(value) {
         windowY: window.scrollY,
         boardLeft: boardScroll ? boardScroll.scrollLeft : 0,
         boardTop: boardScroll ? boardScroll.scrollTop : 0,
+        boardStage: stripStageAnchor(),
       };
       try {
         window.sessionStorage.setItem(scrollPositionStorageKey(state.serverBuildId), JSON.stringify(value));
@@ -83,6 +85,10 @@ SCRIPT_REFRESH = """    function normalizeBuildId(value) {
         if (boardScroll) {
           boardScroll.scrollLeft = Number(value.boardLeft) || 0;
           boardScroll.scrollTop = Number(value.boardTop) || 0;
+        }
+        // SYRD-722: the Show filters reset on reload, so the stage, not the pixel, is what is kept.
+        if (value.boardStage && typeof value.boardStage.key === 'string') {
+          restoreStripStageAnchor({ key: value.boardStage.key, offset: Number(value.boardStage.offset) || 0 });
         }
       } catch (error) {
         // Ignore malformed persisted scroll state from an older page.

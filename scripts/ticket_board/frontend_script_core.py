@@ -838,12 +838,14 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-
     }
 
     function renderBoard() {
+      const stripAnchor = stripStageAnchor();  // SYRD-722: a redraw keeps the stage the User was looking at
       boardEl.innerHTML = '';
       const columns = visibleColumns();
       syncBoardGridColumns(columns);
       columns.forEach((column) => {
         const columnEl = document.createElement('section');
         columnEl.className = 'column';
+        columnEl.dataset.stage = column.key;
         const tickets = columnTickets(column.key);
         const ticketCount = columnTicketCount(column.key);
         const sectionKey = `column:${column.key}`;
@@ -892,6 +894,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-
         columnEl.appendChild(body);
         boardEl.appendChild(columnEl);
       });
+      restoreStripStageAnchor(stripAnchor);
     }
 
     // The highlight says whose current work a ticket is; it never said the

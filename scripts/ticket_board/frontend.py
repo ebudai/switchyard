@@ -11,6 +11,7 @@ from .frontend_script_core import SCRIPT_CORE
 from .frontend_script_delegation import SCRIPT_DELEGATION
 from .frontend_script_detail import SCRIPT_DETAIL
 from .frontend_script_reports import SCRIPT_REPORTS
+from .frontend_script_stage_strip import SCRIPT_STAGE_STRIP, STYLE_STAGE_STRIP
 from .frontend_script_uat import SCRIPT_UAT, STYLE_UAT
 from .frontend_style import STYLE
 
@@ -45,6 +46,7 @@ def render_html(*, project: str = "pgu", project_name: str = "PGU", ticket_prefi
         "  <style>\n"
         + STYLE
         + STYLE_UAT
+        + STYLE_STAGE_STRIP
         + "  </style>\n"
         + "</head>\n"
         + "<body>\n"
@@ -57,6 +59,7 @@ def render_html(*, project: str = "pgu", project_name: str = "PGU", ticket_prefi
         + SCRIPT_UAT
         + SCRIPT_APP
         + SCRIPT_REPORTS
+        + SCRIPT_STAGE_STRIP
         + "  </script>\n"
         + "</body>\n"
         + "</html>\n"

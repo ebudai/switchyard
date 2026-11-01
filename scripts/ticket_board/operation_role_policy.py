@@ -70,6 +70,8 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
     "cancel": {"director"},
     "set_manually_controlled": {"director"},
     "set_blockers": {"director"},
+    # SYRD-723: the owner's explanation of its own ticket's blocker; the database checks owner and runtime.
+    "set_blocked_reason": IMPLEMENTER_ROLES,
     # SYRD-270: the other half of an external blocker, so the same authority.
     "release_external_blocker": {"director"},
     # SYRD-537: deferring optional reminders is less than holding the ticket.
@@ -139,6 +141,9 @@ COMPOSED_OPERATION_CAPABILITIES = {
     # Releasing a blocker is setting the ticket's blockers (SYRD-270); the
     # database checks set_blockers itself.
     "release_external_blocker": frozenset({"set_blockers"}),
+    # SYRD-723: a ticket's blocker explanation is its text, as edit_fields edits its implementation notes; no blocker,
+    # state, owner or wait. The database admits only the ticket's implementation owner, from its live runtime.
+    "set_blocked_reason": frozenset({"edit_fields"}),
     # A reminder snooze silences a subset of what holding a ticket silences, for
     # a bounded time, so it takes the hold's authority; the database checks
     # set_manually_controlled itself (SYRD-537).

@@ -830,6 +830,12 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     add_free_text_argument(blockers, "--blocked-reason", required=True)
+    explain = subparsers.add_parser(
+        "set-blocked-reason", help="the owner of a ticket in implementation, from its own pane: replace or clear the "
+                                   "ticket's blocker explanation, and nothing else; a note, never a wait (SYRD-723)")
+    explain.add_argument("ticket_id")
+    add_free_text_argument(explain, "--blocked-reason", help="why the work cannot proceed, as you now know it")
+    explain.add_argument("--clear", action="store_true", help="empty it; refused while a blocker stands")
 
     comment = subparsers.add_parser("add-comment")
     comment.add_argument("ticket_id")
@@ -1093,6 +1099,10 @@ def main(argv: list[str] | None = None) -> int:
             response = client.set_manually_controlled(args.ticket_id, args.value)
         elif command == "set_blockers":
             response = client.set_blockers(args.ticket_id, blocked_by=args.blocked_by, blocked_reason=args.blocked_reason)
+        elif command == "set_blocked_reason":
+            if args.clear == bool(args.blocked_reason.strip()):
+                parser.error("set-blocked-reason: give --blocked-reason with the new text, or --clear")
+            response = client.set_blocked_reason(args.ticket_id, args.blocked_reason)
         elif command == "add_comment":
             response = client.add_comment(args.ticket_id, text=args.text, urgent=args.urgent)
         elif command == "edit_fields":
@@ -1122,7 +1132,8 @@ def main(argv: list[str] | None = None) -> int:
                    "snooze_reminders", "clear_reminder_snooze", "claim_next", "approve_size_exception",
                    "enable_size_review", "measure_size", "set_report_intake", "force_fresh_context",
                    "uat_instructions", "extend_lease", "interrupt_lease", "set_cohort_quota", "clear_cohort_quota",
-                   "clear_provider_hold", "await_user", "set_audit_return", "report_follow_up", "notify_user"}:
+                   "clear_provider_hold", "await_user", "set_audit_return", "report_follow_up", "notify_user",
+                   "set_blocked_reason"}:
         print(json.dumps(response))
     else:
         print(json.dumps(_ticket_from_response(response)))

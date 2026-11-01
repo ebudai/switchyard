@@ -217,6 +217,16 @@ system working, not a bug to route around.
   with nobody holding it until the idle-owner escalation reached the director over an
   hour later (SYRD-133). Prefer it over bare `await-role`: same wait, plus the sentence
   the awaited role needs in order to act. It does not reassign; the work is still yours.
+- `set-blocked-reason <id> --blocked-reason "..."` (or `--clear`) — implementers: keep
+  the ticket's blocker explanation current while you own it in an implementation stage,
+  as you find, refine or resolve the reason, instead of leaving the Director to rewrite
+  it (SYRD-723). It changes that text and nothing else: no blocker, state, assignee or
+  wait. Saving text records no wait, clearing it ends none, and it never stands in for
+  `request-dependency` or for the stage's declared transition. While a blocker stands,
+  its explanation can be revised but not emptied. It works only from your own registered
+  pane, over the board's socket, and the board refuses it on another owner's ticket,
+  once the ticket has left implementation, and from a replaced or retired runtime. Each
+  change is recorded in the ticket's field audit under your role and runtime.
 - External blockers (director) — `set-blockers <id> --blocked-by syrd:SYRD-269 --blocked-reason "..."`
   records a wait on another board's work (SYRD-270); `--blocked-by operator:<name>` records a
   wait on a person whose step has no ticket (SYRD-273). It never resolves by itself, whatever

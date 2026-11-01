@@ -76,6 +76,8 @@ def test_server_keeps_identical_aliases_and_no_reverse_import() -> None:
     assert policy.COMPOSED_OPERATION_CAPABILITIES == {
         "request_dependency": frozenset({"add_comment", "await_role"}),
         "release_external_blocker": frozenset({"set_blockers"}),
+        # SYRD-723: the owner's explanation of its own ticket's blocker is its text, as edit_fields edits it.
+        "set_blocked_reason": frozenset({"edit_fields"}),
         # SYRD-537: a reminder snooze takes the hold's authority.
         "snooze_reminders": frozenset({"set_manually_controlled"}),
         "clear_reminder_snooze": frozenset({"set_manually_controlled"}),
@@ -140,7 +142,9 @@ def test_default_environment() -> None:
     assert table["await_user"] == ["director"]
     assert table["set_audit_return"] == ["director"]
     assert table["notify_user"] == ["director"]
-    assert len(table) == 60, len(table)  # SYRD-548: set_report_intake; SYRD-598: withdraw_signoff; SYRD-626; SYRD-629; SYRD-616: extend_lease, interrupt_lease; SYRD-628: five cohort operations; SYRD-644: clear_provider_hold; SYRD-662: await_user; SYRD-673: set_audit_return; SYRD-714: notify_user
+    # SYRD-723: the implementers, each on its own ticket only; the database decides that.
+    assert table["set_blocked_reason"] == ["app", "main", "ops", "perf", "research"]
+    assert len(table) == 61, len(table)  # SYRD-548: set_report_intake; SYRD-598: withdraw_signoff; SYRD-626; SYRD-629; SYRD-616: extend_lease, interrupt_lease; SYRD-628: five cohort operations; SYRD-644: clear_provider_hold; SYRD-662: await_user; SYRD-673: set_audit_return; SYRD-714: notify_user; SYRD-723: set_blocked_reason
 
 
 def test_role_environment_is_read_at_import() -> None:

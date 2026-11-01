@@ -302,6 +302,8 @@ GRANT EXECUTE ON FUNCTION ticket_board.user_events_after(bigint, integer) TO tic
 -- The Director's ad hoc notification: the function checks the control role and its registered live pane.
 GRANT EXECUTE ON FUNCTION ticket_board.record_director_notice(bigint, bigint, bigint, text, text, text, boolean, text,
                                                               text) TO ticket_board_service;
+-- SYRD-723: an implementer's own ticket's blocker explanation; the function checks the owner and its live runtime.
+GRANT EXECUTE ON FUNCTION ticket_board.set_blocked_reason(text, text, bigint, bigint, bigint) TO ticket_board_service;
 
 -- SYRD-589: work delivered to a replaced provider, told to its replacement once.
 REVOKE EXECUTE ON FUNCTION ticket_board.redeliver_replaced_work(jsonb, timestamptz) FROM PUBLIC;

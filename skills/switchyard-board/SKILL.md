@@ -165,6 +165,7 @@ move it to backlog; that reads as abandoned.
 ```bash
 ticket-board-write request-dependency <id> --role <role> --reason "what they have to do"
 ticket-board-write set-blockers <id> --blocked-by <other-ticket-id> --blocked-reason "..."
+ticket-board-write set-blocked-reason <id> --blocked-reason "..."   # or --clear
 ticket-board-write await-role <id> --role <role>
 ticket-board-write clear-awaiting-role <id>
 ```
@@ -189,6 +190,17 @@ dependency; you are told once when it is released, with the result. `await-role`
 wait without a reason - prefer `request-dependency`, which is that plus the
 sentence the awaited role needs. Either way the wait clears when the awaited
 role *acts*, not when they reply.
+
+**Keep the explanation current yourself.** The ticket's `blocked_reason` says why
+the work cannot proceed. While you own the ticket in an implementation stage,
+set, replace or clear it with `set-blocked-reason`, from your own pane, as you
+find, refine or resolve the reason, rather than leaving the director to rewrite
+it. It is text and nothing more: it records no wait and ends none, sets or
+removes no blocker, and moves nothing. Ask for the dependency with
+`request-dependency`, and finish the stage with its declared transition; prose
+never stands in for either. While a blocker stands you can revise its
+explanation, not empty it. Each change goes in the ticket's field audit under
+your role and runtime.
 
 **The User is never a dependency.** `request-dependency` and `await-role` refuse
 the User: work reaches the User in User Review, after every gate it owes. Finish

@@ -1105,20 +1105,12 @@ class TicketBoardWriteClient:
     def set_manually_controlled(self, ticket_id: str, value: bool, *, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "set_manually_controlled", {"manually_controlled": value}, caller_role=caller_role)
 
-    def set_blockers(
-        self,
-        ticket_id: str,
-        *,
-        blocked_by: list[str],
-        blocked_reason: str,
-        caller_role: str | None = None,
-    ) -> dict[str, Any]:
-        return self._ticket_action(
-            ticket_id,
-            "set_blockers",
-            {"blocked_by": blocked_by, "blocked_reason": blocked_reason},
-            caller_role=caller_role,
-        )
+    def set_blockers(self, ticket_id: str, *, blocked_by: list[str], blocked_reason: str, caller_role: str | None = None) -> dict[str, Any]:
+        return self._ticket_action(ticket_id, "set_blockers", {"blocked_by": blocked_by, "blocked_reason": blocked_reason}, caller_role=caller_role)
+
+    def set_blocked_reason(self, ticket_id: str, blocked_reason: str, *, caller_role: str | None = None) -> dict[str, Any]:
+        """The owner's explanation of its own ticket's blocker (SYRD-723); empty clears it. A note, never a wait."""
+        return self._ticket_action(ticket_id, "set_blocked_reason", {"blocked_reason": blocked_reason}, caller_role=caller_role)
 
     def add_comment(self, ticket_id: str, *, text: str, urgent: bool = False, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "add_comment", {"text": text, "urgent": urgent}, caller_role=caller_role)

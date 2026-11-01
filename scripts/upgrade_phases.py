@@ -796,6 +796,10 @@ def _refresh_upgrade_artifacts(
     report_problems = report_link_problems + launcher.refresh_upstream_report_credential(
         config, dry_run=dry_run, registry_dir=registry_dir, print_func=print_func,
     )
+    # SYRD-721: its one connection becomes its declared report parent, and each ancestor's credential is refreshed.
+    from scripts import report_parent
+
+    report_problems += report_parent.migrate(config, registry_dir=registry_dir, dry_run=dry_run, print_func=print_func)
     # A tenant registered before its CLI selection was recorded cannot be
     # offered a promotion at launch without guessing, and guessing is what
     # asked the `test` tenant about a Hermes no role of its uses (SYRD-220).

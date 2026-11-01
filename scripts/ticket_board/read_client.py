@@ -456,6 +456,11 @@ def _build_parser() -> argparse.ArgumentParser:
     cohorts.add_argument("--json", action="store_true", help="print JSON")
     stall = subparsers.add_parser("stall", help="show why the board stall alert has or has not fired (SYRD-637)")
     stall.add_argument("--json", action="store_true", help="print the stall state JSON")
+    ancestors = subparsers.add_parser(
+        "report-ancestors", help="list where this project can file reports: its report parent and every ancestor, "
+                                 "nearest first, with identity, reachability and credential (SYRD-721)")
+    ancestors.add_argument("--project", default="", help="default: TICKET_BOARD_REPORT_ORIGIN_PROJECT")
+    ancestors.add_argument("--json", action="store_true", help="print JSON")
 
     return parser
 
@@ -487,6 +492,18 @@ def command_wants_json(args: argparse.Namespace) -> bool:
 def main(argv: list[str] | None = None) -> int:
     try:
         args = _build_parser().parse_args(normalize_argv(argv))
+        if args.command == "report-ancestors":  # root's registry and each ancestor's public answer; not this board
+            from . import report_ancestry as ra
+
+            project = args.project.strip() or os.environ.get("TICKET_BOARD_REPORT_ORIGIN_PROJECT", "").strip() \
+                or os.environ.get("TICKET_BOARD_PROJECT", "").strip()
+            if not project:
+                raise TicketBoardReadError("report-ancestors needs --project or TICKET_BOARD_REPORT_ORIGIN_PROJECT")
+            payload = ra.describe(project, directory=ra.registry_dir(),
+                                  token_file=os.environ.get("TICKET_BOARD_TENANT_REPORT_TOKEN_FILE", ""),
+                                  environment_url=os.environ.get("TICKET_BOARD_REPORT_URL", ""))
+            print_json(payload) if command_wants_json(args) else print(ra.describe_text(payload))
+            return 0
         client = TicketBoardReadClient(args.board_url)
         command = args.command
         if command is None:

@@ -468,90 +468,201 @@ ticket-board-write report-follow-up --ticket SYRD-673 --kind supersession \
   credentials held before SYRD-677, files reports but cannot follow one up. The next upgrade,
   or `sudo switchyard upgrade <project> --only upstream-report`, replaces it.
 
+#### More than one upstream board: report ancestry
+
+A project has at most one **report parent**, and a parent may have its own (SYRD-721).
+MEFP uses SAPI as a library: a defect in MEFP's use of SAPI may be SAPI's to fix, and
+Switchyard's too where it touches orchestration or reporting. With MEFP → SAPI →
+Switchyard, MEFP's **report ancestors** are SAPI, then Switchyard, nearest first. Ancestry
+is about where reports go. It is not a ticket's parent or children, and not a code
+dependency.
+
+```bash
+ticket-board-read report-ancestors          # --json for a program
+```
+
+It lists the immediate parent and every ancestor, nearest first. Each entry shows:
+- the project's name, slug and ticket prefix;
+- whether its board answered as that project;
+- whether this project holds a usable report credential for it.
+
+It never shows a URL or a token.
+
+The board page shows the same ancestors under **Reports go to**, with one difference in
+the credential column. The board service cannot read your project's files, so the page
+says only whether root's records show a credential was **issued** for each ancestor (in
+`GET /api/report-ancestry`, `credential.issued`, never `usable`). Only
+`report-ancestors`, run in your pane, checks that the credential file is there, readable,
+and bound to your project. If the two views differ, rerun the narrow step below: it
+rewrites a missing or changed credential file, or repairs root's missing issuance record
+without rotating a current private credential. The page itself points to
+`report-ancestors`. This is deliberate least privilege: the board service never reads
+report tokens, and no role's report of what it saw is shown as proof.
+
+**One target, normally.** `file-report` without `--to` files to the immediate parent,
+exactly as before. Name one ancestor with `--to <project>`: its slug, its name or its
+ticket prefix. Use `--to all` only when the *same* report genuinely concerns each
+ancestor, for example a library defect that is also a platform defect. Having ancestors
+is not a reason to file more than once. Nothing fans out unless you say `--to all`.
+
+```bash
+ticket-board-write file-report --to all --title "..." --body "..." --external-source-ref mefp:MEFP-12
+# preview: "Destination: All ancestors (Stellaris API, Switchyard). This would create 2 NEW tickets ..."
+# then the same command with --submit-upstream --expect <digest>
+```
+
+**The two steps cover the whole set.**
+- **Preview.** It names every destination and says how many tickets will be created.
+  It writes nothing.
+- **Submit.** `--submit-upstream --expect <digest>` files exactly that report to exactly
+  those boards. The one digest binds every destination, and each board still checks its
+  own confirmation.
+- **Refused before anything is written:**
+  - a target that is not one of your ancestors, or a name that matches two of them;
+  - a board that does not answer as the project root recorded;
+  - a missing credential, or one bound to another project;
+  - a broken chain, such as a cycle.
+- **Each destination gets its own ticket.** It carries your origin project and source
+  reference, plus the shared **report group** (`rg-…`), which the board says on the
+  ticket. Related reports can be recognised, and neither board controls the other.
+
+**A partial result is said exactly, and is safe to retry.** Boards are written one after
+another, not in one transaction. If one takes the report and another fails, the command
+names each outcome (created, already there, or FAILED and why) and exits non-zero. Run the
+same command with the same `--expect` again:
+- it files only where the report is missing;
+- a board that already took it answers with the ticket it created, even when your own
+  record of it is lost.
+
+Your project keeps a receipt per destination, owner-only, in
+`~/.local/state/switchyard/<project>/report-receipts/<group>.json`. A receipt names the
+ticket, the board and the credential file it used, never a token.
+
+**Following up one ticket or all of them.**
+- `report-follow-up --group <rg> --to all` follows up every ticket that report group
+  filed.
+- `--group <rg> --to <project>` follows up just that board's ticket.
+- `--to <project> --ticket <ID>` names one ancestor's ticket directly.
+
+Each takes the same preview, one confirmation and safe partial retry. A follow-up to a
+board that already took it adds nothing.
+
+**Choosing or changing a project's report parent is root's**, through one narrow step, described in
+"Connecting a project and choosing its report parent" below.
+
 **No one-step path exists, for anyone.** No automated reporter exists. A health or crash
 monitor that needs to report upstream must first be given its own declared, authorised
 path on the receiving board, one an ordinary tenant credential cannot claim.
 
-The target board is `TICKET_BOARD_REPORT_URL`, not the tenant board's
-`TICKET_BOARD_URL`. The credential stays in a 0600 EnvironmentFile-style file, and panes
-carry only its path through `TICKET_BOARD_TENANT_REPORT_TOKEN_FILE`. New projects can
-carry those values in their launcher config as `upstream_report_url` and
-`upstream_report_token_file`; the pane launcher exports them for every role without
-putting the token value on the process command line. If `TICKET_BOARD_REPORT_ORIGIN_PROJECT`
-is set, `--origin-project` is optional and defaults to the current tenant slug.
+#### Connecting a project and choosing its report parent (operators)
 
-**If the variables are not there, the tenant was never given them.** They are exported
-only for a project whose launcher config names the upstream board, and for a long time
-those two keys could only be supplied to `switchyard new` — so a project provisioned
-before the feature, or one whose upstream board moved, had no way to acquire them and its
-Director had to pass the URL and token path by hand every time. One narrow step connects
-it now, and runs no upgrade phase at all -- no release resolution, no ownership repair, no
-workflow, identity or pane change (SYRD-548):
+Two things make a project able to report, and they are kept apart.
+- **Root's record of its report parent.** This is `report_parent` in the project's
+  root-owned registry record, with every change in `report_parent_history` (from, to,
+  when, who). The ancestors after it are read from the same records. The board API
+  cannot change it, and neither can the project's own configuration.
+- **The link its panes carry.** Each pane's environment has:
+  - `TICKET_BOARD_REPORT_URL`: the immediate parent's board;
+  - `TICKET_BOARD_REPORT_ORIGIN_PROJECT`;
+  - `TICKET_BOARD_TENANT_REPORT_TOKEN_FILE`: the path to the immediate parent's 0600
+    credential, by default `~/.config/<project>/upstream-report.env`.
+
+  These come from `upstream_report_url` and `upstream_report_token_file` in the
+  project's configuration. A token is never put in the configuration, which every role
+  can read, or on a command line.
+
+  Each other ancestor's credential sits beside it in
+  `~/.config/<project>/report-credentials/<ancestor>.env`, also owner-only, and found
+  from that path. One board's token is never used at another.
+
+**One narrow step sets both, and runs no other upgrade phase.** It touches no release,
+ownership, workflow, identity or pane (SYRD-548). Name the parent by its registered
+project slug:
 
 ```bash
-sudo switchyard upgrade <project> --only upstream-report --upstream-report-url http://127.0.0.1:23326
+sudo switchyard upgrade mefp --only upstream-report --upstream-report-board sapi --dry-run
+sudo switchyard upgrade mefp --only upstream-report --upstream-report-board sapi
+sudo switchyard upgrade mefp --only upstream-report          # the parent already recorded, or the host's declared board
+sudo switchyard upgrade mefp --only upstream-report --no-upstream-report   # no parent
 ```
 
-A new project is connected from its first launch by default (SYRD-674). Every board mints
-a report token, so which board takes this host's tenant reports is root's declaration, made
-once in that board's root-owned registry record:
+**What the step does, in order:**
+1. It checks the parent and the whole chain it brings, and refuses, writing nothing, on:
+   - a project that would be its own parent, or a cycle;
+   - an unregistered project;
+   - two links with the same board or ticket prefix;
+   - any board that does not answer as the project root recorded.
 
-```bash
-sudo switchyard upgrade syrd --only accept-reports     # --only refuse-reports withdraws it
-```
+   Nothing is inferred from other boards on the host or from repository remotes.
+2. It writes the link and the immediate parent's credential.
+3. It records the parent with a history entry.
+4. It issues one report-only credential for each ancestor's board.
 
-With exactly one board declared, `switchyard new` connects every new tenant to it before
-any pane starts, and says so before its confirmation and again at the end. Otherwise it
-refuses before creating anything, asked or not, and says the repair: with none declared,
-the `--only accept-reports` to run, naming a board only when root's own registry records
-show this host's tenants connected to that one board (never from a tenant's configuration,
-which names whatever its tenant wrote); with several, the ones to choose between. Every tenant's
-board mints a report token, so an undeclared board is never offered as a receiver
-(SYRD-686). The declaration is kept in that board's registry record, which install never
-touches and every upgrade step rewrites with its other keys intact.
-`--upstream-report-board <slug>` or `--upstream-report-url <board URL>` names one; `--no-upstream-report` creates the tenant unable to file, with a warning naming the
-repair. A board that does not answer at its URL as itself is never recorded as connected.
-What became of it -- connected, failed, opted out, or no board available -- is kept in the
-tenant's own registry record, and `switchyard status` shows it for every project.
+After a complete run, running it again changes nothing. After a partial local failure, a
+retry completes the missing credential file or root issuance record without rotating a
+current private credential. Removing or changing a parent erases nothing: credentials
+already issued and the project's receipts stay, so a report filed before the change can
+still be followed up. When the step writes a new link while panes are running, it names
+the panes that need a relaunch; each pane carries the link from its next launch. A full
+`switchyard upgrade` with `--upstream-report-url` still records a link as part of an
+upgrade, but no project needs one for this.
 
-The repair needs no URL either: `--only upstream-report` connects the board already
-recorded, or the host's one declared board, and refuses rather than guess between two. When
-it writes a new link while panes are running, it names the panes that need a relaunch.
-A full `switchyard upgrade <project> --upstream-report-url ...` still records the link as part
-of an upgrade, but no tenant needs one for this. A pane with no report credential is refused
-by `file-report` with the narrow command, never an upgrade.
+**Where a new project reports.** `switchyard new` decides before creating anything,
+and the board it connects becomes the project's report parent.
+- **The default is root's declaration.** Every board mints a report token, so which
+  board takes this host's tenant reports is declared once, in that board's root-owned
+  registry record:
 
-That is stated once. The credential path defaults to
-`~/.config/<project>/upstream-report.env`, both are written into the tenant's config, and
-the next launch carries `TICKET_BOARD_REPORT_URL`, `TICKET_BOARD_REPORT_ORIGIN_PROJECT`
-and `TICKET_BOARD_TENANT_REPORT_TOKEN_FILE` to every pane.
+  ```bash
+  sudo switchyard upgrade syrd --only accept-reports     # --only refuse-reports withdraws it
+  ```
 
-**The credential is refreshed on every upgrade, because it goes stale silently.** The
-board checks a submitted report token against one configured secret, minted when that
-board's own environment file is first written — so a cutover mints a new one and every
-credential handed out before it stops working. Nothing notices, because the thing that
-would notice is a tenant trying to report that something is wrong. MEFP's copy was from
-2026-08-31 and its Director could not file at all (SYRD-238).
+  With exactly one board declared, `switchyard new` connects every new tenant to it
+  before any pane starts, and says so before its confirmation and again at the end.
+- **No single declared board.** `switchyard new` refuses before creating anything and
+  names the repair:
+  - with none declared, the `--only accept-reports` to run, naming a board only when
+    root's own registry records show this host's tenants connected to that one board;
+  - with several declared, the ones to choose between.
 
-Each upgrade -- and `upgrade --only upstream-report` with no URL, which reconnects the
-recorded board -- resolves the upstream board from the host registry, reads that board's
-current report token, and writes the tenant's credential file atomically, 0600 and owned by
-the tenant. Only the report token is ever read: a write token sitting beside it in the
-board's environment does not travel, and the token value is never put in the launcher
-config, which every role can read. Running it again writes nothing.
+  An undeclared board is never offered as a receiver (SYRD-686).
+- **Choosing explicitly.** `--upstream-report-board <slug>` names the parent;
+  `--no-upstream-report` creates the tenant unable to file, with a warning naming the
+  repair.
 
-The tenant is given a credential **bound to its own project** (SYRD-677), derived from
-the upstream board's own binding key (`TICKET_BOARD_REPORT_BINDING_KEY`, in that board's
-environment file). The key is never given to any tenant, and it is not the report secret
-every tenant once held, so no tenant can make another project's credential. This happens
-when the upstream board says it reads such a credential. The board then reads the
-reporting project from the credential: a bound credential files reports from its own
-project only, and is the only one that can follow a report up. A board that does not say
-so is given its secret as before, and the next refresh asks again.
+A board that does not answer at its URL as itself is never recorded as connected. What
+became of the connection (connected, failed, opted out, or no board available) is kept in
+the tenant's registry record, and `switchyard status` shows it for every project. A
+project connected before ancestry existed has that one board declared as its parent at
+its next upgrade, so it reports exactly where it did.
 
-A board provisioned before SYRD-677 has no binding key. Root's
-`sudo switchyard upgrade <board> --only accept-reports` gives it one, once, and it takes
-effect when that board next starts; each tenant's next upgrade then binds its credential.
+**Credentials are refreshed on every upgrade, because they go stale silently.** A board
+checks a report token against secrets minted when its own environment file was first
+written. A cutover therefore mints new ones, and every credential handed out before stops
+working. Nothing notices, because the thing that would notice is a tenant trying to report
+that something is wrong. MEFP's copy was from 2026-08-31, and its Director could not file
+at all (SYRD-238).
+
+Each upgrade, and each `--only upstream-report`, resolves every board in the chain from
+the host registry and writes each credential atomically, 0600 and owned by the tenant.
+Only report credentials are ever read. Running it again writes nothing.
+
+**Each credential is bound to the project** where that board reads bound credentials
+(SYRD-677).
+- **What it is.** It is derived from that board's own binding key
+  (`TICKET_BOARD_REPORT_BINDING_KEY`, in its environment file). The key is never given to
+  any tenant, and is not the report secret every tenant once held, so no tenant can make
+  another project's credential.
+- **What it allows.** It files reports from its own project only, and is the only
+  credential that can follow a report up.
+- **Older boards.** A board that does not read bound credentials is given its shared
+  secret instead, and the next refresh asks again. A board provisioned before SYRD-677
+  has no binding key. `sudo switchyard upgrade <board> --only accept-reports` gives it
+  one, once; it takes effect when that board next starts, and each tenant's next upgrade
+  then binds its credentials.
+
+`file-report` in a pane with no report credential is refused with the narrow command,
+never an upgrade.
 
 An upstream report lands in `analysis`, assigned to `unassigned`, unless it asks for Backlog
 and the board's Director allows that. `file-report --defer` asks for Backlog (deferred); the

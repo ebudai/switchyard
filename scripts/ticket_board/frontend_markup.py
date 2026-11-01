@@ -105,6 +105,7 @@ MARKUP = """  <div class="layout">
           <div><strong>Store</strong>: <span id="storePath">(loading)</span></div>
           <div><strong>Frames</strong>: <span id="framePath">(loading)</span></div>
           <div><strong>Refresh</strong>: <span id="refreshLine">(loading)</span></div>
+          <div><strong>Reports go to</strong>: <span id="reportAncestry">(loading)</span></div>
         </div>
       </div>
       <div class="board-scroll">

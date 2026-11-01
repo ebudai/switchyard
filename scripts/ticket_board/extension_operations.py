@@ -142,7 +142,18 @@ READ_ROUTES = {
     "/api/cohorts": lambda app, _query: cohort_status(app),  # SYRD-628
     "/api/provider-holds": lambda app, _query: provider_hold_status(app),  # SYRD-644
     user_events.PATH: user_events.read,  # SYRD-714: the phone bridge's read; changes nothing
+    "/api/report-ancestry": lambda app, _query: report_ancestry_status(app),  # SYRD-721
 }
+
+
+def report_ancestry_status(app: Any) -> dict[str, Any]:
+    """SYRD-721: where this board's project can file reports, read-only, as the board page shows it. The board service
+    reads no tenant file, so each credential is as root's records say it was issued; never a token."""
+    from . import report_ancestry
+
+    return report_ancestry.describe(str(getattr(app, "project", "")), directory=report_ancestry.registry_dir(),
+                                    from_records=True,
+                                    ask=lambda url: report_ancestry.ask_identity(url, timeout=2.0))
 
 
 def board_stall_status(app: Any) -> dict[str, Any]:

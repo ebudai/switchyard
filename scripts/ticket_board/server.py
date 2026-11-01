@@ -977,12 +977,10 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/runtime-assignments":
             self.send_json({
                 "project": getattr(self.app, "project", "pgu"),
+                "ticket_prefix": getattr(self.app, "ticket_prefix", "PGU"),  # SYRD-721: root records it with a parent
                 "report_credentials": "bound" if self.server.report_binding_key else "shared",  # SYRD-677
-                "authority_mode": (
-                    "process"
-                    if os.environ.get("TICKET_BOARD_PROCESS_AUTHORITY", "").strip() == "1"
-                    else "legacy_uid"
-                ),
+                "authority_mode": ("process" if os.environ.get("TICKET_BOARD_PROCESS_AUTHORITY", "").strip() == "1"
+                                   else "legacy_uid"),
                 "assignments": self.app.runtime_targets(),
             })
             return
@@ -1021,13 +1019,11 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 "project": getattr(self.app, "project", "pgu"),
                 "project_name": getattr(self.app, "project_name", "PGU"),
                 "ticket_prefix": getattr(self.app, "ticket_prefix", "PGU"),
-                # Where this board verifies a commit_hash. A role pane is not
-                # told this by its environment -- only the board unit carries it
-                # -- so a client that has just published has no way to put the
-                # commit somewhere the board will find it without asking
-                # (SYRD-125). Paths, not contents: nothing here is secret, and
-                # the board remains the one authority on which repository it
-                # actually reads.
+                "report_groups": True,  # SYRD-721: a report filed as one of a group is recorded as one
+                # Where this board verifies a commit_hash. A role pane is not told this by its environment --
+                # only the board unit carries it -- so a client that has just published has no way to put the
+                # commit somewhere the board will find it without asking (SYRD-125). Paths, not contents:
+                # nothing here is secret, and the board remains the one authority on which repository it reads.
                 "commit_repositories": [str(path) for path in getattr(self.app, "commit_git_dirs", ())],
             }, session=True)
             return

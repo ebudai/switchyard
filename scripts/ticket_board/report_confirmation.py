@@ -31,14 +31,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any
 
 DIGEST_VERSION = "syrd602-v1"
+#: A report that carries a report group (SYRD-721): the same report, correlated across a project's ancestors.
+GROUP_DIGEST_VERSION = "syrd721-v1"
+GROUP_RE = re.compile(r"^rg-[0-9a-f]{20}$")
 DIGEST_CHARS = 24
 #: What a report may carry: the fields the board has always accepted, the
 #: confirmation, and nothing that would let a tenant set state or ownership.
 REPORT_FIELDS = {"title", "body", "origin_project", "external_source_ref", "source_ref", "requested_stage",
-                 "attachments", "confirmation"}
+                 "attachments", "confirmation", "report_group"}
 
 
 def destination_identity(client_config: dict[str, Any]) -> dict[str, str]:
@@ -51,10 +55,12 @@ def destination_identity(client_config: dict[str, Any]) -> dict[str, str]:
 
 def report_digest(*, destination: dict[str, str], source_project: str, title: str, body: str,
                   requested_stage: str = "", external_source_ref: str = "",
-                  attachments: list[str] | None = None) -> str:
-    """The confirmation for exactly this report to exactly this board."""
+                  attachments: list[str] | None = None, report_group: str = "") -> str:
+    """The confirmation for exactly this report to exactly this board. A report group, when one is sent, is
+    bound too, under its own version: a report without one confirms exactly as it always did."""
+    grouped = {"report_group": report_group} if report_group else {}
     canonical = json.dumps({
-        "version": DIGEST_VERSION,
+        "version": GROUP_DIGEST_VERSION if report_group else DIGEST_VERSION, **grouped,
         "destination": {"project": destination["project"], "ticket_prefix": destination["ticket_prefix"]},
         "source_project": source_project, "title": title, "body": body,
         "requested_stage": requested_stage, "external_source_ref": external_source_ref,
@@ -101,7 +107,10 @@ def checked_submission(payload: dict[str, Any], *, project: str, ticket_prefix: 
         "origin_project": str(payload.get("origin_project", "")),
         "external_source_ref": str(payload.get("external_source_ref", payload.get("source_ref", ""))),
         "requested_stage": str(payload.get("requested_stage") or ""),
+        "report_group": str(payload.get("report_group") or "").strip(),
     }
+    if report["report_group"] and not GROUP_RE.fullmatch(report["report_group"]):
+        raise ValueError("file_report report_group must be rg- and 20 hex digits, as report-fanout makes it")
     confirmation = str(payload.get("confirmation") or "").strip()
     if not confirmation:
         raise PermissionError(
@@ -110,7 +119,8 @@ def checked_submission(payload: dict[str, Any], *, project: str, ticket_prefix: 
     expected = report_digest(destination={"project": project, "ticket_prefix": ticket_prefix},
                              source_project=report["origin_project"], title=report["title"], body=report["body"],
                              requested_stage=report["requested_stage"],
-                             external_source_ref=report["external_source_ref"], attachments=[])
+                             external_source_ref=report["external_source_ref"], attachments=[],
+                             report_group=report["report_group"])
     if confirmation != expected:
         raise PermissionError(
             f"file_report confirmation does not match this report on this board ({project}, {ticket_prefix}-N): "
@@ -122,12 +132,16 @@ def submit(app: Any, payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     """Create the confirmed report once: (ticket, created). A used confirmation returns its ticket, uncreated."""
     report = checked_submission(payload, project=str(app.project), ticket_prefix=str(app.ticket_prefix))
     # Title, origin and the requested state are ticket_board.file_report's to refuse, as they always were.
+    # A report group is recorded with the confirmation and said on the ticket (pgu1023, SYRD-721); without one the
+    # board files through the same six-argument function it always called.
+    grouped = (report["report_group"],) if report["report_group"] else ()
     with app._pg_connect() as conn:
         with conn.transaction():
             row = conn.execute(
-                "SELECT ticket_id, created FROM ticket_board.file_confirmed_report(%s, %s, %s, %s, %s, %s)",
+                "SELECT ticket_id, created FROM ticket_board.file_confirmed_report(%s, %s, %s, %s, %s, %s"
+                + (", %s)" if grouped else ")"),
                 (report["title"], report["body"], report["origin_project"], report["external_source_ref"],
-                 report["requested_stage"], report["confirmation"]),
+                 report["requested_stage"], report["confirmation"], *grouped),
             ).fetchone()
     ticket_id = str(row["ticket_id"] if isinstance(row, dict) else row[0])
     created = bool(row["created"] if isinstance(row, dict) else row[1])

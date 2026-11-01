@@ -90,16 +90,18 @@ def _add_user_acceptance_relay(client: Any, *, apply: bool, expected_revision: i
 def not_connected_for_reports(environ: Any) -> str:
     """The refusal a pane with no report credential sees, naming the one narrow step (SYRD-548).
 
-    Never a full upgrade: connecting a tenant for reports writes its report URL,
-    its credential and nothing else, so the remedy must not cost it every other
-    pending upgrade phase.
+    Never a full upgrade: connecting a tenant for reports writes its report link and credentials, and root's
+    record of its report parent (SYRD-721), and nothing else, so the remedy must not cost it every other pending
+    upgrade phase.
     """
     project = str(environ.get("TICKET_BOARD_PROJECT") or "").strip() or "<project>"
     return (
         f"file-report: {project} is not connected to an upstream board for reports: this pane has no report "
-        "credential (TICKET_BOARD_TENANT_REPORT_TOKEN_FILE is unset). An operator connects it with one narrow "
-        f"step that runs no other upgrade phase: `sudo switchyard upgrade {project} --only upstream-report "
-        "--upstream-report-url <upstream-board-url>`; the next launch of each pane carries it. Nothing was filed."
+        "credential (TICKET_BOARD_TENANT_REPORT_TOKEN_FILE is unset). An operator connects it to its report parent "
+        f"with one narrow step that runs no other upgrade phase: `sudo switchyard upgrade {project} --only "
+        "upstream-report --upstream-report-board <slug>` (the parent's project; with none named, the parent root already "
+        "recorded, or the host's declared report board). It verifies the parent's chain, records it, and issues a "
+        "credential for each ancestor; the next launch of each pane carries the link. Nothing was filed."
     )
 
 
@@ -110,7 +112,10 @@ def file_report_command(args: Any, client: Any, environ: Any) -> dict[str, Any] 
     written anywhere until `--submit-upstream --expect <digest>` names this report's own digest.
     """
     from . import report_confirmation as rc
+    from . import report_fanout
 
+    if args.to.strip():  # SYRD-721: one named ancestor, or all of them, under one confirmation
+        return report_fanout.file_report_to(args, client, environ)
     if not (args.report_token.strip() or args.report_token_file.strip()) or not args.report_board_url.strip():
         raise write_client.TicketBoardWriteError(not_connected_for_reports(environ))
     if not args.origin_project.strip():
@@ -146,6 +151,12 @@ def file_report_command(args: Any, client: Any, environ: Any) -> dict[str, Any] 
     response = client.file_report(title=args.title, body=args.body, origin_project=args.origin_project,
                                   external_source_ref=args.external_source_ref, requested_stage=requested,
                                   confirmation=digest)
+    # SYRD-721: filed exactly as before, and remembered, so filing the same report to all ancestors later skips it.
+    report_fanout.keep_single_receipt(environ, project=args.origin_project, group=report_fanout.report_group(
+        source_project=args.origin_project, title=args.title, body=args.body, requested_stage=requested,
+        external_source_ref=args.external_source_ref), title=args.title,
+        destination={**destination, "project_name": identity.get("project_name")}, board_url=args.report_board_url,
+        credential_file=args.report_token_file, digest=digest, response=response)
     if response.get("replayed"):
         print(f"file-report: this exact report was already filed as {_ticket_from_response(response).get('id')}; "
               "nothing new was created.", file=sys.stderr)
@@ -162,6 +173,16 @@ def report_follow_up_command(args: Any, client: Any, environ: Any) -> dict[str, 
     from . import report_confirmation as rc
     from . import report_follow_up as rf
 
+    if args.to.strip() or args.group.strip():  # SYRD-721: one filed destination, or each, under one confirmation
+        if not args.to.strip():
+            raise write_client.TicketBoardWriteError("report-follow-up --group needs --to all or --to <project>. "
+                                                     "Nothing was sent.")
+        from . import report_fanout
+
+        return report_fanout.report_follow_up_to(args, client, environ)
+    if not args.ticket:
+        raise write_client.TicketBoardWriteError("report-follow-up needs --ticket <ID>, or --group <rg> with --to. "
+                                                 "Nothing was sent.")
     if not (args.report_token.strip() or args.report_token_file.strip()) or not args.report_board_url.strip():
         raise write_client.TicketBoardWriteError(not_connected_for_reports(environ))
     if args.expect and not args.submit_upstream:
@@ -443,6 +464,10 @@ def _build_parser() -> argparse.ArgumentParser:
     file_report.add_argument("--submit-upstream", action="store_true",
                              help="file the report on the other project's board; needs --expect")
     file_report.add_argument("--expect", default="", help="the digest this report's preview printed")
+    # SYRD-721: a member of this project's report ancestry (ticket-board-read report-ancestors), or all of them.
+    file_report.add_argument("--to", default="", metavar="PROJECT|all",
+                             help="file to this one report ancestor, or to each (all), nearest first, after one "
+                                  "confirmation of the whole set; default: the immediate report parent")
     file_report.add_argument(
         "--defer",
         action="store_true",
@@ -453,7 +478,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     # SYRD-677: a follow-up on a report this project filed: previewed, then exactly that one, once.
     follow_up = subparsers.add_parser("report-follow-up")
-    follow_up.add_argument("--ticket", required=True, help="the upstream report this project filed")
+    follow_up.add_argument("--ticket", default="", help="the upstream report this project filed")
+    follow_up.add_argument("--group", default="", help="a report group file-report printed: follow up its tickets")
+    follow_up.add_argument("--to", default="", metavar="PROJECT|all",
+                           help="the ancestor whose ticket to follow up, or all the group's tickets (SYRD-721)")
     follow_up.add_argument("--kind", choices=["comment", "correction", "withdrawal_request", "supersession"],
                            default="comment", help="what it is; a withdrawal or supersession is a request to the "
                                                    "upstream Director, not a change")
@@ -891,6 +919,9 @@ def main(argv: list[str] | None = None) -> int:
         elif command == "file_report":
             response = file_report_command(args, client, os.environ)
             if response is None:  # a preview: printed, and nothing filed
+                return 0
+            if "destinations" in response:  # SYRD-721: each destination's outcome
+                print(json.dumps(response))
                 return 0
             if args.defer and not _records_report_request(response):
                 print(

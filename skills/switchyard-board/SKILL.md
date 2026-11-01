@@ -223,6 +223,17 @@ adds one comment attributed `reporter:<your project>` and tells the upstream Dir
 changes nothing else. A withdrawal or supersession is a request for that Director, not a
 change. Only your own project's reports, read from your credential, never an argument.
 
+A project may have report **ancestors** (its report parent, that parent's parent, and so
+on), declared by root and listed by `ticket-board-read report-ancestors`: names, ticket
+prefixes, whether each board answered as itself, and whether you hold a usable credential
+for it. Without `--to`, `file-report` files to the immediate parent, as always. Name one
+ancestor with `--to <project>`; use `--to all` only when the same report genuinely
+concerns each of them, never just because they exist. One preview names every destination
+and how many tickets it creates, and one digest confirms the whole set. If one board takes
+it and another fails, the result says which, and the same command with the same `--expect`
+files only where it is missing; a board that took it answers with its ticket. Follow up
+those tickets with `report-follow-up --group <rg> --to all|<project>`, the same way.
+
 ## A ticket that is not yours
 
 When a project runs a Router, an implementer can be handed work that belongs to

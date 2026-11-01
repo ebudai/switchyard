@@ -401,6 +401,21 @@ REPORT_PARSERS = {
     "_build_switchyard_new_parser": "the host's one declared report board, else you are asked",
     "_build_switchyard_upgrade_parser": "the URL or board already recorded, else the host's one declared report board",
 }
+#: SYRD-721: upgrade's narrow step also declares the report parent and issues ancestor credentials, and its
+#: --no-upstream-report removes a parent. The baseline's words for those, and the candidate's, swapped by rule.
+ONLY_721 = ("connects the project to the board it files reports to -- its report URL, its credential and nothing "
+            "else (SYRD-548)",
+            "connects the project to its report parent -- the link its panes carry and its credential -- and, after "
+            "verifying the whole ancestor chain, records that parent in root's registry with its history and issues "
+            "one report-only credential per ancestor; nothing else (SYRD-548, SYRD-721)")
+NO_REPORT_HELP = {
+    "_build_switchyard_new_parser":
+        "file no Switchyard reports: recorded as a deliberate opt-out, with a warning naming the repair",
+    "_build_switchyard_upgrade_parser":
+        "with --only upstream-report: remove this project's report parent, recorded with its history; credentials "
+        "already issued and receipts are kept. With no parent, it records a deliberate opt-out. (switchyard new's "
+        "--no-upstream-report is the creation-time opt-out.)",
+}
 ONLY_TAIL = ("; accept-reports / refuse-reports records, as root, whether this project's board is the one new "
              "tenants on this host report to (SYRD-674); workflow-projection gives the tenant back the workflow "
              "projection a resumed provision left root's, so its Director can change its workflow (SYRD-676)")
@@ -421,7 +436,7 @@ def with_the_report_board(name: str, gold: dict) -> dict:
                                     f"{REPORT_PARSERS[name]})"},
         {**action, "class": "_StoreTrueAction", "option_strings": ["--no-upstream-report"], "dest": "no_upstream_report",
          "nargs": 0, "const": True, "default": False, "metavar": None,
-         "help": "file no Switchyard reports: recorded as a deliberate opt-out, with a warning naming the repair"},
+         "help": NO_REPORT_HELP[name]},
     ]
     actions = out["structure"]["actions"]
     at = next(i for i, a in enumerate(actions) if a["option_strings"] == ["--upstream-report-token-file"]) + 1
@@ -429,7 +444,7 @@ def with_the_report_board(name: str, gold: dict) -> dict:
     only = next((a for a in actions if a["option_strings"] == ["--only"]), None)
     if only is not None:
         only["choices"] = ["upstream-report", "accept-reports", "refuse-reports", "workflow-projection"]  # SYRD-676
-        only["help"] += ONLY_TAIL
+        only["help"] = only["help"].replace(*ONLY_721) + ONLY_TAIL
     defaults = {"upstream_report_board": "", "no_upstream_report": False}
     parsed = [out["no arguments"]] if "parsed" in out["no arguments"] else []
     parsed += list(out["parses"].values())
@@ -461,7 +476,7 @@ def without_the_report_board(text: str) -> str:
             continue
         skipping = False
         kept.append(line)
-    words = " ".join(" ".join(kept).split())
+    words = " ".join(" ".join(kept).split()).replace(" ".join(ONLY_721[1].split()), " ".join(ONLY_721[0].split()))
     for segment in (" [--upstream-report-board SLUG] [--no-upstream-report]",
                     ",accept-reports,refuse-reports,workflow-projection",
                     " ".join(ONLY_TAIL.split())):

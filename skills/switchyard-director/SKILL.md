@@ -510,6 +510,13 @@ the live workflow and command help are the current operating contract;
   `preview-upgrade` then `upgrade-tenant-release` for the host's commit. Follow
   those; never reinstall the older release, and never work around the boundary.
 - `switchyard board-skill verify` / `install` repairs the skills a pane loads.
+- A project's report parent (where its `file-report` goes) is root's, kept in
+  its registry record with its history: `sudo switchyard upgrade <project>
+  --only upstream-report --upstream-report-board <slug>` sets or changes it,
+  `--no-upstream-report` removes it, `--dry-run` first. It verifies the whole
+  chain it brings (no cycle, every board answering as itself) before writing,
+  and issues a credential per ancestor. `ticket-board-read report-ancestors`
+  shows the result. Ancestry is not consent: each report is still confirmed.
 - Rollback is a decision with a record: say on the ticket what was deployed,
   what regressed, what you reverted to, and how you confirmed the revert took.
 

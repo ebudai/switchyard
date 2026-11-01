@@ -92,6 +92,11 @@ and dashes in CLI subcommands.
 - Workflows, examples and configuration consumed by programs are product
   inputs, not prose. A documentation role reviews them but does not edit them.
 - Commit and publish from the checkout that actually contains the candidate.
+- A cross-board report goes to the immediate report parent unless `--to` names
+  one ancestor or `all`; `ticket-board-read report-ancestors` lists them. Use
+  more than one only when the same report concerns each. One preview and
+  digest cover the whole set; a partial result is retried with the same
+  digest, which files only where it is missing (board guide, report ancestry).
 
 ## Waits, blockers and silence
 

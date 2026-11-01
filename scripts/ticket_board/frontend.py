@@ -10,6 +10,7 @@ from .frontend_script_app import SCRIPT_APP
 from .frontend_script_core import SCRIPT_CORE
 from .frontend_script_delegation import SCRIPT_DELEGATION
 from .frontend_script_detail import SCRIPT_DETAIL
+from .frontend_script_reports import SCRIPT_REPORTS
 from .frontend_script_uat import SCRIPT_UAT, STYLE_UAT
 from .frontend_style import STYLE
 
@@ -55,6 +56,7 @@ def render_html(*, project: str = "pgu", project_name: str = "PGU", ticket_prefi
         + SCRIPT_DELEGATION
         + SCRIPT_UAT
         + SCRIPT_APP
+        + SCRIPT_REPORTS
         + "  </script>\n"
         + "</body>\n"
         + "</html>\n"

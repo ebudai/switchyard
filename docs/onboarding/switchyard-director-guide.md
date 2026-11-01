@@ -720,6 +720,25 @@ The recovery is the human's. You make sure nobody skips the verification or the 
 SYRD-553's check covers items 1 to 3 automatically. Until a check covers items 4 and 5,
 those are this section's alone.
 
+## Reports to other boards
+
+Your project files reports to its **report parent**: the board root declared for it, and
+that board's own ancestors after it. `ticket-board-read report-ancestors` lists them. For a
+project that consumes a library run as its own project, the chain is the library, then
+Switchyard: MEFP → SAPI → Switchyard.
+
+Choose one destination for each report, the board that owns the fix. Report to more than
+one ancestor (`file-report --to all`) only when the same report genuinely concerns each.
+For example, a library defect may also be a platform defect, and each board needs its own
+ticket for its own part. Having ancestors is never the reason. If a filing to several
+boards reports a partial result, rerun the same command with the same `--expect`: it files
+only where the report is missing. Do not file it again by hand.
+
+Changing where your project reports is not a board action. It is root's
+`--only upstream-report` step, described in the board guide.
+
+---
+
 ## Escalating to the human
 
 Escalate **decisions**, not technical direction the team can reason out. Product choices,

@@ -256,8 +256,10 @@ def _build_switchyard_upgrade_parser() -> argparse.ArgumentParser:
         choices=["upstream-report", "accept-reports", "refuse-reports", "workflow-projection"],
         default="",
         help=(
-            "run this one narrow step and no upgrade phase: upstream-report connects the project to the "
-            "board it files reports to -- its report URL, its credential and nothing else (SYRD-548); "
+            "run this one narrow step and no upgrade phase: upstream-report connects the project to its report "
+            "parent -- the link its panes carry and its credential -- and, after verifying the whole ancestor chain, "
+            "records that parent in root's registry with its history and issues one report-only credential per "
+            "ancestor; nothing else (SYRD-548, SYRD-721); "
             "accept-reports / refuse-reports records, as root, whether this project's board is the one new "
             "tenants on this host report to (SYRD-674); workflow-projection gives the tenant back the workflow "
             "projection a resumed provision left root's, so its Director can change its workflow (SYRD-676)"
@@ -309,7 +311,9 @@ def _build_switchyard_upgrade_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-upstream-report",
         action="store_true",
-        help="file no Switchyard reports: recorded as a deliberate opt-out, with a warning naming the repair",
+        help=("with --only upstream-report: remove this project's report parent, recorded with its history; "
+              "credentials already issued and receipts are kept. With no parent, it records a deliberate opt-out. "
+              "(switchyard new's --no-upstream-report is the creation-time opt-out.)"),
     )
     parser.add_argument(
         "--publish-remote",

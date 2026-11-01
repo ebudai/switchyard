@@ -606,6 +606,7 @@ def connect_chosen_report_board(
     _linked, problems = launcher.connect_upstream_report(
         config, config_path=config_path, upstream_report_url=choice.url,
         upstream_report_token_file=upstream_report_token_file, registry_dir=registry_dir, print_func=print_func,
+        reason=f"switchyard new ({choice.source})",  # the board it connects is its report parent (SYRD-721)
     )
     if not choice.board:
         board = next((b.slug for b in report_boards(exclude=slug, registry_dir=registry_dir)

@@ -426,8 +426,13 @@ def connect_upstream_report(
     registry_dir: Path | None = None,
     home_for_user: Callable[[str], Path | None] = home_dir_for_user,
     print_func: Callable[[str], None] = print,
+    reason: str = "",
 ) -> tuple[ProjectConfig, list[str]]:
     """Connect a tenant to the board it reports to, and do nothing else (SYRD-548).
+
+    That board is then its declared report parent, and each ancestor's credential is issued (SYRD-721). The chain
+    is checked once the board has answered, before anything is written; a problem recording it afterwards is
+    said and does not undo the connection.
 
     The link in its configuration (which is what puts `TICKET_BOARD_REPORT_URL`
     and the credential's path in every pane's environment) and the report-only
@@ -464,6 +469,13 @@ def connect_upstream_report(
     problem, answered = upstream_report_sinks.board_reading(url, upstream)
     if problem:
         return config, [f"{config.project} cannot be connected for reports: {problem}"]
+    # SYRD-721: the whole chain again, now that the parent has said its ticket prefix, before anything is written: a
+    # check made before the board was asked could not see that prefix repeated further up (Audit of 52f543e1).
+    from scripts import report_parent
+
+    ancestry, problem = report_parent.proposed_chain(config.project, url, registry_dir=registry_dir, answered=answered)
+    if problem:
+        return config, [f"{config.project} cannot take that report parent: {problem}"]
     linked, problems = launcher.record_upstream_report_link(
         config,
         config_path=config_path,
@@ -480,11 +492,20 @@ def connect_upstream_report(
         token_file = upstream_report_token_file.strip()
         if url != str(config.upstream_report_url or "").strip() or token_file:
             linked = replace(config, upstream_report_url=url, upstream_report_token_file=token_file)
-    return linked, launcher.refresh_upstream_report_credential(
+    # The board just said what it reads: it is not asked again (SYRD-677).
+    reads_bound = answered.get("report_credentials") == "bound"
+    problems = launcher.refresh_upstream_report_credential(
         linked, dry_run=dry_run, registry_dir=registry_dir, home_for_user=home_for_user, print_func=print_func,
-        # The board just said what it reads: it is not asked again (SYRD-677).
-        takes_bound=lambda _url: answered.get("report_credentials") == "bound",
+        takes_bound=lambda _url: reads_bound,
     )
+    if not problems:
+        for problem in report_parent.settle(
+                linked, url, registry_dir=registry_dir, home_for_user=home_for_user, dry_run=dry_run,
+                links=ancestry, answered=answered, reason=reason or "connected for reports", print_func=print_func,
+                takes_bound=lambda board: reads_bound if board.rstrip("/") == url.rstrip("/")
+                else _board_takes_bound_credentials(board)):
+            print_func(f"switchyard: WARNING: {problem}; the connection itself is in place")
+    return linked, problems
 
 
 def connect_upstream_report_command(
@@ -530,16 +551,25 @@ def connect_upstream_report_command(
         print_func(f"switchyard: --only takes upstream-report, accept-reports, refuse-reports or workflow-projection, "
                    f"not {only!r}. Nothing was changed.")
         return 2
+    from scripts import report_parent
+
     if no_upstream_report:
         configured = str(config.upstream_report_url or "").strip()
-        if upstream_report_url.strip() or upstream_report_board.strip() or configured:
-            print_func(f"switchyard: --no-upstream-report records that {config.project} files no reports; "
-                       + (f"it files them to {configured}, and removing that link is not this step's"
-                          if configured else "it cannot be combined with a report board") + ". Nothing was changed.")
-            return 2 if not configured else 1
+        if upstream_report_url.strip() or upstream_report_board.strip():
+            print_func(f"switchyard: --no-upstream-report records that {config.project} files no reports; it cannot "
+                       "be combined with a report board. Nothing was changed.")
+            return 2
+        # SYRD-721: removing a report parent is this explicit step, journaled in root's record; nothing filed is erased.
+        problems = report_parent.remove(config, config_path=config_path, registry_dir=registry_dir, dry_run=dry_run,
+                                        print_func=print_func)
+        for problem in problems:
+            print_func(f"switchyard: {problem}")
+        if problems:
+            return 1
         if dry_run:
-            print_func(f"switchyard: would record that {config.project} opted out of Switchyard reports; "
-                       "nothing written")
+            print_func(f"switchyard: would record that {config.project} "
+                       + ("no longer files reports to " + configured if configured else "opted out of Switchyard reports")
+                       + "; nothing written")
             return 0
         sinks.record_report_outcome(config.project, sinks.OPTED_OUT, registry_dir=registry_dir, print_func=print_func)
         print_func(f"switchyard: {config.project} files no Switchyard reports, as its operator chose; connect it "
@@ -550,8 +580,14 @@ def connect_upstream_report_command(
         registry_dir=registry_dir,
     )
     problems = [f"{config.project} cannot be connected for reports: {problem}"] if problem else []
+    links: list = []
+    if url and not problems:
+        # SYRD-721: the parent and the chain it brings, each board verified, before anything is written.
+        links, problem = report_parent.proposed_chain(config.project, url, registry_dir=registry_dir,
+                                                      parent_verified=True)
+        problems = [f"{config.project} cannot take that report parent: {problem}"] if problem else []
     connected = config
-    if url:
+    if url and not problems:
         connected, problems = launcher.connect_upstream_report(
             config,
             config_path=config_path,
@@ -560,6 +596,7 @@ def connect_upstream_report_command(
             dry_run=dry_run,
             registry_dir=registry_dir,
             print_func=print_func,
+            reason="--only upstream-report",
         )
     for problem in problems:
         print_func(f"switchyard: {problem}")

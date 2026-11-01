@@ -133,13 +133,16 @@ def test_the_narrow_step_writes_the_link_and_the_credential_and_nothing_else() -
             rel_record = str((h.registry / "mefp.json").relative_to(tmp))
             # The credential's directory is created on the way, and the config replaced in place.
             created_dirs = sorted(k for k in changed if after[k][0] == stat.S_IFDIR and k not in before)
-            check(set(changed) - set(created_dirs) == {rel_config, rel_credential, rel_record},
-                  f"only the configuration, the credential and the registry record changed: {changed}")
+            # SYRD-721: and the report parent's own credential, as its first report ancestor, beside the first.
+            rel_ancestor = str((h.credential.parent / "report-credentials" / "syrd.env").relative_to(tmp))
+            check(set(changed) - set(created_dirs) == {rel_config, rel_credential, rel_record, rel_ancestor},
+                  f"only the configuration, the credentials and the registry record changed: {changed}")
             record = json.loads((h.registry / "mefp.json").read_text())
             check(record["upstream_report"]["state"] == "connected" and TOKEN not in json.dumps(record),
                   f"recorded connected, with no token in it: {record}")
             check(h.asked == [(UPSTREAM, "syrd")], f"the board was asked whether it answers as itself: {h.asked}")
-            check(all(rel_credential.startswith(d + "/") for d in created_dirs), created_dirs)
+            check(all(rel_credential.startswith(d + "/") or rel_ancestor.startswith(d + "/") for d in created_dirs),
+                  created_dirs)
             check(not [k for k in before if k not in after], "nothing was removed")
             after_config = json.loads(h.config_path.read_text())
             check({k for k in set(before_config) | set(after_config) if before_config.get(k) != after_config.get(k)}
@@ -326,7 +329,9 @@ def test_a_pane_without_a_credential_is_told_the_narrow_step() -> None:
     argv = shlex.split(remedy)
     check(argv[:3] == ["sudo", "switchyard", "upgrade"], remedy)
     args = launcher._build_switchyard_upgrade_parser().parse_args(argv[3:])
-    check((args.project, args.only) == ("otto", "upstream-report") and args.upstream_report_url, remedy)
+    # SYRD-721: the parent is named by its registered project, not a raw URL.
+    check((args.project, args.only) == ("otto", "upstream-report") and args.upstream_report_board
+          and not args.upstream_report_url, remedy)
     check("--only" in argv, "never a full upgrade")
 
 

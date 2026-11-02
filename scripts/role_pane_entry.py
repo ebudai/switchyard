@@ -394,6 +394,15 @@ def attach_role_to_slot(
             return 1
         resume = recovery is None or recovery.action == "resume"
         recovered = recovery is not None and recovery.action == "resume"
+    if not exists and resume:
+        from scripts.hermes_role_config import boundary_cutover
+
+        if boundary_cutover(role, session_dir=session_dir):
+            # SYRD-693: its conversation was held with Hermes memory and session search open.
+            _decided(role, session_dir, "team_launcher.attach_role", "ticket_boundary_cutover",
+                     f"team-launcher: {role.role} starts fresh: its recorded Hermes conversation predates its closed "
+                     "ticket boundary, so it is set aside, not resumed")
+            resume, recovered = False, False
     if not exists and not resume:
         # A fresh start leaves nothing for a later one to resume: the record, adopted above or not, is set aside
         # as `_start_role_session` sets it aside (SYRD-622).

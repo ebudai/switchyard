@@ -110,7 +110,14 @@ It contains the owner's shared `config.yaml` with these changes:
   profile describer, curator, goal judge): `provider: custom` on the same
   endpoint and model, with `fallback_chain: []`. The task's other settings, such
   as timeouts, are kept.
+- **Lazy installs:** `security.allow_lazy_installs: false`, keeping the owner's other `security` settings.
+  Otherwise Hermes 0.15.2 runs `pip install` for optional packages (its text-to-speech backends) from PyPI as
+  it starts. Offline it retries every few seconds and holds the first turn back; found by the SYRD-693 canary.
 - **Effort:** `agent.reasoning_effort`, when the role has one.
+- **The ticket boundary,** for a role the board clears into each ticket (`ephemeral` or
+  `fresh_session_per_ticket`): Hermes's memory, user profile and memory provider are off, `memory` and
+  `session_search` are disabled toolsets, and the file carries the mark the board checks before each clear
+  (SYRD-693). A persistent role keeps them.
 
 **Why every auxiliary task is explicit.** In Hermes 0.15.2 an auxiliary task
 on `provider: auto` (the default) tries the main model, then on failure walks
@@ -172,6 +179,16 @@ hold:
 Anything else is refused in the pane, in plain words, with the remedy, and
 "nothing falls back to a hosted model". The startup capture keeps those lines.
 
+**Before the pane (SYRD-693).** The launcher asks the endpoint the same
+questions before it decides anything about the role's conversation
+(`hermes_local_profile.start_refusal`, from `role_sessions._start_role_session`).
+The service stops itself once idle, so a role is often started while it is
+stopped. Before, the pane's refusal read as a resume that failed: the launcher
+set the conversation's record aside and tried a fresh start, which was refused
+too, and the conversation was lost. Now the start is refused first, with the
+same remedy, `local_model_unavailable` in the pane's resume history, and the
+record kept, so the role resumes once the service serves its profile.
+
 ## Status and validation
 
 - `switchyard status` has a **LOCAL MODEL ROLES** section. It lists each local
@@ -186,10 +203,10 @@ Anything else is refused in the pane, in plain words, with the remedy, and
 
 ## Not covered here
 
-- **The live canary** is SYRD-693: tool use, edit and test, board hooks,
-  stop/resume, and load. This slice proves the configuration with the installed
-  Hermes's own resolution, offline, not a model turn.
-- **The service's context.** The service as installed on 2026-10-27 holds a
-  32,768-token context. Hermes refuses anything below 64,000, so a local role
-  will not start until SYRD-691 raises it. Every flow and the start check say so,
-  with the remedy.
+- **The live canary** is SYRD-693 (`docs/syrd-693-local-qwen-canary.md`): tool
+  use, edit and test, stop/resume, and load. This slice proves the configuration
+  with the installed Hermes's own resolution, offline, not a model turn.
+- **The service's context.** The service was installed on 2026-10-27 with a
+  32,768-token context, which Hermes refuses (below 64,000). SYRD-691 raised it
+  to 65,536 on 2026-10-29. A service below the floor is still said by every flow
+  and refused by the start check, with the remedy.

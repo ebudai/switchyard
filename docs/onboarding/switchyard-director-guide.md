@@ -559,6 +559,51 @@ cannot also claim pulled work. This section and
 procedure; [SYRD-678](../syrd-678-designer-implementer.md) is historical
 design and rollout evidence.
 
+## Reports to other boards
+
+Your project files reports to its **report parent**: the board root declared for it, and
+that board's own ancestors after it. `ticket-board-read report-ancestors` lists them. For a
+project that consumes a library run as its own project, the chain is the library, then
+Switchyard: MEFP → SAPI → Switchyard.
+
+Choose one destination for each report, the board that owns the fix. Report to more than
+one ancestor (`file-report --to all`) only when the same report genuinely concerns each.
+For example, a library defect may also be a platform defect, and each board needs its own
+ticket for its own part. Having ancestors is never the reason. If a filing to several
+boards reports a partial result, rerun the same command with the same `--expect`: it files
+only where the report is missing. Do not file it again by hand.
+
+Changing where your project reports is not a board action. It is root's
+`--only upstream-report` step, described in the board guide.
+
+## Local Qwen roles
+
+A role can run Hermes on the host's local model service (`--local-qwen`; see
+`docs/local-model-service.md`). The SYRD-693 canary decides how you use one:
+
+- **Who.** Route a local role small, bounded tickets only: a short edit and test in a
+  small repository, a board read, a summary. Never make the Director, Audit, the
+  Librarian or the Inspector local, and keep one local role per host.
+- **When.** Root starts the service, and it stops itself after 15 idle minutes. A local
+  role therefore works only while the operator has it running. A ticket routed to a
+  local role outside such a window waits: its pane refuses to start (its conversation
+  is kept), or its next turn fails in about 23 seconds. Route the work elsewhere, or
+  ask the operator for a window as an `operator:<name>` blocker.
+- **Status.** `switchyard status` lists every local role and what its endpoint answers
+  now. `switchyard local-model status` says whether the service runs, what GPU memory it
+  holds, and when it will stop itself.
+- **Expect** two to seven minutes for a task that a hosted worker finishes in seconds,
+  and about three times that while a second role shares the service.
+- **Ephemeral Hermes roles,** local or cloud, start each ticket with Hermes's memory
+  and session search off. A Hermes pane started before its role became ephemeral, or
+  before this release, is held at its next hand-off (`hermes_ticket_boundary_open`) until
+  you restart that role. That restart starts fresh: the conversation it held open is set
+  aside (`ticket_boundary_cutover`), and a ticket still bound to it may be parked for you.
+- **Re-pin, roll back, remove.** A new model or engine is a new packet the User approves,
+  then each local role is re-pinned with `switchyard set-role-runtime … --local-qwen`.
+  `--no-local-qwen --model <hosted model>` takes a role off it. `local-model remove`
+  takes the service off the host, and only after it has stopped.
+
 ## Host health the board depends on
 
 Every board on a host shares one PostgreSQL cluster, one filesystem and one journal. When
@@ -721,23 +766,6 @@ The recovery is the human's. You make sure nobody skips the verification or the 
 
 SYRD-553's check covers items 1 to 3 automatically. Until a check covers items 4 and 5,
 those are this section's alone.
-
-## Reports to other boards
-
-Your project files reports to its **report parent**: the board root declared for it, and
-that board's own ancestors after it. `ticket-board-read report-ancestors` lists them. For a
-project that consumes a library run as its own project, the chain is the library, then
-Switchyard: MEFP → SAPI → Switchyard.
-
-Choose one destination for each report, the board that owns the fix. Report to more than
-one ancestor (`file-report --to all`) only when the same report genuinely concerns each.
-For example, a library defect may also be a platform defect, and each board needs its own
-ticket for its own part. Having ancestors is never the reason. If a filing to several
-boards reports a partial result, rerun the same command with the same `--expect`: it files
-only where the report is missing. Do not file it again by hand.
-
-Changing where your project reports is not a board action. It is root's
-`--only upstream-report` step, described in the board guide.
 
 ---
 

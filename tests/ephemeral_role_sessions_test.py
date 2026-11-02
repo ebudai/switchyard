@@ -475,6 +475,13 @@ def test_a_failed_clear_holds_the_ticket_and_stays_retryable() -> None:
 
 def test_every_supported_cli_is_cleared_through_the_same_transport() -> None:
     """One send path, four products, and each one asked in its own vocabulary."""
+    from unittest.mock import patch
+
+    from scripts.ticket_board import hermes_ticket_boundary
+
+    asked: list[str] = []
+    closed = patch.object(hermes_ticket_boundary, "open_reason", lambda target: asked.append(target) or "")
+    closed.start()  # a Hermes pane here started closed (SYRD-693); the check is its own test
     for index, runtime in enumerate(sorted(RUNTIMES)):
         sent: list[tuple[str, str]] = []
         cfg = document(ephemeral=("ops",), runtimes={"ops": runtime})
@@ -484,6 +491,37 @@ def test_every_supported_cli_is_cleared_through_the_same_transport() -> None:
         assert sent[0] == ("pgu-ops:0.0", SESSION_CLEAR_COMMANDS[runtime]), (runtime, sent)
         assert len(sent) == 2, (runtime, sent)
         assert conn.clear_writes == [(f"PGU-52{index}", "ops")], runtime
+    closed.stop()
+    assert asked == ["pgu-ops:0.0"], f"FAILED CHECK: only the Hermes pane's boundary is asked about: {asked}"
+
+
+def test_a_hermes_pane_whose_boundary_is_open_is_held_not_cleared() -> None:
+    """SYRD-693: a running Hermes keeps the memory it started with; /clear does not close it."""
+    from unittest.mock import patch
+
+    from scripts.ticket_board import hermes_ticket_boundary
+
+    cfg = document(ephemeral=("ops",), runtimes={"ops": "hermes"})
+    sent: list[tuple[str, str]] = []
+    conn = WorkflowConnection([lt.queue_row(30, "PGU-530")], cfg=cfg)
+    with patch.object(hermes_ticket_boundary, "open_reason", lambda target: "its config.yaml leaves memory on"), \
+            lt.TemporaryStateDir() as tmp_path:
+        delivered = drive(conn, tmp_path=tmp_path, sent=sent)
+    assert delivered == 0 and sent == [], f"FAILED CHECK: an open boundary types neither the clear nor the ticket: {sent}"
+    assert conn.clear_writes == [] and conn.acked == [], \
+        f"FAILED CHECK: nothing is recorded as cleared or done: {conn.clear_writes} {conn.acked}"
+    assert [notification_id for notification_id, _params in conn.requeued] == [30] and any(
+        hermes_ticket_boundary.HERMES_BOUNDARY_OPEN_ERROR in str(params) for _id, params in conn.requeued), \
+        f"FAILED CHECK: the hand-off waits, retryable, with the reason: {conn.requeued}"
+    assert "session_clear_failed" in lt.trace_events(conn), "FAILED CHECK: the hold is traced"
+
+    # Restarted on its prepared home, the same notification is cleared and delivered.
+    retry_sent: list[tuple[str, str]] = []
+    retry = WorkflowConnection([lt.queue_row(30, "PGU-530", attempts=2)], cfg=cfg, cleared=conn.cleared)
+    with patch.object(hermes_ticket_boundary, "open_reason", lambda target: ""), lt.TemporaryStateDir() as tmp_path:
+        delivered = drive(retry, tmp_path=tmp_path, sent=retry_sent)
+    assert delivered == 1 and [message for _target, message in retry_sent][:1] == ["/clear now"], \
+        f"FAILED CHECK: restarted closed, the same notification is cleared and delivered: {retry_sent}"
 
 
 def test_a_runtime_with_no_clear_command_holds_the_ticket_instead_of_delivering() -> None:
@@ -583,6 +621,67 @@ def test_the_generated_config_records_what_the_document_declared() -> None:
     assert _role_from_json(
         "pgu", turned_off["ops"], base=Path("/tmp"), default_workdir=Path("/tmp")
     ).ephemeral is False
+
+
+def test_an_open_hermes_pane_is_held_before_any_continuation() -> None:
+    """Audit (on b308740b): a same-parent continuation carries the pane on, and so is no reason to skip the check."""
+    from unittest.mock import patch
+
+    from scripts.ticket_board import context_continuation, hermes_ticket_boundary
+
+    cfg = document(ephemeral=("ops",), runtimes={"ops": "hermes"})
+    decided: list[str] = []
+
+    def continues(listener, conn, *, ticket_id, **kwargs):
+        decided.append(ticket_id)
+        return True  # SYRD-626 would continue the pane's conversation into this sibling
+
+    sent: list[tuple[str, str]] = []
+    conn = WorkflowConnection([lt.queue_row(40, "PGU-540")], cfg=cfg)
+    with patch.object(context_continuation, "before_clear", continues), \
+            patch.object(hermes_ticket_boundary, "open_reason", lambda target: "its config.yaml leaves memory on"), \
+            lt.TemporaryStateDir() as tmp_path:
+        delivered = drive(conn, tmp_path=tmp_path, sent=sent)
+    assert delivered == 0 and sent == [] and decided == [], \
+        f"FAILED CHECK: an open pane gets no continuation, no clear and no ticket: {delivered} {sent} {decided}"
+    assert any(hermes_ticket_boundary.HERMES_BOUNDARY_OPEN_ERROR in str(params) for _id, params in conn.requeued), \
+        f"FAILED CHECK: it waits with the reason: {conn.requeued}"
+
+    # Restarted on its closed home, the same hand-off may continue the sibling's conversation.
+    retry_sent: list[tuple[str, str]] = []
+    retry = WorkflowConnection([lt.queue_row(40, "PGU-540", attempts=2)], cfg=cfg, cleared=conn.cleared)
+    with patch.object(context_continuation, "before_clear", continues), \
+            patch.object(hermes_ticket_boundary, "open_reason", lambda target: ""), lt.TemporaryStateDir() as tmp_path:
+        delivered = drive(retry, tmp_path=tmp_path, sent=retry_sent)
+    assert delivered == 1 and decided == ["PGU-540"] and "/clear now" not in [m for _t, m in retry_sent], \
+        f"FAILED CHECK: a closed pane continues as SYRD-626 decides: {delivered} {decided} {retry_sent}"
+
+
+def test_a_projected_ephemeral_hermes_role_starts_with_hermes_memory_closed() -> None:
+    """SYRD-693 (Audit, on 8c31c512): the projection sets `ephemeral` alone, and that is what closes the boundary."""
+    import tempfile
+
+    from scripts import hermes_role_config
+    from scripts.team_launcher import _role_from_json
+    from scripts.ticket_board.hermes_ticket_boundary import TICKET_BOUNDARY_MARK
+
+    projected = {role["role"]: role for role in launcher_config(
+        document(ephemeral=("ops",), runtimes={"ops": "hermes", "audit": "hermes"}))["roles"]}
+    with tempfile.TemporaryDirectory(prefix="syrd693-") as tmp:
+        shared = Path(tmp) / "shared"
+        shared.mkdir()
+        (shared / "config.yaml").write_text("memory:\n  memory_enabled: true\n  user_profile_enabled: true\n",
+                                            encoding="utf-8")
+        for name, closed in (("ops", True), ("audit", False)):
+            parsed = _role_from_json("pgu", projected[name], base=Path(tmp), default_workdir=Path(tmp))
+            assert parsed.ephemeral is closed and parsed.fresh_session_per_ticket is False, (name, parsed)
+            home = Path(tmp) / name
+            home.mkdir()
+            (home / "config.yaml").symlink_to(shared / "config.yaml")
+            hermes_role_config.prepare_hermes_role_config(parsed, hermes_home=home, shared_home=shared)
+            text = "" if (home / "config.yaml").is_symlink() else (home / "config.yaml").read_text(encoding="utf-8")
+            assert (TICKET_BOUNDARY_MARK in text) is closed, (name, text)
+            assert ("memory_enabled: false" in text and "- session_search" in text) is closed, (name, text)
 
 
 def test_the_generated_config_rejects_a_value_that_is_not_a_boolean() -> None:

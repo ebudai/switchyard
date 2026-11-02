@@ -137,7 +137,7 @@ def test_every_allowlist_names_copilot_and_keeps_the_others() -> None:
     check(PROMOTER_MODULE.PROMOTABLE_CLIS == ("agy", "claude", "codex", "hermes", "copilot")
           and PROMOTER_MODULE.VERSION_PREFIXES == {"copilot": "GitHub Copilot CLI "},
           "the root promoter's own list takes copilot, and only by its version line")
-    check(notification_session_clear.SESSION_CLEAR_COMMANDS == {r: "/clear" for r in five},
+    check(notification_session_clear.SESSION_CLEAR_COMMANDS == {**{r: "/clear" for r in five}, "hermes": "/clear now"},
           notification_session_clear.SESSION_CLEAR_COMMANDS)
     check(session_context.RESUME_COMMANDS == {"claude": "/resume {session_id}", "copilot": "/resume {session_id}"},
           session_context.RESUME_COMMANDS)

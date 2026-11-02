@@ -18,6 +18,7 @@ import io
 import json
 import os
 import pwd
+import shlex
 import shutil
 import subprocess
 import sys
@@ -68,6 +69,9 @@ terminal:
   sudo_password: {SECRETS[3]}
 display:
   compact: true
+security:
+  allow_lazy_installs: true
+  redact_secrets: true
 """
 
 
@@ -346,6 +350,9 @@ def test_the_home_holds_the_profile_and_no_hosted_credential() -> None:
               and document["display"] == {"compact": True}, "the owner's other settings are kept")
         check(document["delegation"]["provider"] == "" and document["delegation"]["base_url"] == "",
               "subagents inherit the main, local model")
+        check(document["security"] == {"allow_lazy_installs": False, "redact_secrets": True},
+              f"Hermes installs nothing from PyPI as it starts; the owner's other security settings stay: "
+              f"{document['security']}")
         again = (home / "config.yaml").read_text(encoding="utf-8")
         check(t.prepare() == "" and (home / "config.yaml").read_text(encoding="utf-8") == again,
               "the next start writes the same config: stop/start keeps the profile")
@@ -572,6 +579,7 @@ from hermes_cli.runtime_provider import resolve_runtime_provider
 from hermes_cli.config import load_config
 from agent.auxiliary_client import _resolve_task_provider_model
 from agent.model_metadata import MINIMUM_CONTEXT_LENGTH
+from tools.lazy_deps import _allow_lazy_installs
 import sys
 main = resolve_runtime_provider()
 cfg = load_config()
@@ -579,7 +587,7 @@ aux = {task: list(_resolve_task_provider_model(task=task))[:4] for task in sys.a
 print("RESOLVED " + json.dumps({"provider": main.get("provider"), "base_url": main.get("base_url"),
       "api_key": main.get("api_key"), "fallback": cfg.get("fallback_providers"), "fallback_model": cfg.get("fallback_model"),
       "model": cfg["model"].get("default"), "context": cfg["model"].get("context_length"), "aux": aux,
-      "minimum": MINIMUM_CONTEXT_LENGTH}))
+      "minimum": MINIMUM_CONTEXT_LENGTH, "lazy_installs": _allow_lazy_installs()}))
 '''
         env = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": str(home), "HERMES_HOME": str(home),
                # A hosted key in the environment: the explicit local provider must not reach for it.
@@ -597,6 +605,129 @@ print("RESOLVED " + json.dumps({"provider": main.get("provider"), "base_url": ma
         check(all(value == ["custom", MODEL, url, hlp.NO_KEY] for value in got["aux"].values()),
               f"every auxiliary task, by Hermes's own resolution, on the endpoint only: {got['aux']}")
         check(got["minimum"] == hlp.HERMES_MINIMUM_CONTEXT, f"the context floor is Hermes's own: {got['minimum']}")
+        check(got["lazy_installs"] is False, f"by Hermes's own reading, it installs nothing from PyPI: {got}")
+
+
+#: What the installed Hermes makes of a role's home: its memory settings, and the tools its CLI would offer.
+BOUNDARY_PROBE = r'''
+import json
+from hermes_cli.config import load_config
+from model_tools import get_tool_definitions
+cfg = load_config()
+agent = cfg.get("agent") or {}
+names = sorted(t["function"]["name"] for t in get_tool_definitions(
+    enabled_toolsets=cfg.get("toolsets") or ["hermes-cli"], disabled_toolsets=agent.get("disabled_toolsets") or [],
+    quiet_mode=True))
+memory = cfg.get("memory") or {}
+print("BOUNDARY " + json.dumps({"memory": memory.get("memory_enabled"), "profile": memory.get("user_profile_enabled"),
+      "provider": memory.get("provider"), "tools": names}))
+'''
+
+
+def test_a_role_that_starts_each_ticket_fresh_carries_nothing_from_hermes_memory() -> None:
+    """SYRD-693: the canary's PLUM-42 came back after `/clear now`, from Hermes's own memory. A role declared fresh
+    per ticket gets neither memory, user profile, memory provider nor session search; a persistent one keeps them."""
+    from scripts import hermes_role_config
+
+    with tenant(roles=("app",)) as (t, _server):
+        homes = {}
+        for case, local, fresh in (("local, fresh per ticket", True, True), ("local, persistent", True, False),
+                                   ("local, ephemeral by the workflow", True, "ephemeral"),
+                                   ("cloud, fresh per ticket", False, True)):
+            entry = next(role for role in t.raw["roles"] if role["role"] == "app")
+            # The workflow projection writes `ephemeral` alone (Audit, on 8c31c512); the launcher's own opt-in is
+            # `fresh_session_per_ticket`. Either is a ticket boundary.
+            entry["ephemeral"] = fresh == "ephemeral"
+            entry["fresh_session_per_ticket"] = fresh is True
+            fresh = bool(fresh)
+            if local:
+                entry.update(model=MODEL, hermes_local=profile(t.port).entry())
+            else:
+                entry.pop("hermes_local", None)
+                entry["model"] = "glm-5.3"
+            t.save()
+            home = t.role_home()
+            (home / "memories").mkdir(parents=True, exist_ok=True)
+            (home / "memories" / "MEMORY.md").write_text("Codeword given by user: PLUM-42\n", encoding="utf-8")
+            (home / "config.yaml").unlink(missing_ok=True)
+            with patch.object(hlp, "read_service_record", lambda *a, **k: t.read_record()):
+                check(t.prepare() == "", f"{case}: prepared without a notice")
+            import yaml
+
+            document = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))  # its marks are comments
+            closed = (document.get("memory") or {}).get("memory_enabled") is False and set(
+                hermes_role_config.TICKET_BOUNDARY_TOOLSETS) <= set((document.get("agent") or {}).get("disabled_toolsets") or [])
+            check(closed == fresh, f"{case}: the boundary is closed exactly when the role is fresh per ticket: {document}")
+            from scripts.ticket_board.hermes_ticket_boundary import MARK_LINES, TICKET_BOUNDARY_MARK
+
+            head = (home / "config.yaml").read_text(encoding="utf-8").splitlines()[:MARK_LINES]
+            check((TICKET_BOUNDARY_MARK in head) == fresh,
+                  f"{case}: the config carries the mark the board checks exactly when it is closed: {head}")
+            if fresh:
+                memory, agent = document.get("memory") or {}, document.get("agent") or {}
+                check(memory.get("user_profile_enabled") is False and memory.get("provider") == ""
+                      and (document.get("security") or {}).get("redact_secrets") is True and agent.get("max_turns") == 60,
+                      f"{case}: the user profile and memory provider too, and the owner's other settings stay: {document}")
+            homes[case] = (t.root / f"hermes-{len(homes)}", fresh)
+            shutil.copytree(home, homes[case][0], symlinks=True)
+        # A launch that resumes a ticket the role already holds (SYRD-626) runs as not fresh for that launch alone;
+        # the next ticket is still cleared into the same pane, so its home must still be closed.
+        from types import SimpleNamespace
+
+        from scripts import role_context_recovery, role_sessions
+
+        (home / "config.yaml").unlink()
+        store = t.store()
+        store.mkdir(parents=True, exist_ok=True)
+        (store / team_launcher.session_file_name(t.role().target)).write_text(
+            json.dumps({"target": t.role().target, "session_id": "20261101_held"}), encoding="utf-8")
+        runner = lambda args, **k: subprocess.CompletedProcess(args, 1, "", "no tmux here")  # noqa: E731
+        with patch.object(role_context_recovery, "prepare", lambda *a, **k: SimpleNamespace(action="resume")), \
+                contextlib.redirect_stderr(io.StringIO()):
+            role_sessions._start_role_session(t.role(), session_dir=store, pane_state_dir=t.root / "panes",
+                                              prefer_resume=True, seed_source="syrd693", runner=runner)
+        import yaml
+
+        resumed = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+        check((resumed.get("memory") or {}).get("memory_enabled") is False
+              and "memory" in ((resumed.get("agent") or {}).get("disabled_toolsets") or []),
+              f"a launch that resumes a held ticket still closes the boundary the next ticket relies on: {resumed}")
+        if not HERMES_PYTHON.exists() or shutil.which("unshare") is None:
+            print(f"hermes_local_profile_test: {HERMES_PYTHON} is not installed here; the Hermes boundary checks are SKIPPED")
+            return
+        for case, (home, fresh) in homes.items():
+            done = subprocess.run(["unshare", "-rn", str(HERMES_PYTHON), "-I", "-c", BOUNDARY_PROBE],
+                                  env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": str(home), "HERMES_HOME": str(home)},
+                                  capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+            line = next((line for line in reversed(done.stdout.splitlines()) if line.startswith("BOUNDARY ")), "")
+            check(done.returncode == 0 and line, f"{case}: the installed Hermes read the home: {done.stderr[-1500:]}")
+            got = json.loads(line.removeprefix("BOUNDARY "))
+            offered = {"memory", "session_search"} & set(got["tools"])
+            if fresh:
+                check(got["memory"] is False and got["profile"] is False and not offered,
+                      f"{case}: by Hermes's own reading, no memory is loaded and neither tool is offered: {got}")
+            else:
+                check(got["memory"] is not False and offered == {"memory", "session_search"},
+                      f"{case}: a persistent role keeps Hermes's memory and session search: {got}")
+
+
+def test_the_board_clears_a_hermes_conversation_without_its_question() -> None:
+    """SYRD-693: a bare /clear stops Hermes 0.15.2 at a question, which swallows the ticket typed next."""
+    from scripts.ticket_board.notification_session_clear import SESSION_CLEAR_COMMANDS
+
+    if not HERMES_PYTHON.exists():
+        print(f"hermes_local_profile_test: {HERMES_PYTHON} is not installed here; the Hermes clear check is SKIPPED")
+        return
+    script = ("import json, sys\nfrom cli import HermesCLI\n"
+              "print('SPLIT ' + json.dumps([HermesCLI._split_destructive_skip(c) for c in sys.argv[1:]]))")
+    done = subprocess.run([str(HERMES_PYTHON), "-I", "-c", script, SESSION_CLEAR_COMMANDS["hermes"], "/clear"],
+                          env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": tempfile.gettempdir()},
+                          capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+    line = next((line for line in done.stdout.splitlines() if line.startswith("SPLIT ")), "")
+    check(done.returncode == 0 and line, f"the installed Hermes parsed the commands: {done.stderr[-800:]}")
+    ours, bare = json.loads(line.removeprefix("SPLIT "))
+    check(ours == ["", True] and bare == ["", False],
+          f"what the board types skips Hermes's own question, where a bare /clear asks it: {ours} {bare}")
 
 
 def test_leaving_the_profile_removes_only_switchyards_material() -> None:
@@ -861,6 +992,62 @@ def test_validate_models_checks_a_local_role_against_the_service() -> None:
         check(len(failures) == 1 and failures[0].model == MODEL and "did not answer" in failures[0].suggestion,
               f"validate-models: the local role is checked against the service, and its silence is a failure: "
               f"{report.model_validation_failures} {said[-3:]}")
+
+
+def test_a_start_while_the_service_is_stopped_keeps_the_conversation() -> None:
+    """SYRD-693: the service stops itself once idle, and a role resumed then must not lose its conversation."""
+    from scripts import role_sessions
+    from scripts.resume_history import read_resume_history
+
+    with tenant(roles=("app",)) as (t, server):
+        role, store = t.role("app"), t.store("app")
+        store.mkdir(parents=True, exist_ok=True)
+        path = store / team_launcher.session_file_name(role.target)
+        calls: list[list[str]] = []
+
+        def runner(args, **kwargs):
+            calls.append(list(args))
+            return subprocess.CompletedProcess(args, 1, "", "no tmux here")  # the start fails once it is reached
+
+        def start() -> tuple[int, str]:
+            said = io.StringIO()
+            with contextlib.redirect_stderr(said), patch.object(hlp, "read_service_record", lambda *a, **k: t.read_record()):
+                code = role_sessions._start_role_session(role, session_dir=store, pane_state_dir=t.root / "panes",
+                                                         prefer_resume=True, seed_source="syrd693", runner=runner)
+            return code, said.getvalue()
+
+        record_file = t.service / "service.json"
+        for case, change in (("another model served", lambda: setattr(server, "model", "Qwen/Qwen3-8B")),
+                             ("an untrusted record", lambda: os.chmod(record_file, 0o666)),
+                             ("the service stopped", server.close)):
+            path.write_text(json.dumps({"target": role.target, "session_id": "20261101_canary"}), encoding="utf-8")
+            path.with_name(path.name + ".superseded").unlink(missing_ok=True)
+            change()
+            calls.clear()
+            code, said = start()
+            check(code == 1 and calls == [], f"{case}: refused before any pane starts: {code} {calls}")
+            check(team_launcher.session_id_for_role(role, store) == "20261101_canary"
+                  and not path.with_name(path.name + ".superseded").exists(),
+                  f"{case}: the conversation's record is kept, not set aside: {sorted(p.name for p in store.iterdir())}")
+            check("was not started" in said and "record is kept" in said and "nothing falls back" in said,
+                  f"{case}: it says why, and that the conversation waits: {said}")
+            events = [e["event"] for e in read_resume_history(role.target, store)]
+            check(events[-1:] == ["local_model_unavailable"], f"{case}: the start's decision is kept: {events}")
+            if case != "the service stopped":
+                server.model = MODEL
+                os.chmod(record_file, 0o644)
+                code, said = start()
+                news = [c for c in calls if "new-session" in c]
+                # What it resumes from here is the launcher's own decision, unchanged (the stand-in id fails the
+                # Hermes resume preflight); what matters is that the start is no longer held back.
+                check(code == 1 and len(news) == 1 and "hermes_local_profile.py check" in news[0][-1],
+                      f"once the service serves the profile, the pane starts as before: {code} {calls}")
+                # The board's boundary check reads this very start command back from tmux, quoted whole.
+                from scripts.ticket_board.hermes_ticket_boundary import start_command_home
+
+                check(start_command_home(shlex.quote(news[0][-1])) == str(t.role_home()) == start_command_home(news[0][-1]),
+                      f"the HERMES_HOME the board reads from the launcher's real start command is the role's home: "
+                      f"{start_command_home(news[0][-1])!r} {t.role_home()}")
 
 
 def main() -> int:

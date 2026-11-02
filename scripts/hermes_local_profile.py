@@ -320,7 +320,8 @@ def _scrubbed(value: Any) -> Any:
     return value
 
 
-def render_config(shared: Mapping[str, Any] | None, profile: LocalProfile, *, effort: str = "") -> dict[str, Any]:
+def render_config(shared: Mapping[str, Any] | None, profile: LocalProfile, *, effort: str = "",
+                  fresh_per_ticket: bool = False) -> dict[str, Any]:
     """The role's whole config: the shared document's settings, on the local endpoint and nowhere else."""
     document = _scrubbed(dict(shared or {}))
     for key in ("providers", "custom_providers", "fallback_model"):
@@ -337,9 +338,17 @@ def render_config(shared: Mapping[str, Any] | None, profile: LocalProfile, *, ef
         task: {**(auxiliary.get(task) if isinstance(auxiliary.get(task), dict) else {}), **local, "fallback_chain": []}
         for task in dict.fromkeys((*AUXILIARY_TASKS, *auxiliary))
     }
+    # SYRD-693: otherwise Hermes pip-installs optional packages (text-to-speech) from PyPI as it starts, and
+    # offline it retries every few seconds and holds the first turn back.
+    security = document.get("security") if isinstance(document.get("security"), dict) else {}
+    document["security"] = {**security, "allow_lazy_installs": False}
     if effort:
         agent = document.get("agent") if isinstance(document.get("agent"), dict) else {}
         document["agent"] = {**agent, "reasoning_effort": effort}
+    if fresh_per_ticket:
+        from scripts.hermes_role_config import close_ticket_boundary
+
+        document = close_ticket_boundary(document)
     return document
 
 
@@ -430,7 +439,8 @@ def _head(fd: int, name: str) -> str:
         return stream.read(4096).decode("utf-8", errors="replace")
 
 
-def write_role_home(hermes_home: Path, profile: LocalProfile, *, shared_home: Path, effort: str = "") -> str:
+def write_role_home(hermes_home: Path, profile: LocalProfile, *, shared_home: Path, effort: str = "",
+                    fresh_per_ticket: bool = False) -> str:
     """Give a local role's home its config and drop its credential links; any notice, or "" when done.
 
     A `config.yaml` of the role's own that Switchyard did not write is left alone and said; the start check
@@ -461,8 +471,11 @@ def write_role_home(hermes_home: Path, profile: LocalProfile, *, shared_home: Pa
             return f"cannot read {shared} for the local profile: {exc}"
         if document is not None and not isinstance(document, dict):
             document = {}
-        text = "\n".join((CONFIG_MARK, _profile_line(profile),
-                          yaml.safe_dump(render_config(document, profile, effort=effort), sort_keys=False)))
+        from scripts.ticket_board.hermes_ticket_boundary import TICKET_BOUNDARY_MARK
+
+        text = "\n".join((CONFIG_MARK, _profile_line(profile), *([TICKET_BOUNDARY_MARK] if fresh_per_ticket else []),
+                          yaml.safe_dump(render_config(document, profile, effort=effort,
+                                                       fresh_per_ticket=fresh_per_ticket), sort_keys=False)))
         temp = f".{CONFIG_NAME}.{os.getpid()}.tmp"
         handle = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
         try:
@@ -577,6 +590,27 @@ def endpoint_problems(profile: LocalProfile, *, record: Mapping[str, Any] | None
         found.append(f"{profile.base_url} holds a {n_ctx:,}-token context, not the declared {profile.context:,}; "
                      "re-pin the role")
     return found
+
+
+def start_refusal(role: Any, *, get: Callable[[str, float], Any] = _get_json) -> str:
+    """Why the launcher must not start a local role's pane now, before it decides anything about the role's
+    conversation; "" when the service serves its profile, or the role has none.
+
+    The pane's own check would refuse too, but only after the launcher had taken that exit for a resume that
+    failed and set the conversation's record aside (SYRD-693).
+    """
+    profile = getattr(role, "hermes_local", None)
+    if profile is None:
+        return ""
+    try:
+        problems = endpoint_problems(profile, record=read_service_record(), get=get)
+    except ProfileRefusal as exc:
+        problems = [str(exc).removeprefix("switchyard: ")]
+    if not problems:
+        return ""
+    return (f"team-launcher: {role.role} was not started on {profile.describe()}: " + "; ".join(problems)
+            + ". Its conversation's record is kept, so it resumes once the service serves the profile; "
+            "nothing falls back to a hosted model.")
 
 
 def start_problems(profile: LocalProfile, *, environ: Mapping[str, str], record: Mapping[str, Any] | None,

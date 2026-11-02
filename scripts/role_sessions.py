@@ -109,7 +109,14 @@ def _start_role_session(
     startup_capture: bool = False,
 ) -> int:
     from scripts import team_launcher as launcher
+    from scripts.hermes_local_profile import start_refusal
 
+    # SYRD-693: a local role whose service is stopped (it stops itself once idle) would exit at once, which
+    # reads below as a failed resume and sets its conversation aside; it is refused first, changing nothing.
+    refusal = start_refusal(role)
+    if refusal:
+        _decided(role, session_dir, seed_source, "local_model_unavailable", refusal)
+        return 1
     # SYRD-622: back on a runtime it left, the role resumes the conversation it left it with.
     from scripts.runtime_return_records import settle_return_record
 
@@ -128,6 +135,7 @@ def _start_role_session(
 
         install_adopted_record(role, session_dir, seed_source)
     recovery = None
+    declared = role  # its home follows the declaration, not this launch's resume (SYRD-693)
     if prefer_resume and _uses_fresh_session_per_ticket(role):
         # SYRD-626: a launch is not a ticket boundary; the board says what this role's work needs.
         from dataclasses import replace
@@ -154,6 +162,15 @@ def _start_role_session(
                  "starting a fresh session instead of inheriting the previous ticket context", session_id)
         prefer_resume = False
     if prefer_resume:
+        from scripts.hermes_role_config import boundary_cutover
+
+        if boundary_cutover(declared, session_dir=session_dir):
+            # SYRD-693: its conversation was held with Hermes memory and session search open.
+            _decided(role, session_dir, seed_source, "ticket_boundary_cutover",
+                     f"team-launcher: {role.role} starts fresh: its recorded Hermes conversation predates its closed "
+                     "ticket boundary, so it is set aside, not resumed", session_id)
+            prefer_resume = False
+    if prefer_resume:
         # SYRD-638: another role's conversation is set aside with its reason, never resumed.
         from scripts.session_provenance import refuse_foreign
 
@@ -165,7 +182,7 @@ def _start_role_session(
             prefer_resume = False
     if not prefer_resume:
         launcher.clear_session_record_for_role(role, session_dir)
-    launcher.prepare_hermes_home_for_role(role, session_dir=session_dir)
+    launcher.prepare_hermes_home_for_role(declared, session_dir=session_dir)
     # SYRD-532: a command that exits during startup keeps its last lines.
     # Asked for by the detached start `worker-pool start` runs; every other start is unchanged.
     armed = startup_capture
@@ -234,7 +251,7 @@ def _start_role_session(
         if kill_proc.returncode != 0:
             return int(kill_proc.returncode)
     launcher.clear_session_record_for_role(role, session_dir)
-    launcher.prepare_hermes_home_for_role(role, session_dir=session_dir)
+    launcher.prepare_hermes_home_for_role(declared, session_dir=session_dir)
     capture = capture_module.prepare(capture_file) if armed else None
     fresh_proc = runner(
         [

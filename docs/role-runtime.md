@@ -152,6 +152,10 @@ against the owner's hosted catalog: the service serves it, and the role's pane
 checks that before Hermes starts. See
 [SYRD-692](syrd-692-hermes-local-profile.md).
 
+Choose it for one implementer-class role doing small bounded tasks, in a session the operator starts and
+attends. Never choose it for the Director, Audit, Librarian or Inspector, nor for more than one role per host
+(SYRD-693; [Local model service](local-model-service.md#running-a-role-on-it-syrd-693)).
+
 ## When something fails
 
 Every applied step is undone and the command says the switch was undone. The

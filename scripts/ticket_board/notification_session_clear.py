@@ -6,7 +6,7 @@ import logging
 import subprocess
 from typing import Any, Callable
 
-from . import context_continuation, session_context
+from . import context_continuation, hermes_ticket_boundary, session_context
 from .notification_ledger import NotificationLedger
 
 #: What each supported CLI is told, in its own composer, to start the next
@@ -24,7 +24,13 @@ SESSION_CLEAR_COMMANDS = {
     "claude": "/clear",
     "codex": "/clear",
     "agy": "/clear",
-    "hermes": "/clear",
+    # Hermes 0.15.2 asks before a bare /clear ("destroys conversation state",
+    # 1/2/3, two minutes). The ticket typed next is swallowed by that question,
+    # and when it times out Hermes exits. `now` is its own skip token (SYRD-693).
+    # The clear empties only the conversation; Hermes's memory and session
+    # search are closed by the config its process started from, which is
+    # checked before the clear (hermes_ticket_boundary).
+    "hermes": "/clear now",
     # Copilot 1.0.101 ends the old session and starts a new one at the next
     # prompt (tests/fixtures/copilot-1.0.101/hooks/resume-then-clear.jsonl).
     "copilot": "/clear",
@@ -53,6 +59,7 @@ class NotificationSessionClear:
         sleeper: Callable[[float], None],
         settle_seconds: Callable[[], float],
         gate: Callable[[], Any] = lambda: None,
+        boundary: Callable[[str], str] | None = None,
     ) -> None:
         self.logger = logger
         self.ledger = ledger
@@ -65,6 +72,8 @@ class NotificationSessionClear:
         self.settle_seconds = settle_seconds
         #: The pane activity gate, for the hook state a ticket's conversation is proven from (SYRD-540).
         self.gate = gate
+        #: Why a Hermes pane may not be cleared into a ticket, or "" (SYRD-693); read at call time, so tests reach it.
+        self.boundary = boundary or (lambda target: hermes_ticket_boundary.open_reason(target))
 
     def _session_clear_is_due(self, conn: Any, ticket_id: str, target_role: str, kind: str, payload: str) -> bool:
         """Whether this delivery is the first handoff of this ticket to an ephemeral role.
@@ -174,6 +183,20 @@ class NotificationSessionClear:
             self.ledger.requeue(conn, notification_id, attempts, f"ticket_context_{decision}",
                                 delay_seconds=session_context.RESUME_WAIT_SECONDS / 3)
             return False
+        if runtime == "hermes":
+            # SYRD-693: /clear empties the conversation, not Hermes's memory; only the config it started from
+            # does. Asked before a continuation too (Audit, on b308740b): carrying a pane on does not close it.
+            reason = self.boundary(target)
+            if reason:
+                self.logger.warning("Holding notification %s for %s: ephemeral Hermes role %s: %s",
+                                    notification_id, ticket_id, target_role, reason)
+                self.ledger.trace(conn, notification_id=notification_id, ticket_id=ticket_id, target_role=target_role,
+                                  kind=kind, event="session_clear_failed",
+                                  busy_reason=hermes_ticket_boundary.HERMES_BOUNDARY_OPEN_ERROR,
+                                  detail={"target": target, "runtime": runtime, "reason": reason, "attempts": attempts})
+                self.ledger.requeue(conn, notification_id, attempts,
+                                    f"{hermes_ticket_boundary.HERMES_BOUNDARY_OPEN_ERROR}: {reason}")
+                return False
         # SYRD-626: the next ticket of the same package may continue the pane's conversation instead.
         continued = context_continuation.before_clear(self, conn, notification_id=notification_id, ticket_id=ticket_id,
                                                       target_role=target_role, kind=kind, target=target, attempts=attempts)

@@ -170,4 +170,49 @@ A procedure that starts the service by hand (`start`, then `probe` or anything e
   file on the host as it was. If the service does not stop, `remove` deletes nothing and says so, so the
   service is never left running without its unit.
 
-Hermes roles are pointed at the endpoint in SYRD-692; the live Hermes canary is SYRD-693.
+## Running a role on it (SYRD-693)
+
+The live canary (`docs/syrd-693-local-qwen-canary.md`) decides how the service is used.
+
+**Which roles.**
+- **Yes:** one implementer-class Hermes role, for small bounded tasks: a single ticket's board read, a short
+  edit and test in a small repository, a summary.
+- **No:** Director, Audit, Librarian or Inspector.
+- **No:** an always-on worker.
+- **No:** work on a repository whose files fill the window. The usable window is 65,536 tokens, and Hermes's
+  own prompt and tools take about 10K of every request.
+
+**One local role per host.** The service has one slot. A second role works, but both run about three times
+slower, and Hermes's own background requests time out.
+
+**Attended windows.** The service stops itself after 15 idle minutes and only root starts it, so a local role
+works while the operator is there:
+
+```bash
+sudo switchyard local-model start        # loads in seconds when the model is in the page cache
+switchyard local-model status            # serving, the GPU memory it holds, when it stops itself
+switchyard start <project>               # or attach the local role; its pane checks the endpoint first
+# ... the role works its tickets ...
+sudo switchyard local-model stop         # or let the idle stop release it 15 minutes after the last request
+switchyard local-model status            # "GPU: this service holds no GPU memory"
+```
+
+**When the service is stopped.**
+- **A role started then** is refused before its pane starts, with this remedy. Its conversation's record is
+  kept, so the next start resumes it.
+- **A role already running** fails its next turn after three attempts, about 23 seconds, and waits at its
+  prompt. Nothing retries forever and nothing falls back to a hosted model. Start the service, and the same
+  conversation carries on.
+
+**What to expect, measured on the qualifying host.**
+- **GPU:** about 8.6 GiB while it runs (8,612 MiB peak).
+- **Host memory:** 9.2 GiB peak in the unit, most of it the mapped model.
+- **CPU pressure:** negligible.
+- **Generation:** about 5 tokens a second, falling to 2.7 at 60K tokens of context.
+- **Turn times:** a one-call task takes about a minute, a four-call edit-and-test about two, each roughly three
+  times longer with a second role.
+
+**Choosing and leaving it.** `switchyard add-role … --local-qwen` and
+`switchyard set-role-runtime … --local-qwen`, and leaving it again, are in
+[SYRD-692](syrd-692-hermes-local-profile.md) and `docs/role-runtime.md`. A re-pin of the service (above) needs
+each local role re-pinned the same way.

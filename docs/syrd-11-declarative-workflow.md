@@ -31,7 +31,10 @@ Replace its project and absolute onboarding path when creating a tenant.
 - `roles[].ephemeral`: optional boolean, absent meaning false (SYRD-135). When
   true, the notify listener sends that role's CLI its clear command once before
   the first notification that hands it a given ticket, so the role starts each
-  ticket on an empty conversation and carries nothing from the last one. The
+  ticket on an empty conversation and carries nothing from the last one. A
+  Hermes role's own memory and session search are closed in its home for this,
+  and a Hermes pane started before its home was closed is held, not cleared or
+  continued, until it is restarted, fresh (SYRD-693). The
   policy is role-neutral -- an implementer, Audit, Inspector or a role invented
   later may declare it -- and only a real boolean is accepted; a string or a
   number is rejected naming the role. The clear happens after every delivery

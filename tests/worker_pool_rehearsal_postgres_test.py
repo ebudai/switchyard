@@ -41,6 +41,7 @@ if str(ROOT / "tests") not in sys.path:
 
 from scripts import team_launcher, worker_pool  # noqa: E402
 from scripts.ticket_board.notify_listener import TicketBoardNotifyListener  # noqa: E402
+from scripts.ticket_board.notification_session_clear import SESSION_CLEAR_COMMANDS  # noqa: E402
 from scripts.ticket_board.peer_identity import read_process  # noqa: E402
 from scripts.ticket_board.workflow_config import validate  # noqa: E402
 
@@ -242,6 +243,13 @@ FROM ticket_board.notification_trace;
 
 
 def main() -> int:
+    # The pool's Hermes members stand in for panes started on their prepared, closed homes (SYRD-693); the
+    # board's check of a real pane is tests/hermes_ticket_boundary_test.py.
+    from unittest.mock import patch
+
+    from scripts.ticket_board import hermes_ticket_boundary
+
+    patch.object(hermes_ticket_boundary, "open_reason", lambda target: "").start()
     pool = team_launcher.parse_worker_pool(POOL)
     document, changes = worker_pool.expand_pool(
         base_document(), pool, project=PROJECT, worktree_base=Path("/srv/worktrees")
@@ -348,7 +356,8 @@ def run_rehearsal(bench: Bench, pool, document: dict, members: list[str]) -> Non
         # address: this is what makes a bench member interchangeable rather
         # than an implementer carrying the last ticket's context (SYRD-135).
         for_member = [message for target, message in bench.sent if target == targets[member]]
-        check(for_member[0] == "/clear", f"{member} was cleared before its ticket: {for_member}")
+        # In the pool's runtime's own words: Hermes is told `/clear now` (SYRD-693).
+        check(for_member[0] == SESSION_CLEAR_COMMANDS[pool.runtime], f"{member} was cleared before its ticket: {for_member}")
         check(len(for_member) == 2 and ticket in for_member[1], f"{member} got one ticket: {for_member}")
     check(bench.queued() == [], "and the queue is empty afterwards")
 

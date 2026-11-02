@@ -15,6 +15,7 @@ until you turn it on.
 | `operation_failed` | A privileged host operation recorded on a ticket fails, times out or is rolled back. |
 | `project_outage` | A board's service has failed, or has been running without answering for `outage_minutes` (15 by default). Sent at high priority. A board stopped on purpose is not an outage. |
 | `director_ad_hoc` | The Director sends you a short note of its own (see "The Director's notifications"). |
+| `director_capacity` | The Director's Codex pane stopped on "Selected model is at capacity" and the board's automatic retries did not get through, so the Director is stopped until someone acts. It links the board page, which shows the same alert, and is sent at high priority. See "When the Director's model is at capacity" in the Director guide. |
 
 **Not sent:** worker assignments, pane nudges, reminder snoozes, routine comments, test progress, and every other
 transition.

@@ -150,7 +150,15 @@ READ_ROUTES = {
     "/api/provider-holds": lambda app, _query: provider_hold_status(app),  # SYRD-644
     user_events.PATH: user_events.read,  # SYRD-714: the phone bridge's read; changes nothing
     "/api/report-ancestry": lambda app, _query: report_ancestry_status(app),  # SYRD-721
+    "/api/director-capacity": lambda app, _query: director_capacity_status(app),  # SYRD-728
 }
+
+
+def director_capacity_status(app: Any) -> dict[str, Any]:
+    """SYRD-728: the Director's capacity alert, if one stands, and its open episode; read-only."""
+    from . import director_capacity
+
+    return director_capacity.status(app)
 
 
 def report_ancestry_status(app: Any) -> dict[str, Any]:

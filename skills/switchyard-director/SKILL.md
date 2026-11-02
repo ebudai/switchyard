@@ -261,9 +261,9 @@ carried when it was given.
   `release-external-blocker <id> --ref <ref> --reason "..."`. For a person, the
   reason is where their result is recorded, and the owner is told once. While
   an `operator:<name>` blocker stands, a User comment on the ticket is told to
-  you, once, and not to its owner (SYRD-725): read it, then release the blocker
+  you, once, and not to its owner: read it, then release the blocker
   with the result or keep it. The comment itself releases nothing. Decide what
-  the person's answer ends (SYRD-726): a blocker that waited only for an
+  the person's answer ends: a blocker that waited only for an
   authorization is released when you accept the authorization, with that as the
   result; one that waits on the person's own result is kept until that result
   is recorded. Never keep a blocker for the owner's own approved work, and never
@@ -279,7 +279,7 @@ carried when it was given.
   the owner still submits through every gate. A `blocked_reason` with nothing
   in `blocked_by` is only a note: it blocks nothing and silences nothing, so
   `set-blockers` refuses it - name what the ticket waits on. The implementation
-  owner keeps that explanation current itself (`set-blocked-reason`, SYRD-723),
+  owner keeps that explanation current itself (`set-blocked-reason`),
   so you need not rewrite it; the owner's edit changes the text only, never
   your blockers, the stage, the assignee or a wait, and is in the field audit.
 - **Deferred** - nobody is working it. Backlog, unassigned.
@@ -404,6 +404,11 @@ ticket-board-write set-board-stall-threshold --default --apply --expected-revisi
   - held notices;
   - provider quota;
   - outage detection.
+
+If your own Codex turn ends on "Selected model is at capacity", the board retries it up to three times
+(after 1, 2 and 5 minutes) and then alerts the operator, never you. When a retry reaches you, first
+check what the interrupted turn already did (the board, git status and log, command output), then carry on. Do
+not redo what already took effect.
 
 Your quota is shared operational capacity. Routing, integration and incident
 response all spend it, and every pane capture and ticket read lands in your
@@ -702,8 +707,8 @@ work Audit reviewed, which the board records: its substantive origin. It is the
 implementer's submission, or the draft or implementation stage the ticket last
 left. The Librarian's documentation commit, or its no-change decision, is
 recorded beside that as the documentation layer and never replaces it; Audit
-sends a documentation-only finding there with `audit-documentation-kick-back`
-(SYRD-719). Your stages and the review stages
+sends a documentation-only finding there with `audit-documentation-kick-back`.
+Your stages and the review stages
 pass a ticket on without changing that, so a draft you released into triage and
 moved into Audit returns to its designer. The ticket's `audit_return` shows where
 the kick-back goes. When the board does not know who produced the revision (a

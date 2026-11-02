@@ -114,6 +114,7 @@ MARKUP = """  <div class="layout">
         </div>
       </div>
       <div id="boardScroll" class="board-scroll" tabindex="0" role="region" aria-label="Workflow stages">
+        <div id="directorCapacityAlert" class="alert alert-blocked" role="alert" hidden></div>
         <div id="errorBox" class="error-box" hidden></div>
         <div class="board" id="board"></div>
       </div>

@@ -9,7 +9,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from . import delivery_proof
+from . import delivery_proof, director_capacity
 from .notification_ledger import NotificationLedger
 from .runtime_paths import directorctl_path
 
@@ -482,7 +482,9 @@ class NotificationDispatch:
                 decision="send",
                 reason=activity_trace.reason,
                 directorctl_diagnostic=directorctl_diagnostic,
-            ) | {"submission": {"witnessed": submission, "since": send_started_at}},
+            ) | {"submission": {"witnessed": submission, "since": send_started_at,
+                                # SYRD-728: the turn it started, by the recipient's own hook; no later turn is it.
+                                "turn": director_capacity.started_turn(gate, target, send_started_at)}},
         )
         self.ledger.trace(
             conn,

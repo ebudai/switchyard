@@ -605,6 +605,40 @@ A role can run Hermes on the host's local model service (`--local-qwen`; see
   `--no-local-qwen --model <hosted model>` takes a role off it. `local-model remove`
   takes the service off the host, and only after it has stopped.
 
+## When the Director's model is at capacity
+
+A Codex pane whose model is full ends its turn with `■ Selected model is at capacity. Please try a different
+model.` and returns to an empty prompt. No Stop hook runs, so nothing else in the pane changes. The condition
+usually passes within minutes. For an implementer the board retries the turn through its ticket (SYRD-594). For you,
+the Director, it does this (SYRD-728):
+
+- **Recognised.** It recognises only that exact error at the margin above an empty prompt, with the pane still and
+  no question open. Quota exhaustion, authentication, a policy refusal, a model that does not exist and a reply that
+  quotes the error are left alone, and the board never switches your model.
+- **Retried.** It types one retry into your pane after 1 minute, then 2, then 5, each timed from the failure it
+  answers. Only one retry is in flight at a time. Anything the board already queued for you goes first. Nothing is
+  cleared from your conversation. The retry says your last turn was interrupted and names the ticket when a board
+  notice started that turn. It asks you to check what the turn already did before repeating anything: the board, git
+  status and log, and any command it ran.
+- **Stopped.** A turn that ends normally stops it. So does anyone typing in your composer or starting a turn of
+  their own, and so does your pane or runtime being replaced. A restarted listener carries on where it left off and
+  never repeats a retry.
+- **Escalated.** If the third retry fails too, nothing more is typed into your pane. The operator gets one alert: a
+  red banner on the board page (`GET /api/director-capacity`), and the `director_capacity` phone notification where
+  the phone bridge is configured. A Director turn that later ends normally clears the banner.
+
+**Manual recovery**, for the operator, or for you when you come back to an interrupted turn:
+
+1. Attach to the Director pane: `switchyard attach <project> director`. Look at what is on screen; do not clear it.
+2. Before repeating anything, find out what the interrupted turn already did: read the board
+   (`ticket-board-read director`, and the ticket it was on), then `git status` and `git log -3` in its worktree,
+   and the output of any command it was running.
+3. Once the provider has capacity, type "carry on from where you stopped; first check what already took effect".
+   If it is still full after the board's retries, wait, or switch the pane's model with Codex's `/model` (a
+   decision for the operator: the board never switches it).
+4. Codex's quota error, an authentication failure or a refusal is a different problem: the board does not retry
+   it, and waiting will not fix it.
+
 ## Host health the board depends on
 
 Every board on a host shares one PostgreSQL cluster, one filesystem and one journal. When

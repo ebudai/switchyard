@@ -62,7 +62,9 @@ PASS_SECONDS = 30.0
 SERVE_CHECK_SECONDS = 300.0
 ANSWER_LIMIT = 64 << 10
 HOST_PROJECT = "_host"
-BOARD_KINDS = ("user_review", "operator_blocker", "operation_failed", "director_ad_hoc")
+BOARD_KINDS = ("user_review", "operator_blocker", "operation_failed", "director_ad_hoc", "director_capacity")
+#: Kinds about the board as a whole, which name no ticket (SYRD-728: the Director's capacity alert).
+BOARD_WIDE = ("director_ad_hoc", "director_capacity")
 #: A board's own limit is 5 an hour; past this many in an hour the bridge sends no more from that board.
 AD_HOC_PER_HOUR = 10
 DETAIL = re.compile(r"[a-z0-9_-]{0,64}")
@@ -114,7 +116,7 @@ def checked_events(answer: Any, project: str, prefix: str, after: int) -> tuple[
         good = (kind in BOARD_KINDS and isinstance(ticket, str) and isinstance(detail, str)
                 and DETAIL.fullmatch(detail) and isinstance(key, str) and len(key) <= 200
                 and key == f"{kind}:{ticket or '-'}:{event['id']}:{stamp}" and STAMP.fullmatch(stamp)
-                and type(event.get("standing")) is bool and (bool(ticket) or kind == "director_ad_hoc"))
+                and type(event.get("standing")) is bool and (bool(ticket) or kind in BOARD_WIDE))
         foreign = good and bool(ticket) and not re.fullmatch(rf"{re.escape(prefix)}-[0-9]{{1,9}}", ticket)
         notice = ad_hoc_notice(event, project, prefix) if good and not foreign and kind == "director_ad_hoc" else {}
         problem = ("an event not of the expected form" if not good else "not this project's ticket" if foreign

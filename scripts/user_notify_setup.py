@@ -39,7 +39,7 @@ from scripts import user_notify_pushover as pushover
 SCHEMA = "switchyard.user-notify.v1"
 UNIT = "switchyard-user-notify.service"
 INSTALLED_SCRIPT = "/opt/switchyard/current/scripts/user_notify.py"
-KINDS = ("user_review", "operator_blocker", "operation_failed", "project_outage", "director_ad_hoc")
+KINDS = ("user_review", "operator_blocker", "operation_failed", "project_outage", "director_ad_hoc", "director_capacity")
 PROVIDERS = ("pushover",)
 NAME = re.compile(r"[a-z][a-z0-9_]{0,31}")
 PROJECT = re.compile(r"[a-z][a-z0-9-]{0,31}")

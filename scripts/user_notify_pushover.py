@@ -47,6 +47,9 @@ LABELS = {
     "operator_blocker": ("waiting on you", "blocked until operator:{detail} acts"),
     "operation_failed": ("host operation failed", "privileged action {detail} did not succeed; see the ticket"),
     "project_outage": ("board is down", "the board has not answered for {detail} minutes"),
+    # SYRD-728: the Director's pane is stuck on its provider's capacity, and the board's retries are spent.
+    "director_capacity": ("Director stopped", "the Director's model is at capacity and the automatic retries failed; "
+                                              "see the board page for what to do"),
     "test": ("test notification", "a test from switchyard-user-notify; nothing needs you"),
 }
 
@@ -89,7 +92,7 @@ def message_for(event: dict[str, Any], *, link: str = "", urgent: bool = False) 
     headline = clean_text(event.get("title"), TEXT_LIMIT)
     body = clean_text(f"{ticket} {headline} -- {action}" if ticket else action, BODY_LIMIT)
     return Message(title=title, body=body, url=link, url_title=f"Open {ticket or project}" if link else "",
-                   priority=1 if kind == "project_outage" else 0)
+                   priority=1 if kind in ("project_outage", "director_capacity") else 0)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):

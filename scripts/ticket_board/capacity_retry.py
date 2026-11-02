@@ -33,6 +33,9 @@ The episode closes when a turn ends normally, or when the ticket moves or
 changes hands; what of it is not sent yet is withdrawn, and a queued retry is
 withdrawn as soon as the pane is working again. Only this error, as measured:
 not a quota error, a rate limit, or any other provider output.
+
+The Director's own pane is left to director_capacity (SYRD-728): its alert would wait in that same pane, and its
+turn may be about no ticket.
 """
 
 from __future__ import annotations
@@ -148,6 +151,9 @@ def run(listener: Any, conn: Any) -> int:
     gate = getattr(listener.activity_gate, "__self__", None)
     if gate is None or not hasattr(gate, "state_store"):
         return 0
+    from . import director_capacity
+
+    director_capacity.run(listener, conn, gate)  # SYRD-728: the Director's own pane, by its own route
     try:
         roles = report(gate)
         if not roles or not _present(listener, conn):

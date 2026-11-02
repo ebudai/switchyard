@@ -571,6 +571,13 @@ GRANT EXECUTE ON FUNCTION ticket_board.request_blocker_review(text, text, text, 
     TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.blocker_review_is_current(jsonb) TO ticket_board_listener;
 
+-- SYRD-728: the Director's capacity episodes, which the listener keeps and the board page reads.
+GRANT EXECUTE ON FUNCTION ticket_board.note_director_capacity(jsonb, double precision[], timestamptz)
+    TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.record_director_capacity_attempt(bigint, integer, text, timestamptz)
+    TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.director_capacity_status() TO ticket_board_service;
+
 -- SYRD-668: last, after every grant above. The board's own principals are the
 -- role users this file creates and its service and listener, and nothing is
 -- granted to any other role. Migrations once granted to every role that passed

@@ -227,6 +227,17 @@ system working, not a bug to route around.
   pane, over the board's socket, and the board refuses it on another owner's ticket,
   once the ticket has left implementation, and from a replaced or retired runtime. Each
   change is recorded in the ticket's field audit under your role and runtime.
+- `request-blocker-review <id> --ref operator:<name> --reason "..."` — implementers: when
+  the Director kept a standing external blocker while you finished work it waited on, and
+  that work is done and recorded, tell the Director it is ready for review (SYRD-726).
+  `request-dependency` is refused while the blocker stands, and a plain comment reaches no
+  one. The Director gets one notice with the blocker and your reason, and you get none. The
+  request releases nothing and changes no blocker, stage, assignee or sign-off; only the
+  Director releases, keeps or replaces it, and the release tells you once, with the result.
+  The same request again changes nothing. A different one is refused until the Director has
+  answered with a comment, the release, or the blockers recorded again. A notice for a
+  blocker released before it was delivered is dropped. It works only from your own
+  registered pane, over the board's socket, on a ticket you own in an implementation stage.
 - External blockers (director) — `set-blockers <id> --blocked-by syrd:SYRD-269 --blocked-reason "..."`
   records a wait on another board's work (SYRD-270); `--blocked-by operator:<name>` records a
   wait on a person whose step has no ticket (SYRD-273). It never resolves by itself, whatever

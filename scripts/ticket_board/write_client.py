@@ -1112,6 +1112,10 @@ class TicketBoardWriteClient:
         """The owner's explanation of its own ticket's blocker (SYRD-723); empty clears it. A note, never a wait."""
         return self._ticket_action(ticket_id, "set_blocked_reason", {"blocked_reason": blocked_reason}, caller_role=caller_role)
 
+    def request_blocker_review(self, ticket_id: str, ref: str, reason: str, *, caller_role: str | None = None) -> dict[str, Any]:
+        """The owner asks the Director to review one standing external blocker (SYRD-726); it releases nothing."""
+        return self._ticket_action(ticket_id, "request_blocker_review", {"ref": ref, "reason": reason}, caller_role=caller_role)
+
     def add_comment(self, ticket_id: str, *, text: str, urgent: bool = False, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "add_comment", {"text": text, "urgent": urgent}, caller_role=caller_role)
 

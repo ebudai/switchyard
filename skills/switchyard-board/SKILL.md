@@ -166,6 +166,7 @@ move it to backlog; that reads as abandoned.
 ticket-board-write request-dependency <id> --role <role> --reason "what they have to do"
 ticket-board-write set-blockers <id> --blocked-by <other-ticket-id> --blocked-reason "..."
 ticket-board-write set-blocked-reason <id> --blocked-reason "..."   # or --clear
+ticket-board-write request-blocker-review <id> --ref <standing external blocker> --reason "..."
 ticket-board-write await-role <id> --role <role>
 ticket-board-write clear-awaiting-role <id>
 ```
@@ -188,7 +189,12 @@ are waiting on another board's work or on a person, ask the director once
 (`request-dependency`) to record that blocker rather than re-opening the same
 dependency; you are told once when it is released, with the result. While a person's blocker
 stands, a User comment on your ticket goes to the director, not to you: the release is what
-tells you. `await-role` is the bare
+tells you. If the director kept the blocker while you finished work it waited on, and that work
+is now done and recorded, ask for the review once:
+`request-blocker-review <id> --ref operator:<name> --reason "what is done, and where the evidence is"`.
+It tells the director, names the blocker and gives your reason, and releases nothing. The same
+request again changes nothing. A new one waits until the director answers: a comment, the
+release, or the blocker recorded again. `await-role` is the bare
 wait without a reason - prefer `request-dependency`, which is that plus the
 sentence the awaited role needs. Either way the wait clears when the awaited
 role *acts*, not when they reply.

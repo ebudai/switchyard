@@ -429,6 +429,10 @@ WHERE id = %s
                                (payload,)).fetchone()
             return target_role == "director" and row is not None and bool(
                 row["current"] if isinstance(row, dict) else row[0])
+        # SYRD-726: the owner's request to review a blocker is the Director's, while the request and its blocker stand.
+        if kind == "blocker_review":
+            row = conn.execute("SELECT ticket_board.blocker_review_is_current(%s::jsonb) AS current", (payload,)).fetchone()
+            return target_role == "director" and bool(row["current"] if isinstance(row, dict) else row[0])
         # SYRD-616: a role is told its own command was interrupted, whatever its ticket has done since.
         if kind == "execution_lease_interrupted":
             return target_role != "director"

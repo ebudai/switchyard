@@ -565,6 +565,11 @@ GRANT EXECUTE ON FUNCTION ticket_board.set_audit_return(text, text, text, text) 
 
 -- SYRD-725: the listener asks whether the User's answer to an operator wait is still the Director's to act on.
 GRANT EXECUTE ON FUNCTION ticket_board.operator_response_is_current(jsonb) TO ticket_board_listener;
+-- SYRD-726: the owner's request to review a standing blocker, which checks the owner and its live runtime; and the
+-- listener's question whether that request still stands.
+GRANT EXECUTE ON FUNCTION ticket_board.request_blocker_review(text, text, text, bigint, bigint, bigint)
+    TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.blocker_review_is_current(jsonb) TO ticket_board_listener;
 
 -- SYRD-668: last, after every grant above. The board's own principals are the
 -- role users this file creates and its service and listener, and nothing is

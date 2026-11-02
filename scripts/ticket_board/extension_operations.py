@@ -8,14 +8,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import (audit_return, blocker_explanation, cohort_ops, provider_hold_ops, context_continuation, director_notice, documentation_candidate, execution_lease_ops, pull_queue, reminder_snooze,
+from . import (audit_return, blocker_explanation, blocker_review, cohort_ops, provider_hold_ops, context_continuation, director_notice, documentation_candidate, execution_lease_ops, pull_queue, reminder_snooze,
                report_intake, router_role, size_review, uat_instructions, ui_delegation, user_events, user_wait)
 
 OPERATIONS = (reminder_snooze.OPERATIONS | size_review.OPERATIONS | report_intake.OPERATIONS
               | router_role.OPERATIONS | ui_delegation.OPERATIONS | context_continuation.OPERATIONS
               | uat_instructions.OPERATIONS | execution_lease_ops.OPERATIONS | cohort_ops.OPERATIONS
               | provider_hold_ops.OPERATIONS | user_wait.OPERATIONS | audit_return.OPERATIONS | director_notice.OPERATIONS
-              | blocker_explanation.OPERATIONS)
+              | blocker_explanation.OPERATIONS | blocker_review.OPERATIONS)
 
 
 def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: str,
@@ -26,6 +26,9 @@ def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: s
     if operation in blocker_explanation.OPERATIONS:  # SYRD-723: so is the owner's runtime
         return blocker_explanation.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id,
                                            handler=handler)
+    if operation in blocker_review.OPERATIONS:  # SYRD-726: and the owner asking for a review
+        return blocker_review.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id,
+                                      handler=handler)
     if operation in reminder_snooze.OPERATIONS:
         if ticket_id is not None:
             raise ValueError(f"{operation} names its tickets in the request, not the path")

@@ -888,6 +888,14 @@ def _build_parser() -> argparse.ArgumentParser:
     explain.add_argument("ticket_id")
     add_free_text_argument(explain, "--blocked-reason", help="why the work cannot proceed, as you now know it")
     explain.add_argument("--clear", action="store_true", help="empty it; refused while a blocker stands")
+    review = subparsers.add_parser(
+        "request-blocker-review", help="the owner of a ticket in implementation, from its own pane: ask the Director "
+                                       "to review one standing external blocker, with why it is ready; it releases "
+                                       "nothing, and only the Director releases, keeps or replaces it (SYRD-726)")
+    review.add_argument("ticket_id")
+    review.add_argument("--ref", required=True, help="the standing blocker, as project:PREFIX-N or operator:<name>")
+    add_free_text_argument(review, "--reason", required=True,
+                           help="why it is ready for the Director's review, with the evidence and where it is recorded")
 
     comment = subparsers.add_parser("add-comment")
     comment.add_argument("ticket_id")
@@ -1160,6 +1168,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.clear == bool(args.blocked_reason.strip()):
                 parser.error("set-blocked-reason: give --blocked-reason with the new text, or --clear")
             response = client.set_blocked_reason(args.ticket_id, args.blocked_reason)
+        elif command == "request_blocker_review":
+            response = client.request_blocker_review(args.ticket_id, args.ref, args.reason)
         elif command == "add_comment":
             response = client.add_comment(args.ticket_id, text=args.text, urgent=args.urgent)
         elif command == "edit_fields":
@@ -1190,7 +1200,7 @@ def main(argv: list[str] | None = None) -> int:
                    "enable_size_review", "measure_size", "set_report_intake", "force_fresh_context",
                    "uat_instructions", "extend_lease", "interrupt_lease", "set_cohort_quota", "clear_cohort_quota",
                    "clear_provider_hold", "await_user", "set_audit_return", "report_follow_up", "notify_user",
-                   "set_blocked_reason"}:
+                   "set_blocked_reason", "request_blocker_review"}:
         print(json.dumps(response))
     else:
         print(json.dumps(_ticket_from_response(response)))

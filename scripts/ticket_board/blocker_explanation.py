@@ -30,12 +30,12 @@ ELSEWHERE = {
 }
 
 
-def _calling_process(handler: Any) -> tuple[int, int, int]:
+def _calling_process(handler: Any, what: str = "a blocker explanation is set") -> tuple[int, int, int]:
     """(pid, start time, uid) of the registered pane making this request, as the kernel names it."""
     authority = getattr(handler, "role_authority", None)
     if handler is None or authority is None or not hasattr(authority, "session_for_peer"):
-        raise PermissionError("a blocker explanation is set only from the owning role's own pane, over the board's "
-                              "socket under process authority")
+        raise PermissionError(f"{what} only from the owning role's own pane, over the board's socket under process "
+                              "authority")
     credentials = handler.require_allowed_peer()
     identity = authority.session_for_peer(credentials)
     return identity.pid, identity.start_time, credentials.uid

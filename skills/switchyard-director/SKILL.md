@@ -262,7 +262,18 @@ carried when it was given.
   reason is where their result is recorded, and the owner is told once. While
   an `operator:<name>` blocker stands, a User comment on the ticket is told to
   you, once, and not to its owner (SYRD-725): read it, then release the blocker
-  with the result or keep it. The comment itself releases nothing. Add
+  with the result or keep it. The comment itself releases nothing. Decide what
+  the person's answer ends (SYRD-726): a blocker that waited only for an
+  authorization is released when you accept the authorization, with that as the
+  result; one that waits on the person's own result is kept until that result
+  is recorded. Never keep a blocker for the owner's own approved work, and never
+  fold an approval and the owner's later work into one release: once you have
+  accepted the approval, the owner's work goes through its gates like any other.
+  If you do keep a blocker while the owner finishes something, the owner tells
+  you it is ready with `request-blocker-review`: you get one notice naming the
+  blocker and the owner's reason, and the owner gets none. Answer it: release
+  with the result, keep it with a comment saying why (which also lets the owner
+  ask again with something new), or record the blockers again. Add
   `--commit <sha>` when the wait was for a commit this board could not see: the
   release is refused until this board resolves it. The release moves nothing;
   the owner still submits through every gate. A `blocked_reason` with nothing

@@ -108,7 +108,7 @@ def scenario(root: Path, upgrade_from: Path | None = None) -> dict:
     def boundary(cluster, dbname: str, *, strip: bool) -> dict:
         """Main's board as deployed, then pgu1026 alone, as the runner applies one file: before its exit-time
         revocation and before rbac.sql. Who may execute each new function then, and after rbac.sql."""
-        from router_role_board_test import build_board
+        from router_role_board_test import build_board, migrate
 
         admin = build_board(cluster, dbname, before=upgrade_from)
         text = (root / MIGRATION.relative_to(ROOT)).read_text()
@@ -124,7 +124,9 @@ def scenario(root: Path, upgrade_from: Path | None = None) -> dict:
                 admin, f"SELECT has_function_privilege('{r}', 'ticket_board.{f}', 'EXECUTE');").strip() == "t")
                 for f in functions}
         seen = {"window": who()}
-        fixture.psql(admin, (root / "scripts/ticket_board/rbac.sql").read_text())
+        # The rest of the upgrade, as production runs it: the runner's pending migrations (a later ticket's too), then
+        # rbac.sql, whose grants may name their functions.
+        migrate(admin, root)
         seen["after_rbac"] = who()
         return seen
 

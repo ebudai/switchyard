@@ -39,7 +39,9 @@ box, and three buttons:
   Director sends it.
 
 Text in backticks renders as code. A fenced block renders as a block with a
-**Copy** button.
+**Copy** button. A Markdown link, `[label](https://...)`, shows its label and
+opens its target in a new tab, for http and https targets only; any other
+link, and a link inside code, stays the text it was written as (SYRD-729).
 
 When the ticket has no current steps, the panel never invents any:
 
@@ -178,6 +180,7 @@ board's relay and withdrawal machinery is unchanged.
 | `tests/uat_instructions_test.py` | Declared and legacy boards. Who may write steps and ask. Blank, long and reconfirm refusals. The guard on every path into User Review. Superseding on Send to Director, return and commit change. A coded ticket, a no-code ticket, a resubmission with changed steps, a legacy ticket. The question notice. |
 | `tests/user_feedback_workflow_test.py` | The shipped transitions. Send to Director keeps the commit and Audit's sign-off and gives exactly one notice, the Director's. Every Director decision from `user_feedback`. The upgrade on a shipped-shape board, its idempotence, and that it leaves other shapes alone. |
 | `tests/uat_upgrade_parity_test.py` | A board installed from the tree before pgu1002 (the parent of the commit that added it), running that era's shipped workflow, then upgraded the way deploy upgrades: `scripts/ticket-board-migrate` alone, with no rbac.sql. It ends with the same UAT columns, constraints, indexes and triggers as a fresh install, the same function bodies and EXECUTE grants, and the same table grants to the service and the listener. It also gets the same User Review and decision stage as today's shipped document. The per-role SELECT on every table comes from install's rbac.sql sweep, which no migration mirrors, so it is not compared. |
+| `tests/uat_link_browser_test.py` | SYRD-729. Chromium, at desktop and phone size, main first. The canary-report link opens its exact target; `javascript:`, `data:`, relative, spaced and unclosed links and links in code stay text; Ask Director, Accept and Send to Director still work. |
 | `tests/uat_panel_browser_test.py` | Chromium, declared and legacy boards. On a ticket with a long body and many comments, the action, the expected result and the controls are visible at the top of an 800px-high viewport without scrolling. Each panel state. Copyable commands. Ask Director, and the reply shown under it. Both confirmations, with where the ticket goes next. |
 
 Neighbour suites that relied on the User's return now run on the earlier

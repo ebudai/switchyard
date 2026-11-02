@@ -7,10 +7,49 @@ with it: Ask Director (the ticket stays), Accept, Send to Director. Each says in
 its confirmation where the ticket goes and who acts next. A ticket without
 current instructions shows the Director's latest explicit UAT request, if one
 can be identified, or says plainly that the Director must prepare the steps.
+Markdown links in that text open their http or https target; any other link,
+and anything inside code, stays the text it is (SYRD-729).
 """
 
 SCRIPT_UAT = r"""
-    // Text with its commands kept literal and copyable: ```fenced``` blocks and `inline` code (SYRD-629).
+    // A Markdown link, [label](target): the target may hold balanced parentheses, never whitespace (SYRD-729).
+    const UAT_LINK = /\[([^\[\]\n]+)\]\(([^()\s]*(?:\([^()\s]*\)[^()\s]*)*)\)/g;
+
+    // Whether a link may open its target: an absolute http or https URL, nothing else.
+    function uatLinkSafe(target) {
+      try {
+        return ['http:', 'https:'].includes(new URL(target).protocol);
+      } catch (failure) {
+        return false;
+      }
+    }
+
+    // Plain text, its safe Markdown links made anchors: label and target set as text and an attribute, never markup.
+    // A link with any other target stays its own text.
+    function uatLinkedText(fragment, text) {
+      let shown = 0;
+      for (const match of text.matchAll(UAT_LINK)) {
+        if (!uatLinkSafe(match[2])) {
+          continue;
+        }
+        if (match.index > shown) {
+          fragment.appendChild(document.createTextNode(text.slice(shown, match.index)));
+        }
+        const link = document.createElement('a');
+        link.setAttribute('href', match[2]);
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.textContent = match[1];
+        fragment.appendChild(link);
+        shown = match.index + match[0].length;
+      }
+      if (shown < text.length) {
+        fragment.appendChild(document.createTextNode(text.slice(shown)));
+      }
+    }
+
+    // Text with its commands kept literal and copyable: ```fenced``` blocks and `inline` code (SYRD-629), and its
+    // links outside them clickable (SYRD-729).
     function uatRichText(text) {
       const fragment = document.createDocumentFragment();
       String(text || '').split('```').forEach((segment, index) => {
@@ -43,7 +82,7 @@ SCRIPT_UAT = r"""
             code.textContent = piece;
             fragment.appendChild(code);
           } else if (piece) {
-            fragment.appendChild(document.createTextNode(piece));
+            uatLinkedText(fragment, piece);
           }
         });
       });
@@ -263,6 +302,7 @@ STYLE_UAT = """
     .uat-part-text { white-space: pre-wrap; overflow-wrap: anywhere; }
     .uat-part-text code { font-family: ui-monospace, monospace; background: rgba(255, 255, 255, 0.1); padding: 0 3px;
                           border-radius: 3px; user-select: all; }
+    .uat-part-text a { color: var(--accent); text-decoration: underline; }
     .uat-code-block { position: relative; margin: 4px 0; }
     .uat-code-block pre { margin: 0; padding: 6px 8px; background: rgba(255, 255, 255, 0.08); border-radius: 6px;
                           overflow-x: auto; }

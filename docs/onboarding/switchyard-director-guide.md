@@ -267,8 +267,9 @@ ticket-board-write uat-instructions <id> --do-this "<the exact command or UI act
 ticket-board-write uat-instructions <id> --reconfirm   # the same steps, for the ticket as it is now
 ```
 
-Plain words, real prerequisites, commands in backticks; background stays in the
-body. Steps are superseded when the ticket leaves User Review unaccepted or goes
+Plain words, real prerequisites, commands in backticks, links as
+`[label](https://...)` (they open on the User's desktop and phone; only http and
+https); background stays in the body. Steps are superseded when the ticket leaves User Review unaccepted or goes
 back to implementation, and are not current once its commit changes, so each
 round needs its own. The User's **Ask Director** leaves the ticket where it is
 and sends you one `uat_question` notice; answer with a comment and the panel

@@ -38,6 +38,7 @@ import os
 import re
 import stat
 import sys
+import time
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, fields
@@ -488,9 +489,31 @@ def write_role_home(hermes_home: Path, profile: LocalProfile, *, shared_home: Pa
                 os.unlink(temp, dir_fd=fd)
             except FileNotFoundError:
                 pass
+        _answer_update_check(fd)
         return ""
     finally:
         os.close(fd)
+
+
+#: Hermes 0.15.2 asks PyPI for a newer Hermes at every interactive start (`hermes_cli.banner.check_for_updates`),
+#: with no setting to stop it, unless `.update_check` in its home is under six hours old (SYRD-690 canary).
+UPDATE_CHECK_NAME = ".update_check"
+
+
+def _answer_update_check(fd: int) -> None:
+    """Answer Hermes's update check for this start, so a local role asks nothing off the host. Upgrading Hermes is
+    the operator's, and the role's tests are rerun after it (docs/syrd-727-hermes-ticket-boundary.md)."""
+    temp = f".{UPDATE_CHECK_NAME}.{os.getpid()}.tmp"
+    handle = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump({"ts": time.time(), "behind": 0, "rev": None}, stream)
+        os.replace(temp, UPDATE_CHECK_NAME, src_dir_fd=fd, dst_dir_fd=fd)
+    finally:
+        try:
+            os.unlink(temp, dir_fd=fd)
+        except FileNotFoundError:
+            pass
 
 
 def link_shared(hermes_home: Path, shared_home: Path, names: Iterable[str]) -> None:

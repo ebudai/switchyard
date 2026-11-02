@@ -580,14 +580,20 @@ from hermes_cli.config import load_config
 from agent.auxiliary_client import _resolve_task_provider_model
 from agent.model_metadata import MINIMUM_CONTEXT_LENGTH
 from tools.lazy_deps import _allow_lazy_installs
-import sys
+from hermes_cli.banner import check_for_updates
+import os, sys
+cache = os.path.join(os.environ["HERMES_HOME"], ".update_check")
+before = open(cache).read() if os.path.exists(cache) else ""
+behind = check_for_updates()
+after = open(cache).read() if os.path.exists(cache) else ""
 main = resolve_runtime_provider()
 cfg = load_config()
 aux = {task: list(_resolve_task_provider_model(task=task))[:4] for task in sys.argv[1:]}
 print("RESOLVED " + json.dumps({"provider": main.get("provider"), "base_url": main.get("base_url"),
       "api_key": main.get("api_key"), "fallback": cfg.get("fallback_providers"), "fallback_model": cfg.get("fallback_model"),
       "model": cfg["model"].get("default"), "context": cfg["model"].get("context_length"), "aux": aux,
-      "minimum": MINIMUM_CONTEXT_LENGTH, "lazy_installs": _allow_lazy_installs()}))
+      "minimum": MINIMUM_CONTEXT_LENGTH, "lazy_installs": _allow_lazy_installs(),
+      "update_check": {"behind": behind, "answered_from_cache": bool(before) and before == after}}))
 '''
         env = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": str(home), "HERMES_HOME": str(home),
                # A hosted key in the environment: the explicit local provider must not reach for it.
@@ -606,6 +612,9 @@ print("RESOLVED " + json.dumps({"provider": main.get("provider"), "base_url": ma
               f"every auxiliary task, by Hermes's own resolution, on the endpoint only: {got['aux']}")
         check(got["minimum"] == hlp.HERMES_MINIMUM_CONTEXT, f"the context floor is Hermes's own: {got['minimum']}")
         check(got["lazy_installs"] is False, f"by Hermes's own reading, it installs nothing from PyPI: {got}")
+        # SYRD-690: with no network here, an attempt would answer None and rewrite the cache.
+        check(got["update_check"] == {"behind": 0, "answered_from_cache": True},
+              f"Hermes's start-up update check is answered in the home and asks PyPI nothing: {got['update_check']}")
 
 
 #: What the installed Hermes makes of a role's home: its memory settings, and the tools its CLI would offer.

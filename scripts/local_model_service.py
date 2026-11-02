@@ -67,7 +67,9 @@ PYTHON = "/usr/bin/python3"
 #: How often the supervisor reads the server's /metrics.
 POLL_SECONDS = 30
 #: What a running service holds, measured on the qualifying host at 24 GPU layers (SYRD-691, 2026-10-29).
-HOLDS = "about 8.3 GiB of GPU memory (8,546 MiB measured) and 3 GiB of RAM"
+#: What the running service holds, in every place that says so (SYRD-690, Audit: one account of its RAM).
+HOLDS = ("about 8.3 GiB of GPU memory (8,546 MiB measured) and up to about 15 GiB of host RAM: about 3 GiB of "
+         "its own, the rest the model's weights in the page cache")
 
 MODEL_ID = "Qwen/Qwen3.8-27B"
 UPSTREAM_REVISION = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
@@ -346,7 +348,11 @@ def approval_packet(settings: Settings, layout: Layout, *, observed: dict[str, A
                                 "about 12 GB read from RAM per token; about 4-5 "
                                 "tokens/s generated (host measured at about 63 GB/s read). Thinking is on by "
                                 "default, so a turn can take minutes. Measured after install, not promised."),
-                   "ram": f"about 15 GiB (12 GiB of weights, 2-3 GiB of KV cache and buffers), capped at MemoryMax {settings.memory_max}"},
+                   "ram": ("up to about 15 GiB: about 11 GiB (12 GB) of model weights read through the page cache, "
+                           "which the kernel can reclaim, and about 3 GiB of its own (KV cache in host memory and "
+                           "buffers). The page cache counts against the unit only for weights the unit itself reads "
+                           "in; measured unit peaks were 2.4-3.1 GiB (SYRD-691) and 9.15 GiB (SYRD-693). Limits "
+                           f"MemoryHigh {settings.memory_high}, MemoryMax {settings.memory_max}")},
         "network": "install downloads from huggingface.co and github.com only; the service itself may reach localhost only",
         "rollback": ("`switchyard local-model stop`, then `remove`: stops and deletes the unit, the engine "
                      "directory, the supervisor, the model directory and the record, and nothing else. Re-pinning "

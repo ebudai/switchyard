@@ -67,6 +67,47 @@ These ran in interactive Hermes in a private tmux, which is how a pane runs it.
   own `memory` tool came back in the new session, with no tool call. Hermes's memory (`memories/MEMORY.md` in
   the role's home) and its `session_search` over earlier sessions outlive `/clear`.
 
+## Board hooks, live (SYRD-690)
+
+SYRD-693's canary ran Hermes from a sandbox home without Switchyard's hooks. SYRD-690's Audit asked for the
+real pane command with them, so one more approved window ran (2026-11-02, 18:07:14–18:10:38 EST; log
+`/var/log/syrd690-window-20261102T180714.log`). It installed the corrected packet `6f787b3c…` (one account of its RAM;
+`docs/local-model-service.md`) without downloading anything, served for 3.5 minutes, and ended stopped (`NRestarts=0`, only kwin on the GPU).
+
+**Setup.** Nothing touched a live tenant, board or Hermes home. SYRD's own shared `config.yaml` was
+byte-identical before and after.
+- **Hooks:** Switchyard's own `ticket-board-install-pane-hooks install` wrote a disposable shared Hermes home,
+  whose hooks name scratch state and session directories.
+- **Tenant:** a disposable one with one local-Qwen Hermes role.
+- **Start:** the real `role_sessions._start_role_session`, which ran the start check, prepared the home and
+  started the real pane command: `… hermes_local_profile.py check … -- hermes -m Qwen/Qwen3.8-27B --yolo
+  --accept-hooks --pass-session-id`. tmux ran on a private socket.
+
+**What the board would read.** The pane's state file, `ticket-board-pane-idle-hook`'s, at every change:
+
+| When | State | Source |
+|---|---|---|
+| launcher start | idle | the launcher's seed |
+| first turn, 5.6 s later | busy | `hermes.pre_llm_call` |
+| its answer, 54.7 s later | idle | `hermes.post_llm_call` |
+| `/exit` | idle | `hermes.on_session_end`, then `hermes.on_session_finalize` |
+| launcher start, resuming | idle | the launcher's seed; its command carried `--resume 20261102_180821_19317c`, the session the `on_session_start` hook had recorded |
+| second turn | busy, then idle 16 s later | `hermes.pre_llm_call`, `hermes.post_llm_call` |
+
+**The conversation.** The first turn asked the model to remember `CANARY-690` and it answered `OK`. After the
+stop and the resume, asked which word, it answered `CANARY-690`. It was one session throughout
+(`20261102_180821_19317c`: 4 messages, 2 model calls).
+
+**Off the host: nothing.**
+- Hermes's TCP peers, sampled through both turns, were only `127.0.0.1:17431`.
+- Its log names no endpoint but `http://127.0.0.1:17431/v1`.
+- It made no lazy install.
+- Its update check was answered from the home (below).
+
+**Found by this canary's dry run, and fixed.** Run outside a sandbox, Hermes 0.15.2 asked PyPI for a newer
+release at its start. A local role's home now answers that check, so the role asks nothing off the host
+(SYRD-692 note).
+
 ## Failure, load and recovery
 
 - **Endpoint stopped mid-session** (`local-model stop` by the window script): the next turn made 3 attempts

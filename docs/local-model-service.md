@@ -4,8 +4,9 @@ One opt-in, host-wide inference service that serves the exact model `Qwen/Qwen3.
 loopback. There is one service for the whole host, never one per tenant or role. Nothing is downloaded or
 installed until the operator approves a packet, and no project launch starts it.
 
-**While it runs it holds about 8.3 GiB of the GPU's memory (8,546 MiB measured) and 3 GiB of RAM, whether or not
-anything is using it.** It stops itself once it has been idle for 15 minutes, and never while a request runs.
+**While it runs it holds about 8.3 GiB of the GPU's memory (8,546 MiB measured) and up to about 15 GiB of host
+RAM, whether or not anything is using it.** About 3 GiB of that RAM is its own (KV cache and buffers). The rest is
+the model's weights in the page cache, which the kernel can reclaim. It stops itself once it has been idle for 15 minutes, and never while a request runs.
 `sudo switchyard local-model stop` releases it at once. `switchyard local-model status` says what holds GPU
 memory now.
 
@@ -206,7 +207,9 @@ switchyard local-model status            # "GPU: this service holds no GPU memor
 
 **What to expect, measured on the qualifying host.**
 - **GPU:** about 8.6 GiB while it runs (8,612 MiB peak).
-- **Host memory:** 9.2 GiB peak in the unit, most of it the mapped model.
+- **Host memory:** up to about 15 GiB, about 3 GiB of it the service's own and the rest model weights in the page
+  cache. The page cache counts against the unit only for weights the unit itself reads in. The unit's measured
+  peaks were 2.4–3.1 GiB (SYRD-691) and 9.15 GiB (SYRD-693). Its limits are `MemoryHigh` 28G and `MemoryMax` 32G.
 - **CPU pressure:** negligible.
 - **Generation:** about 5 tokens a second, falling to 2.7 at 60K tokens of context.
 - **Turn times:** a one-call task takes about a minute, a four-call edit-and-test about two, each roughly three

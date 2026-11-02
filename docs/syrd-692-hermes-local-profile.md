@@ -114,6 +114,10 @@ It contains the owner's shared `config.yaml` with these changes:
   Otherwise Hermes 0.15.2 runs `pip install` for optional packages (its text-to-speech backends) from PyPI as
   it starts. Offline it retries every few seconds and holds the first turn back; found by the SYRD-693 canary.
 - **Effort:** `agent.reasoning_effort`, when the role has one.
+- **The update check:** Hermes 0.15.2 asks PyPI for a newer Hermes at every interactive start, with no setting
+  to stop it, unless its `.update_check` cache is under six hours old. The home's `.update_check` is written
+  as up to date at every start, so the role asks nothing off the host (SYRD-690). Upgrading Hermes is the
+  operator's; rerun the role's suites after it.
 - **The ticket boundary,** for a role the board clears into each ticket (`ephemeral` or
   `fresh_session_per_ticket`): Hermes's memory, user profile and memory provider are off, `memory` and
   `session_search` are disabled toolsets, and the file carries the mark the board checks before each clear

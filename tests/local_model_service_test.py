@@ -185,6 +185,23 @@ def said(function, *args, **kwargs):
 # ------------------------------------------------------------------ the packet
 
 
+def test_every_statement_of_what_it_holds_agrees() -> None:
+    """SYRD-690 (Audit): the packet said 3 GiB of RAM in one line and about 15 GiB in another."""
+    from scripts import local_model_service as m
+
+    packet = m.approval_packet(m.Settings(), m.Layout())
+    lifecycle, ram = packet.body["service"]["lifecycle"], packet.body["sizing"]["ram"]
+    guide = (ROOT / "docs" / "local-model-service.md").read_text(encoding="utf-8")
+    opening = guide[:guide.index("## What it is")]
+    for where, text in (("the packet's lifecycle", lifecycle), ("the packet's RAM", ram), ("HOLDS", m.HOLDS),
+                        ("the guide's opening", " ".join(opening.split()))):
+        check("up to about 15 gib" in text.lower() and "about 3 gib" in text.lower() and "page cache" in text,
+              f"{where} gives the same RAM: up to about 15 GiB, about 3 GiB its own, the rest page cache: {text}")
+    check("MemoryHigh 28G" in ram and "MemoryMax 32G" in ram and "9.15 GiB" in ram,
+          f"the packet's RAM names its limits and the measured peak: {ram}")
+    check(m.HOLDS in lifecycle, "the packet's lifecycle says what the help, start and install say")
+
+
 def test_the_packet_names_every_pin_and_preview_changes_nothing() -> None:
     from scripts import local_model_service as m
 

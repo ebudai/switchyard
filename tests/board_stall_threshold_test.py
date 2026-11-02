@@ -783,7 +783,12 @@ def reprovision_checks(got: dict) -> None:
 def mirrored() -> None:
     schema = (ROOT / "scripts/ticket_board/schema.sql").read_text()
     body = MIGRATION.read_text().split("BEGIN;\n\n", 1)[1].rsplit("\nCOMMIT;", 1)[0]
-    check(schema.endswith(body), "schema.sql's last copies are the migration's, byte for byte")
+    # The last definition of each function is the migration's, byte for byte; a later ticket's may follow (SYRD-725).
+    heads = [f"CREATE OR REPLACE FUNCTION ticket_board.{name}(" for name in (
+        "declared_board_stall_seconds", "note_board_stall", "board_stall_status", "provisioned_workflow")]
+    at = schema.rfind(body)
+    check(at >= 0 and all(at <= schema.rfind(h) < at + len(body) for h in heads),
+          "schema.sql's last copies are the migration's, byte for byte")
     readers = subprocess.run(["git", "-C", str(ROOT), "grep", "--untracked", "-l", "-e", "->'board_stall'", "--", "scripts"],
                              capture_output=True, text=True).stdout.split()
     check(sorted(readers) == [str(MIGRATION.relative_to(ROOT)), "scripts/ticket_board/schema.sql"],

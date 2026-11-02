@@ -259,7 +259,10 @@ carried when it was given.
   it, and nothing repeats. An external or operator blocker never resolves by
   itself, whatever happens elsewhere: end it with
   `release-external-blocker <id> --ref <ref> --reason "..."`. For a person, the
-  reason is where their result is recorded, and the owner is told once. Add
+  reason is where their result is recorded, and the owner is told once. While
+  an `operator:<name>` blocker stands, a User comment on the ticket is told to
+  you, once, and not to its owner (SYRD-725): read it, then release the blocker
+  with the result or keep it. The comment itself releases nothing. Add
   `--commit <sha>` when the wait was for a commit this board could not see: the
   release is refused until this board resolves it. The release moves nothing;
   the owner still submits through every gate. A `blocked_reason` with nothing

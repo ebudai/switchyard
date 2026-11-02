@@ -423,6 +423,12 @@ WHERE id = %s
                     "provider_quota_hold", "invalid_user_wait", "audit_return_missing",
                     "report_follow_up"}:  # SYRD-539, 540, 565, 557, 570, 583, 633, 629, 616, 644, 662, 673, 677
             return target_role == "director"
+        # SYRD-725: the User's answer to an operator wait is the Director's, while a blocker it names stands.
+        if kind == "operator_response":
+            row = conn.execute("SELECT ticket_board.operator_response_is_current(%s::jsonb) AS current",
+                               (payload,)).fetchone()
+            return target_role == "director" and row is not None and bool(
+                row["current"] if isinstance(row, dict) else row[0])
         # SYRD-616: a role is told its own command was interrupted, whatever its ticket has done since.
         if kind == "execution_lease_interrupted":
             return target_role != "director"

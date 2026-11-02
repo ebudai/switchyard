@@ -231,7 +231,9 @@ system working, not a bug to route around.
   records a wait on another board's work (SYRD-270); `--blocked-by operator:<name>` records a
   wait on a person whose step has no ticket (SYRD-273). It never resolves by itself, whatever
   the other board does; while it stands the ticket keeps its stage and owner, its
-  reminders and handoffs are silent, and submission is refused. End it with
+  reminders and handoffs are silent, and submission is refused. While an `operator:<name>`
+  blocker stands, a User comment on the ticket notifies the Director once instead of the
+  owner (SYRD-725); the comment releases nothing. End it with
   `release-external-blocker <id> --ref syrd:SYRD-269 --reason "..."`, adding `--commit <sha>`
   when the wait was for a commit this board could not see: the release is then refused
   until this board's own repository resolves it. The release moves nothing. A

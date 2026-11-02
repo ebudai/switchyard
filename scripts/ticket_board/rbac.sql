@@ -563,6 +563,9 @@ GRANT EXECUTE ON FUNCTION ticket_board.audit_return_transition(jsonb) TO ticket_
 GRANT EXECUTE ON FUNCTION ticket_board.audit_return_status(text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.set_audit_return(text, text, text, text) TO ticket_board_service;
 
+-- SYRD-725: the listener asks whether the User's answer to an operator wait is still the Director's to act on.
+GRANT EXECUTE ON FUNCTION ticket_board.operator_response_is_current(jsonb) TO ticket_board_listener;
+
 -- SYRD-668: last, after every grant above. The board's own principals are the
 -- role users this file creates and its service and listener, and nothing is
 -- granted to any other role. Migrations once granted to every role that passed

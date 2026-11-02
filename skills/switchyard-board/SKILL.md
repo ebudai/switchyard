@@ -186,7 +186,9 @@ is really there - and while it stands it silences your reminders and refuses
 your submission, so you are not asked to act on work that cannot move. If you
 are waiting on another board's work or on a person, ask the director once
 (`request-dependency`) to record that blocker rather than re-opening the same
-dependency; you are told once when it is released, with the result. `await-role` is the bare
+dependency; you are told once when it is released, with the result. While a person's blocker
+stands, a User comment on your ticket goes to the director, not to you: the release is what
+tells you. `await-role` is the bare
 wait without a reason - prefer `request-dependency`, which is that plus the
 sentence the awaited role needs. Either way the wait clears when the awaited
 role *acts*, not when they reply.

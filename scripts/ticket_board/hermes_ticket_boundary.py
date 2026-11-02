@@ -1,6 +1,6 @@
 """Whether a Hermes pane may be cleared into a new ticket (SYRD-693).
 
-`/clear now` empties a Hermes conversation, but Hermes puts its memory
+`/new now` empties a Hermes conversation, but Hermes puts its memory
 (`memories/MEMORY.md`, `USER.md`) into every new session's prompt, and its
 `session_search` tool reads every earlier session. So an ephemeral Hermes role
 starts a ticket on nothing from the last one only if its Hermes was started

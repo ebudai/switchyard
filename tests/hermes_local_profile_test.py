@@ -718,8 +718,9 @@ def test_the_board_clears_a_hermes_conversation_without_its_question() -> None:
     if not HERMES_PYTHON.exists():
         print(f"hermes_local_profile_test: {HERMES_PYTHON} is not installed here; the Hermes clear check is SKIPPED")
         return
-    script = ("import json, sys\nfrom cli import HermesCLI\n"
-              "print('SPLIT ' + json.dumps([HermesCLI._split_destructive_skip(c) for c in sys.argv[1:]]))")
+    script = ("import json, sys\nfrom cli import HermesCLI\nfrom hermes_cli.commands import resolve_command\n"
+              "print('SPLIT ' + json.dumps([HermesCLI._split_destructive_skip(c) for c in sys.argv[1:]]))\n"
+              "print('RESOLVES ' + (getattr(resolve_command(sys.argv[1].split()[0].lstrip('/')), 'name', '') or ''))")
     done = subprocess.run([str(HERMES_PYTHON), "-I", "-c", script, SESSION_CLEAR_COMMANDS["hermes"], "/clear"],
                           env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": tempfile.gettempdir()},
                           capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
@@ -728,6 +729,8 @@ def test_the_board_clears_a_hermes_conversation_without_its_question() -> None:
     ours, bare = json.loads(line.removeprefix("SPLIT "))
     check(ours == ["", True] and bare == ["", False],
           f"what the board types skips Hermes's own question, where a bare /clear asks it: {ours} {bare}")
+    resolves = next((line for line in done.stdout.splitlines() if line.startswith("RESOLVES ")), "")
+    check(resolves == "RESOLVES new", f"and it is Hermes's own fresh-conversation command, /new (SYRD-727): {resolves!r}")
 
 
 def test_leaving_the_profile_removes_only_switchyards_material() -> None:

@@ -599,6 +599,7 @@ A role can run Hermes on the host's local model service (`--local-qwen`; see
   before this release, is held at its next hand-off (`hermes_ticket_boundary_open`) until
   you restart that role. That restart starts fresh: the conversation it held open is set
   aside (`ticket_boundary_cutover`), and a ticket still bound to it may be parked for you.
+  `docs/syrd-727-hermes-ticket-boundary.md` says exactly what "fresh" means for Hermes.
 - **Re-pin, roll back, remove.** A new model or engine is a new packet the User approves,
   then each local role is re-pinned with `switchyard set-role-runtime … --local-qwen`.
   `--no-local-qwen --model <hosted model>` takes a role off it. `local-model remove`

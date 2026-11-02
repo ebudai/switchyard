@@ -520,7 +520,7 @@ def test_a_hermes_pane_whose_boundary_is_open_is_held_not_cleared() -> None:
     retry = WorkflowConnection([lt.queue_row(30, "PGU-530", attempts=2)], cfg=cfg, cleared=conn.cleared)
     with patch.object(hermes_ticket_boundary, "open_reason", lambda target: ""), lt.TemporaryStateDir() as tmp_path:
         delivered = drive(retry, tmp_path=tmp_path, sent=retry_sent)
-    assert delivered == 1 and [message for _target, message in retry_sent][:1] == ["/clear now"], \
+    assert delivered == 1 and [message for _target, message in retry_sent][:1] == [SESSION_CLEAR_COMMANDS["hermes"]], \
         f"FAILED CHECK: restarted closed, the same notification is cleared and delivered: {retry_sent}"
 
 
@@ -653,7 +653,7 @@ def test_an_open_hermes_pane_is_held_before_any_continuation() -> None:
     with patch.object(context_continuation, "before_clear", continues), \
             patch.object(hermes_ticket_boundary, "open_reason", lambda target: ""), lt.TemporaryStateDir() as tmp_path:
         delivered = drive(retry, tmp_path=tmp_path, sent=retry_sent)
-    assert delivered == 1 and decided == ["PGU-540"] and "/clear now" not in [m for _t, m in retry_sent], \
+    assert delivered == 1 and decided == ["PGU-540"] and SESSION_CLEAR_COMMANDS["hermes"] not in [m for _t, m in retry_sent], \
         f"FAILED CHECK: a closed pane continues as SYRD-626 decides: {delivered} {decided} {retry_sent}"
 
 

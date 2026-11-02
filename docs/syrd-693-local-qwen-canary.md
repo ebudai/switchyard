@@ -110,7 +110,7 @@ These ran in interactive Hermes in a private tmux, which is how a pane runs it.
    (1/2/3, 120 s), even under `--yolo`. The board types the ticket 0.5 s after the clear, into that menu, and
    it was lost. When the menu timed out, Hermes printed "Goodbye!" and exited, ending the pane. This affects
    every Hermes role that starts each ticket fresh.
-   - **Fix:** the board types `/clear now` to Hermes (`SESSION_CLEAR_COMMANDS`). `now` is Hermes's own skip
+   - **Fix:** the board types `/clear now` to Hermes (`SESSION_CLEAR_COMMANDS`; `/new now` since SYRD-727). `now` is Hermes's own skip
      token.
 3. **Hermes `pip install`ed from PyPI as it started.** Its lazy installer tried its text-to-speech packages
    every ~8 s (18 attempts in one run against the scripted stand-in) and held the first turn back 47 s

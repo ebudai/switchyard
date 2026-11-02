@@ -24,13 +24,14 @@ SESSION_CLEAR_COMMANDS = {
     "claude": "/clear",
     "codex": "/clear",
     "agy": "/clear",
-    # Hermes 0.15.2 asks before a bare /clear ("destroys conversation state",
+    # Hermes 0.15.2 asks before /new or /clear ("destroys conversation state",
     # 1/2/3, two minutes). The ticket typed next is swallowed by that question,
     # and when it times out Hermes exits. `now` is its own skip token (SYRD-693).
-    # The clear empties only the conversation; Hermes's memory and session
-    # search are closed by the config its process started from, which is
-    # checked before the clear (hermes_ticket_boundary).
-    "hermes": "/clear now",
+    # `/new` is Hermes's own fresh-conversation command; /clear also wipes the
+    # screen (SYRD-727). Either empties only the conversation: Hermes's memory
+    # and session search are closed by the config its process started from,
+    # which is checked before this is typed (hermes_ticket_boundary).
+    "hermes": "/new now",
     # Copilot 1.0.101 ends the old session and starts a new one at the next
     # prompt (tests/fixtures/copilot-1.0.101/hooks/resume-then-clear.jsonl).
     "copilot": "/clear",

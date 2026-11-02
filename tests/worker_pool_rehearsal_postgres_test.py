@@ -356,7 +356,7 @@ def run_rehearsal(bench: Bench, pool, document: dict, members: list[str]) -> Non
         # address: this is what makes a bench member interchangeable rather
         # than an implementer carrying the last ticket's context (SYRD-135).
         for_member = [message for target, message in bench.sent if target == targets[member]]
-        # In the pool's runtime's own words: Hermes is told `/clear now` (SYRD-693).
+        # In the pool's runtime's own words: Hermes is told `/new now` (SYRD-693, SYRD-727).
         check(for_member[0] == SESSION_CLEAR_COMMANDS[pool.runtime], f"{member} was cleared before its ticket: {for_member}")
         check(len(for_member) == 2 and ticket in for_member[1], f"{member} got one ticket: {for_member}")
     check(bench.queued() == [], "and the queue is empty afterwards")

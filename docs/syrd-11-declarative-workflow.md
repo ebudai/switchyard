@@ -34,7 +34,8 @@ Replace its project and absolute onboarding path when creating a tenant.
   ticket on an empty conversation and carries nothing from the last one. A
   Hermes role's own memory and session search are closed in its home for this,
   and a Hermes pane started before its home was closed is held, not cleared or
-  continued, until it is restarted, fresh (SYRD-693). The
+  continued, until it is restarted, fresh (SYRD-693;
+  `docs/syrd-727-hermes-ticket-boundary.md`). The
   policy is role-neutral -- an implementer, Audit, Inspector or a role invented
   later may declare it -- and only a real boolean is accepted; a string or a
   number is rejected naming the role. The clear happens after every delivery

@@ -89,6 +89,7 @@ changes.
 | [Role runtime](role-runtime.md), [runtime presentation](runtime-presentation.md), and [desktop access](desktop-access.md) | Agent runtime, display slots and desktop policy |
 | [User notifications](user-notifications.md) | User phone notification setup and operation |
 | [Local model service](local-model-service.md) | The opt-in host-wide local model service: approval, installation, GPU memory, idle stop, qualification and removal |
+| [SYRD-727 Hermes ticket boundary](syrd-727-hermes-ticket-boundary.md) | What "fresh" means for a Hermes role: no memory or session search, the board's check and `/new now`, continuation, recovery, rollback |
 | [SYRD-693 local-Qwen canary](syrd-693-local-qwen-canary.md) | The live canary's evidence and what it decides: which roles may run local Qwen, one role per host, attended windows |
 | [Git update hook](git-update-hook.md), [testing](testing.md), and [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Repository policy and contribution checks |
 | [`examples/workflows/inspection.json`](../examples/workflows/inspection.json) | Executable example workflow; validate it as configuration, not prose |

@@ -834,6 +834,8 @@ STYLE = """    :root {
          opportunity will split (SYRD-104). */
       overflow-wrap: anywhere;
     }
+    /* An alert's own display would otherwise beat the user agent's [hidden] (SYRD-730). */
+    .alert[hidden] { display: none; }
     .card-alert {
       padding: 10px 12px;
       font-size: 12px;

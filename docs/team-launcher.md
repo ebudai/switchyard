@@ -582,11 +582,19 @@ that the role is being left running, and that `sudo switchyard upgrade
 are healthy are still judged and still restarted in the same run.
 
 **Root gives that state back; nothing is loosened to reach it.** Before it
-repatriates any runtime state, the upgrade walks the tenant's session directory
-and each role directory under it, reports every path whose owner is not the
-project owner, and `chown`s them back -- without changing a single mode bit. A
-tenant home that is 0700 stays 0700; the fix is that the files inside it belong
-to the account again. The paths are read back afterwards, and an upgrade whose
+repatriates any runtime state, the upgrade repairs both layers around the
+tenant's session store. It walks the session directory and each role directory
+under it, reports every path whose owner is not the project owner, and `chown`s
+them back. It also opens, one component at a time from the owner's home, every
+directory above the session store (`.local`, `.local/state` and
+`<project>-ticket-board` in the standard layout) and gives back each component
+whose owner is wrong. It never walks into those parent directories, never
+touches the home itself and never names a directory outside it.
+
+Neither repair changes a single mode bit. A tenant home that is 0700 stays
+0700; the fix is that the state belongs to the account again. The parent walk
+does not follow links, and refuses that chain before changing any parent if a
+component is a link. The paths are read back afterwards, and an upgrade whose
 repair did not take stops non-zero before any phase can declare the tenant
 ready. `--dry-run` reports the same paths and changes nothing. A tenant whose
 state is already its own is reported as such and nothing is written.

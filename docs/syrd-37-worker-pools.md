@@ -175,6 +175,35 @@ the invoking role and the sessions live on the project account's tmux server, so
 whose entire point is a terminal on a worker with no privileged parent shell
 behind it (SYRD-76).
 
+### Status from outside the tenant
+
+The generated configuration lives in the tenant owner's private tree. An
+account that cannot read it, such as the desktop operator checking another
+tenant, cannot load it, and is not given a way around that (SYRD-731). From such
+an account, `list` and `status` answer from the tenant's running board instead.
+They find the board at the loopback port named in root's own unit,
+`/etc/systemd/system/<project>-ticket-board.service`. They do not use the
+tenant's configuration for this.
+
+What that board reports, for each live `<pool>-<N>` worker in its workflow
+document:
+
+- the tickets the worker holds;
+- its serial slot;
+- whether it is a pull claimant;
+- whether a process is registered for it. That is judged the same way the
+  listener judges it: by pid and start time.
+
+The summary line also says how many idle ephemeral workers are stopped.
+Readiness needs the owner's account: skill, sign-in, worktree, trust and the
+tmux session itself. So the report names that part as not read, along with
+who can read it.
+
+Every other verb refuses before it reads or changes anything, and names the
+command to run as the owner. A missing or malformed configuration is reported
+too, along with whose file it is to fix. In none of these cases is there a
+traceback.
+
 ### Before a worker's first ticket
 
 `start` refuses a worker that is not ready, and says which subsystem is missing

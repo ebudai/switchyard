@@ -839,6 +839,42 @@ def _build_switchyard_release_status_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def unusable_configuration(
+    slug: str, *, config_path: Path, problem: BaseException, registry_dir: Path | None = None
+) -> tuple[int | None, str]:
+    """Why this account cannot use a tenant's generated configuration, as (errno or None, the line that says so).
+
+    Private, missing and malformed are said apart, each with whose it is to fix (SYRD-659). Shared with
+    `worker-pool`, whose read-only verbs report from the board in the same case (SYRD-731).
+    """
+    from scripts import team_launcher as launcher
+
+    caller = launcher.current_user_name() or "this account"
+    owner = launcher._project_config_path_owner_user(config_path)
+    registry = (registry_dir or launcher.switchyard_registry_dir()) / f"{slug}.json"
+    code = getattr(problem, "errno", None)
+    if code is None:
+        # Root's reader refuses in words, not an errno. Which words is not the question here -- whether the file is
+        # there is, and a look at it decides only how this is said; nothing is read or written from it.
+        try:
+            os.stat(config_path)
+        except OSError as exc:
+            code = exc.errno
+    reason = " ".join(str(getattr(problem, "strerror", None) or problem).split()).removeprefix("switchyard: ")
+    reason = reason.removesuffix(" Nothing was changed.").rstrip(".")
+    if code in (errno.EACCES, errno.EPERM):
+        return code, (f"switchyard: {slug}'s generated configuration {config_path} is not readable from {caller}: "
+                      f"it is in {owner or 'its owner'}'s private tree.")
+    if code in (errno.ENOENT, errno.ENOTDIR):
+        return code, (f"switchyard: {slug}'s registered configuration {config_path} does not exist, so the registry "
+                      f"entry {registry} is stale. Restore the checkout there, or have an operator remove that entry "
+                      f"and run `sudo switchyard register <the configuration's path>`.")
+    if not isinstance(problem, (OSError, ValueError, SystemExit)):
+        reason = f"{reason} ({type(problem).__name__})"
+    return code, (f"switchyard: {slug}'s generated configuration {config_path} is not a usable launcher "
+                  f"configuration: {reason}. It is {owner or 'its owner'}'s file to repair; nothing was changed.")
+
+
 def release_status_from_root_records(
     slug: str,
     *,
@@ -866,29 +902,8 @@ def release_status_from_root_records(
 
     caller = launcher.current_user_name() or "this account"
     owner = launcher._project_config_path_owner_user(config_path)
-    registry = (registry_dir or launcher.switchyard_registry_dir()) / f"{slug}.json"
-    code = getattr(problem, "errno", None)
-    if code is None:
-        # Root's reader refuses in words, not an errno. Which words is not the question here -- whether the file is
-        # there is, and a look at it decides only how this is said; nothing is read or written from it.
-        try:
-            os.stat(config_path)
-        except OSError as exc:
-            code = exc.errno
-    reason = " ".join(str(getattr(problem, "strerror", None) or problem).split()).removeprefix("switchyard: ")
-    reason = reason.removesuffix(" Nothing was changed.").rstrip(".")
-    if code in (errno.EACCES, errno.EPERM):
-        print_func(f"switchyard: {slug}'s generated configuration {config_path} is not readable from {caller}: "
-                   f"it is in {owner or 'its owner'}'s private tree.")
-    elif code in (errno.ENOENT, errno.ENOTDIR):
-        print_func(f"switchyard: {slug}'s registered configuration {config_path} does not exist, so the registry "
-                   f"entry {registry} is stale. Restore the checkout there, or have an operator remove that entry "
-                   f"and run `sudo switchyard register <the configuration's path>`.")
-    else:
-        if not isinstance(problem, (OSError, ValueError, SystemExit)):
-            reason = f"{reason} ({type(problem).__name__})"
-        print_func(f"switchyard: {slug}'s generated configuration {config_path} is not a usable launcher "
-                   f"configuration: {reason}. It is {owner or 'its owner'}'s file to repair; nothing was changed.")
+    code, said = unusable_configuration(slug, config_path=config_path, problem=problem, registry_dir=registry_dir)
+    print_func(said)
 
     unreadable = ("(not readable from this account)" if code in (errno.EACCES, errno.EPERM)
                   else "(unknown without a usable configuration)")

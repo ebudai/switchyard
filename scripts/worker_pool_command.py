@@ -18,6 +18,7 @@ and the patches keep reaching this code.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import re
 import subprocess
@@ -443,7 +444,14 @@ def switchyard_worker_pool_command(
     from scripts import worker_pool as pool_module
 
     entry = launcher._resolve_switchyard_project(project, config_dir=config_dir, registry_dir=registry_dir)
-    config = launcher.load_project_config(entry.slug, entry.config_path)
+    try:
+        config = launcher.load_project_config(entry.slug, entry.config_path)
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - any failure, as release-status (SYRD-659)
+        # Another tenant's private tree, a checkout that moved, or a document that does not load (SYRD-731).
+        return worker_pool_without_configuration(
+            entry.slug, action=action, member=member, config_path=entry.config_path, problem=exc,
+            registry_dir=registry_dir, print_func=print_func,
+        )
     pool = config.worker_pool
     read_board = board_reader or _read_board_workflow_document
     board_workflow = read_board(config)
@@ -774,6 +782,141 @@ def _read_board_workflow_document(config: ProjectConfig) -> Mapping[str, Any] | 
     except Exception:
         return None
     return document if isinstance(document, dict) else None
+
+
+#: The verbs that can answer from the board alone, for a tenant whose configuration this account cannot use.
+WORKER_POOL_BOARD_ACTIONS = frozenset({"list", "status"})
+
+
+def worker_pool_without_configuration(
+    slug: str,
+    *,
+    action: str,
+    member: str = "",
+    config_path: Path,
+    problem: BaseException,
+    registry_dir: Path | None = None,
+    address: Callable[[str], tuple[int, str]] | None = None,
+    board_get: Callable[[str], Any] | None = None,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    """`worker-pool` for a tenant whose generated configuration this account cannot use (SYRD-731).
+
+    The configuration is in its owner's private tree, so another account -- the desktop operator checking a
+    tenant's pool -- cannot load it, and is not given a way round that. `list` and `status` answer from the
+    tenant's running board instead, at the loopback port root's own unit names (SYRD-659 reads the same port):
+    which workers its workflow document declares, which tickets each holds, its serial slot, and whether a
+    process is registered for it, judged as the listener judges one. What only the owner can see -- skill,
+    sign-in, worktree, trust and the session itself -- is named as not read. Every other verb acts on or reads
+    what only the configuration says, and refuses, naming who can run it.
+    """
+    from scripts import project_status
+    from scripts import team_launcher as launcher
+
+    code, said = project_status.unusable_configuration(slug, config_path=config_path, problem=problem,
+                                                        registry_dir=registry_dir)
+    print_func(said)
+    private = code in (errno.EACCES, errno.EPERM)
+    owner = launcher._project_config_path_owner_user(config_path) or "its owner"
+    if action not in WORKER_POOL_BOARD_ACTIONS:
+        print_func(f"switchyard: worker-pool {action} needs {slug}'s own configuration, so nothing was read or changed"
+                   + (f"; run `switchyard worker-pool {slug} {' '.join(filter(None, (action, member)))}` as {owner}."
+                      if private else "."))
+        return 1
+
+    from scripts import worker_pool as pool_module
+    from scripts.ticket_board import board_identity
+    from scripts.ticket_board.notify_listener import assignment_process_gone
+    from scripts.ticket_board.read_client import queue_payload
+    from scripts.ticket_board.workflow_config import pull_claimant_pool
+
+    try:
+        port, _prefix = (address or board_identity.unit_board_address)(slug)
+    except (board_identity.BoardIdentityError, OSError) as exc:
+        print_func(f"switchyard: {slug}'s board cannot be found from root's records, so its pool is not reported: "
+                   f"{exc}")
+        return 1
+    base = f"http://127.0.0.1:{port}"
+    read = board_get or _board_get_json
+    workflow, board, reported, registered = (read(f"{base}{path}") for path in (
+        "/api/workflow", "/api/board", "/api/reservations", "/api/runtime-assignments"))
+    claimed = {str(answer.get("project")) for answer in (reported, registered)
+               if isinstance(answer, dict) and answer.get("project") is not None}
+    if claimed - {slug}:
+        print_func(f"switchyard: the board at {base}, where root's unit puts {slug}'s, says it is "
+                   f"{', '.join(sorted(claimed - {slug}))}'s; its pool is not reported.")
+        return 1
+    document = workflow.get("document") if isinstance(workflow, dict) else None
+    roles = document.get("roles") if isinstance(document, dict) else None
+    if not isinstance(roles, list):
+        print_func(f"switchyard: {slug}'s board at {base} did not answer /api/workflow with a workflow document"
+                   + ("; it runs the built-in workflow, which declares no pool." if isinstance(workflow, dict)
+                      else "; is it running? `switchyard status " + slug + "`"))
+        return 1
+    pools: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for role in roles:
+        matched = pool_module.MEMBER_RE.match(str(role.get("name") or "")) if isinstance(role, dict) else None
+        if matched:
+            pools.setdefault(matched.group("pool"), []).append((int(matched.group("index")), role))
+    if not pools:
+        print_func(f"switchyard: {slug}'s board declares no pool worker: no role in its workflow document is "
+                   "named <pool>-<N>.")
+        return 1
+
+    tickets = board.get("tickets") if isinstance(board, dict) else None
+    if not (isinstance(tickets, list) and all(isinstance(ticket, dict) for ticket in tickets)):
+        board = None
+    queues = queue_payload(dict(board), None) if board is not None else None
+    reservations = reported.get("reservations") if isinstance(reported, dict) else None
+    # A slot the board answered with something other than a ticket or nothing is not known, never taken as one.
+    reservations = ({worker: held for worker, held in reservations.items() if held is None or isinstance(held, dict)}
+                    if isinstance(reservations, dict) else None)
+    assignments = registered.get("assignments") if isinstance(registered, dict) else None
+    assignments = assignments if isinstance(assignments, dict) else None
+    try:
+        claimants = set(pull_claimant_pool(document)) if isinstance(document.get("scheduling"), dict) else None
+    except (AttributeError, KeyError, TypeError):
+        claimants = None
+
+    print_func(f"switchyard: {slug} worker pool, from its board at {base} (the port root's unit names) only")
+    for name, members in sorted(pools.items()):
+        live = [role for _index, role in sorted(members, key=lambda item: item[0]) if role.get("active") is True]
+        retired = len(members) - len(live)
+        lines, running, stopped, idle = [], 0, 0, {"running": 0, "stopped": 0}
+        for role in live:
+            worker = str(role["name"])
+            registration = assignments.get(worker) if assignments is not None else None
+            if assignments is None:
+                session, state = "process unknown: the board did not report its runtime assignments", ""
+            elif not isinstance(registration, dict):
+                session, state = "stopped: no process is registered with the board", "stopped"
+            else:
+                gone = assignment_process_gone(registration)
+                session, state = ((f"stopped: its registered process is gone ({gone})", "stopped") if gone else
+                                  (f"running: process {registration.get('process_pid')} is registered with the board",
+                                   "running"))
+            running, stopped = running + (state == "running"), stopped + (state == "stopped")
+            holding = (tuple(str(ticket.get("id") or "") for ticket in queues.get(worker, []))
+                       if queues is not None else None)
+            slot = pool_module.WorkerReadiness(role=worker, target="", **pool_module._reservation_of(
+                worker, reservations, board)).slot()
+            if state and role.get("ephemeral") is True and holding == () and slot == "serial slot free":
+                idle[state] += 1
+            held = ("holding nothing" if holding == () else "holding " + ", ".join(holding) if holding
+                    else "holding unknown: the board did not report its tickets")
+            pull = ("" if claimants is None
+                    else "; claims ready work" if worker in claimants else "; not a pull claimant")
+            lines.append(f"  {worker} ({role.get('target') or 'no target'}): {session}; {held}; {slot}{pull}")
+        print_func(f"switchyard: {name}: {len(live)} worker(s) declared on the board"
+                   + (f", {retired} retired" if retired else "")
+                   + (f"; {running} running, {stopped} stopped; idle ephemeral workers: {idle['stopped']} stopped, "
+                      f"{idle['running']} running" if assignments is not None else "; process state unknown"))
+        for line in lines:
+            print_func(line)
+    print_func("switchyard: readiness -- skill, sign-in, worktree, trust and each tmux session -- is not read "
+               + (f"from this account; `switchyard worker-pool {slug} status` as {owner} reports it." if private
+                  else "without a usable configuration."))
+    return 0 if private else 1
 
 
 #: Every verb `switchyard worker-pool` takes, and whether it names a worker.

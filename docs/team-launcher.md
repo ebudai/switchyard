@@ -582,14 +582,24 @@ that the role is being left running, and that `sudo switchyard upgrade
 are healthy are still judged and still restarted in the same run.
 
 **Root gives that state back; nothing is loosened to reach it.** Before it
-repatriates any runtime state, the upgrade walks the tenant's session directory
-and each role directory under it, reports every path whose owner is not the
-project owner, and `chown`s them back -- without changing a single mode bit. A
-tenant home that is 0700 stays 0700; the fix is that the files inside it belong
-to the account again. The paths are read back afterwards, and an upgrade whose
-repair did not take stops non-zero before any phase can declare the tenant
-ready. `--dry-run` reports the same paths and changes nothing. A tenant whose
-state is already its own is reported as such and nothing is written.
+repatriates any runtime state, the upgrade repairs both layers around the
+tenant's session store. It walks the session directory and each role directory
+under it, reports every path whose owner is not the project owner, and `chown`s
+them back. It also opens, one component at a time from the owner's home, every
+directory above the session store (`.local`, `.local/state` and
+`<project>-ticket-board` in the standard layout) and gives back each component
+whose owner is wrong. It never walks into those parent directories, never
+touches the home itself and never names a directory outside it.
+
+Neither repair changes a single mode bit. A tenant home that is 0700 stays
+0700; the fix is that the state belongs to the account again. The parent walk
+acts only on a plain absolute session-store path below the owner's home, and
+refuses a retained `..` traversal before opening a directory. It does not
+follow links, and refuses that chain before changing any parent if a component
+is a link. The paths are read back afterwards, and an upgrade whose repair did
+not take stops non-zero before any phase can declare the tenant ready.
+`--dry-run` reports the same paths and changes nothing. A tenant whose state is
+already its own is reported as such and nothing is written.
 
 **And the upgrade finishes the record the broken store interrupted.** Giving
 the directories back is only half of it. The role is still running, its record
@@ -1541,6 +1551,9 @@ Each project config contains:
   ordinary invoking-user teams; set it only when an existing deployment must
   remain on a specific user-owned tmux/runtime namespace.
 - `session_dir`: optional directory containing per-pane resume session files.
+  Generated values are plain absolute paths below the project owner's home. If
+  set by hand, use the same shape: upgrade's parent-ownership repair refuses a
+  retained `..` component before opening anything.
 - `board_url`: optional project ticket-board HTTP URL. Defaults to
   `http://127.0.0.1:8770` for PGU, and otherwise to the same deterministic
   per-project port used by the ticket-board provisioner.

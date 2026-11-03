@@ -28,9 +28,12 @@ Nothing is written until everything that can be checked has been:
 1. The role exists, is one the launcher starts, and the requested runtime is
    supported. Switching to the runtime already configured is reported as
    nothing to do, not an error.
-2. The new runtime could actually start — installed, logged in, and trusting the
-   role's worktree — using the launcher's own first-run checks, so a runtime
-   that passes here is one the launcher would also accept.
+2. The new runtime could actually start, using the launcher's own first-run
+   checks: installed, signed in when it uses a hosted provider, and trusting the
+   role's worktree when that runtime requires it. A `--local-qwen` profile signs
+   in to nothing, so that switch checks the owner's Hermes install but no hosted
+   authentication. A runtime that passes here is one the launcher would also
+   accept.
 3. The role is not mid-turn. This is the launcher's activity gate, which fails
    closed: a live session whose hooks have written no state reads as busy,
    because the alternative is ending a turn on the strength of an absent
@@ -149,7 +152,9 @@ revisions, quantization and context. Run it again to re-pin. `--no-local-qwen
 --model <hosted model>` takes the role off the service, and moving the role to
 another runtime removes the profile as well. A local role's model is not checked
 against the owner's hosted catalog: the service serves it, and the role's pane
-checks that before Hermes starts. See
+checks that before Hermes starts. The owner needs Hermes installed, but needs no
+hosted key and no `hermes model` setup for this switch; switching to hosted
+Hermes still requires the owner to be signed in. See
 [SYRD-692](syrd-692-hermes-local-profile.md).
 
 Choose it for one implementer-class role doing small bounded tasks, in a session the operator starts and

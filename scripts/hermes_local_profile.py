@@ -414,7 +414,9 @@ def _home_fd(hermes_home: Path, *, create: bool = True) -> int:
             found = os.fstat(child)
             if found.st_uid != me or found.st_mode & 0o022:
                 os.close(child)
-                raise ProfileRefusal(f"{where} does not belong to this account alone")
+                # SYRD-732: an older root run can leave the store's parent root's; upgrade gives it back.
+                raise ProfileRefusal(f"{where} does not belong to this account alone; `sudo switchyard upgrade "
+                                     "<project>` gives a tenant's state directories back to its account")
             os.close(fd)
             fd = child
         os.fchmod(fd, 0o700)

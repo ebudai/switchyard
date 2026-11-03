@@ -239,6 +239,13 @@ def set_project_role_runtime_command(
     # the switch does not happen.
     written = not dry_run and (profile is not None or local is False)
     previous = hermes_local_profile.write_entry(config, config_path, role_name, profile, runner=runner) if written else None
+    if profile is not None:
+        # SYRD-732: the switch's checks see the role as it will run, dry run or not: on its keyless local profile,
+        # which signs in to no hosted provider.
+        from dataclasses import replace
+
+        config = replace(config, roles=[replace(role, hermes_local=profile, model=profile.model)
+                                        if role.role == role_name else role for role in config.roles])
     try:
         result = role_runtime.switch_role_runtime(
             config,

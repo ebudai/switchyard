@@ -1493,7 +1493,7 @@ def test_u2_reads_its_lookups_through_the_launcher_and_keeps_its_own_names() -> 
         check(len(through) == count and not bare, f"U2 reads {name} at its {count} site(s), through the launcher")
     local = [(n.module, [(a.name, a.asname) for a in n.names]) for n in ast.walk(function)
              if isinstance(n, ast.ImportFrom) and not (n.module == "scripts" and n.names[0].name == "team_launcher")]
-    check(local == [("scripts", [("desktop_access", "_desktop")])], f"the desktop policy import stays U2's own: {local}")
+    check(local == [("scripts", [("role_state_parents", None)]), ("scripts", [("desktop_access", "_desktop")])], f"U2's own imports: {local}")
     bound = {a.arg for a in ast.walk(function) if isinstance(a, ast.arg)}
     bound |= {n.id for n in ast.walk(function) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
     through = sorted({n.attr for n in ast.walk(function) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)

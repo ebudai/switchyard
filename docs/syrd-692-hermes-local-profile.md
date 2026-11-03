@@ -63,6 +63,15 @@ survives all of them as written. Leaving Hermes removes it
 | Leaving it | `switchyard set-role-runtime <project> <role> --cli hermes --no-local-qwen --model <hosted model>`. The hosted model must be named, so the role never runs the Qwen id on a hosted provider by accident. |
 | Off Hermes | `switchyard set-role-runtime <project> <role> --cli codex` (or any other runtime). |
 
+**No hosted sign-in (SYRD-732).** A switch to the profile checks that Hermes is installed for the project's
+owner, and nothing more. The owner's Hermes needs no hosted key and no `hermes model` setup, because the role
+runs on its own keyless profile. A switch to a hosted Hermes model still needs the owner signed in.
+
+**The store's parents (SYRD-732).** A local role's home is walked from the owner's home, and every directory on
+the way must be the owner's. `sudo switchyard upgrade <project>` gives back, each alone, the directories between
+the owner's home and the session store (for example `.local/state/<project>-ticket-board`) that an older root
+run left root's. The role-state repair, which begins at the session store, never reached them.
+
 **What each flow prints.** It shows the profile it writes, for example
 `local-qwen: Qwen/Qwen3.8-27B at http://127.0.0.1:17431/v1 (llama.cpp b11803;
 revision 1d4bf0f2ff60; ggml-org/Qwen3.8-27B-GGUF@a316ea527fde Q4_K_M; context

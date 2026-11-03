@@ -937,6 +937,11 @@ def _recover_upgrade_state(
         config, dry_run=dry_run, runner=runner, print_func=print_func
     ):
         return 1
+    # SYRD-732: and the directories above the session store, which that repair does not reach.
+    from scripts import role_state_parents
+
+    if not role_state_parents.repair_state_parents(config, dry_run=dry_run, print_func=print_func):
+        return 1
 
     written: dict[str, Any] = {}
     repatriated, repatriation_problems = launcher.repatriate_role_runtime_state(

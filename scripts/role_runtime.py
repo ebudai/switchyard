@@ -311,8 +311,8 @@ def _readiness_blockers(
 ) -> tuple[str, ...]:
     """Whether ``runtime`` could actually start, checked before anything stops.
 
-    Reuses the launcher's own first-run checks rather than a second opinion, so
-    a runtime that passes here is one the launcher would also accept.
+    Reuses the launcher's own first-run checks rather than a second opinion, so a runtime that passes here is one
+    the launcher would also accept. A local-model profile signs in to nothing: only its install counts (SYRD-732).
     """
     owner_user = config.run_as_user or team_launcher.current_user_name()
     owner_home = team_launcher._owner_home_for_auth(owner_user)
@@ -322,7 +322,7 @@ def _readiness_blockers(
     )
     if status == "not_installed":
         blockers.append(f"{runtime} is not installed for {owner_user}")
-    elif status not in {"authenticated", "unknown"}:
+    elif status not in {"authenticated", "unknown"} and getattr(role, "hermes_local", None) is None:
         login = " ".join(team_launcher.FIRST_RUN_AUTH_LOGIN_COMMANDS.get(runtime, ()))
         blockers.append(team_launcher.auth_blocker_text(runtime, status, owner_user, login))
     if runtime in team_launcher.FIRST_RUN_TRUST_CLIS and not owner_writes.holds_as_owner(  # as the owner (SYRD-612)

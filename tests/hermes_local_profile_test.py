@@ -851,6 +851,75 @@ def test_set_role_runtime_writes_the_profile_and_puts_it_back_when_the_switch_fa
                   and (t.role_home() / "memories").is_dir(), "off Hermes: the profile's config is removed, the role's state kept")
 
 
+def judged_exit(call):
+    """The command's return code, or the refusal it exited with, as text."""
+    try:
+        return call()
+    except SystemExit as exc:
+        return str(exc)
+
+
+def test_a_switch_to_the_local_profile_needs_no_hosted_sign_in() -> None:
+    """SYRD-732: MEFP's luna-1 was refused "hermes is not logged in" until a fake OPENROUTER_API_KEY was planted."""
+    from dataclasses import replace
+
+    from scripts import project_role_runtime, role_runtime
+
+    with tenant() as (t, _server):
+        for role in t.raw["roles"]:
+            if role["role"] == "app":
+                role.pop("hermes_local"), role.update(model="glm-5.3")
+        t.save()
+        config = t.config()
+        cloud = t.role()
+        local = replace(cloud, hermes_local=profile(t.port), model=MODEL)
+        runner = lambda *a, **k: subprocess.CompletedProcess(a, 0, "", "")  # noqa: E731
+        for status in ("unauthenticated", "not_installed"):
+            with patch.object(team_launcher, "_cli_auth_status", lambda *a, _s=status, **k: _s):
+                said = {name: role_runtime._readiness_blockers(config, role, "hermes", runner=runner)
+                        for name, role in (("local", local), ("cloud", cloud))}
+            if status == "unauthenticated":
+                check(not any("not logged in" in b for b in said["local"]),
+                      f"a keyless local profile is not refused for the owner's hosted sign-in: {said['local']}")
+                check(any("not logged in" in b for b in said["cloud"]),
+                      f"a hosted Hermes role still needs it: {said['cloud']}")
+            else:
+                check(all(any("not installed" in b for b in found) for found in said.values()),
+                      f"Hermes must still be installed for the owner, local or not: {said}")
+
+        seen: list = []
+
+        def switch(config, **kwargs):
+            # The real readiness check, on the role the switch is handed, with the owner not signed in.
+            role = team_launcher._role_by_name(config, "app")
+            with patch.object(team_launcher, "_cli_auth_status", lambda *a, **k: "unauthenticated"):
+                seen.append((role, role_runtime._readiness_blockers(config, role, kwargs["runtime"], runner=runner)))
+            if seen[-1][1]:
+                raise role_runtime.RoleRuntimeRefusal("switchyard: cannot switch app: " + "; ".join(seen[-1][1]))
+            return SimpleNamespace(configured_changed=True, describe=lambda: "switched", forced=False, reason="",
+                                   role="app", previous_runtime="claude", runtime=kwargs["runtime"])
+
+        service = t.service / "service.json"
+        reader = lambda real=hlp.profile_from_service: real(service, anchor=t.root, owner_uid=os.getuid())  # noqa: E731
+        with patch.object(role_runtime, "switch_role_runtime", switch), patch.object(hlp, "profile_from_service", reader):
+            def run(**kwargs):
+                return judged_exit(lambda: project_role_runtime.set_project_role_runtime_command(
+                    t.config(), config_path=t.config_path, role_name="app", interactive=False,
+                    print_func=lambda line: None, runner=runner, **kwargs))
+
+            for dry_run in (True, False):
+                check(run(local=True, dry_run=dry_run) == 0 and seen[-1][0].hermes_local == profile(t.port)
+                      and seen[-1][0].model == MODEL and seen[-1][1] == (),
+                      f"the switch's checks see the role on its local profile, exempt (dry run {dry_run}): {seen[-1]}")
+            # Audit (on 29a3b916): back to hosted Hermes, the role the checks see must have left the profile too.
+            for dry_run in (True, False):
+                said = run(runtime="hermes", local=False, model="glm-5.3", dry_run=dry_run)
+                check(seen[-1][0].hermes_local is None and any("not logged in" in b for b in seen[-1][1])
+                      and "not logged in" in str(said),
+                      f"leaving the profile for hosted Hermes is refused while the owner is not signed in "
+                      f"(dry run {dry_run}): {seen[-1]} {said}")
+
+
 def test_new_project_and_add_role_take_the_profile_from_the_service() -> None:
     from scripts import new_project_artifacts
 

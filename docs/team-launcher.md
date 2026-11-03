@@ -99,7 +99,10 @@ implementers default to `<Role> Developer`, `ops` is shipped as `Ops`, and a
 document may name any role's label explicitly (SYRD-141). An earlier attempt put the project name in front of every role
 instead, on the understanding that a window had no title of its own; that left
 six headers reading `Switchyard -- <Role>` and the window title still followed
-whichever pane had focus (SYRD-122, SYRD-139). Projects
+whichever pane had focus (SYRD-122, SYRD-139). The wrapper's header is the
+configured role's and is set once, so the display slot re-sends the header
+through tmux for whatever role it shows now, after the window title it already
+sends (SYRD-733). Projects
 without `run_as_user` use the invoking user's runtime
 pane-state directory and `$HOME/bin` prepended to pane CLI `PATH`; projects
 with `run_as_user` prepend that runtime user's `$HOME/bin`, not the invoking

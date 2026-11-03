@@ -150,7 +150,7 @@ def _hand_off_desktop_half(
         pane_program=team_launcher.pane_window_program(
             team_launcher.switchyard_pane_launcher_for(config)
         ),
-        slot_titles=team_launcher.presentation_slot_titles(config, int(state["slot_count"])),
+        slot_titles=team_launcher.presentation_slot_titles(config, int(state["slot_count"]), state.get("slots")),
         window_title=team_launcher.project_window_title(config),
     )
     try:
@@ -189,7 +189,7 @@ def _launch_separate(
         pane_program=team_launcher.pane_window_program(
             team_launcher.switchyard_pane_launcher_for(config)
         ),
-        slot_titles=team_launcher.presentation_slot_titles(config, state["slot_count"]),
+        slot_titles=team_launcher.presentation_slot_titles(config, state["slot_count"], state.get("slots")),
     )
     # Under the control bridge this process is the project owner: it can
     # neither write into the desktop account's state directory nor reach that

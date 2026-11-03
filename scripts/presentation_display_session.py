@@ -303,13 +303,18 @@ def _configure_recovery_hook(
             f"{config.project}: {role_name} disconnected; use "
             f"`{_recovery_instruction(config, role_name)}`"
         )
+        session = display_session_name(config.project, slot)
         respawn = shlex.join(
             [
-                "respawn-pane", "-k", "-t",
-                _exact_tmux_target(f"{display_session_name(config.project, slot)}:0.0"),
+                "respawn-pane", "-k", "-t", _exact_tmux_target(f"{session}:0.0"),
                 "-c", role.workdir, _status_command(message),
             ]
         )
+        # And the split says so: its header follows what the slot now shows (SYRD-733).
+        relabel = display_slot_terminal_title_commands(
+            config, session, display_slot_split_title(config, slot, role_name, {"state": "disconnected"})
+        )[1]
+        respawn = f"{respawn} ; {shlex.join(relabel[1:])}"
         condition = f"#{{==:#{{hook_session_name}},{role.tmux_session}}}"
         hook_command = shlex.join(["if-shell", "-F", condition, respawn, ""])
         proc = runner(["tmux", "set-hook", "-g", hook, hook_command])
@@ -317,10 +322,41 @@ def _configure_recovery_hook(
         raise RuntimeError(f"tmux could not configure recovery hook for slot {slot} (exit {proc.returncode})")
 
 
+#: Ends the window title tmux sends and opens the split's own: BEL, then OSC 30, Konsole's escape for one split's
+#: title. tmux wraps the whole string in its own `ESC ]0;` ... `BEL`, so what reaches the terminal is the two escapes
+#: the pane wrapper sends at start, in the same order (SYRD-733).
+SPLIT_TITLE_ESCAPE = "\a\033]30;"
+
+
+def _terminal_title_text(text: str) -> str:
+    """Text as tmux sends it, and only as text: no control character to end an escape early -- the ones a handoff's
+    titles are refused for -- and `#` literal in what tmux reads as a format."""
+    return team_launcher.PRESENTATION_TITLE_REJECTED.sub(" ", str(text)).replace("#", "##")
+
+
+def display_slot_split_title(
+    config: team_launcher.ProjectConfig, slot: int, role_name: str | None, role_status: Mapping[str, Any]
+) -> str:
+    """What the split showing this slot calls itself: the role the slot shows now (SYRD-733).
+
+    The pane wrapper names its split once, as the window opens, after the role configured for that slot. A runtime
+    swap moves another role into the slot, and the header went on naming the configured one. So the slot says it
+    itself, through its own client, every time what it shows changes: the role's label while it runs, the label and
+    why not otherwise, and plainly hidden when it shows no role.
+    """
+    if role_name is None:
+        return f"Slot {slot}: hidden"
+    role = _role_by_name(config, role_name)
+    label = team_launcher.pane_split_title(config, role) if role is not None else role_name
+    if role_status.get("live"):
+        return label
+    return f"{label} ({'disconnected' if role_status.get('state') == 'disconnected' else 'not running'})"
+
+
 def display_slot_terminal_title_commands(
-    config: team_launcher.ProjectConfig, session: str
+    config: team_launcher.ProjectConfig, session: str, split_title: str
 ) -> tuple[list[str], ...]:
-    """What a display slot tells the terminal around it to call the window.
+    """What a display slot tells the terminal around it to call the window, and the split it is in.
 
     The project, never the slot. A display slot is a frame around one worker,
     and its pane is attached to by the terminal the User is looking at -- so
@@ -339,13 +375,22 @@ def display_slot_terminal_title_commands(
     The slot's own label is not lost: it is on `status-left` and in the
     `@switchyard_slot`/`@switchyard_role` pane options, which is where the
     viewer reads it for its pane borders.
+
+    The split's header goes the same way, after the window's title: OSC 30
+    with `split_title`, from `display_slot_split_title`. tmux sends its title
+    to every client as it attaches and again whenever this option changes, so
+    a swap, a hide, a recovery or a reconnected window relabels the split
+    through the client already in it. Nothing types into the worker, and
+    nothing writes to a terminal of the desktop account's from outside it
+    (SYRD-733).
     """
     target = _exact_tmux_target(f"{session}:")
+    title = _terminal_title_text(team_launcher.project_window_title(config))
     return (
         ["tmux", "set-option", "-t", target, "set-titles", "on"],
         [
-            "tmux", "set-option", "-t", target,
-            "set-titles-string", team_launcher.project_window_title(config),
+            "tmux", "set-option", "-t", target, "set-titles-string",
+            f"{title}{SPLIT_TITLE_ESCAPE}{_terminal_title_text(split_title)}",
         ],
     )
 
@@ -433,7 +478,9 @@ def _configure_display_session(
             "tmux", "set-option", "-t", _exact_tmux_target(f"{session}:"),
             "status-left", f" slot {slot}: {label} ",
         ],
-        *display_slot_terminal_title_commands(config, session),
+        *display_slot_terminal_title_commands(
+            config, session, display_slot_split_title(config, slot, role_name, status)
+        ),
         [
             "tmux", "set-option", "-p", "-t", _exact_tmux_target(f"{session}:0.0"),
             "@switchyard_project", config.project,

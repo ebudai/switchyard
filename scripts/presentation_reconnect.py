@@ -29,7 +29,7 @@ import os
 import stat
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
 from scripts.layout_modes import LAYOUT_MODE_SEPARATE
 
@@ -158,15 +158,28 @@ def stale_handoff_refusal(project: str, unusable: str, *, gui_user: str = "") ->
     )
 
 
-def presentation_slot_titles(config: ProjectConfig, slot_count: int) -> list[str]:
+def presentation_slot_titles(
+    config: ProjectConfig, slot_count: int, slots: Mapping[str, str | None] | None = None
+) -> list[str]:
     """What each slot in the presentation window calls itself.
 
     A slot no role occupies keeps the project's own name: the window is still
     that project's, and there is no role to claim it (SYRD-130).
+
+    `slots` is the presentation's own mapping, slot to role, when there is
+    one: a window opened after a runtime swap names each split after the role
+    it shows, not the one the config placed there. The slot's client then
+    keeps the header current (SYRD-733).
     """
     from scripts import team_launcher as launcher
 
     titles = [launcher.project_window_title(config)] * max(int(slot_count), 0)
+    if slots is not None:
+        roles = {role.role: role for role in config.roles}
+        for key, name in slots.items():
+            if str(key).isdigit() and int(key) < len(titles) and name in roles:
+                titles[int(key)] = launcher.pane_split_title(config, roles[name])
+        return titles
     for role in config.roles:
         if role.detached or role.slot is None:
             continue

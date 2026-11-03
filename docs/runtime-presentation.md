@@ -165,6 +165,19 @@ whatever it sends as a terminal title becomes that window's caption: sending
 the label made the Konsole caption follow the focused pane. Every session that
 forwards a title forwards the project's window title instead (SYRD-141).
 
+The split's own header does follow the slot. After the window title, the slot
+sends OSC 30, Konsole's escape for one split's title. It names the role the
+slot shows now:
+- its presentation label while the role runs;
+- `<label> (not running)` or `<label> (disconnected)` otherwise;
+- `Slot <n>: hidden` when it shows no role.
+
+tmux sends this to every client as it attaches, and again whenever the slot
+changes. So `show`, `swap`, `hide`, `restore`, a recovery, a respawned slot and
+a reopened window all relabel the split through the client already in it,
+without touching the worker or the configured slots. A window opened after a
+swap also starts with the roles the presentation shows (SYRD-733).
+
 Sizing follows the window an operator is actually looking at:
 
 - A viewer pane is the sizing client of the slot it shows when it is that

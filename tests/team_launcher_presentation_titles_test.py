@@ -384,15 +384,24 @@ def test_every_session_that_names_the_terminal_names_the_project() -> None:
     every session that forwards a title to the terminal forwards the project's
     window title, and no `set-titles-string` anywhere is built from a role or a
     slot.
+
+    The display slot's string now carries the split's own header too, after
+    the window title and behind OSC 30, so a runtime swap relabels the split
+    (SYRD-733). The window's part is still the project's alone:
+    `test_the_slot_title_command_names_the_tenant_not_the_slot` reads the
+    value itself.
     """
-    # The viewer's argv moved to scripts/tmux_viewer.py (SYRD-309). The launcher
-    # is still read, so a title line added back there is still counted.
+    # The viewer's argv moved to scripts/tmux_viewer.py (SYRD-309), and the
+    # slot's to scripts/presentation_display_session.py. The launcher and the
+    # controller are still read, so a title line added back there is still
+    # counted.
     sources = {
         name: (ROOT / "scripts" / name).read_text(encoding="utf-8")
-        for name in ("team_launcher.py", "tmux_viewer.py", "presentation_controller.py")
+        for name in ("team_launcher.py", "tmux_viewer.py", "presentation_controller.py",
+                     "presentation_display_session.py")
     }
     assert "def tmux_viewer_set_titles_args" in sources["tmux_viewer.py"]
-    assert "def display_slot_terminal_title_commands" in sources["presentation_controller.py"]
+    assert "def display_slot_terminal_title_commands" in sources["presentation_display_session.py"]
 
     enabling = [
         (name, line)
@@ -418,7 +427,7 @@ def test_every_session_that_names_the_terminal_names_the_project() -> None:
     for name, line in strings:
         assert "slot" not in line and "label" not in line and "role" not in line, (name, line)
     # And the value each of them sends is the project's, by name.
-    for name in ("tmux_viewer.py", "presentation_controller.py"):
+    for name in ("tmux_viewer.py", "presentation_display_session.py"):
         block = sources[name].split('"set-titles-string"', 1)[1][:200]
         assert "title" in block, (name, block)
 
@@ -434,6 +443,7 @@ def _konsole_reading(
     config_dir: Path | None = None,
     config_home: Path | None = None,
     attempts: int = 3,
+    change: tuple[Callable[[], None], dict] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Read a window, retrying only a reading that says nothing either way.
 
@@ -450,7 +460,7 @@ def _konsole_reading(
     """
     for attempt in range(attempts):
         titles, windows = _konsole_reading_once(
-            layout, settle_seconds=settle_seconds, config_dir=config_dir, config_home=config_home
+            layout, settle_seconds=settle_seconds, config_dir=config_dir, config_home=config_home, change=change
         )
         if not any("/" in title for title in windows):
             return titles, windows
@@ -463,8 +473,13 @@ def _konsole_reading_once(
     settle_seconds: float = 30.0,
     config_dir: Path | None = None,
     config_home: Path | None = None,
+    change: tuple[Callable[[], None], dict] | None = None,
 ) -> tuple[list[str], list[str]]:
     """What a real Konsole shows: every split's title, and the window's own.
+
+    `change`, when given, is something done to the open window once both have
+    been read, and a dict the splits' titles and the window's are read into
+    afterwards, once a split's title has moved (SYRD-733).
 
     The window titles are read one per focus change, because that is the
     reported fault -- the caption was correct until a pane was clicked. Focus
@@ -527,17 +542,21 @@ def _konsole_reading_once(
             return [], []
         # The sessions appear as their leaves start; wait for all six rather
         # than reading a half-built window.
-        deadline = time.time() + settle_seconds
-        titles: list[str] = []
-        while time.time() < deadline:
-            titles = []
+        def split_titles() -> list[str]:
+            read = []
             for index in range(1, 7):
                 match = re.search(
                     r'string "(.*)"',
                     ask(f"--dest={service}", f"/Sessions/{index}",
                         "org.kde.konsole.Session.title", "int32:1"),
                 )
-                titles.append(match.group(1) if match else "")
+                read.append(match.group(1) if match else "")
+            return read
+
+        deadline = time.time() + settle_seconds
+        titles: list[str] = []
+        while time.time() < deadline:
+            titles = split_titles()
             if all(title and GENERIC_TITLE_MARKER not in title for title in titles):
                 break
             time.sleep(1.0)
@@ -576,6 +595,22 @@ def _konsole_reading_once(
                 time.sleep(0.4)
                 seen = window_title()
             window_titles.append(seen)
+        if change is not None:
+            act, after = change
+            act()
+            deadline = time.time() + settle_seconds
+            later = split_titles()
+            while time.time() < deadline and later == titles:
+                time.sleep(0.4)
+                later = split_titles()
+            time.sleep(1.0)  # anything still on its way
+            after["splits"] = split_titles()
+            after["windows"] = []
+            for index in range(1, 7):
+                ask(f"--dest={service}", "/Windows/1",
+                    "org.kde.konsole.Window.setCurrentSession", f"int32:{index}")
+                time.sleep(0.4)
+                after["windows"].append(window_title())
         return titles, window_titles
     finally:
         if konsole is not None:
@@ -785,7 +820,9 @@ def _slot_sessions(server: str, config) -> list[str]:
             check=True,
         )
         _run_isolated_tmux(server, ["set-option", "-t", f"{session}:", "status", "off"], check=True)
-        for args in presentation_controller.display_slot_terminal_title_commands(config, session):
+        for args in presentation_controller.display_slot_terminal_title_commands(
+            config, session, team_launcher.pane_split_title(config, config.roles[slot])
+        ):
             assert args[0] == "tmux", args
             _run_isolated_tmux(server, list(args[1:]), check=True)
         sessions.append(session)
@@ -798,25 +835,35 @@ def test_the_slot_title_command_names_the_tenant_not_the_slot() -> None:
     Data-driven both ways: a tenant with a display name sends that, a tenant
     without one sends its slug, and neither sends anything that varies by slot
     or role -- which is what made the caption move when focus did.
-    """
-    from scripts import presentation_controller
 
+    The split's own header follows, behind OSC 30, and is the one part that
+    varies: the role the slot shows (SYRD-733). A `#` reaches the terminal as
+    itself, not as a tmux format, and a control character cannot end either
+    escape early.
+    """
+    from scripts import presentation_display_session
+
+    split = presentation_display_session.SPLIT_TITLE_ESCAPE
+    assert split == "\a\033]30;", split
     for project, project_name, expected in (
         ("porter", "Switchyard", "Switchyard"),
         ("otto", "Otto Works", "Otto Works"),
         ("otto", "", "otto"),
+        ("porter", "C# Team", "C## Team"),
     ):
         with tempfile.TemporaryDirectory(prefix="pgu-slot-title.") as tmp:
             config, _ = _project(Path(tmp), project=project, project_name=project_name)
             sent = []
             for slot in range(6):
-                commands = presentation_controller.display_slot_terminal_title_commands(
-                    config, f"{project}-display-{slot}"
+                commands = presentation_display_session.display_slot_terminal_title_commands(
+                    config, f"{project}-display-{slot}", f"Role #{slot}\x1b]2;x\a\x9c"
                 )
                 assert [args[-2] for args in commands] == ["set-titles", "set-titles-string"], commands
                 assert commands[0][-1] == "on", commands[0]
                 sent.append(commands[1][-1])
-        assert sent == [expected] * 6, (project, project_name, sent)
+        assert [value.split(split) for value in sent] == [
+            [expected, f"Role ##{slot} ]2;x  "] for slot in range(6)
+        ], (project, project_name, sent)
 
 
 @gui_integration.gui_case("konsole", "dbus-send", "dbus-daemon", "tmux")
@@ -889,6 +936,61 @@ def test_a_focused_tmux_pane_cannot_replace_the_project_caption() -> None:
     assert windows == ["Switchyard"] * 6, windows
     # The exact shape the User reported, named so a regression says so.
     assert not any("slot " in window for window in windows), windows
+
+
+@gui_integration.gui_case("konsole", "dbus-send", "dbus-daemon", "tmux")
+def test_a_real_konsole_split_header_follows_a_runtime_swap() -> None:
+    """SYRD-733 live: slot 0 showed Librarian and its header still said Inspector.
+
+    The same six display slots, wrapper and Konsole as the case above, each
+    split opened with its configured role's title. Then slot 0 is relabelled
+    exactly as `present show librarian --slot 0` relabels it: the product's own
+    title options, for the role the slot now shows. Konsole's own reading of
+    the split is what is asserted: the header moves to Librarian, every other
+    header stays, and the window's caption stays the project's under focus.
+    """
+    server = f"syrd733-{os.getpid()}"
+    _cleanup_dead_isolated_tmux_socket(server)
+    from scripts import presentation_display_session
+
+    with tempfile.TemporaryDirectory(prefix="pgu-presentation-swap.") as tmp:
+        tmp_path = Path(tmp)
+        config, _config_path = _project(tmp_path, project_name="Switchyard")
+        wrapper = tmp_path / "bin" / team_launcher.PANE_WINDOW_NAME
+        wrapper.parent.mkdir()
+        shutil.copy2(ROOT / "scripts" / team_launcher.PANE_WINDOW_NAME, wrapper)
+        after: dict = {}
+        try:
+            sessions = _slot_sessions(server, config)
+            layout = _six_pane_layout(tmp_path / "layout.json")
+            document = json.loads(layout.read_text(encoding="utf-8"))
+            for slot, leaf in enumerate(team_launcher._layout_leaves(document)):
+                leaf["Command"] = team_launcher.inert_pane_command(
+                    wrapper,
+                    ["tmux", "-L", server, "attach", "-t", sessions[slot]],
+                    title=team_launcher.pane_split_title(config, config.roles[slot]),
+                    window_title=team_launcher.project_window_title(config),
+                )
+                leaf["WorkingDirectory"] = str(tmp_path)
+            layout.write_text(json.dumps(document) + "\n", encoding="utf-8")
+            defaults = tmp_path / "konsole-defaults"
+            assert team_launcher.write_konsole_config_defaults(defaults, model=layout) == ""
+
+            def swap() -> None:
+                for args in presentation_display_session.display_slot_terminal_title_commands(
+                    config, sessions[0], "Librarian"
+                ):
+                    _run_isolated_tmux(server, list(args[1:]), check=True)
+
+            splits, windows = _konsole_reading(layout, config_dir=defaults, change=(swap, after))
+        finally:
+            _run_isolated_tmux(server, ["kill-server"], check=False, capture_output=True)
+
+    gui_integration.require_reading("split titles", splits)
+    assert splits == EXPECTED_HEADERS, splits
+    assert windows == ["Switchyard"] * 6, windows
+    assert after.get("splits") == ["Librarian", *EXPECTED_HEADERS[1:]], after
+    assert after.get("windows") == ["Switchyard"] * 6, after
 
 
 def main() -> int:

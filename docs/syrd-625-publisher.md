@@ -59,7 +59,11 @@ the Publisher behaves exactly as before.
     User Review; any other goes to Final Sign-Off.
   - `publication_return` goes to the recorded implementer and clears every
     sign-off. The return also clears the commit, so the next candidate passes
-    every gate again.
+    every gate again. On a pull-scheduled board the implementer has usually
+    claimed other work by then, so serial focus diverts the return into the
+    ready stage, pinned to that implementer behind the work it holds. The queue
+    notice says so in the Publisher's name (SYRD-744: it used to be refused, as
+    `invalid configured caller role: <NULL>`, and escalated).
   - `publication_escalate` goes to `publication_failed`.
 - **The Director's answers to a failure:**
   - `publication_retry` hands the ticket back to the Publisher;

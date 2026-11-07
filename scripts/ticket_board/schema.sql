@@ -4407,7 +4407,11 @@ BEGIN
     PERFORM set_config('ticket_board.serial_focus_queued', '', true);
     queued_for := queued->>'queued_for';
     reserved_by := coalesce(nullif(queued->>'reserved_by', ''), 'active work');
-    actor := coalesce(nullif(ticket_board.current_app_actor(), ''), 'director');
+    -- SYRD-744: the actor that moved the ticket, as enforce_declared_ticket_update names it -- a workflow
+    -- move's declared actor (the Publisher's publisher_finish sets one, and no caller role) before the session's
+    -- caller role -- so a return diverted by serial focus is announced as the Publisher's, not refused.
+    actor := coalesce(nullif(current_setting('ticket_board.workflow_actor', true), ''),
+                      nullif(ticket_board.current_app_actor(), ''), 'director');
 
     notice := NEW.id || ' is queued for ' || queued_for || ': serial focus is held by '
         || reserved_by || '. It is waiting in ' || (queued->>'stage') || '/' || (queued->>'assignee')

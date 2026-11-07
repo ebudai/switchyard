@@ -910,20 +910,49 @@ def shared_credential_check_command(remote: str, *, owner_user: str, identity_fi
     question it can answer is the one being asked: whether this credential is
     allowed to write at all. Read access is untouched and no ref is created or
     moved.
+
+    Both answers come from the one line whose name is exactly `HEAD`. `git
+    ls-remote <remote> HEAD` matches every ref ending in `/HEAD`, and a valid
+    bare repository can hold `refs/heads/roles/director/HEAD` and
+    `refs/remotes/origin/HEAD`: on MEFP's local publication remote the tip and
+    the ref became lists of lines, and the push an invalid refspec (SYRD-747).
+    It runs as the owner, with the owner's HOME, whoever asks, and from an
+    empty repository of its own: run through root it kept root's working
+    directory, and git refused it with `fatal: error reading /root/.git` before
+    asking anything. The remote's own tip needs no object from it.
     """
     ssh = (
         f"ssh -i {_quote(identity_file)} -o IdentitiesOnly=yes -o BatchMode=yes"
     )
     script = (
         f"set -eu\n"
-        f"tip=$(GIT_SSH_COMMAND={_quote(ssh)} git ls-remote {_quote(remote)} HEAD | cut -f1)\n"
-        f'[ -n "$tip" ] || exit 3\n'
-        f"ref=$(GIT_SSH_COMMAND={_quote(ssh)} git ls-remote --symref {_quote(remote)} HEAD "
-        f"| awk '/^ref:/ {{print $2}}')\n"
-        f'[ -n "$ref" ] || exit 3\n'
+        f'cd "$HOME"\n'
+        # Run from a repository of its own, empty and the owner's: a push needs one, and the remote's own tip needs no
+        # object from it. Whatever directory the check was started in is never read (SYRD-747).
+        f'scratch=$(mktemp -d)\n'
+        f"trap 'rm -rf \"$scratch\"' EXIT\n"
+        f'git init -q --bare "$scratch/check.git"\n'
+        f'cd "$scratch/check.git"\n'
+        f"heads=$(GIT_SSH_COMMAND={_quote(ssh)} git ls-remote --symref {_quote(remote)} HEAD)\n"
+        f"tip=$(printf '%s\\n' \"$heads\" | awk -F '\\t' '$2 == \"HEAD\" && $1 !~ /^ref: / {{print $1}}')\n"
+        f"ref=$(printf '%s\\n' \"$heads\" | awk -F '\\t' '$2 == \"HEAD\" && $1 ~ /^ref: / "
+        f"{{sub(/^ref: /, \"\", $1); print $1}}')\n"
+        f'case "$tip" in ""|*[!0-9a-f]*) exit 3 ;; esac\n'
+        f'case "$ref" in refs/heads/?*) ;; *) exit 3 ;; esac\n'
         f'GIT_SSH_COMMAND={_quote(ssh)} git push --dry-run {_quote(remote)} "$tip:$ref"\n'
     )
-    return ["sudo", "-u", owner_user, "sh", "-c", script]
+    return ["sudo", "-u", owner_user, "-H", *_owner_home_env(owner_user), "sh", "-c", script]
+
+
+def _owner_home_env(owner_user: str) -> list[str]:
+    """`env HOME=<the owner's home>`, from the account database: sudo's own HOME policy is the host's (SYRD-747)."""
+    import pwd
+
+    try:
+        home = pwd.getpwnam(owner_user).pw_dir
+    except (KeyError, TypeError):
+        return []  # an account this host does not know: `-H` is all that can be said
+    return ["env", f"HOME={home}"] if home else []
 
 
 def verify_shared_credential(

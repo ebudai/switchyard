@@ -17,7 +17,9 @@ notice is the only message anyone gets: a successful pickup tells the
 Director nothing. What the Director is told, once per waiting ticket, is when
 claimable work has waited past the policy's `idle_alert_seconds` while
 implementers sit idle -- with each one's reason, so unknown readiness is
-visible as unknown rather than reported as idle.
+visible as unknown rather than reported as idle. A worker still working --
+finishing its last turn, or with background work running -- is not idle and
+is never named there (SYRD-748): it claims when its turn is over.
 
 Who is asked is the declared claimant pool (SYRD-573), not the claim
 transition's actor list: every active, ephemeral implementer that owns the
@@ -42,6 +44,10 @@ from .workflow_config import pull_claimant_pool
 #: Why a pool member is not running, as `why_not_eligible` says it: such a
 #: worker is not capacity, so it is never reported as idle.
 NOT_RUNNING = frozenset({"no registered provider process", "registered provider process is gone"})
+#: What `why_not_eligible` says of a running worker whose turn is still going. It is not idle capacity that failed to
+#: claim, so the idle notice never names it (SYRD-748: "idle without claiming it: luna-2 (working)"); a Codex turn that
+#: ended without its Stop hook stays here until the gate's stale-turn recovery, and then claims.
+WORKING = frozenset({"working", "background work running"})
 
 
 def why_not_eligible(gate: Any, role: str) -> str:
@@ -142,7 +148,7 @@ def run(listener: Any, conn: Any) -> int:
         listener.logger.warning("Demand start check failed: %s", exc)
     try:
         conn.execute("SELECT ticket_board.notify_pull_idle_capacity(%s::jsonb, clock_timestamp())",
-                     (json.dumps(idle, sort_keys=True),))
+                     (json.dumps({role: why for role, why in idle.items() if why not in WORKING}, sort_keys=True),))
     except Exception as exc:  # logged, never fatal to the pass
         listener.logger.warning("Pull idle-capacity check failed: %s", exc)
     try:  # SYRD-736: rework pinned to a worker that cannot take it, told to the Director once it has waited

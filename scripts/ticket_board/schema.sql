@@ -8372,7 +8372,8 @@ BEGIN
     END IF;
     IF previous.state=proposed.state THEN
         IF previous.assignee IS DISTINCT FROM proposed.assignee AND actor<>'director'
-           AND nullif(current_setting('ticket_board.router_ticket', true), '') IS DISTINCT FROM previous.id THEN
+           AND nullif(current_setting('ticket_board.router_ticket', true), '') IS DISTINCT FROM previous.id
+           AND nullif(current_setting('ticket_board.review_balance_ticket', true), '') IS DISTINCT FROM previous.id THEN  -- SYRD-745
             RAISE EXCEPTION 'only director may reassign without transition' USING ERRCODE='42501'; END IF;
         PERFORM ticket_board.require_stage_owner_assignee(proposed.state,proposed.assignee);
         FOR flag IN SELECT * FROM jsonb_each(cfg->'flags') LOOP
@@ -23733,3 +23734,64 @@ REVOKE ALL ON SEQUENCE ticket_board.ticket_reopen_records_id_seq FROM PUBLIC;
 REVOKE ALL ON FUNCTION ticket_board.record_ticket_reopen() FROM PUBLIC;
 REVOKE ALL ON FUNCTION ticket_board.reopen_restore_admits(ticket_board.tickets, ticket_board.tickets) FROM PUBLIC;
 REVOKE ALL ON FUNCTION ticket_board.restore_reopened_ticket(text, text) FROM PUBLIC;
+-- SYRD-745: waiting review work goes to an idle owner of the same review stage.
+--
+-- A transition into a stage names an owner only when it says so; otherwise the declared update gives the ticket the
+-- stage's first owner. On MEFP, Audit is owned by audit and audit-2, so every submission went to audit and waited
+-- behind its current review ("finish current") while audit-2 sat live, idle and empty.
+--
+-- The listener says which owners are live and idle (pull_pickup.why_not_eligible) and asks this, once per such
+-- owner, per pass. It moves the oldest review that is only waiting -- behind its reviewer's current ticket
+-- (finish_current_stage_blocker) -- to that owner, which must hold nothing in the stage and not be provider-held.
+-- Never moved: a reviewer's current ticket; a manually controlled one, which is never waiting (finish_current_stage_
+-- blocker counts it for nobody); a blocked or awaited one; and a re-review its reviewer already began (it was handed to them in this stage before). The move is recorded on the ticket, and
+-- the new owner is handed it as a reassignment is.
+CREATE OR REPLACE FUNCTION ticket_board.balance_review_stage(p_stage text, p_to text, p_now timestamptz)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+DECLARE cfg jsonb := ticket_board.declared_workflow(); owners text[]; candidate record; busy_with text;
+    moved ticket_board.tickets;
+BEGIN
+    PERFORM ticket_board.require_ticket_board_listener('balance_review_stage');
+    SELECT ARRAY(SELECT jsonb_array_elements_text(x->'owners')) INTO owners
+      FROM jsonb_array_elements(coalesce(cfg->'stages', '[]'::jsonb)) x WHERE x->>'name' = p_stage AND x->>'kind' = 'review';
+    IF coalesce(cardinality(owners), 0) < 2 OR NOT p_to = ANY(owners) THEN
+        RETURN jsonb_build_object('moved', false, 'reason', 'not an owner of a shared review stage');
+    END IF;
+    IF EXISTS (SELECT FROM ticket_board.tickets t WHERE t.state = p_stage AND t.assignee = p_to) THEN
+        RETURN jsonb_build_object('moved', false, 'reason', 'it already holds work in this stage');
+    END IF;
+    IF ticket_board.role_provider_hold_is_current(p_to, p_now) THEN
+        RETURN jsonb_build_object('moved', false, 'reason', 'its provider is held');
+    END IF;
+    FOR candidate IN
+        SELECT t.id, t.assignee FROM ticket_board.tickets t JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
+         WHERE t.state = p_stage AND t.assignee = ANY(owners) AND t.assignee <> p_to
+           AND coalesce(btrim(ns.awaiting_role), '') = ''
+           AND NOT ticket_board.ticket_has_unresolved_blockers(t.id)
+           AND NOT EXISTS (SELECT FROM ticket_board.notification_trace nt
+                            WHERE nt.ticket_id = t.id AND nt.target_role = t.assignee AND nt.ticket_state_at_event = p_stage
+                              AND nt.kind = 'transition' AND nt.event = 'send')
+         ORDER BY ns.entered_current_state_at, t.ticket_number
+    LOOP
+        busy_with := nullif(ticket_board.finish_current_stage_blocker(candidate.id, candidate.assignee, p_stage, p_now), '');
+        CONTINUE WHEN busy_with IS NULL;  -- its reviewer's current ticket: never taken from it
+        PERFORM set_config('ticket_board.review_balance_ticket', candidate.id, true);
+        PERFORM set_config('ticket_board.workflow_actor', 'board', true);
+        UPDATE ticket_board.tickets SET assignee = p_to
+         WHERE id = candidate.id AND state = p_stage AND assignee = candidate.assignee
+        RETURNING * INTO moved;
+        PERFORM set_config('ticket_board.workflow_actor', '', true);
+        PERFORM set_config('ticket_board.review_balance_ticket', '', true);
+        CONTINUE WHEN moved.id IS NULL;  -- moved by someone else meanwhile
+        PERFORM ticket_board.append_ticket_comment(moved.id, 'ticket_board_service', format(
+            'Board balance in %s: %s -> %s. %s is reviewing %s, and %s was live and idle with nothing in %s, so this '
+            'waiting review goes to it.', p_stage, candidate.assignee, p_to, candidate.assignee, busy_with, p_to, p_stage));
+        PERFORM ticket_board.enqueue_transition_notification(
+            moved.id, moved.title, p_stage, moved.state, moved.assignee, moved.updated_at, moved.ticket_number,
+            moved.id || CASE WHEN moved.title <> '' THEN ' -- ' || moved.title ELSE '' END || ' is now assigned to you');
+        RETURN jsonb_build_object('moved', true, 'ticket', moved.id, 'from', candidate.assignee, 'to', p_to, 'behind', busy_with);
+    END LOOP;
+    RETURN jsonb_build_object('moved', false, 'reason', 'no review is waiting');
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION ticket_board.balance_review_stage(text, text, timestamptz) FROM PUBLIC;

@@ -581,6 +581,9 @@ GRANT EXECUTE ON FUNCTION ticket_board.director_capacity_status() TO ticket_boar
 GRANT EXECUTE ON FUNCTION ticket_board.notify_pull_pinned_rework_strands(jsonb, jsonb, timestamptz)
     TO ticket_board_listener;
 
+-- SYRD-745: the listener hands a waiting review to an idle owner of the same review stage.
+GRANT EXECUTE ON FUNCTION ticket_board.balance_review_stage(text, text, timestamptz) TO ticket_board_listener;
+
 -- SYRD-668: last, after every grant above. The board's own principals are the
 -- role users this file creates and its service and listener, and nothing is
 -- granted to any other role. Migrations once granted to every role that passed

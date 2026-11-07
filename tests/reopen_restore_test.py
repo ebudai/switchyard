@@ -199,9 +199,13 @@ def test_a_fresh_and_an_upgraded_board_run_the_same_functions() -> None:
         drift = ""
     except AssertionError as exc:
         drift = str(exc)
-    owners = {owning_migration(name).name for name in names}
-    check(drift == "" and owners == {"pgu1032_syrd746_restore_reopened.sql"},
-          f"schema.sql's copies are pgu1032's, character for character: {drift} {owners}")
+    # A later migration may own enforce_declared_ticket_update (SYRD-745's pgu1033 adds its own window), as long as its
+    # copy still carries this ticket's restore window.
+    owners = {owning_migration(name).name for name in names if name != "enforce_declared_ticket_update"}
+    keeps = "ticket_board.restore_reopen" in owning_migration("enforce_declared_ticket_update").read_text()
+    check(drift == "" and owners == {"pgu1032_syrd746_restore_reopened.sql"} and keeps,
+          f"schema.sql's copies are their owning migrations', character for character, and the trigger's owner keeps the "
+          f"restore window: {drift} {owners} {keeps}")
 
 
 def main() -> int:

@@ -1402,6 +1402,71 @@ def test_finish_upgrade_withholds_the_sequence_the_owner_could_not_run() -> None
         assert f"cannot write {releases}" in finished, finished
 
 
+def _verdict_dry_run(tmp: Path, *, live: bool = True, deployed: bool = False, deploy_ref: str | None = None,
+                     dry_run: bool = True) -> tuple[object, str, str]:
+    """SYRD-685: a cut-over tenant's upgrade, end to end: (its answer, its output, the commit origin/main names)."""
+    config_path, source_repo, board_root, accounts = _tenant_before_cutover(tmp)
+    _cut_over(config_path, source_repo, board_root, accounts)
+    target = _run_git(["git", "rev-parse", "origin/main"], cwd=source_repo).stdout.strip()
+    if deployed:  # as a deploy of that commit leaves the board root: a retained pin, the release already there
+        release = board_root / "releases" / target
+        release.mkdir(parents=True, exist_ok=True)
+        (release / ".pgu-deploy-sha").write_text(target + "\n", encoding="utf-8")
+        (board_root / "current").unlink()
+        (board_root / "current").symlink_to(release)
+    with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
+        tenant.live = live
+        result, output, _m = _upgrade(
+            config_path, as_root=True, exists=accounts, dry_run=dry_run, deploy_ref=deploy_ref,
+            runner=_deploying_runner(tenant.runner(), board_root=board_root, deploys=[], deploy=False),
+            board=_board_with_marker(False), source_repo=source_repo,
+        )
+    return result, output, target
+
+
+def _the_verdict(output: str) -> str:
+    lines = output.splitlines()
+    found = [line for line in lines if line.startswith("switchyard: dry-run verdict:")]
+    assert len(found) == 1 and lines[-1] == found[0], f"exactly one verdict, last: {found} {lines[-3:]}"
+    return found[0]
+
+
+def test_a_dry_run_that_would_move_the_release_ends_ready_with_its_commit() -> None:
+    """SYRD-685: PIE's case -- a pinned release movement on a running tenant -- ends on READY TO APPLY."""
+    with tempfile.TemporaryDirectory(prefix="verdict-moving.") as tmp:
+        result, output, target = _verdict_dry_run(Path(tmp))
+        verdict = _the_verdict(output)
+        assert result == 0, output
+        assert verdict == (f"switchyard: dry-run verdict: READY TO APPLY: porter, release {target}, moving the board "
+                           f"from {'1' * 40}. Nothing changed; run the same command without --dry-run to apply it. "
+                           f"[verdict=ready project=porter commit={target} exit=0]"), verdict
+        assert f"deployed board release new: {target}" in output, output
+
+
+def test_a_retained_pin_and_a_stopped_tenant_end_ready_too() -> None:
+    with tempfile.TemporaryDirectory(prefix="verdict-noop.") as tmp:
+        result, output, target = _verdict_dry_run(Path(tmp), deployed=True)
+        verdict = _the_verdict(output)
+        assert result == 0 and f"release {target}, already deployed: the board release does not move" in verdict, verdict
+    with tempfile.TemporaryDirectory(prefix="verdict-stopped.") as tmp:
+        result, output, target = _verdict_dry_run(Path(tmp), live=False)
+        verdict = _the_verdict(output)
+        assert result == 0 and "READY TO APPLY: porter" in verdict and f"commit={target} exit=0]" in verdict, verdict
+
+
+def test_a_refused_dry_run_ends_not_ready_and_an_applying_one_says_nothing_new() -> None:
+    for ref in ("f" * 40, "no-such-branch"):
+        with tempfile.TemporaryDirectory(prefix="verdict-refused.") as tmp:
+            result, output, _target = _verdict_dry_run(Path(tmp), deploy_ref=ref)
+            verdict = _the_verdict(output)
+            assert result == 1 and verdict == ("switchyard: dry-run verdict: NOT READY: porter: the blocking reasons "
+                                               "are printed above. Nothing changed. "
+                                               "[verdict=not-ready project=porter exit=1]"), verdict
+    with tempfile.TemporaryDirectory(prefix="verdict-apply.") as tmp:
+        result, output, _target = _verdict_dry_run(Path(tmp), dry_run=False)
+        assert "dry-run verdict" not in output, output
+
+
 def main() -> int:
     with exact_release_host():  # SYRD-700
         run_team_launcher_tests(globals(), first=())

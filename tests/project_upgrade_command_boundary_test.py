@@ -58,7 +58,8 @@ MOVED = ('upgrade_project_command',)
 SEAMS = {
     # SYRD-548: `--only upstream-report` adds one read, connect_upstream_report_command.
     # SYRD-579: two more, the role models held before U1 and checked after U6.
-    'upgrade_project_command': {'connect_upstream_report_command': 1, 'hold_role_selections_for_upgrade': 1, 'role_selections_after_upgrade': 1, 'UpgradeIdentitiesDone': 1, 'UpgradeSourcePinned': 1, 'UpgradeStateReady': 1, 'UpgradeToolingStaged': 1, '_finish_upgrade': 1, '_pin_upgrade_source': 1, '_recover_upgrade_state': 1, '_refresh_upgrade_artifacts': 1, '_stage_upgrade_tooling': 1, '_upgrade_identities_and_accounts': 1},
+    # SYRD-685: and one more, the dry run's verdict the command is run inside.
+    'upgrade_project_command': {'UpgradeDryRunVerdict': 1, 'connect_upstream_report_command': 1, 'hold_role_selections_for_upgrade': 1, 'role_selections_after_upgrade': 1, 'UpgradeIdentitiesDone': 1, 'UpgradeSourcePinned': 1, 'UpgradeStateReady': 1, 'UpgradeToolingStaged': 1, '_finish_upgrade': 1, '_pin_upgrade_source': 1, '_recover_upgrade_state': 1, '_refresh_upgrade_artifacts': 1, '_stage_upgrade_tooling': 1, '_upgrade_identities_and_accounts': 1},
 }
 #: Measured on the baseline launcher: every launcher definition outside the command that names it, and how often.
 DISPATCH = {'switchyard_main': {'upgrade_project_command': 1}, 'main': {'upgrade_project_command': 1}}
@@ -485,14 +486,48 @@ def with_the_report_board(label: str, gold: dict) -> dict:
     return out
 
 
+VERDICT = "switchyard: dry-run verdict:"
+FINISHES = ("_finish_upgrade", "the rebound finish")
+
+
+def without_the_verdict(got: dict) -> tuple[dict, list[str], list]:
+    """SYRD-685, taken back out by rule: (the answer without the dry run's verdict line or the verdict U6 is handed,
+    the verdict lines it printed, and what U6 was handed)."""
+    import copy
+
+    out, handed = copy.deepcopy(got), []
+    for name, _args, kwargs in out["calls"]:
+        if name in FINISHES:
+            handed.append(kwargs.pop("verdict", "NOT HANDED"))
+    said = [line for _where, line in out["printed"] if line.startswith(VERDICT)]
+    out["printed"] = [entry for entry in out["printed"] if not entry[1].startswith(VERDICT)]
+    return out, said, handed
+
+
+def dry_run_of(gold: dict) -> bool:
+    return any(kwargs.get("dry_run") is True for name, _args, kwargs in gold["calls"]
+               if name in ("hold_role_selections_for_upgrade", "connect_upstream_report_command"))
+
+
 def test_every_answer_is_the_baselines() -> None:
     check(sorted(CASES) == sorted(GOLDEN), "every measured case is asserted, and nothing else")
     check(sorted(label for label in GOLDEN if with_the_report_board(label, GOLDEN[label]) != GOLDEN[label])
           == sorted(REPORT_BOARD_CASES), "the translation moves exactly the cases that reach the report options")
     for label, spec in CASES.items():
+        gold = with_the_report_board(label, GOLDEN[label])
         for holder in (m, t):
-            got = run(holder, spec)
-            check(got == with_the_report_board(label, GOLDEN[label]), f"{label} ({holder.__name__}): the baseline's answer, every call in order: {got}")
+            got, said, handed = without_the_verdict(run(holder, spec))
+            check(got == gold, f"{label} ({holder.__name__}): the baseline's answer, every call in order: {got}")
+            # SYRD-685: and, in a dry run only, one verdict, last; ready only when the upgrade went through and answered 0.
+            dry = dry_run_of(gold)
+            finished = gold["result"] == 0 and (any(c[0] in FINISHES for c in gold["calls"])
+                                                or any(c[0] == "connect_upstream_report_command" for c in gold["calls"]))
+            raw = run(holder, spec)["printed"]
+            check(len(said) == (1 if dry else 0) and (not dry or raw[-1][1] == said[0])
+                  and (not dry or said[0].startswith(f"{VERDICT} {'READY TO APPLY' if finished else 'NOT READY'}: syrd424")),
+                  f"{label} ({holder.__name__}): one verdict, last, in a dry run only, and the right one: {said}")
+            check(all(h == f"UpgradeDryRunVerdict('syrd424', dry_run={dry})" for h in handed),
+                  f"{label}: U6 is handed the command's own verdict, to name the release it finds: {handed}")
 
 
 def test_the_rules_hold_in_the_measured_record() -> None:
@@ -544,7 +579,9 @@ def test_every_launcher_seam_is_reached() -> None:
     # SYRD-548: the six phases and --only's hand-over; SYRD-579: and the role models held and checked.
     check(names - types <= REACHED and len(names - types) == 9, f"a recorder on the launcher reached every phase: missing {sorted(names - types - REACHED)}")
     rebound = {spec.get("rebind") for spec in CASES.values()} - {None}
-    check(len(types) == 4 and rebound & types and rebound - types and "the rebound finish" in REACHED,
+    # SYRD-685: and the dry run's verdict, the fifth type, real in every case like the four continuations.
+    check(len(types) == 5 and "UpgradeDryRunVerdict" in types and rebound & types and rebound - types
+          and "the rebound finish" in REACHED,
           f"and a type and a phase rebound there take effect: {sorted(rebound)}")
 
 

@@ -582,10 +582,12 @@ def _finish_upgrade(
     print_func: Callable[[str], None],
     release_report_config: ProjectConfig,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
+    verdict: Any = None,
 ) -> int:
     """U6 of `upgrade_project_command`, unchanged: the director phase, the release
     phase and its report, and the upgrade's closing report; it answers the
-    upgrade's own exit code."""
+    upgrade's own exit code. A dry run's `verdict` is told what the release phase
+    found, to name it (SYRD-685)."""
     from scripts import team_launcher as launcher
 
     # Asked after the cutover, because the director makes that write from the
@@ -646,6 +648,9 @@ def _finish_upgrade(
             dry_run=dry_run,
         )
         release_blocked = launcher.release_update_blocked(release_status)
+    if verdict is not None:
+        verdict.release(status=release_status if final_cutover.is_complete and not release_root_problems else None,
+                        withheld=not final_cutover.is_complete)
 
     if director_state in {"pending", "unknown"}:
         director_action = (

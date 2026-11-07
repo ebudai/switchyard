@@ -1449,6 +1449,8 @@ from scripts.project_design_command import (
     _default_project_design_document_path,
     design_project_command,
 )
+# SYRD-685: the dry run's last line; the upgrade command reads it here.
+from scripts.upgrade_verdict import UpgradeDryRunVerdict
 from scripts.project_upgrade_command import (
     upgrade_project_command,
 )

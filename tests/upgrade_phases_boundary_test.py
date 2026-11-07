@@ -119,7 +119,9 @@ UPGRADE_READS = ("_pin_upgrade_source", "_recover_upgrade_state", "_refresh_upgr
                  # SYRD-548: `--only upstream-report` returns this before U1.
                  "connect_upstream_report_command",
                  # SYRD-579: role models are held before U1 and checked after U6.
-                 "hold_role_selections_for_upgrade", "role_selections_after_upgrade")
+                 "hold_role_selections_for_upgrade", "role_selections_after_upgrade",
+                 # SYRD-685: the dry run's verdict the whole upgrade runs inside.
+                 "UpgradeDryRunVerdict")
 
 
 def upgrade_command() -> tuple[ast.Module, ast.FunctionDef, str]:
@@ -148,6 +150,40 @@ def upgrade_command() -> tuple[ast.Module, ast.FunctionDef, str]:
         check(bare == [] and through == sorted(UPGRADE_READS),
               f"every phase and continuation is read through the launcher, none bare: {bare} {through}")
         del upgrade.body[1]
+        # SYRD-685: the whole upgrade runs inside its dry run's verdict, which every way out reports to. Checked here,
+        # once, and taken back out -- the `with`, the verdict's own calls and the verdict U6 is handed -- so the
+        # positions checked below are still the upgrade's own.
+        inside = upgrade.body[1]
+        check(isinstance(inside, ast.With) and len(upgrade.body) == 2 and len(inside.items) == 1
+              and ast.unparse(inside.items[0]) == "launcher.UpgradeDryRunVerdict(config.project, dry_run=dry_run, "
+                                                  "print_func=print_func) as verdict",
+              f"the upgrade runs inside its verdict: {ast.unparse(inside)[:160]}")
+        upgrade.body[1:2] = inside.body
+        told: dict[str, int] = {}
+
+        class WithoutTheVerdict(ast.NodeTransformer):
+            def visit_Expr(self, node: ast.Expr) -> ast.AST | None:
+                call = node.value
+                if isinstance(call, ast.Call) and ast.unparse(call.func) in ("verdict.only", "verdict.pinned"):
+                    told[ast.unparse(call.func)] = told.get(ast.unparse(call.func), 0) + 1
+                    return None
+                return self.generic_visit(node)
+
+            def visit_Call(self, node: ast.Call) -> ast.AST:
+                self.generic_visit(node)
+                name = ast.unparse(node.func)
+                if name in ("verdict.stopped", "verdict.finished") and len(node.args) == 1:
+                    told[name] = told.get(name, 0) + 1
+                    return node.args[0]
+                kept = [k for k in node.keywords if not (k.arg == "verdict" and ast.unparse(k.value) == "verdict")]
+                if len(kept) != len(node.keywords):
+                    told["verdict="] = told.get("verdict=", 0) + 1
+                    node.keywords = kept
+                return node
+
+        upgrade = WithoutTheVerdict().visit(upgrade)
+        check(told == {"verdict.finished": 2, "verdict.only": 1, "verdict.stopped": 5, "verdict.pinned": 1, "verdict=": 1},
+              f"each early stop, both answers, --only, the pin and U6 report to it, and nothing else does: {told}")
         # SYRD-548: `--only upstream-report` returns before U1 and runs no phase.
         # Checked here, once, and then set aside, so the positions checked below
         # are still the upgrade's own.

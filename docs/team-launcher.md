@@ -820,6 +820,28 @@ an interrupted upgrade resumes rather than repeats and a partial state is
 visible rather than inferred. Every phase is idempotent; rerunning is the
 supported way to continue.
 
+**A dry run ends on its verdict** (SYRD-685). After every phase's detail,
+`switchyard upgrade <project> --dry-run` prints exactly one last line:
+
+```
+switchyard: dry-run verdict: READY TO APPLY: pie, release <commit>, moving the board from <commit>. Nothing changed; run the same command without --dry-run to apply it. [verdict=ready project=pie commit=<commit> exit=0]
+switchyard: dry-run verdict: NOT READY: pie: the blocking reasons are printed above. Nothing changed. [verdict=not-ready project=pie exit=1]
+```
+
+- **READY TO APPLY** only when every phase went through and the upgrade
+  answered 0. It names the exact release commit the release phase found:
+  either the one it would move the board to, or, for a retained pin, the one
+  already deployed, which stays. It says so when the release deploy is
+  withheld.
+- **NOT READY** in every other case:
+  - a phase that stopped the upgrade, whatever it answered;
+  - a nonzero finish;
+  - a refusal raised from inside a phase. Its own words are printed first, then
+    the verdict, which repeats them; it exits 1, as Python would have.
+
+The bracketed tail is for scripts. The exit status and every line above the
+verdict are unchanged. An upgrade that applies prints no verdict.
+
 **The release stays pinned across the handoff.** The accounts phase ends by
 asking an operator to run a generated script, and that script hands the upgrade
 back with `sudo switchyard upgrade <project>` -- no arguments, and `sudo`

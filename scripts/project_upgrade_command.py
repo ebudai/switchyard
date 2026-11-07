@@ -78,127 +78,132 @@ def upgrade_project_command(
     """
     from scripts import team_launcher as launcher
 
-    if only:
-        return launcher.connect_upstream_report_command(
-            only, config, config_path=config_path, dry_run=dry_run, registry_dir=registry_dir,
-            upstream_report_url=upstream_report_url, upstream_report_token_file=upstream_report_token_file,
-            print_func=print_func, upstream_report_board=upstream_report_board,
-            no_upstream_report=no_upstream_report, runner=runner,
+    # Every way out of a dry run says, last, whether applying it is safe: READY TO APPLY or NOT READY (SYRD-685).
+    with launcher.UpgradeDryRunVerdict(config.project, dry_run=dry_run, print_func=print_func) as verdict:
+        if only:
+            verdict.only(only)
+            return verdict.finished(launcher.connect_upstream_report_command(
+                only, config, config_path=config_path, dry_run=dry_run, registry_dir=registry_dir,
+                upstream_report_url=upstream_report_url, upstream_report_token_file=upstream_report_token_file,
+                print_func=print_func, upstream_report_board=upstream_report_board,
+                no_upstream_report=no_upstream_report, runner=runner,
+            ))
+        # Before anything is stopped or written: a restart in any later phase would
+        # put a role that chose another model back on its configuration (SYRD-579).
+        role_selections = launcher.hold_role_selections_for_upgrade(
+            config, config_path=config_path, keep=role_models, dry_run=dry_run, print_func=print_func,
         )
-    # Before anything is stopped or written: a restart in any later phase would
-    # put a role that chose another model back on its configuration (SYRD-579).
-    role_selections = launcher.hold_role_selections_for_upgrade(
-        config, config_path=config_path, keep=role_models, dry_run=dry_run, print_func=print_func,
-    )
-    if role_selections is None:
-        return 1
-    source_pinned = launcher._pin_upgrade_source(
-        config,
-        commit_git_dir=commit_git_dir,
-        deploy_ref=deploy_ref,
-        desktop_policy=desktop_policy,
-        dry_run=dry_run,
-        print_func=print_func,
-        publish_remote=publish_remote,
-        runner=runner,
-        source_repo=source_repo,
-        tooling_root=tooling_root,
-    )
-    if not isinstance(source_pinned, launcher.UpgradeSourcePinned):
-        return source_pinned
-    desktop_choice = source_pinned.desktop_choice
-    deploy_ref_chosen = source_pinned.deploy_ref_chosen
-    source_repo = source_pinned.source_repo
-    commit_git_dir = source_pinned.commit_git_dir
-    deploy_ref = source_pinned.deploy_ref
-    state_ready = launcher._recover_upgrade_state(
-        config,
-        config_path=config_path,
-        deploy_ref=deploy_ref,
-        desktop_policy=desktop_policy,
-        dry_run=dry_run,
-        print_func=print_func,
-        runner=runner,
-        source_repo=source_repo,
-    )
-    if not isinstance(state_ready, launcher.UpgradeStateReady):
-        return state_ready
-    source_repo = state_ready.source_repo
-    effective_source_repo = state_ready.effective_source_repo
-    config = state_ready.config
-    cutover = state_ready.cutover
+        if role_selections is None:
+            return verdict.stopped(1)
+        source_pinned = launcher._pin_upgrade_source(
+            config,
+            commit_git_dir=commit_git_dir,
+            deploy_ref=deploy_ref,
+            desktop_policy=desktop_policy,
+            dry_run=dry_run,
+            print_func=print_func,
+            publish_remote=publish_remote,
+            runner=runner,
+            source_repo=source_repo,
+            tooling_root=tooling_root,
+        )
+        if not isinstance(source_pinned, launcher.UpgradeSourcePinned):
+            return verdict.stopped(source_pinned)
+        desktop_choice = source_pinned.desktop_choice
+        deploy_ref_chosen = source_pinned.deploy_ref_chosen
+        source_repo = source_pinned.source_repo
+        commit_git_dir = source_pinned.commit_git_dir
+        deploy_ref = source_pinned.deploy_ref
+        verdict.pinned(deploy_ref)
+        state_ready = launcher._recover_upgrade_state(
+            config,
+            config_path=config_path,
+            deploy_ref=deploy_ref,
+            desktop_policy=desktop_policy,
+            dry_run=dry_run,
+            print_func=print_func,
+            runner=runner,
+            source_repo=source_repo,
+        )
+        if not isinstance(state_ready, launcher.UpgradeStateReady):
+            return verdict.stopped(state_ready)
+        source_repo = state_ready.source_repo
+        effective_source_repo = state_ready.effective_source_repo
+        config = state_ready.config
+        cutover = state_ready.cutover
 
-    release_report_config = config
-    trusted_release_root: Path | None = None
-    publication_detail = ""
-    config = launcher._refresh_upgrade_artifacts(
-        config,
-        commit_git_dir=commit_git_dir,
-        config_path=config_path,
-        dry_run=dry_run,
-        effective_source_repo=effective_source_repo,
-        print_func=print_func,
-        registry_dir=registry_dir,
-        runner=runner,
-        source_repo=source_repo,
-        upstream_report_token_file=upstream_report_token_file,
-        upstream_report_url=upstream_report_url,
-        board_ui_users=board_ui_users,
-        **({"document": state_ready.document} if state_ready.document is not None else {}),
-    )
-    tooling_staged = launcher._stage_upgrade_tooling(
-        config,
-        config_path=config_path,
-        deploy_ref=deploy_ref,
-        deploy_ref_chosen=deploy_ref_chosen,
-        dry_run=dry_run,
-        effective_source_repo=effective_source_repo,
-        print_func=print_func,
-        publication_detail=publication_detail,
-        publish_remote=publish_remote,
-        runner=runner,
-        tooling_root=tooling_root,
-        trusted_release_root=trusted_release_root,
-    )
-    if not isinstance(tooling_staged, launcher.UpgradeToolingStaged):
-        return tooling_staged
-    trusted_release_root = tooling_staged.trusted_release_root
-    publication_detail = tooling_staged.publication_detail
-    identities_done = launcher._upgrade_identities_and_accounts(
-        config,
-        commit_git_dir=commit_git_dir,
-        config_path=config_path,
-        cutover=cutover,
-        deploy_ref=deploy_ref,
-        desktop_choice=desktop_choice,
-        dry_run=dry_run,
-        effective_source_repo=effective_source_repo,
-        print_func=print_func,
-        publication_detail=publication_detail,
-        publish_remote=publish_remote,
-        release_report_config=release_report_config,
-        runner=runner,
-        source_repo=source_repo,
-        tooling_root=tooling_root,
-        trusted_release_root=trusted_release_root,
-    )
-    if not isinstance(identities_done, launcher.UpgradeIdentitiesDone):
-        return identities_done
-    config = identities_done.config
-    release_report_config = identities_done.release_report_config
+        release_report_config = config
+        trusted_release_root: Path | None = None
+        publication_detail = ""
+        config = launcher._refresh_upgrade_artifacts(
+            config,
+            commit_git_dir=commit_git_dir,
+            config_path=config_path,
+            dry_run=dry_run,
+            effective_source_repo=effective_source_repo,
+            print_func=print_func,
+            registry_dir=registry_dir,
+            runner=runner,
+            source_repo=source_repo,
+            upstream_report_token_file=upstream_report_token_file,
+            upstream_report_url=upstream_report_url,
+            board_ui_users=board_ui_users,
+            **({"document": state_ready.document} if state_ready.document is not None else {}),
+        )
+        tooling_staged = launcher._stage_upgrade_tooling(
+            config,
+            config_path=config_path,
+            deploy_ref=deploy_ref,
+            deploy_ref_chosen=deploy_ref_chosen,
+            dry_run=dry_run,
+            effective_source_repo=effective_source_repo,
+            print_func=print_func,
+            publication_detail=publication_detail,
+            publish_remote=publish_remote,
+            runner=runner,
+            tooling_root=tooling_root,
+            trusted_release_root=trusted_release_root,
+        )
+        if not isinstance(tooling_staged, launcher.UpgradeToolingStaged):
+            return verdict.stopped(tooling_staged)
+        trusted_release_root = tooling_staged.trusted_release_root
+        publication_detail = tooling_staged.publication_detail
+        identities_done = launcher._upgrade_identities_and_accounts(
+            config,
+            commit_git_dir=commit_git_dir,
+            config_path=config_path,
+            cutover=cutover,
+            deploy_ref=deploy_ref,
+            desktop_choice=desktop_choice,
+            dry_run=dry_run,
+            effective_source_repo=effective_source_repo,
+            print_func=print_func,
+            publication_detail=publication_detail,
+            publish_remote=publish_remote,
+            release_report_config=release_report_config,
+            runner=runner,
+            source_repo=source_repo,
+            tooling_root=tooling_root,
+            trusted_release_root=trusted_release_root,
+        )
+        if not isinstance(identities_done, launcher.UpgradeIdentitiesDone):
+            return verdict.stopped(identities_done)
+        config = identities_done.config
+        release_report_config = identities_done.release_report_config
 
-    finished = launcher._finish_upgrade(
-        config,
-        commit_git_dir=commit_git_dir,
-        config_path=config_path,
-        deploy_ref=deploy_ref,
-        desktop_choice=desktop_choice,
-        dry_run=dry_run,
-        effective_source_repo=effective_source_repo,
-        print_func=print_func,
-        release_report_config=release_report_config,
-        runner=runner,
-    )
-    return launcher.role_selections_after_upgrade(
-        role_selections, config_path=config_path, code=finished, print_func=print_func,
-    )
+        finished = launcher._finish_upgrade(
+            config,
+            commit_git_dir=commit_git_dir,
+            config_path=config_path,
+            deploy_ref=deploy_ref,
+            desktop_choice=desktop_choice,
+            dry_run=dry_run,
+            effective_source_repo=effective_source_repo,
+            print_func=print_func,
+            release_report_config=release_report_config,
+            runner=runner,
+            verdict=verdict,
+        )
+        return verdict.finished(launcher.role_selections_after_upgrade(
+            role_selections, config_path=config_path, code=finished, print_func=print_func,
+        ))

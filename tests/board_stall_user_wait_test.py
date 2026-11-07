@@ -240,14 +240,18 @@ def candidate(got: dict) -> None:
 
 
 def mirrors() -> None:
-    """schema.sql's last board_stall_runnable is pgu1018's, byte for byte, so fresh and upgraded boards agree. A later
-    ticket's functions may follow it (SYRD-697)."""
-    migration = (ROOT / "scripts/ticket_board/migrations/pgu1018_syrd696_user_wait_not_runnable.sql").read_text()
-    body = migration.split("BEGIN;\n\n", 1)[1].rsplit("\nCOMMIT;\n", 1)[0]
-    schema = (ROOT / "scripts/ticket_board/schema.sql").read_text()
+    """schema.sql's last board_stall_runnable is the copy of the last migration to define it, byte for byte, so fresh
+    and upgraded boards agree -- pgu1018's, until SYRD-735's pgu1034 redefined it -- and it keeps this ticket's clause.
+    A later ticket's functions may follow it (SYRD-697)."""
+    from schema_function_drift import owning_migration
+
     head = "CREATE OR REPLACE FUNCTION ticket_board.board_stall_runnable("
-    check(body.startswith(head) and schema.rfind(body) >= 0 and schema.rfind(head) == schema.rfind(body),
-          "schema.sql's last board_stall_runnable is pgu1018's, byte for byte")
+    migration = owning_migration("board_stall_runnable").read_text()
+    body = migration[migration.index(head):migration.index("$$;", migration.index("AS $$", migration.index(head)) + 5) + 3]
+    schema = (ROOT / "scripts/ticket_board/schema.sql").read_text()
+    check(schema.rfind(body) >= 0 and schema.rfind(head) == schema.rfind(body)
+          and "'waiting on ' || r.awaiting_role || ', the User, until the wait is cleared'" in body,
+          "schema.sql's last board_stall_runnable is its owning migration's, byte for byte, with SYRD-696's clause")
 
 
 def main() -> int:

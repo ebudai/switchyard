@@ -33,7 +33,7 @@ import os
 import subprocess
 from typing import Any
 
-from . import provider_quota, provider_refusal
+from . import provider_prompt, provider_quota, provider_refusal
 
 GRACE_ENV = "TICKET_BOARD_QUOTA_HOLD_GRACE_SECONDS"
 RECHECK_ENV = "TICKET_BOARD_QUOTA_HOLD_RECHECK_SECONDS"
@@ -42,6 +42,9 @@ DEFAULT_RECHECK_SECONDS = 1800.0
 #: A Codex pane whose last turn did not end normally: its own turn start, or the
 #: listener's rewrite of a stale one, which keeps that turn (pane_activity_gate).
 CODEX_UNENDED = {("busy", "codex.UserPromptSubmit"), ("idle", "listener.stale_codex_busy_recovery")}
+#: SYRD-735: how many times one hold presses Esc on Claude's usage-limit menu before leaving it to a person.
+MENU_PRESSES = 2
+SHARED_SOURCE = "claude.shared_account"
 
 
 #: The provider's own punctuation, said in ASCII: a board in SQL_ASCII counts bytes and would cut a character in half.
@@ -119,6 +122,34 @@ def evidence_for(gate: Any, role: str, target: str, state: Any, registration: di
     }
 
 
+def account_of(state: Any, registration: dict[str, Any]) -> str:
+    """The provider account a pane's current session runs as, as the pane hook read it from that session's own
+    session-owner record and hashed it: at its latest StopFailure, else at its latest normal turn end (SYRD-735).
+    "" unless the record names the registered process AND the pane's current session (its latest SessionStart): a
+    replacement's account, or a new session's, is its own to show, and until it does it shares nothing."""
+    session = state.last_session_start.get("session_id") if isinstance(state.last_session_start, dict) else ""
+    for holder in (state.provider_error, state.last_checkout):
+        record = holder.get("account") if isinstance(holder, dict) else None
+        if isinstance(record, dict) and record.get("account") and session and record.get("session_id") == session \
+                and _registered_process(record, registration):
+            return str(record["account"])
+    return ""
+
+
+def shared_evidence(role: str, target: str, state: Any, registration: dict[str, Any], held: dict[str, Any]) -> dict[str, Any]:
+    """`role`'s evidence that its account is the held role's: that hold's own failure, said for `role`'s registration
+    (SYRD-735). Its time is the failure's, so it renews nothing the role has answered since."""
+    session = state.last_session_start.get("session_id") if isinstance(state.last_session_start, dict) else ""
+    return {
+        "runtime": registration["runtime"], "generation": registration["generation"], "pid": registration["pid"],
+        "start_time": registration["start_time"], "session": str(session or ""), "target": target,
+        "source": SHARED_SOURCE, "observed_at": held["observed_at"], "turn": f"shared:{held['role']}:{held['turn']}",
+        "message": plain(f"shares {held['role']}'s account: {held['message']}"), "limit": held["limit"],
+        "reset_at": held["reset_at"], "grace_seconds": _seconds(GRACE_ENV, DEFAULT_GRACE_SECONDS),
+        "recheck_seconds": _seconds(RECHECK_ENV, DEFAULT_RECHECK_SECONDS),
+    }
+
+
 def facts_for(state: Any) -> dict[str, Any]:
     """What can end a hold early: the pane's provider session, and its latest normal turn end."""
     from .pane_activity_gate import IDLE_TURN_END_SOURCES
@@ -163,6 +194,7 @@ def run(listener: Any, conn: Any) -> dict[str, Any]:
         provider_refusal.run(listener, conn, registrations)
         facts: dict[str, Any] = {}
         noted: dict[str, Any] = {}
+        states: dict[str, Any] = {}
         for role, target in sorted(gate.role_targets.items()):
             registration = registrations.get(role)
             if registration is None:
@@ -173,7 +205,7 @@ def run(listener: Any, conn: Any) -> dict[str, Any]:
                 continue
             if state is None:
                 continue
-            facts[role] = facts_for(state)
+            facts[role], states[role] = facts_for(state), state
             evidence = evidence_for(gate, role, target, state, registration)
             if evidence is not None:
                 row = conn.execute("SELECT ticket_board.note_provider_quota(%s, %s::jsonb)",
@@ -182,6 +214,8 @@ def run(listener: Any, conn: Any) -> dict[str, Any]:
         row = conn.execute("SELECT ticket_board.reconcile_provider_quota_holds(%s::jsonb, clock_timestamp())",
                            (json.dumps(facts, sort_keys=True, ensure_ascii=False),)).fetchone()
         reconciled = (next(iter(row.values())) if isinstance(row, dict) else row[0]) if row else None
+        noted.update(_share(conn, gate, registrations, states))  # after reconcile: only holds still standing share
+        _dismiss_usage_menus(listener, conn, gate, registrations)
     except Exception as exc:  # logged; never fatal to the pass
         listener.logger.warning("Provider quota hold pass failed: %s", exc)
         return {}
@@ -189,6 +223,74 @@ def run(listener: Any, conn: Any) -> dict[str, Any]:
     if began or (isinstance(reconciled, dict) and any(reconciled.values())):
         listener.logger.info("Provider quota holds: noted %s; reconciled %s", began, reconciled)
     return {"noted": noted, "reconciled": reconciled}
+
+
+def _held(conn: Any, where: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT h.id, h.role, h.evidence_turn, h.evidence->>'message', h.evidence->>'limit', "
+        "to_char(h.evidence_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"+00:00\"'), "
+        "to_char(h.reset_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"+00:00\"'), extract(epoch FROM h.evidence_at) "
+        f"FROM ticket_board.provider_quota_holds h WHERE {where} ORDER BY h.id").fetchall()
+    keys = ("id", "role", "turn", "message", "limit", "observed_at", "reset_at", "observed_epoch")
+    return [{key: (value if key in {"id", "observed_epoch"} or value is None else _text(value))
+             for key, value in zip(keys, row.values() if isinstance(row, dict) else row)} for row in rows]
+
+
+def _share(conn: Any, gate: Any, registrations: dict[str, Any], states: dict[str, Any]) -> dict[str, Any]:
+    """Roles on a held role's provider account, held with it rather than woken to find out (SYRD-735).
+
+    One account means both panes' own Claude transcripts name it for their registered processes -- never the
+    runtime's name, so distinct accounts and other runtimes, which record none, stay apart. Left out: a role whose
+    own normal turn ended after that failure (its account answered since), a role with a newer hold of its own, and
+    the Director, whose pane goes on hearing the board. A hold's own role, or a hold shared from it, is no news: its
+    evidence is no newer than theirs.
+    """
+    noted: dict[str, Any] = {}
+    for held in _held(conn, "h.state = 'held'"):
+        source = states.get(held["role"])
+        account = account_of(source, registrations[held["role"]]) if source is not None and held["role"] in registrations else ""
+        for role, state in sorted(states.items()):
+            registration = registrations.get(role)
+            if not account or role == "director" or account_of(state, registration) != account:
+                continue
+            from .pane_activity_gate import IDLE_TURN_END_SOURCES
+
+            if state.state == "idle" and state.source in IDLE_TURN_END_SOURCES and state.updated_at > float(held["observed_epoch"]):
+                continue
+            row = conn.execute("SELECT ticket_board.note_provider_quota(%s, %s::jsonb)", (role, json.dumps(
+                shared_evidence(role, gate.role_targets[role], state, registration, held), sort_keys=True,
+                ensure_ascii=False))).fetchone()
+            noted[role] = (next(iter(row.values())) if isinstance(row, dict) else row[0]) if row else None
+    return noted
+
+
+def _dismiss_usage_menus(listener: Any, conn: Any, gate: Any, registrations: dict[str, Any]) -> None:
+    """Esc on Claude's usage-limit menu, in the pane of a role whose provider is held (SYRD-735).
+
+    Measured on Claude Code 2.1.318 (tests/fixtures/syrd735_claude_usage_limit.json): Esc leaves the menu for the
+    prompt, choosing nothing -- no request, no hook -- where Enter would take the highlighted option and a typed
+    notice's digits could pick "Switch to usage credits". So the hold's one attempt meets a prompt, and nobody has to
+    type through the menu. Only on a screen showing that menu, only for a held role, at most MENU_PRESSES per hold.
+    """
+    presses = gate.__dict__.setdefault("_usage_menu_presses", {})  # per hold, for as long as this listener runs
+    press = getattr(gate, "key_runner", None) or subprocess.run  # tmux, as the gate's own captures run it
+    for held in _held(conn, "h.state IN ('held', 'released') AND ticket_board.role_provider_hold_is_current(h.role, "
+                            "clock_timestamp())"):
+        target = gate.role_targets.get(held["role"])
+        if target is None or presses.get(held["id"], 0) >= MENU_PRESSES:
+            continue
+        try:
+            capture = gate.capture_pane_runner(["tmux", "capture-pane", "-p", "-t", target],
+                                               check=True, text=True, capture_output=True, timeout=2.0)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        prompt = provider_prompt.open_prompt(capture.stdout.splitlines())
+        if prompt is None or prompt.kind != "usage_limit":
+            continue
+        presses[held["id"]] = presses.get(held["id"], 0) + 1
+        listener.logger.info("Pressing Esc on %s's usage-limit menu (hold %s): its provider is out of quota",
+                             held["role"], held["id"])
+        press(["tmux", "send-keys", "-t", target, "Escape"], check=True, text=True, capture_output=True, timeout=2.0)
 
 
 #: Director notices whose only cause, while a role's provider is held, is that

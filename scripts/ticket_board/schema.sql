@@ -21904,6 +21904,12 @@ BEGIN
                     'waiting on ' || r.awaiting_role || ', the User, until the wait is cleared'
                 WHEN ticket_board.ticket_awaiting_role_is_active(r.awaiting_role, r.awaiting_since_at, p_now) THEN
                     'waiting on ' || r.awaiting_role
+                -- SYRD-735: an owner whose provider is out of quota cannot move it until the reset, when its hold
+                -- delivers the work; the hold's own notice told the Director (SYRD-644). The question the reminders ask.
+                WHEN ticket_board.role_account_hold(responsible) IS NOT NULL THEN
+                    responsible || '''s provider account is held after a safety refusal, until it is cleared'
+                WHEN ticket_board.role_provider_hold_is_current(responsible, p_now) THEN
+                    responsible || '''s provider is out of quota, and its work waits for the reset'
                 WHEN ticket_board.ticket_reminders_snoozed(r.id, p_now) THEN 'its reminders are snoozed'
                 WHEN btrim(coalesce(r.queued_for_assignee, '')) <> '' THEN
                     'queued for ' || r.queued_for_assignee || ' behind ' || coalesce(nullif(r.queued_behind_ticket, ''), 'its work')

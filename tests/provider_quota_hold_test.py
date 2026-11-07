@@ -211,7 +211,9 @@ class Rig:
     def claude_failure(self, role: str, error: str = "rate_limit", *, reset_in: float | None = 4.0, session: str = "s-1",
                        quota: bool = True, resets_at: int | None = None) -> None:
         """Claude Code's StopFailure, through the real hook program: its payload, and the transcript it points at."""
-        record = dict(EVIDENCE["claude"]["subscription_records"][0])
+        # Stamped now, as Claude stamps the record of the failure it reports: an earlier turn's is not this one's (SYRD-735).
+        record = dict(EVIDENCE["claude"]["subscription_records"][0],
+                      timestamp=time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()))
         reset = resets_at if resets_at is not None else int(time.time() + reset_in) if reset_in else None
         record["quotaLimits"] = ({**record["quotaLimits"], "resetsAt": reset}
                                  if quota else None)

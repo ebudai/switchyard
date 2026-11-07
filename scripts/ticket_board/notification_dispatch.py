@@ -280,11 +280,14 @@ class NotificationDispatch:
         return str(session) if session else None
 
     def _park_if_unsubmitted(self, conn: Any, gate: Any, before: str | None, *, notification_id: int, ticket_id: str,
-                             target_role: str, kind: str, target: str, sent_at: float, reason: str,
+                             target_role: str, kind: str, target: str, sent_at: float, reason: str, typed: str,
                              error_output: str = "") -> bool:
-        """SYRD-565: text still in the composer is never delivered; park it for the proof pass."""
+        """SYRD-565: text still in the composer is never delivered; park it for the proof pass.
+
+        Only the notice's own text: a turn the notice started redraws the composer row, and that is not the notice
+        left behind (SYRD-734)."""
         after = delivery_proof.read_composer(gate, target) if gate is not None else None
-        if not delivery_proof.left_in_composer(before, after):
+        if not delivery_proof.left_in_composer(before, after, typed):
             return False
         self.logger.warning("Notification %s for %s is still in %s's composer (%s); parked, not delivered",
                             notification_id, ticket_id, target, reason)
@@ -349,7 +352,7 @@ class NotificationDispatch:
             if self._park_if_unsubmitted(conn, gate, composer_text_before, notification_id=notification_id,
                                          ticket_id=ticket_id, target_role=target_role, kind=kind, target=target,
                                          sent_at=send_started_at, reason="sender_failed_after_input",
-                                         error_output=error_output):
+                                         typed=display_message(message), error_output=error_output):
                 return False
             if failure_reason == "tmux_target_missing":
                 self.logger.error(
@@ -404,7 +407,8 @@ class NotificationDispatch:
         composer_after = self._composer_snapshot(target)
         if self._park_if_unsubmitted(conn, gate, composer_text_before, notification_id=notification_id,
                                      ticket_id=ticket_id, target_role=target_role, kind=kind, target=target,
-                                     sent_at=send_started_at, reason="text_left_in_composer"):
+                                     sent_at=send_started_at, reason="text_left_in_composer",
+                                     typed=display_message(message)):
             return False
         # directorctl returning 0 is not delivery: its check is what the
         # pane looks like, and a pane already busy on another turn looks
@@ -414,9 +418,11 @@ class NotificationDispatch:
         # "Cannot tell" is not receipt either: without the recipient's
         # own record the notice is unconfirmed, whatever the reason.
         submission, unconfirmed_reason = self._await_submission(target, send_started_at)
-        if submission is False and gate is not None and delivery_proof.read_composer(gate, target) == "":
+        if submission is False and gate is not None and delivery_proof.left_in_composer(
+                "", delivery_proof.read_composer(gate, target), display_message(message)) is False:
             # SYRD-565: the text left the composer and no turn has started yet --
-            # a slow preflight looks exactly like this. The notice is in, so it is
+            # a slow preflight looks exactly like this. Left it, though the row may
+            # show the starting turn's own marks rather than nothing (SYRD-734). The notice is in, so it is
             # acknowledged with its receipt still watched, not settled as missed.
             unconfirmed_reason = delivery_proof.RECEIPT_PENDING
         if submission is not True:

@@ -48,6 +48,13 @@ cursor is in; whatever follows it is the draft, on the cursor's row too, right
 of the cursor as well as left: the empty box shows no placeholder. Its earlier
 prompts in the transcript are ``▄``/``▀`` blocks without those corners, and
 are output.
+
+Hermes 0.15.2 marks its input row while a turn runs: ``⚕ ❯`` with the cursor
+after it and its hint ``msg=interrupt · /queue …`` right of the cursor. The
+mark read as text the notice had left behind, so a notice already taken was
+parked as unsubmitted and submit pressed into the running turn (MEFP-748 on
+luna-1, SYRD-734). The mark is the prompt's only where a prompt glyph follows
+it: the status bar begins ``⚕ <model>``, and that is output.
 """
 
 from __future__ import annotations
@@ -64,6 +71,8 @@ BOX_BOTTOM_CORNERS = frozenset("╰└╯┘")
 INPUT_BOX_TOP, INPUT_BOX_TOP_FILL = "╻", "▄"
 INPUT_BOX_BOTTOM, INPUT_BOX_BOTTOM_FILL = "╹", "▀"
 INPUT_BOX_BAR = "┃"
+#: Hermes's running-turn mark before its prompt glyph (SYRD-734).
+BUSY_PROMPT_MARKS = frozenset("⚕")
 
 
 def _is_rule(line: str) -> bool:
@@ -122,10 +131,15 @@ def _input_box_texts(lines: list[str], rows: range) -> list[str]:
     return [_text(lines[row].lstrip()[len(INPUT_BOX_BAR):]) for row in rows]
 
 
+def _busy_mark(line: str, index: int) -> bool:
+    """A running-turn mark in front of a prompt glyph, as Hermes draws one."""
+    return line[index] in BUSY_PROMPT_MARKS and line[index + 1:].lstrip()[:1] in PROMPT_GLYPHS
+
+
 def _text(line: str) -> str:
-    """The line less its leading run of prompt glyphs and whitespace (NBSP included)."""
+    """The line less its leading run of prompt glyphs, their running-turn marks and whitespace (NBSP included)."""
     index = 0
-    while index < len(line) and (line[index] in PROMPT_GLYPHS or line[index].isspace()):
+    while index < len(line) and (line[index] in PROMPT_GLYPHS or line[index].isspace() or _busy_mark(line, index)):
         index += 1
     return line[index:].strip()
 

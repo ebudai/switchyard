@@ -458,7 +458,7 @@ class TicketBoardNotifyListener:
             failure_reason=delivery_failure_reason,
             sleeper=sleeper,
             settle_seconds=lambda: self.session_clear_settle_seconds,
-            gate=lambda: getattr(self.activity_gate, "__self__", None),  # SYRD-540
+            gate=lambda: getattr(self.activity_gate, "__self__", None), terminal=lambda conn, ticket_id: self.eligibility.terminal(conn, ticket_id),  # SYRD-540/734
         )
         self.dispatch = NotificationDispatch(
             logger=logger,

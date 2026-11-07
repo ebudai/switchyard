@@ -44,6 +44,8 @@ SESSION_CLEAR_COMMANDS = {
 SESSION_CLEAR_KINDS = frozenset({"transition", "awaiting_role"})
 SESSION_CLEAR_FAILED_ERROR = "ephemeral_session_clear_failed"
 SESSION_CLEAR_UNSUPPORTED_RUNTIME_ERROR = "ephemeral_session_clear_unsupported_runtime"
+#: A notice about a ticket that has ended, to an ephemeral role whose pane does not hold that ticket (SYRD-734).
+TERMINAL_WITHOUT_CONVERSATION = "terminal_notice_without_conversation"
 #: How long to let a cleared CLI finish resetting before the ticket is typed
 #: into it. Short, because the clear is a local composer action; non-zero,
 #: because the message that follows is the whole point of the clear.
@@ -61,6 +63,7 @@ class NotificationSessionClear:
         settle_seconds: Callable[[], float],
         gate: Callable[[], Any] = lambda: None,
         boundary: Callable[[str], str] | None = None,
+        terminal: Callable[[Any, str], bool] = lambda _conn, _ticket_id: False,
     ) -> None:
         self.logger = logger
         self.ledger = ledger
@@ -75,6 +78,8 @@ class NotificationSessionClear:
         self.gate = gate
         #: Why a Hermes pane may not be cleared into a ticket, or "" (SYRD-693); read at call time, so tests reach it.
         self.boundary = boundary or (lambda target: hermes_ticket_boundary.open_reason(target))
+        #: Whether a ticket is in a terminal stage now (SYRD-734).
+        self.terminal = terminal
 
     def _session_clear_is_due(self, conn: Any, ticket_id: str, target_role: str, kind: str, payload: str) -> bool:
         """Whether this delivery is the first handoff of this ticket to an ephemeral role.
@@ -166,6 +171,15 @@ class NotificationSessionClear:
         the opposite. A send that fails leaves no row, so the requeued
         notification tries again.
         """
+        if self.terminal(conn, ticket_id):
+            # SYRD-734: the ticket has ended, and this pane does not hold its conversation -- that is why a clear or a
+            # restore is due at all. Clearing it, or bringing the old conversation back, only to have a model read
+            # that the ticket is over spends a whole turn on nothing: on MEFP, a cancelled canary's notice started a
+            # fresh local Qwen session on an idle worker. Nobody can act on an ended ticket, so the notice ends here.
+            self.ledger.trace(conn, notification_id=notification_id, ticket_id=ticket_id, target_role=target_role,
+                              kind=kind, event="drop", busy_reason=TERMINAL_WITHOUT_CONVERSATION, detail={"target": target})
+            self.ledger.discard(conn, notification_id, TERMINAL_WITHOUT_CONVERSATION)
+            return False
         runtime = self.role_runtimes().get(target_role, "")
         command = SESSION_CLEAR_COMMANDS.get(runtime, "")
         handoff = kind in SESSION_CLEAR_KINDS

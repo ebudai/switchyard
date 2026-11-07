@@ -380,6 +380,12 @@ WHERE id = %s
             "current_reserved_by": current[1] or UNNAMED_RESERVATION,
         }
 
+    def terminal(self, conn: Any, ticket_id: str) -> bool:
+        """Whether the ticket is in a terminal stage now: nobody can act on it any more (SYRD-734)."""
+        current = self._current_ticket_state(conn, ticket_id)
+        terminal_states = {stage["name"] for stage in self.workflow["stages"] if stage["terminal"]} if getattr(self, "workflow", None) else TERMINAL_STATES
+        return current is not None and current[0] in terminal_states
+
     def _notification_is_current(self, conn: Any, ticket_id: str, target_role: str, payload: str) -> bool:
         current = self._current_ticket_state(conn, ticket_id)
         if current is None:

@@ -38,6 +38,10 @@ SUBMIT_ATTEMPTS_MAX = 3
 #: A pressed submit is read back after this long.
 SUBMIT_SETTLE_SECONDS = 1.0
 
+#: How much of a notice's end a scrolled composer must show to be holding that notice, whitespace aside. Hermes
+#: 0.15.2 showed the last 1,021 of a 2,710-letter notice; a short draft or a passing word is far below this.
+TAIL_MIN_LETTERS = 64
+
 UNSUBMITTED_EVENT = "send_unsubmitted"
 RECEIPT_PENDING = "receipt_pending"
 RECEIPT_MISSED = "receipt_missed"
@@ -76,15 +80,34 @@ def sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def left_in_composer(before: str | None, after: str | None) -> bool | None:
+def _letters(text: str) -> str:
+    return "".join(text.split())
+
+
+def left_in_composer(before: str | None, after: str | None, typed: str = "") -> bool | None:
     """Did this send leave text in the composer? None when that cannot be told.
 
     The gate sends only to an idle pane, so an empty composer before and text
-    after is this notice's text, still there.
+    after is this notice's text, still there -- when it is the notice's text.
+    Whatever else the row shows after a send is not: a turn the notice started
+    redraws the composer with its own marks and hints, and that read as the
+    notice left behind (SYRD-734). Compared without whitespace, because the
+    composer wraps what was typed into it.
+
+    The notice's text means all of it, or -- in a composer that scrolled, as
+    Hermes's does once a notice outgrows it -- its end, at least
+    `TAIL_MIN_LETTERS` long. Any fragment would not do: a short draft or a
+    passing word (`a`, `Audit`) occurs in most notices, and text taken for the
+    notice is text the proof pass may press submit on (Audit, SYRD-734).
     """
     if before is None or after is None or before != "":
         return None
-    return after != ""
+    if after == "":
+        return False
+    if not typed:
+        return True
+    shown, sent = _letters(after), _letters(typed)
+    return shown == sent or (len(shown) >= TAIL_MIN_LETTERS and sent.endswith(shown))
 
 
 def park_unsubmitted(conn: Any, notification_id: int, target: str, sent_at: float, composer: str) -> None:
@@ -182,6 +205,14 @@ def _settle_unsubmitted(listener: Any, conn: Any, proof: dict, gate: Any, witnes
         return 1
     payload = proof.get("payload")
     payload_text = payload if isinstance(payload, str) else json.dumps(payload or {})
+    if getattr(listener, "target_exists", lambda _target: None)(proof["target"]) is False:
+        # The pane is gone -- a worker stopped on purpose, say. There is no composer to press and nothing for anyone
+        # to check in it: the notice ends as one whose target is missing does when it is claimed (SYRD-734).
+        _trace(listener, conn, proof, "drop", "tmux_target_missing", {"target": proof["target"]})
+        listener.ledger.dead_letter(conn, notification_id, "tmux_target_missing", target=proof["target"], message="",
+                                    attempts=proof["submit_attempts"], payload=payload_text)
+        _resolve(conn, notification_id, "abandoned", "the pane is gone; nothing is pressed or reported")
+        return 1
     if not listener.eligibility._notification_is_current(conn, proof["ticket_id"], proof["target_role"], payload_text):
         # Superseded while it sat there: the ticket moved on, so submitting the
         # old text would tell its owner something no longer true.
@@ -193,14 +224,16 @@ def _settle_unsubmitted(listener: Any, conn: Any, proof: dict, gate: Any, witnes
     composer = read_composer(gate, proof["target"]) if gate is not None else None
     if composer is None:
         return 0  # Cannot see the composer: nothing is pressed blind.
+    if (composer == "" or sha(composer) != proof["composer_sha256"]) and callable(witnessed) \
+            and witnessed(proof["target"], proof["sent_at"].timestamp()):
+        # The parked text is no longer what the composer holds, and a turn started after the send: the notice went
+        # in. A turn redraws the composer row with its own marks -- Hermes's `⚕ ❯` and its interrupt hint -- and that
+        # is no edit of anyone's, and no reason to tell the Director to check the pane (SYRD-734).
+        _trace(listener, conn, proof, "send", "submitted_late", {"receipt": "witnessed"})
+        listener.ledger.ack(conn, notification_id)
+        _resolve(conn, notification_id, "delivered", "the parked text left the composer and a turn started")
+        return 1
     if composer == "":
-        since = proof["sent_at"].timestamp()
-        if callable(witnessed) and witnessed(proof["target"], since):
-            # Submitted by someone, and taken: the notice is in.
-            _trace(listener, conn, proof, "send", "submitted_late", {"receipt": "witnessed"})
-            listener.ledger.ack(conn, notification_id)
-            _resolve(conn, notification_id, "delivered", "the composer emptied and a turn started")
-            return 1
         # The text is gone and nothing took it: typing it again is safe now.
         _resolve(conn, notification_id, "abandoned", "the composer was cleared; the notice is sent again")
         listener.ledger.requeue(conn, notification_id, 0, "unsubmitted_cleared", delay_seconds=0)

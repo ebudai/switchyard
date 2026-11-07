@@ -71,3 +71,36 @@ it nothing, so there is no version test and nothing to keep in step. The
 regression measures both directions and says so rather than assuming: if the
 count with a reachable bus is zero, it reports reduced coverage instead of
 failing.
+
+## Fixture processes that cannot outlive the test
+
+A suite that starts processes of its own (a fake tmux server, a provider, the commands a provider runs, a daemon in a
+session of its own) owns them with `tests/fixture_processes.py` (SYRD-681). A session of its own is often the point
+of such a fixture, and it is also why a timeout's TERM to the test's process group never reaches it. On 2026-10-25 a
+`while :; do :; done # stale-616` from SYRD-616's suite spun one core for 25 hours, reparented into the user
+session.
+
+```python
+with tempfile.TemporaryDirectory() as own:
+    with fixture_processes.owned(own) as run:
+        ...                                    # start processes with run.popen(...), fixture scripts with
+                                               # fixture_processes.DIE_WITH_PARENT, TMUX_SERVER, PROVIDER
+    left = run.sentinel()
+check(left == [], f"every fixture process is gone: {left}")
+```
+
+A run sets up four boundaries, each working by process identity (pid AND start time, signalled through a pidfd),
+never by command name:
+- **Signals:** while a run is owned, SIGTERM, SIGINT and SIGHUP raise SystemExit, so a timeout, an interrupt or a
+  closed session runs every `finally`.
+- **The parent's death:** each fixture process gets `PR_SET_PDEATHSIG` against the process that started it, so the
+  kernel ends the chain even when the test is SIGKILLed.
+- **The run's mark:** every process the run starts inherits a per-run `SWITCHYARD_TEST_FIXTURE_RUN` id. At the end,
+  each marked or recorded identity is sent TERM, then KILL.
+- **A guardian:** a process in a session of its own waits for the test to end, then stops whatever still carries
+  the mark. It is what cleans up after a SIGKILLed test, including a command's own children, which no parent-death
+  signal reaches.
+
+`tests/fixture_processes_test.py` ends a harness every way a test can end, and checks each fixture process is gone
+while a decoy with the same command line survives. The ways are: success, a failed check, TERM, INT, HUP, SIGKILL,
+and SIGKILL with the guardian killed too.

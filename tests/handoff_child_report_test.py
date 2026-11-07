@@ -64,45 +64,14 @@ VM = "./resume-vm.sh {name} 8 16384 > {name}.qemu.log 2>&1 < /dev/null; exit 0"
 
 #: A process whose name is what the board's session lookup needs a pane's parent
 #: to be, and which starts the panes it is given and reaps whatever they leave.
-TMUX_SERVER = """
-import json, os, signal, subprocess, sys, time
-open('/proc/self/comm', 'w').write('tmux: server')
-panes = [subprocess.Popen(argv, start_new_session=True) for argv in json.loads(sys.argv[1])]
-open(sys.argv[2], 'w').write(json.dumps([p.pid for p in panes]))
-def stop(*_):
-    for p in panes:
-        try: p.terminate()
-        except OSError: pass
-    sys.exit(0)
-signal.signal(signal.SIGTERM, stop)
-while True:
-    try:
-        while os.waitpid(-1, os.WNOHANG)[0]: pass
-    except ChildProcessError: pass
-    time.sleep(0.1)
-"""
 
 #: The provider stand-in: it starts each command it is asked to in a session of
 #: its own, as a provider's tool does, and reaps what ends.
-PROVIDER = """
-import json, os, subprocess, sys, time
-from pathlib import Path
-ctl = Path(sys.argv[1])
-if len(sys.argv) > 2:  # a daemon of its own, in a session of its own, as Codex starts its app-server (SYRD-589)
-    subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(86400)', sys.argv[2]], start_new_session=True,
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-while True:
-    for request in sorted(ctl.glob('spawn-*.json')):
-        job = json.loads(request.read_text())
-        child = subprocess.Popen(['bash', '-c', job['command']], cwd=job['cwd'], start_new_session=True,
-                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        request.with_suffix('.pid').write_text(str(child.pid))
-        request.unlink()
-    try:
-        while os.waitpid(-1, os.WNOHANG)[0]: pass
-    except ChildProcessError: pass
-    time.sleep(0.05)
-"""
+
+
+# SYRD-681: the fake tmux server and the provider, and the run that owns every process they start.
+import fixture_processes  # noqa: E402
+from fixture_processes import PROVIDER, TMUX_SERVER  # noqa: E402
 
 
 def check(condition: object, detail: str) -> None:
@@ -198,8 +167,8 @@ def scenario(root: Path, full: bool) -> dict:
                   "--runtime", "claude", "--target", targets[role], "--worktree", str(homes / f"{role}-home"),
                   "--session-dir", str(sessions), "--", sys.executable, str(tmp_path / "provider.py"),
                   str(tmp_path / f"ctl-{role}")] + (["app-server-daemon"] if role == "app" else []) for role in roles]
-        tmux_server = subprocess.Popen([sys.executable, "-c", TMUX_SERVER, json.dumps(panes), str(tmp_path / "panes.json")],
-                                       stdin=subprocess.DEVNULL)
+        tmux_server = fixture_processes.current.popen(
+            [sys.executable, "-c", TMUX_SERVER, json.dumps(panes), str(tmp_path / "panes.json")], stdin=subprocess.DEVNULL)
 
         def registered() -> dict:
             return json.loads(sql("SELECT coalesce(json_object_agg(role, json_build_array(process_pid, process_start_time, "
@@ -602,6 +571,16 @@ def tree_at(commit: str, into: Path) -> Path:
 
 
 def main() -> int:
+    """Every fixture process this suite starts is owned, and proved gone by identity at the end (SYRD-681)."""
+    with tempfile.TemporaryDirectory(prefix="syrd636-own.") as own:
+        with fixture_processes.owned(own) as run:
+            code = _main()
+        left = run.sentinel()
+    check(left == [], f"every fixture process the suite started is gone, by pid and start time: {left}")
+    return code
+
+
+def _main() -> int:
     for key in [k for k in os.environ if k.startswith(PANE_ENV_PREFIXES)]:
         os.environ.pop(key)
     if len(sys.argv) == 3 and sys.argv[1] == "--scenario":
@@ -620,7 +599,8 @@ def before_run() -> None:
     with tempfile.TemporaryDirectory(prefix="syrd636.") as tmp:
         before_root = tree_at(BEFORE, Path(tmp) / "before")
         child = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--scenario", str(before_root)],
-                               capture_output=True, text=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}, timeout=900)
+                               capture_output=True, text=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}, timeout=900,
+                               preexec_fn=fixture_processes.current.preexec())
         assert child.returncode == 0, child.stderr[-3000:]
         before = json.loads(child.stdout.strip().splitlines()[-1])
     handoff = before["handoff"]

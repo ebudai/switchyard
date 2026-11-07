@@ -274,8 +274,12 @@ def _board_facts(config: Any, roles: Mapping[str, Any], getter: Callable[[str], 
     if not claimants:
         return {}, [], set(), {}, ({}, {}, {})
     queue = (getter(f"{base}/api/reservations") or {}).get("pull_queue") or {}
-    holds = (getter(f"{base}/api/provider-holds") or {}).get("holds") or []
+    answered = getter(f"{base}/api/provider-holds") or {}
+    holds = answered.get("holds") or []
     held = {str(hold.get("role")) for hold in holds if isinstance(hold, dict) and hold.get("current")}
+    # SYRD-672: no worker on a held provider account is started.
+    held |= {str(role) for hold in ((answered.get("accounts") or {}).get("held") or []) if isinstance(hold, dict)
+             for role in hold.get("roles") or []}
     holders = {}
     for name in claimants if ask_holders else ():
         answer = getter(f"{base}/api/context-recovery/{parse.quote(name, safe='')}")

@@ -26,7 +26,8 @@ hold:
 
 These are left alone, and the board never switches the model:
 - Codex's quota error;
-- an authentication failure, a policy refusal, a model that does not exist;
+- an authentication failure, a policy refusal, a model that does not exist (a safety refusal holds the whole
+  account instead: SYRD-672, `docs/syrd-672-provider-safety-holds.md`);
 - a reply that quotes the error;
 - a pane that is not Codex.
 

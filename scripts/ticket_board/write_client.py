@@ -13,6 +13,10 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib import error as urllib_error
 from urllib import parse, request
+try:
+    from .provider_hold_client import ProviderAccountHoldWrites
+except ImportError:  # pragma: no cover - `python write_client.py` runs outside the package
+    from provider_hold_client import ProviderAccountHoldWrites
 
 CALLER_ROLE_HEADER = "X-Ticket-Board-Caller-Role"
 WRITE_TOKEN_HEADER = "X-Ticket-Board-Write-Token"
@@ -410,7 +414,7 @@ def _git_error_detail(proc: subprocess.CompletedProcess[str]) -> str:
 
 
 @dataclass(frozen=True)
-class TicketBoardWriteClient:
+class TicketBoardWriteClient(ProviderAccountHoldWrites):
     board_url: str = DEFAULT_BOARD_URL
     caller_role: str = field(default_factory=default_caller_role)
     timeout: float = 10.0

@@ -26,7 +26,7 @@ import subprocess
 import time
 from typing import Any
 
-from . import capacity_retry
+from . import capacity_retry, provider_refusal
 
 ROLE = "director"
 REPORT_FUNCTION = "ticket_board.note_director_capacity(jsonb, double precision[], timestamptz)"
@@ -110,6 +110,8 @@ def run(listener: Any, conn: Any, gate: Any) -> int:
             present = listener._director_capacity_present = bool(row["present"] if isinstance(row, dict) else row[0])
         if not present:
             return 0
+        if provider_refusal.typing_held(listener, conn, "director"):
+            return 0  # SYRD-672: no retry is claimed, or typed, while the Director's provider account is held
         row = conn.execute("SELECT ticket_board.note_director_capacity(%s::jsonb, %s::double precision[]) AS action",
                            (json.dumps(report, sort_keys=True), list(capacity_retry.delays_seconds()))).fetchone()
         action = row["action"] if isinstance(row, dict) else row[0]

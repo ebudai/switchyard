@@ -33,6 +33,8 @@ import json
 import time
 from typing import Any
 
+from . import provider_refusal
+
 #: How long a clear may wait for the SessionStart that proves its session.
 BIND_SECONDS = 120.0
 #: The board records a clear just AFTER sending it (so it never records one that
@@ -183,7 +185,7 @@ def judge(listener: Any, conn: Any, gate: Any, attempt: dict, context: dict | No
     if probe_at is None:
         if now - sent > RESUME_WAIT_SECONDS and _idle(gate, role) and \
                 _scalar(conn, "SELECT ticket_board.note_ticket_context_probe(%s)", (attempt["id"],)):
-            _tell(listener, gate, role, CONFIRM_PROMPT)
+            _tell(listener, conn, gate, role, CONFIRM_PROMPT)
         return "pending"
     if now - float(probe_at) > CONFIRM_SECONDS:
         _resolve(conn, attempt["id"], "failed", {"reason": "no SessionStart confirmed the resume"})
@@ -210,9 +212,9 @@ def _epoch_iso(value: Any) -> float:
     return datetime.fromisoformat(str(value)).timestamp()
 
 
-def _tell(listener: Any, gate: Any, role: str, text: str) -> None:
+def _tell(listener: Any, conn: Any, gate: Any, role: str, text: str) -> None:
     target = gate.role_targets.get(role) if gate is not None else None
-    if target:
+    if target and not provider_refusal.typing_held(listener, conn, role):  # SYRD-672
         try:
             listener.sender(target, text)
         except Exception as exc:  # logged; an unanswered prompt ends in the bounded failure
@@ -252,7 +254,7 @@ def _restart_ready(listener: Any, conn: Any, gate: Any, attempt: dict, start: di
         (start.get("checkout") or {})
     if before.get("head") and before.get("cwd") == now_at.get("cwd") and before.get("head") == now_at.get("head"):
         if _set_checkout(conn, attempt["id"], "ready", {"expected": before, "current": now_at, "source": "unchanged by a restart"}):
-            _tell(listener, gate, attempt["role"], RESTORED_NOTE.format(
+            _tell(listener, conn, gate, attempt["role"], RESTORED_NOTE.format(
                 session_id=attempt["session_id"], ticket=attempt["ticket_id"], why=" after its provider restarted",
                 cwd=now_at["cwd"], head=now_at["head"], source="where its last turn ended") + f" Continue {attempt['ticket_id']}.")
     else:
@@ -271,13 +273,13 @@ def checkout_ready(listener: Any, conn: Any, gate: Any, attempt: dict, status: d
     current = current_checkout(gate, role)
     if current.get("cwd") == tree and current.get("head") == head:
         if _set_checkout(conn, attempt["id"], "ready", {"expected": head, "source": source, "current": current}):
-            _tell(listener, gate, role, RESTORED_NOTE.format(session_id=attempt["session_id"], ticket=ticket, why="",
+            _tell(listener, conn, gate, role, RESTORED_NOTE.format(session_id=attempt["session_id"], ticket=ticket, why="",
                                                              cwd=tree, head=head, source=source))
         return "ready"
     if attempt.get("checkout_state") is None:
         here = f"{current.get('head') or 'an unreported HEAD'}{' in ' + current['cwd'] if current.get('cwd') and current['cwd'] != tree else ''}"
         if _set_checkout(conn, attempt["id"], "preparing", {"expected": head, "source": source, "current": current}):
-            _tell(listener, gate, role, PREPARE_PROMPT.format(ticket=ticket, cwd=tree, head=head, source=source, current=here))
+            _tell(listener, conn, gate, role, PREPARE_PROMPT.format(ticket=ticket, cwd=tree, head=head, source=source, current=here))
         return "wait"
     if now - _epoch_iso(attempt["checkout_at"]) > PREPARE_SECONDS:
         where = f"{current.get('head') or 'an unreported HEAD'}" + (f" in {current.get('cwd') or 'an unreported worktree'}"
@@ -298,6 +300,8 @@ def repair_pass(listener: Any, conn: Any, gate: Any, now: float) -> None:
             continue
         if not _idle(gate, role) or _other_process(gate, role, start):
             continue  # not a safe boundary yet, or the new process is not registered yet
+        if provider_refusal.typing_held(listener, conn, role):
+            continue  # SYRD-672: no attempt is opened, so the context is restored once the hold is cleared
         last = _scalar(conn, "SELECT max(sent_at) FROM ticket_board.ticket_context_restores WHERE ticket_id=%s AND role=%s",
                        (ticket, role))
         if last is not None and float(start.get("at", 0)) <= _epoch(last) + CLEAR_SKEW_SECONDS:
@@ -356,6 +360,8 @@ def before_delivery(listener: Any, conn: Any, gate: Any, *, ticket_id: str, role
     "park" is a ticket whose restore failed: the notice is not sent at all.
     "deliver" after a restore comes with the board's restored note.
     """
+    if provider_refusal.typing_held(listener, conn, role):
+        return "wait"  # SYRD-672: nothing is typed, and nothing parks, while the role's provider account is held
     status = _status(conn, ticket_id, role)
     if status.get("parked"):
         return "park"

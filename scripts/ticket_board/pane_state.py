@@ -66,6 +66,8 @@ class PaneHookState:
     #: What ended the latest turn when it was an API error, as the provider's
     #: failure hook recorded it (SYRD-644; quota_hold reads it), or None.
     provider_error: object = None
+    #: The pane's latest provider safety refusal: its classification and identity only (SYRD-672).
+    last_refusal: object = None
     #: The provider process that took the latest turn -- {pane_pid,
     #: pane_start_time} -- as the hook stamped it (SYRD-644), or None.
     turn_process: object = None
@@ -350,6 +352,7 @@ class PaneHookStateStore:
             last_session_start=parsed.get("last_session_start") if isinstance(parsed.get("last_session_start"), dict) else None,
             last_checkout=parsed.get("last_checkout") if isinstance(parsed.get("last_checkout"), dict) else None,
             provider_error=parsed.get("provider_error") if isinstance(parsed.get("provider_error"), dict) else None,
+            last_refusal=parsed.get("last_refusal") if isinstance(parsed.get("last_refusal"), dict) else None,
             turn_process=parsed.get("turn_process") if isinstance(parsed.get("turn_process"), dict) else None,
             tool_activity=activity if isinstance(activity, dict) else None,
         )

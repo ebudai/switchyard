@@ -615,7 +615,8 @@ the Director, it does this (SYRD-728):
 
 - **Recognised.** It recognises only that exact error at the margin above an empty prompt, with the pane still and
   no question open. Quota exhaustion, authentication, a policy refusal, a model that does not exist and a reply that
-  quotes the error are left alone, and the board never switches your model.
+  quotes the error are left alone, and the board never switches your model. A safety refusal holds its whole
+  provider account instead (see the next section).
 - **Retried.** It types one retry into your pane after 1 minute, then 2, then 5, each timed from the failure it
   answers. Only one retry is in flight at a time. Anything the board already queued for you goes first. Nothing is
   cleared from your conversation. The retry says your last turn was interrupted and names the ticket when a board
@@ -639,6 +640,52 @@ the Director, it does this (SYRD-728):
    decision for the operator: the board never switches it).
 4. Codex's quota error, an authentication failure or a refusal is a different problem: the board does not retry
    it, and waiting will not fix it.
+
+## When a provider refuses on safety grounds
+
+Repeated cybersecurity or safety refusals can get a provider account suspended. So the first refusal is a circuit
+breaker, and **you never argue with it from the same account**: you do not explain, appeal, retry, rephrase, or ask
+the refused pane to write anything, however defensive the work is.
+
+- **Recognised.** The board recognises a refusal only from the provider's own record of it:
+  - Claude Code: a turn whose last transcript entry ends on `stop_reason: "refusal"`;
+  - Codex: its own cybersecurity line (`This request has been flagged for possible cybersecurity risk.`, or `Your
+    account was flagged for potentially high-risk cyber activity`), drawn as Codex's own error directly above the
+    prompt, ending a turn that pane's own process started. The same line still showing under a later turn is not a
+    new refusal.
+
+  It keeps the refusal's category and identity, never the prompt, the response or the pane's text. Claude panes
+  start with Claude Code's own refusal fallback off (`CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1`), so Claude Code never
+  re-sends a refused request to another model on the same account by itself.
+- **Held.** A refusal holds the **whole account**: every role on that CLI on this board, whether it is running or
+  only declared, because every role runs with the project owner's sign-in. While the hold stands, nothing automatic
+  reaches those roles:
+  - no notice is delivered, retried, or used as a reminder, nudge or stall prompt;
+  - no context is restored, and no capacity retry is typed;
+  - no worker claims work, Router assigns none to them, and no worker is started.
+
+  Their notices wait in the queue; nothing is dropped. Tickets, reservations and context stay as they were. Nothing
+  asks the provider whether the refusal has passed. A timeout, a restart, a new registration, a quota reset or
+  another account's success never ends the hold.
+- **Told once.** You get one notice per hold. It names the account, the roles it holds, and your choices. The
+  refused pane is told nothing. When your own account is the one held, you are told nothing: the operator gets the
+  `provider_safety_hold` phone notification, which stands until the hold is cleared. The operator always gets that
+  notification, whoever else is told.
+
+What you can do, in order of preference:
+1. **Inspect by hand.** `ticket-board-read holds` lists each held account, what held it, and the roles it holds.
+   Attach to the refused pane only to look. Never type into it.
+2. **Move the work** to a role on another provider: `ticket-board-write reassign <ticket> --assignee <role> --reason "..."`, or
+   change a role's runtime with `switchyard set-role-runtime`. The ticket keeps its stage, comments and history, and
+   nothing is sent to the held account.
+3. **Clear the hold,** only once the operator has confirmed the account is safe:
+   `ticket-board-write clear-provider-account-hold <cli> --reason "who confirmed it, and how"`. The board records
+   who cleared it and why. Waiting notices then go, each checked again first. The refusal that began the hold can
+   never begin another. A new refusal begins a new hold.
+
+When you suspect a refusal the board did not recognise (Hermes, agy and Copilot write none it can read), hold the
+account yourself: `ticket-board-write hold-provider-account <cli> --reason "what you saw"`. The User can do both,
+which matters when your own account is held.
 
 ## Host health the board depends on
 

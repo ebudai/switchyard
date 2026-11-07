@@ -56,7 +56,7 @@ from .local_peer_authority import (
 from .operation_role_policy import (
     CALLER_ROLES,
     COMPOSED_OPERATION_CAPABILITIES,
-    CONTROL_OVERRIDE_OPERATIONS,
+    CONTROL_OVERRIDE_OPERATIONS, OPERATOR_OR_CONTROL_OPERATIONS,
     DEFAULT_IMPLEMENTER_ROLES,
     DEFAULT_OPERATION_ALLOWED_ROLES,
     DRAFT_ROLES,
@@ -379,6 +379,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                     # Built from capabilities this role already holds, so the
                     # atomic form conveys no authority the sequence did not.
                     return
+                if operation in OPERATOR_OR_CONTROL_OPERATIONS and (role.get("kind") == "user" or "set_manually_controlled" in role["capabilities"]):
+                    return  # SYRD-672
                 raise PermissionError(f"{caller_role} cannot call {operation}")
             return
         if operation in PUBLICATION_OPERATIONS:

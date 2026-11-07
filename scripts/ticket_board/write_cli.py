@@ -704,6 +704,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "clear-provider-hold", help="end a role's provider quota hold at once, with a reason (SYRD-644)")
     clear_hold.add_argument("role", help="the held role, from ticket-board-read holds")
     add_free_text_argument(clear_hold, "--reason", required=True, help="why it should try again now")
+    for name, verb, why in (("hold-provider-account", "hold every role on a provider account: a suspected safety refusal",
+                             "what was seen"),
+                            ("clear-provider-account-hold", "end a provider account's safety hold, once it is confirmed safe",
+                             "who confirmed the account is safe, and how")):
+        account = subparsers.add_parser(name, help=f"{verb} (SYRD-672; the Director or the User)")
+        account.add_argument("runtime", choices=("claude", "codex", "agy", "hermes", "copilot"), help="the account's CLI")
+        add_free_text_argument(account, "--reason", required=True, help=why)
     subparsers.add_parser(
         "claim-next",
         help="under a pull policy, claim your own next ready ticket; held work is returned instead (SYRD-539)",
@@ -1097,6 +1104,8 @@ def main(argv: list[str] | None = None) -> int:
             response = client.clear_cohort_quota(args.runtime, reason=args.reason)
         elif command == "clear_provider_hold":
             response = client.clear_provider_hold(args.role, reason=args.reason)
+        elif command in ("hold_provider_account", "clear_provider_account_hold"):
+            response = getattr(client, command)(args.runtime, reason=args.reason)
         elif command == "extend_lease":
             response = client.extend_lease(args.lease, minutes=args.minutes, reason=args.reason)
         elif command == "interrupt_lease":
@@ -1200,7 +1209,8 @@ def main(argv: list[str] | None = None) -> int:
                    "enable_size_review", "measure_size", "set_report_intake", "force_fresh_context",
                    "uat_instructions", "extend_lease", "interrupt_lease", "set_cohort_quota", "clear_cohort_quota",
                    "clear_provider_hold", "await_user", "set_audit_return", "report_follow_up", "notify_user",
-                   "set_blocked_reason", "request_blocker_review"}:
+                   "set_blocked_reason", "request_blocker_review", "hold_provider_account",
+                   "clear_provider_account_hold"}:
         print(json.dumps(response))
     else:
         print(json.dumps(_ticket_from_response(response)))

@@ -371,6 +371,9 @@ def _write_layout_and_plan(
             plan["layout_mode"] = launcher.LAYOUT_MODE_VIEWER
             plan["viewer_session"] = launcher.viewer_session_for_project(config.project)
             plan["viewer_roles"] = [role.role for role in launcher.visible_roles_for_viewer(config)]
+        if mode == "attach-or-start":
+            # What the start would do with the board's tab, changing nothing (SYRD-680).
+            plan["board_tab"] = launcher.board_tab_plan(config.project, config=config)
         print(json.dumps(plan, indent=2, sort_keys=True))
         return 0
     return None

@@ -1047,6 +1047,9 @@ def _launch_new_project_panes(
             pane_state_updated_since=launch_started_at,
             print_func=print_func,
         )
+    # The new board, once it answers: opened in the desktop the window went to, or its address said (SYRD-680).
+    launcher.present_project_board(resolved_slug, config=config, print_func=print_func,
+                                   **({"desktop": False} if launch_deferred else {}))
     if resolved_layout_mode == launcher.LAYOUT_MODE_VIEWER:
         if include_designer:
             print_func("switchyard: maximize the designer pane during design with Ctrl+a z; press it again to restore")

@@ -63,7 +63,7 @@ MOVED = ('_switchyard_command_display', '_switchyard_user_can_prompt_for_sudo', 
 #: Measured on the baseline launcher: each moved body's call-time reads of launcher globals, siblings included.
 SEAMS = {
     'ensure_staged_role_bundle_before_crossing': {'repair_tenant_control_helper': 1, 'staged_bundle_launch_problems': 2},
-    '_switchyard_exec_through_tenant_control': {'TENANT_CONTROL_ROOT': 1, 'close_desktop_presentation': 1, 'complete_desktop_presentation': 1, 'current_user_name': 1, 'ensure_staged_role_bundle_before_crossing': 1},
+    '_switchyard_exec_through_tenant_control': {'TENANT_CONTROL_ROOT': 1, '_tenant_has_desktop_access': 1, 'close_desktop_presentation': 1, 'complete_desktop_presentation': 1, 'current_user_name': 1, 'ensure_staged_role_bundle_before_crossing': 1, 'present_project_board': 1},
     '_switchyard_exec_with_root': {'_switchyard_command_display': 1, '_switchyard_user_can_prompt_for_sudo': 1},
     '_configured_role_account_caller': {'current_user_name': 1},
     '_switchyard_command_is_unprivileged': {'SWITCHYARD_UNPRIVILEGED_COMMANDS': 1},
@@ -317,6 +317,10 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
             reached.add("root_recorded_owner")
             or ("owner_asked" in spec and spec["owner_asked"].append([project, norm(config_path)]))
             or spec.get("recorded_owner", ("syrd414-owner", ""))),
+        # SYRD-680's reads, after the baseline, answered the same way: the board's tab after a bridged start.
+        # tests/board_tab_test.py asserts when the caller presents it, and with what.
+        "_tenant_has_desktop_access": lambda project, **k: reached.add("_tenant_has_desktop_access") or True,
+        "present_project_board": lambda project, **k: reached.add("present_project_board") or "opened",
         "TENANT_CONTROL_ROOT": Path("/nonexistent/syrd414/tenant-control"),
         "_switchyard_exec_with_root": sibling("_switchyard_exec_with_root", {"runner": runner, "exec_func": exec_func}),
         "_switchyard_cross_account": sibling("_switchyard_cross_account", {**effects, "which": lambda *a, **k: None, "input_func": lambda prompt: "n",

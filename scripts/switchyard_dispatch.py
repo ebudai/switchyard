@@ -576,7 +576,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         if problems:
             return 1
         config = launcher.prepare_project_desktop(config)
-        return launcher.launch_project(
+        started = launcher.launch_project(
             config,
             config_path=entry.config_path,
             mode="start",
@@ -584,6 +584,9 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             report_session_records=True,
             discard_worktree_changes=frozenset(args.discard_worktree_changes),
         )
+        if started == 0:
+            launcher.present_project_board(entry.slug, config=config)  # SYRD-680
+        return started
     if argv[0].casefold() == "teardown":
         args = launcher._build_switchyard_teardown_parser().parse_args(argv[1:])
         return launcher.switchyard_teardown_command(
@@ -653,4 +656,6 @@ def switchyard_main(argv: list[str] | None = None) -> int:
     if launch_result != 0:
         return launch_result
     launcher.report_first_run_auth_warnings(first_run_auth_report)
+    # Last, once the board is proven up: the operator's tab onto it, once (SYRD-680).
+    launcher.present_project_board(entry.slug, config=config)
     return 0

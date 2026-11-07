@@ -206,6 +206,13 @@ def _switchyard_exec_through_tenant_control(
             print_func(f"switchyard: {project}'s Director display was recovered")
         else:
             code = launcher.complete_desktop_presentation(project, caller=caller, runner=runner)
+            if code == 0 and operation == "start":
+                # The board's tab, from this side too: the owner half has no screen (SYRD-680).
+                launcher.present_project_board(
+                    project, gui_user=caller,
+                    desktop=launcher._tenant_has_desktop_access(project, caller=caller) is True,
+                    print_func=print_func,
+                )
     raise SystemExit(code)
 
 

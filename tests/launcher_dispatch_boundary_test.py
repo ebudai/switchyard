@@ -60,7 +60,7 @@ MOVED = ('_reject_removed_commands', 'main')
 #: Measured on the baseline launcher: each moved body's call-time reads of launcher globals, its sibling included.
 SEAMS = {
     '_reject_removed_commands': {'BOOTSTRAP_REPLACEMENT_COMMAND': 1, 'REMOVED_CONFIG_FREE_COMMANDS': 1},
-    'main': {'DEFAULT_CONFIG_DIR': 1, '_build_parser': 1, '_reject_removed_commands': 1, '_resolve_launcher_project_config': 2, '_role_by_name': 1, 'add_project_role_command': 1, 'attach_role_to_slot': 1, 'current_user_name': 1, 'default_pane_state_dir_for_user': 1, 'deploy_launcher_checkout': 1, 'design_project_command': 1, 'detach_role_from_slot': 1, 'ensure_configured_runtime_user': 1, 'ensure_launcher_checkout_current': 1, 'ensure_visible_role_session_for_viewer': 1, 'launch_project': 1, 'load_project_config': 2, 'new_project_command': 1, 'pane_command_args': 1, 'prepare_project_desktop': 1, 'provision_runtime_command': 1, 'role_run_as_user': 1, 'role_session_dir': 4, 'run_detached_role': 1, 'run_role_pane': 1, 'seed_default_session_dir_from_legacy_sources': 1, 'set_project_vcs_close_role_command': 1, 'stop_project': 1, 'switchyard_teardown_command': 1, 'upgrade_project_command': 1},
+    'main': {'DEFAULT_CONFIG_DIR': 1, '_build_parser': 1, '_reject_removed_commands': 1, '_resolve_launcher_project_config': 2, '_role_by_name': 1, 'add_project_role_command': 1, 'attach_role_to_slot': 1, 'current_user_name': 1, 'default_pane_state_dir_for_user': 1, 'deploy_launcher_checkout': 1, 'design_project_command': 1, 'detach_role_from_slot': 1, 'ensure_configured_runtime_user': 1, 'ensure_launcher_checkout_current': 1, 'ensure_visible_role_session_for_viewer': 1, 'launch_project': 1, 'load_project_config': 2, 'new_project_command': 1, 'pane_command_args': 1, 'prepare_project_desktop': 1, 'present_project_board': 1, 'provision_runtime_command': 1, 'role_run_as_user': 1, 'role_session_dir': 4, 'run_detached_role': 1, 'run_role_pane': 1, 'seed_default_session_dir_from_legacy_sources': 1, 'set_project_vcs_close_role_command': 1, 'stop_project': 1, 'switchyard_teardown_command': 1, 'upgrade_project_command': 1},
 }
 #: Measured on the baseline launcher: every launcher definition outside the two that names them, and how often (none).
 DISPATCH = {}
@@ -71,8 +71,9 @@ READERS = {}
 #: SYRD-709 added one branch, deliberately: provision-runtime never falls back to a bundled config past a registry entry
 #: that cannot be used, or a registry that cannot be read. Every other refusal falls back as before.
 BRANCHES = ["args.command == 'design'", "args.command == 'new'", "args.command == 'provision-runtime' and args.config is None",
-            "' is registered, but ' in str(exc) or str(exc).startswith('switchyard: cannot resolve ')", "args.command == 'provision-runtime'", "args.command == 'upgrade'", "args.command == 'add-role'", 'not args.pane_mode or args.role', "args.command == 'set-vcs-close-role'", 'not args.pane_mode or args.role', "args.command == 'stop'", "args.command == 'teardown'", "args.command == 'deploy-launcher'", "args.command != 'pane' and (args.pane_mode or args.role)", "args.command == 'pane'", 'not args.pane_mode or not args.role', "args.pane_mode not in {'start', 'attach', 'attach-or-start', 'reload', 'attach-role', 'detach-role'}", "args.pane_mode not in {'attach', 'detach-role'}", 'pane_user and current_user_name() != pane_user', 'not args.skip_launcher_check', "args.pane_mode == 'attach-role'", 'args.slot is None', "args.pane_mode == 'detach-role'", 'args.no_attach and (not role.detached)', 'role.detached']
-SHAPE = [16, 7, 1, 25]  # SYRD-709: one more branch, and the refusal it re-raises
+            "' is registered, but ' in str(exc) or str(exc).startswith('switchyard: cannot resolve ')", "args.command == 'provision-runtime'", "args.command == 'upgrade'", "args.command == 'add-role'", 'not args.pane_mode or args.role', "args.command == 'set-vcs-close-role'", 'not args.pane_mode or args.role', "args.command == 'stop'", "args.command == 'teardown'", "args.command == 'deploy-launcher'", "args.command != 'pane' and (args.pane_mode or args.role)", "args.command == 'pane'", 'not args.pane_mode or not args.role', "args.pane_mode not in {'start', 'attach', 'attach-or-start', 'reload', 'attach-role', 'detach-role'}", "args.pane_mode not in {'attach', 'detach-role'}", 'pane_user and current_user_name() != pane_user', 'not args.skip_launcher_check', "args.pane_mode == 'attach-role'", 'args.slot is None', "args.pane_mode == 'detach-role'", 'args.no_attach and (not role.detached)', 'role.detached',
+            "launched == 0 and args.command in ('start', 'attach-or-start') and (not args.dry_run)"]
+SHAPE = [16, 7, 1, 26]  # SYRD-680: one more branch, the start's board tab; SYRD-709: one more branch, and the refusal it re-raises
 #: The BASELINE's own behaviour for the cases below (`gold452.py`, run on the baseline launcher under the guard).
 GOLDEN = {
     'removed: bootstrap': {'result': {'raised': 'SystemExit', 'message': 'team-launcher: bootstrap has been removed; use `switchyard new` to create a launchable project config', 'code_type': 'str'}, 'calls': [['_reject_removed_commands', [['p452', 'bootstrap']], {}]], 'stdout': [], 'stderr': []},
@@ -224,7 +225,8 @@ CASES = {
 FUNCTIONS = ("_reject_removed_commands", "main")
 COMMANDS = ("design_project_command", "new_project_command", "provision_runtime_command", "upgrade_project_command", "add_project_role_command",
             "set_project_vcs_close_role_command", "stop_project", "switchyard_teardown_command", "deploy_launcher_checkout", "attach_role_to_slot",
-            "detach_role_from_slot", "ensure_visible_role_session_for_viewer", "run_detached_role", "run_role_pane", "launch_project")
+            "detach_role_from_slot", "ensure_visible_role_session_for_viewer", "run_detached_role", "run_role_pane", "launch_project",
+            "present_project_board")  # SYRD-680: the board's tab after a start
 
 
 def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
@@ -549,12 +551,28 @@ def test_the_real_entry_points_run_main_on_their_arguments() -> None:
 # --- behaviour -----------------------------------------------------------------------------------------------------
 
 
+def with_the_board_tab(gold: dict) -> dict:
+    """SYRD-680, applied to the baseline's record by rule: a start that launched, and was not a dry run, presents the
+    board's tab last, for the stand-in configuration's project (p452) and the configuration launched."""
+    import copy
+
+    out = copy.deepcopy(gold)
+    launched = [c for c in out["calls"] if c[0] == "launch_project"]
+    if out["result"] == 0 and launched and launched[0][2].get("mode") == "start" and not launched[0][2].get("dry_run"):
+        out["calls"].append(["present_project_board", ["p452"], {"config": launched[0][1][0]}])
+    return out
+
+
 def test_every_answer_is_the_baselines() -> None:
     check(sorted(CASES) == sorted(GOLDEN), "every measured case is asserted, and nothing else")
+    check(sorted(label for label in GOLDEN if with_the_board_tab(GOLDEN[label]) != GOLDEN[label])
+          == ["not removed: bootstrap as the first word", "start"],
+          "the board's tab is added to exactly the starts that launched; not the dry run, attach or reload")
     for label, spec in CASES.items():
         for holder in (m, t):
             got = run(holder, spec)
-            check(got == GOLDEN[label], f"{label} ({holder.__name__}): the baseline's answer, every call in order: {got}")
+            check(got == with_the_board_tab(GOLDEN[label]),
+                  f"{label} ({holder.__name__}): the baseline's answer, translated, every call in order: {got}")
 
 
 def test_the_rules_hold_in_the_measured_record() -> None:

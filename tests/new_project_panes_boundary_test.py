@@ -50,7 +50,7 @@ CHECKS = 0
 SEAMS = {"LAYOUT_MODE_VIEWER": 1, "TEAM_LAUNCHER_NAME": 1, "__file__": 1, "_owner_state_layout_output_path": 1,
          "announce_new_project_presentation": 1, "default_pane_state_dir_for_user": 1, "ensure_staged_role_tooling": 1,
          "launch_project": 1, "report_first_run_auth_warnings": 1, "report_launch_session_records": 1, "resolve_layout_mode": 1,
-         "time": 2}
+         "time": 2, "present_project_board": 1}  # SYRD-680: the new board's tab, once the panes are up
 PARAMETERS = ("home_base", "pane_state_dir", "session_record_timeout", "session_record_poll", "layout_mode", "layout_environ",
               "konsole_process_launcher", "print_func")
 FROM_P0 = ("include_designer", "owner_user", "resolved_slug", "runner", "stages")
@@ -172,6 +172,7 @@ class World:
             "report_first_run_auth_warnings": lambda report, *, print_func: L.step("warnings", report),
             "report_launch_session_records": lambda config, **kw: L.step("records", config, kw),
             "default_pane_state_dir_for_user": lambda user, *, project: L.step("default-state", user, project) or L.default_state,
+            "present_project_board": lambda slug, **kw: L.step("present", slug, kw),
             "__file__": L.launcher_file,
         }
 
@@ -346,7 +347,7 @@ def test_a_launch_with_every_argument() -> None:
         got = run(world, values)
         check(got == 0 and type(got) is int, f"a finished tail answers 0: {got!r}")
         check(world.names() == ["begin", "staging", "time", "time_ns", "layout-output", "launch", "resolve", "announce", "warnings",
-                                "records", "finish"], f"the order: {world.names()}")
+                                "records", "present", "finish"], f"the order: {world.names()}")
         check(world.log[4] == ("layout-output", "s374", tmp / "homes" / OWNER), "the layout written under the owner's home")
         config, kw = world.log[5][1:]
         script = Path(world.launcher_file).resolve().with_name(t.TEAM_LAUNCHER_NAME)
@@ -377,7 +378,7 @@ def test_the_pane_state_directory_falls_back_to_the_users() -> None:
         tmp = Path(tmp)
         world, said = World(tmp), []
         run(world, inputs(tmp, world, said, pane_state_dir=None))
-        check(("default-state", OWNER, "s374") in world.log and world.log[-2][2]["pane_state_dir"] == world.default_state,
+        check(("default-state", OWNER, "s374") in world.log and world.log[-3][2]["pane_state_dir"] == world.default_state,
               "the run-as user's default for the project, when the caller gave none")
         check(world.log[5][2]["pane_state_dir"] is None, "while the launch itself is given the caller's own None")
 
@@ -388,8 +389,10 @@ def test_a_deferred_launch_opens_nothing() -> None:
         world, said = World(tmp, launcher_file=Tripwire()), []
         got = run(world, inputs(tmp, world, said, launch_deferred=True))
         check(got == 0, f"a deferred launch still finishes with 0: {got!r}")
-        check(world.names() == ["begin", "staging", "time", "time_ns", "resolve", "warnings", "finish"],
+        check(world.names() == ["begin", "staging", "time", "time_ns", "resolve", "warnings", "present", "finish"],
               f"no launch, no layout, no announcement, no records -- and the launcher's file never read: {world.names()}")
+        check(world.log[-2][1:] == ("s374", {"config": world.log[1][1], "print_func": said.append, "desktop": False}),
+              f"SYRD-680: no window opened, so the new board's address is said rather than a tab opened: {world.log[-2]}")
 
 
 def test_a_failed_launch_is_answered_with_its_own_status() -> None:
@@ -424,7 +427,8 @@ def test_the_designer_instruction() -> None:
 
 
 def test_every_refusal_stops_what_follows() -> None:
-    order = ["begin", "staging", "time", "time_ns", "layout-output", "launch", "resolve", "announce", "warnings", "records", "finish"]
+    order = ["begin", "staging", "time", "time_ns", "layout-output", "launch", "resolve", "announce", "warnings", "records", "present",
+             "finish"]
     for step in order[1:-1]:
         with tempfile.TemporaryDirectory(prefix="syrd374.") as tmp:
             tmp = Path(tmp)

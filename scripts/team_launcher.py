@@ -785,6 +785,8 @@ from scripts.desktop_presentation import (
     terminal_launch_args,
     validated_presentation_handoff,
 )
+# SYRD-680: the board's tab after an explicit launch; its callers read it here.
+from scripts.board_tab import board_tab_plan, present_project_board
 from scripts.gui_window_launch import (
     FALLBACK_XDG_CONFIG_DIRS,
     GUI_ENVIRONMENT_ALLOWLIST,

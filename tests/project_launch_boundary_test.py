@@ -238,7 +238,7 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
              "_load_switchyard_project_config_for_command", "resume_tenant", "run_switchyard_launch_first_run_auth",
              "stop_before_launch_for_missing_owner_clis", "stop_before_launch_for_unauthenticated_providers",
              "stop_before_launch_for_unknown_models", "report_first_run_auth_warnings", "report_kept_worktrees",
-             "refuse_restart_on_another_model"]
+             "refuse_restart_on_another_model", "present_project_board"]
     saved = {n: getattr(t, n) for n in names}
     try:
         under = {n: getattr(holder, n) for n in FUNCTIONS}
@@ -334,7 +334,7 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
                     label="resolved", config_path=tmp / "p429.json", slug="p429"),
             "report_installed_release_version": lambda: note("report_installed_release_version"),
             "_resolve_switchyard_project": lambda selection: note("_resolve_switchyard_project", selection) or SimpleNamespace(
-                label="entry", config_path=tmp / "registered.json"),
+                label="entry", config_path=tmp / "registered.json", slug="p429"),
             "_load_switchyard_project_config_for_command": lambda entry, argv: note(
                 "_load_switchyard_project_config_for_command", entry, argv) or config("switchyard"),
             "resume_tenant": resume,
@@ -347,6 +347,9 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
             "report_kept_worktrees": lambda cfg, kept, *, print_func: note("report_kept_worktrees", cfg, kept, print_func=print_func),
             # SYRD-579: before anything starts, no role is restarted over the model it chose.
             "refuse_restart_on_another_model": lambda cfg, **kwargs: note("refuse_restart_on_another_model", cfg, **kwargs) or False,
+            # SYRD-680: the board's tab after an explicit start, unrecorded so the goldens stay the baseline's;
+            # tests/board_tab_test.py is its suite.
+            "present_project_board": lambda *args, **kwargs: None,
         }
         on_launcher.update({k: (StandInStartup if v == "STAND-IN" else v) for k, v in spec.get("launcher", {}).items()})
         for n, f in on_launcher.items():

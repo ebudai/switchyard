@@ -219,6 +219,9 @@ def _finish_provision_after_packet(
         f"running, and all {len(config.roles)} configured role(s) have live sessions "
         "registered with the board."
     )
+    if start_roles:
+        # The first launch of an interrupted `switchyard new`: its board's tab, once (SYRD-680).
+        launcher.present_project_board(slug, config=config, print_func=print_func)
     return 0
 
 

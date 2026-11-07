@@ -255,7 +255,7 @@ def main(argv: list[str] | None = None) -> int:
             force_reload=args.force,
             bin_user=pane_user,
         )
-    return launcher.launch_project(
+    launched = launcher.launch_project(
         config,
         config_path=config_path,
         mode=args.command,
@@ -269,3 +269,7 @@ def main(argv: list[str] | None = None) -> int:
         report_session_records=True,
         layout_mode=args.layout,
     )
+    if launched == 0 and args.command in ("start", "attach-or-start") and not args.dry_run:
+        # An explicit start opens the board's tab once; a dry run says so in its plan instead (SYRD-680).
+        launcher.present_project_board(config.project, config=config)
+    return launched

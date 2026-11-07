@@ -48,7 +48,7 @@ SEAMS = {
     "_finish_provision_after_packet": {n: 1 for n in (
         "uid_for_user", "verified_tenant_config", "record_tenant_config_path", "switchyard_registry_dir", "_load_json",
         "_register_switchyard_project", "install_recovered_desktop_access", "launch_project", "__file__", "TEAM_LAUNCHER_NAME",
-        "_owner_state_layout_output_path", "recovery_readiness_problems")},
+        "_owner_state_layout_output_path", "recovery_readiness_problems", "present_project_board")},  # SYRD-680: the tab
     "switchyard_resume_provision_command": {n: 1 for n in (
         "_validate_project_slug", "switchyard_registry_dir", "privileged_baseline_plan_path", "partial_provision_record",
         "read_plan_no_follow", "trusted_owner_identity", "_resume_source_release", "_resume_plan_from_record", "verified_tenant_config",
@@ -240,6 +240,8 @@ class Finish:
             _owner_state_layout_output_path=lambda slug, *, owner_home: log.append(("layout", slug, owner_home)) or Path("/fixture/layout.json"),
             launch_project=lambda config, **kw: log.append(("launch", config.name, kw)) or self.launched,
             recovery_readiness_problems=lambda plan, config, verified, **kw: log.append(("ready", config.name, verified, kw)) or list(self.remaining),
+            # SYRD-680: the board's tab, once the launch is proven ready; logged here, the board-tab suite's to open.
+            present_project_board=lambda slug, **kw: log.append(("present", slug, kw)),
         )
         names.update(extra)
         return names
@@ -341,7 +343,7 @@ def test_desktop_access_then_the_launch_then_readiness() -> None:
                      session_statuses=["r"], registration="w", runtime_wait_seconds=5.0)
         # SYRD-674: the report connection, after registration and before desktop access and the launch.
         check(got == 0 and fx.kinds() == ["uid", "verify", "record", "register", "reports", "projection", "desktop", "layout",
-                                          "launch", "ready"]
+                                          "launch", "ready", "present"]
               and fx.log[4] == ("reports", "checked config", fx.verified, fx.registry),
               f"desktop access before the launch, the launch before readiness: {fx.kinds()}")
         desktop = fx.log[6]
@@ -360,6 +362,10 @@ def test_desktop_access_then_the_launch_then_readiness() -> None:
             "print_func": fx.said.append}, f"readiness is asked about everything it was given: {ready}")
         check(fx.said[-1].endswith("and all 2 configured role(s) have live sessions registered with the board."),
               f"the roles counted are the configured ones: {fx.said[-1]}")
+        present = fx.log[10]
+        check(present[1] == SLUG and present[2]["config"].name == "configured config"
+              and present[2]["print_func"] == fx.said.append and len(present[2]) == 2,
+              f"SYRD-680: once ready, the board's tab, for the configuration launched: {present}")
 
         fx.log.clear(); fx.said.clear()
         # Reached through a symlinked directory, as an installed layout can be:
@@ -396,8 +402,9 @@ def test_desktop_access_then_the_launch_then_readiness() -> None:
               f"what is left, in order, and how to continue: {fx.said}")
         fx.log.clear(); fx.said.clear(); fx.remaining = []
         check(fx.run(start_roles=False) == 0 and "desktop" not in fx.kinds() and "launch" not in fx.kinds()
-              and [e for e in fx.log if e[0] == "ready"][0][1] == "checked config",
-              "roles not started: no desktop access, no launch, and readiness asked about the checked configuration")
+              and "present" not in fx.kinds() and [e for e in fx.log if e[0] == "ready"][0][1] == "checked config",
+              "roles not started: no desktop access, no launch, no board tab (SYRD-680), and readiness asked about the "
+              "checked configuration")
 
 
 # --- the command --------------------------------------------------------------------------------------------------------

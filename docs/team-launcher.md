@@ -712,6 +712,33 @@ is held to the same pinning as any other program root's window runs -- a regular
 file owned by root that nobody else can rewrite -- so a tenant-writable program
 cannot be what a cross-account tab executes.
 
+## The board's tab
+
+A launch opens the project's board in the operator's browser once the board
+answers. That happens after `switchyard new`, after the first launch that an
+interrupted `new` completes through `resume-provision`, and after each later
+`switchyard <slug>`, `switchyard start <slug>` or `team-launcher <slug> start`
+(SYRD-680). Nothing else opens one. That includes upgrades, cutovers, recoveries,
+the listener's demand starts and a board service restart: they run the same
+launch internals, which never open a tab. One command opens at most one tab per
+project.
+
+- **The address** is the loopback port named in root's own unit,
+  `/etc/systemd/system/<slug>-ticket-board.service`. A board with no root unit
+  falls back to its configured `board_url`, but only a loopback one. Either way
+  the URL is rebuilt from scheme, host and port, so no path, query or credential
+  rides along.
+- **Readiness** means `/api/build` answers, within 30 seconds. A board that never
+  answers is reported with its address, and the launch still succeeds.
+- **The desktop** is the one the presentation window goes to, reached the same
+  way and run as the same account, never as root. Over the control bridge, the
+  caller's own process opens the tab, because the owner account has no screen.
+- **No browser** (a headless project, a host with no desktop session to reach,
+  or no `xdg-open`): the address is printed instead.
+
+`team-launcher <slug> start --dry-run` puts the address and the intended action
+in its plan, under `board_tab`, and opens nothing.
+
 ## Attaching to a role
 
 `switchyard attach <project> <role>` puts this terminal on a role's live worker.

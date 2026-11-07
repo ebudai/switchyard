@@ -189,13 +189,77 @@ def reconcile_viewer_observer_flags(
         )
 
 
+def _viewer_watchers(viewer: str, *, runner: Callable[..., subprocess.CompletedProcess[Any]]) -> list[str]:
+    """The terminals attached to the viewer session itself: a person's window. The viewer's own panes are clients of
+    the display slots, never of the viewer."""
+    return sorted(tty for tty, session in _clients_by_tty(runner=runner).items() if session == viewer)
+
+
+def _viewer_shows_its_slots(
+    viewer: str,
+    sessions: list[str],
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> bool:
+    """Whether the viewer is one live pane per display slot, in slot order, each attached to its own slot."""
+    proc = runner(
+        ["tmux", "list-panes", "-t", _exact_tmux_target(f"{viewer}:0"), "-F", "#{pane_dead}\t#{pane_start_command}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return False
+    panes = [line.split("\t", 1) for line in str(proc.stdout or "").splitlines() if line]
+    if len(panes) != len(sessions):
+        return False
+    for (dead, command), session in zip(panes, sessions):
+        if dead.strip() != "0" or _viewer_pane_target(command) != _exact_tmux_target(session):
+            return False
+    return True
+
+
+def _viewer_pane_target(command: str) -> str:
+    """The slot a viewer pane attaches to, read from its start command, or "" for anything that is not one.
+
+    tmux reports the command quoted once more than it was given, `"sh -lc '... -t =<slot>'"`, so one layer is peeled;
+    a pane respawned to anything else -- `cat`, `sleep` -- is not a viewer pane, and is never peeled for ever (Audit of
+    c2ae3f28).
+    """
+    try:
+        words = shlex.split(command)
+        if len(words) == 1:
+            words = shlex.split(words[0])
+        if len(words) != 3 or words[:2] != ["sh", "-lc"]:
+            return ""
+        attach = shlex.split(words[2])
+    except ValueError:
+        return ""
+    return attach[-1] if len(attach) >= 2 and attach[-2] == "-t" else ""
+
+
 def _launch_viewer(
     config: team_launcher.ProjectConfig,
     state: Mapping[str, Any],
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
+    keep_if_watched: bool = False,
+    print_func: Callable[[str], None] | None = None,
 ) -> None:
     viewer = team_launcher.viewer_session_for_project(config.project)
+    if keep_if_watched and _session_exists(viewer, runner=runner):
+        # An ordinary launch over a viewer a person is watching keeps it: rebuilding it ended their window, and a
+        # healthy `resume-provision` did exactly that (SYRD-749). What can change in place -- which pane sizes each
+        # slot, and each slot's label -- the launch's mapping has just refreshed on the viewer as it stands. A viewer
+        # that no longer shows its slots is rebuilt, as before; so is one nobody is watching, and an explicit
+        # bootstrap always rebuilds.
+        watchers = _viewer_watchers(viewer, runner=runner)
+        sessions = [display_session_name(config.project, slot) for slot in range(state["slot_count"])]
+        if watchers and _viewer_shows_its_slots(viewer, sessions, runner=runner):
+            (print_func or print)(
+                f"switchyard: {config.project}'s viewer is open in {len(watchers)} "
+                f"{'terminal' if len(watchers) == 1 else 'terminals'}; keeping it, with its slots refreshed in place")
+            return
     if _session_exists(viewer, runner=runner):
         proc = runner(["tmux", "kill-session", "-t", _exact_tmux_target(viewer)])
         if proc.returncode != 0:

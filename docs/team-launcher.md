@@ -361,6 +361,14 @@ a project already on screen leaves exactly one window, whoever runs it: root,
 for a tenant another account owns, asks as that owner. With no window showing,
 the launch opens one, and the next launch opens none.
 
+The viewer layout opens no window of its own, but a launch used to rebuild
+the viewer session every time, and that ended the window of anyone watching it.
+Now a launch keeps a viewer that a terminal is attached to, provided it still
+shows each display slot in order, and says "viewer is open in N terminal(s);
+keeping it". The slots are re-pointed and relabelled in place, and the person's
+terminal stays attached. A viewer nobody is watching, or one whose panes no
+longer show their slots, is rebuilt as before (SYRD-749).
+
 Two things still open a window regardless:
 - `switchyard present bootstrap`, which is asked for one;
 - a launch through the tenant-control bridge, whose window is the caller's to

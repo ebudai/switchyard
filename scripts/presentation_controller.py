@@ -810,7 +810,8 @@ def launch_presentation(
         _apply_mapping(config, state["slots"], runner=owner_runner)
         _write_state(config, state_path, state, runner=runner)
     if layout == "viewer":
-        _launch_viewer(config, state, runner=owner_runner)
+        # A viewer a person is watching is kept, not rebuilt under them (SYRD-749).
+        _launch_viewer(config, state, runner=owner_runner, keep_if_watched=True, print_func=print_func)
     elif layout == "separate":
         # Deliberately not derived from the presentation state path. That
         # path is the tenant's own project-state directory, 0700 and owned by

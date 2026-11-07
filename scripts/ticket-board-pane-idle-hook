@@ -9,6 +9,7 @@ ambient tmux state.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -16,6 +17,7 @@ import select
 import stat
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from urllib import error as urllib_error
 from urllib import request
@@ -349,29 +351,42 @@ def _session_start_record(payload: object, *, pid: int | None = None, proc_root:
 PROVIDER_FAILURE_SOURCES = frozenset({"claude.StopFailure"})
 PROVIDER_MESSAGE_CHARS = 240
 TRANSCRIPT_TAIL_BYTES = 256 * 1024
+API_ERROR_WAIT_SECONDS = 2.0
 
 
-def _last_api_error(transcript_path: object) -> dict:
-    """The last API-error record in the session transcript, read from its tail only, and only its limit fields."""
-    try:
-        path = Path(str(transcript_path))
-        size = path.stat().st_size
-        with path.open("rb") as handle:
-            handle.seek(max(size - TRANSCRIPT_TAIL_BYTES, 0))
-            tail = handle.read().decode("utf-8", errors="replace")
-    except (OSError, ValueError):
-        return {}
-    for line in reversed(tail.splitlines()):
-        if '"isApiErrorMessage":true' not in line.replace(" ", ""):
-            continue
+def _transcript_facts(payload: dict, since: float | None) -> tuple[dict, dict | None]:
+    """This turn's API-error limit fields (Claude Code 2.1.318 writes them ~0.1 s after StopFailure starts: given the
+    turn's start, wait for this turn's, 5 s of slack for the start hook, never an earlier one's), and the session's
+    account, from its own session-owner record (tail, else head), hashed, with the process it is true of (SYRD-735)."""
+    deadline, session = time.monotonic() + (API_ERROR_WAIT_SECONDS if since is not None else 0), payload.get("session_id")
+    while True:
         try:
-            record = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(record, dict) and record.get("isApiErrorMessage") is True:
-            quota = record.get("quotaLimits") if isinstance(record.get("quotaLimits"), dict) else {}
-            return {key: quota[key] for key in ("status", "resetsAt", "rateLimitType") if key in quota}
-    return {}
+            with Path(str(payload.get("transcript_path"))).open("rb") as handle:
+                head = handle.read(64 * 1024).decode("utf-8", errors="replace").splitlines()
+                handle.seek(max(os.fstat(handle.fileno()).st_size - TRANSCRIPT_TAIL_BYTES, 0))
+                tail = [_json_line(line) for line in reversed(handle.read().decode("utf-8", errors="replace").splitlines())]
+        except (OSError, ValueError):
+            return {}, None
+        error = next((r for r in tail if r.get("isApiErrorMessage") is True), {})
+        owner = next((r for r in tail + [_json_line(line) for line in reversed(head)]
+                      if r.get("type") == "session-owner" and r.get("accountUuid")), None)
+        when = str(error.get("timestamp") or "").replace("Z", "+00:00")
+        fresh = since is None or bool(when) and datetime.fromisoformat(when).timestamp() >= since - 5
+        limits = error.get("quotaLimits") if fresh and isinstance(error.get("quotaLimits"), dict) else {}
+        quota = {key: limits[key] for key in ("status", "resetsAt", "rateLimitType") if key in limits}
+        if quota or time.monotonic() >= deadline:
+            who = owner and f"{owner['accountUuid']}:{owner.get('organizationUuid')}".encode()
+            return quota, owner and {"account": hashlib.sha256(who).hexdigest()[:32], "session_id": str(session)[:128],
+                                     **dict(zip(("pane_pid", "pane_start_time"), _pane_root_identity(os.getpid()) or ()))}
+        time.sleep(0.05)
+
+
+def _json_line(line: str) -> dict:
+    """A transcript record worth parsing -- an API error or the session's owner -- else {}."""
+    try:
+        return json.loads(line) if "isApiErrorMessage" in line or "session-owner" in line else {}
+    except ValueError:
+        return {}
 
 
 def _record_provider_failure(state_dir: str | Path, target: str, source: str, payload: object) -> Path | None:
@@ -391,7 +406,8 @@ def _record_provider_failure(state_dir: str | Path, target: str, source: str, pa
     if not isinstance(record, dict):
         return None
     identity = _pane_root_identity(os.getpid())
-    quota = _last_api_error(payload.get("transcript_path"))
+    quota, account = _transcript_facts(payload, record.get("turn_started_at") if isinstance(
+        record.get("turn_started_at"), (int, float)) else None)
     # An exhausted quota leaves the provider at its prompt, waiting: said as
     # idle, from a source no turn-end reminder trusts, so the hold's one fresh
     # attempt can reach it. Any other API error leaves the state as it was, and
@@ -404,6 +420,7 @@ def _record_provider_failure(state_dir: str | Path, target: str, source: str, pa
         "observed_at": time.time(),
         "session_id": str(payload.get("session_id") or "")[:128],
         "quota": quota,
+        "account": account,
         "message": " ".join(str(payload.get("last_assistant_message") or "").split())[:PROVIDER_MESSAGE_CHARS],
         **({"pane_pid": identity[0], "pane_start_time": identity[1]} if identity else {}),
     }
@@ -1157,12 +1174,13 @@ def main(argv: list[str] | None = None) -> int:
         payload = _read_stdin_json(timeout=max(args.stdin_timeout, 1.0))
         _record_provider_failure(state_dir, target, args.source, payload)
     elif args.source in BACKGROUND_WORK_SOURCES:
-        # Read first: this turn end's input says whether the session is done or
-        # paused on background work, and the state written must say which.
+        # Read first: this turn end's input says whether the session is done or paused on
+        # background work, and the state written must say which; and its account (SYRD-735).
         payload = _read_stdin_json(timeout=args.stdin_timeout)
         _write_state(state_dir, target, args.state, source=args.source,
                      background_work=_background_work(payload, args.source),
-                     checkout={**_checkout(payload), "at": time.time()})
+                     checkout={**_checkout(payload), "at": time.time(),
+                               "account": _transcript_facts(payload if isinstance(payload, dict) else {}, None)[1]})
     elif _is_session_start_hook_source(args.source):
         # Read first: the conversation this SessionStart opened is recorded
         # with the state it writes (SYRD-540).

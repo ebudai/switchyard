@@ -90,6 +90,12 @@ KINDS: dict[str, tuple[str, str]] = {
         "press Esc, or choose \"Use current Git worktree\", in the pane: \"Create new Git worktree\" would move the role "
         "out of its managed checkout. Switchyard starts a fresh conversation with `/clear`, which asks nothing",
     ),
+    # SYRD-735: Claude Code 2.1.318 asks this when a turn hits the account's usage limit (its StopFailure has run).
+    "usage_limit": (
+        "Claude's usage-limit menu: its account is out of quota",
+        "press Esc in the pane, which chooses nothing -- the board does that itself while the role's provider is "
+        "held -- and never \"Switch to usage credits\"; the hold delivers its work once the limit resets",
+    ),
     "menu": (
         "an unanswered menu",
         "answer it in the pane",
@@ -103,6 +109,7 @@ _MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("sign_in", ("sign in with chatgpt", "provide your own api key", "sign in with device code", "select login method",
                  "what account do you want to log into")),
     ("new_conversation_location", ("where should the new conversation run", "create new git worktree")),
+    ("usage_limit", ("stop and wait for limit to reset",)),
 )
 
 

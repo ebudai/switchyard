@@ -1,0 +1,328 @@
+{
+ "source": "Measured for SYRD-735 on 2026-11-07: Claude Code 2.1.318 (/opt/claude-code/bin/claude) in a private tmux (160x45, TZ=America/Toronto) under unshare -rn, signed in with a placeholder Max subscription (placeholder account and organization UUIDs), against a local stand-in API that refuses every message with HTTP 429 and the unified rate-limit headers status=rejected, representative-claim=seven_day, and a reset 30 h ahead (24 h for the auto-continue screen). Kit: tests/fixtures/syrd735_probe. live_record is this host's own Main transcript record from 2026-11-06T01:49:48Z, reduced to its limit fields and text.",
+ "version": "2.1.318",
+ "hooks_fired": {
+  "usage_limit_menu": [
+   "SessionStart",
+   "UserPromptSubmit",
+   "StopFailure",
+   "SessionEnd"
+  ],
+  "auto_continue": [
+   "SessionStart",
+   "UserPromptSubmit",
+   "StopFailure",
+   "SessionEnd"
+  ]
+ },
+ "stopfailure_payload": {
+  "session_id": "cae0d7d1-2561-4002-b72a-c02992915cd8",
+  "transcript_path": "<transcript>",
+  "cwd": "<cwd>",
+  "prompt_id": "3e3616ba-2818-4c9f-8227-7fc8c9f7f97f",
+  "effort": {
+   "level": "medium"
+  },
+  "hook_event_name": "StopFailure",
+  "error": "rate_limit",
+  "last_assistant_message": "You've hit your weekly limit · resets Nov 8, 2:21pm (America/Toronto)"
+ },
+ "transcript_head": [
+  {
+   "type": "mode",
+   "mode": "normal"
+  },
+  {
+   "type": "permission-mode",
+   "permissionMode": "bypassPermissions"
+  },
+  {
+   "type": "session-owner",
+   "accountUuid": "00000000-0000-4000-8000-000000000001",
+   "organizationUuid": "00000000-0000-4000-8000-000000000002"
+  },
+  {
+   "type": "atis-latch",
+   "atis": ""
+  }
+ ],
+ "api_error_record": {
+  "isSidechain": false,
+  "type": "assistant",
+  "timestamp": "2026-11-07T13:21:58.048Z",
+  "message": {
+   "diagnostics": null,
+   "id": "aac149e0-c879-4bc5-8cc4-9c8286d558db",
+   "container": null,
+   "model": "<synthetic>",
+   "role": "assistant",
+   "stop_details": null,
+   "stop_reason": "stop_sequence",
+   "stop_sequence": "",
+   "type": "message",
+   "usage": {
+    "output_tokens_details": null,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "server_tool_use": {
+     "web_search_requests": 0,
+     "web_fetch_requests": 0
+    },
+    "service_tier": null,
+    "cache_creation": {
+     "ephemeral_1h_input_tokens": 0,
+     "ephemeral_5m_input_tokens": 0
+    },
+    "inference_geo": null,
+    "iterations": null,
+    "speed": null,
+    "fallback_credit": null
+   },
+   "content": [
+    {
+     "type": "text",
+     "text": "You've hit your weekly limit · resets Nov 8, 2:21pm (America/Toronto)"
+    }
+   ],
+   "context_management": null
+  },
+  "apiError": "usage_limit_reached",
+  "apiErrorParams": {
+   "rate_limit_info": {
+    "status": "rejected",
+    "resetsAt": 1794165712,
+    "rateLimitType": "seven_day",
+    "overageStatus": "rejected",
+    "overageDisabledReason": "org_level_disabled",
+    "isUsingOverage": false
+   }
+  },
+  "quotaLimits": {
+   "status": "rejected",
+   "resetsAt": 1794165712,
+   "unifiedRateLimitFallbackAvailable": false,
+   "rateLimitType": "seven_day",
+   "overageStatus": "rejected",
+   "overageDisabledReason": "org_level_disabled",
+   "isUsingOverage": false
+  },
+  "error": "rate_limit",
+  "isApiErrorMessage": true,
+  "apiErrorStatus": 429,
+  "perTurnEffort": "medium",
+  "failedResponseHadNoToolCall": true,
+  "userType": "external",
+  "entrypoint": "cli",
+  "version": "2.1.318"
+ },
+ "timing": {
+  "api_error_records_when_stopfailure_starts": [
+   0,
+   0,
+   0,
+   0
+  ],
+  "transcript_bytes_when_stopfailure_starts": [
+   468,
+   468,
+   468,
+   468
+  ],
+  "record_seen_after_stopfailure_starts_seconds": [
+   0.101,
+   0.101,
+   0.101
+  ],
+  "polled_every_seconds": 0.05
+ },
+ "api_requests": {
+  "usage_limit_menu": 1
+ },
+ "screens": {
+  "usage_limit_menu": [
+   "",
+   " ▐▛███▛█   Claude Code v2.1.318",
+   "▝▜██████▀  Opus 5.5 · Claude Max",
+   " ▝▝   ▝▝   /w/repo",
+   "",
+   "",
+   "❯ say hi",
+   "  ⎿  You've hit your weekly limit · resets Nov 8, 2:21pm (America/Toronto)",
+   "",
+   "✻ Brewed for 0s · done 8:21 AM",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔ tmux focus-events off · add 'set -g focus-events on' to ~/.tmux.conf and reattach for focus tracking ▔",
+   "   What do you want to do?",
+   "",
+   "   ❯ 1. Stop and wait for limit to reset",
+   "     2. Wait here, then continue automatically at Nov 8, 2:21pm",
+   "     3. Switch to usage credits",
+   "",
+   "   Enter to confirm · Esc to cancel"
+  ],
+  "after_escape": [
+   "",
+   " ▐▛███▛█   Claude Code v2.1.318",
+   "▝▜██████▀  Opus 5.5 · Claude Max",
+   " ▝▝   ▝▝   /w/repo",
+   "",
+   "",
+   "❯ say hi",
+   "  ⎿  You've hit your weekly limit · resets Nov 8, 2:21pm (America/Toronto)",
+   "",
+   "✻ Brewed for 0s · done 8:21 AM",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "                                                          tmux focus-events off · add 'set -g focus-events on' to ~/.tmux.conf and reattach for focus tracking",
+   "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+   "❯",
+   "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+   "  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+  ],
+  "auto_continue": [
+   "",
+   " ▐▛███▛█   Claude Code v2.1.318",
+   "▝▜██████▀  Opus 5.5 · Claude Max",
+   " ▝▝   ▝▝   /w/repo",
+   "",
+   "",
+   "❯ say hi",
+   "  ⎿  You've hit your weekly limit · resets 8:22am (America/Toronto)",
+   "",
+   "● Usage limit reached · continuing automatically at 8:22am · esc to cancel",
+   "",
+   "✻ Baked for 0s · done 8:22 AM",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "",
+   "                                                          tmux focus-events off · add 'set -g focus-events on' to ~/.tmux.conf and reattach for focus tracking",
+   "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+   "❯",
+   "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+   "  ⚠ Usage limit reached · limit resets 8:22am",
+   "    Continuing automatically at 8:22am · Esc to cancel",
+   "  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+  ]
+ },
+ "live_record": {
+  "type": "assistant",
+  "timestamp": "2026-11-06T01:49:48.097Z",
+  "apiError": "usage_limit_reached",
+  "apiErrorParams": {
+   "rate_limit_info": {
+    "status": "rejected",
+    "resetsAt": 1794038400,
+    "rateLimitType": "seven_day",
+    "overageStatus": "rejected",
+    "overageDisabledReason": "out_of_credits",
+    "isUsingOverage": false
+   }
+  },
+  "quotaLimits": {
+   "status": "rejected",
+   "resetsAt": 1794038400,
+   "unifiedRateLimitFallbackAvailable": false,
+   "rateLimitType": "seven_day",
+   "overageStatus": "rejected",
+   "overageDisabledReason": "out_of_credits",
+   "upgradePaths": [
+    "upgrade_plan",
+    "overage"
+   ],
+   "isUsingOverage": false
+  },
+  "error": "rate_limit",
+  "isApiErrorMessage": true,
+  "apiErrorStatus": 429,
+  "version": "2.1.318",
+  "message": {
+   "model": "<synthetic>",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "You've hit your weekly limit · resets Nov 7, 3am (America/Toronto)"
+    }
+   ]
+  }
+ }
+}

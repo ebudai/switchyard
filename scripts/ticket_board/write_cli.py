@@ -901,6 +901,12 @@ def _build_parser() -> argparse.ArgumentParser:
                                        "nothing, and only the Director releases, keeps or replaces it (SYRD-726)")
     review.add_argument("ticket_id")
     review.add_argument("--ref", required=True, help="the standing blocker, as project:PREFIX-N or operator:<name>")
+    restore = subparsers.add_parser(
+        "restore-reopened", help="the Director: put back the closed disposition a mistaken reopen took away -- stage, "
+                                 "owner, commit and sign-offs, as recorded at the reopen -- while nothing has happened "
+                                 "since (SYRD-746)")
+    restore.add_argument("ticket_id")
+    add_free_text_argument(restore, "--reason", required=True, help="what the reopen mistook, and how it was checked")
     add_free_text_argument(review, "--reason", required=True,
                            help="why it is ready for the Director's review, with the evidence and where it is recorded")
 
@@ -1179,6 +1185,8 @@ def main(argv: list[str] | None = None) -> int:
             response = client.set_blocked_reason(args.ticket_id, args.blocked_reason)
         elif command == "request_blocker_review":
             response = client.request_blocker_review(args.ticket_id, args.ref, args.reason)
+        elif command == "restore_reopened":
+            response = client.restore_reopened(args.ticket_id, reason=args.reason)
         elif command == "add_comment":
             response = client.add_comment(args.ticket_id, text=args.text, urgent=args.urgent)
         elif command == "edit_fields":
@@ -1209,7 +1217,7 @@ def main(argv: list[str] | None = None) -> int:
                    "enable_size_review", "measure_size", "set_report_intake", "force_fresh_context",
                    "uat_instructions", "extend_lease", "interrupt_lease", "set_cohort_quota", "clear_cohort_quota",
                    "clear_provider_hold", "await_user", "set_audit_return", "report_follow_up", "notify_user",
-                   "set_blocked_reason", "request_blocker_review", "hold_provider_account",
+                   "set_blocked_reason", "request_blocker_review", "hold_provider_account", "restore_reopened",
                    "clear_provider_account_hold"}:
         print(json.dumps(response))
     else:

@@ -74,6 +74,8 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
     "set_blocked_reason": IMPLEMENTER_ROLES,
     # SYRD-726: the owner asks the Director to review its ticket's standing external blocker; the database decides.
     "request_blocker_review": IMPLEMENTER_ROLES,
+    # SYRD-746: restoring a mistaken reopen is the Director's repair.
+    "restore_reopened": {"director"},
     # SYRD-270: the other half of an external blocker, so the same authority.
     "release_external_blocker": {"director"},
     # SYRD-537: deferring optional reminders is less than holding the ticket.
@@ -157,6 +159,8 @@ COMPOSED_OPERATION_CAPABILITIES = {
     # SYRD-726: asking the Director to review a standing blocker is a dependency handoff's authority, the one
     # request_dependency takes, for the case it is refused in. The database admits only the owner, from its runtime.
     "request_blocker_review": frozenset({"add_comment", "await_role"}),
+    # SYRD-746: a narrated repair of protected fields, as a Director edit is; the database checks director_edit.
+    "restore_reopened": frozenset({"director_edit"}),
     # A reminder snooze silences a subset of what holding a ticket silences, for
     # a bounded time, so it takes the hold's authority; the database checks
     # set_manually_controlled itself (SYRD-537).

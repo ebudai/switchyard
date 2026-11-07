@@ -641,4 +641,13 @@ GRANT EXECUTE ON FUNCTION ticket_board.hold_provider_account(text, text) TO tick
 GRANT EXECUTE ON FUNCTION ticket_board.clear_provider_account_hold(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.provider_account_hold_status() TO ticket_board_service, ticket_board_listener;
 
+-- SYRD-746 (pgu1032): restore a mistaken reopen.
+REVOKE ALL ON ticket_board.ticket_reopen_records FROM PUBLIC;
+REVOKE ALL ON SEQUENCE ticket_board.ticket_reopen_records_id_seq FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.record_ticket_reopen() FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.reopen_restore_admits(ticket_board.tickets, ticket_board.tickets) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.restore_reopened_ticket(text, text) FROM PUBLIC;
+GRANT SELECT ON ticket_board.ticket_reopen_records TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.restore_reopened_ticket(text, text) TO ticket_board_service;
+
 COMMIT;

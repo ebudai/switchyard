@@ -170,6 +170,30 @@ When you kick back:
 Never kick back for style, for a comment you would have worded differently, or because you
 would have done it another way.
 
+### Undoing a mistaken reopen
+
+Reopening a finished ticket clears its commit and sign-offs, as it must. If the reopen itself
+was the mistake, for example because you compared the wrong repository, put the closed ticket
+back in one step:
+
+```
+ticket-board-write restore-reopened <ticket> --reason "what the reopen mistook, and how you checked"
+```
+
+The board recorded the ticket's closed disposition when it left its terminal stage, whether
+by a reopen or by an override out of it: the stage, the owner, the commit and its exemption,
+and every sign-off. The restore puts exactly that back, all at once. It makes no sign-off that
+was not there, and it starts no review. It records the repair as a comment and a field-audit
+row for each field it moved.
+
+It refuses once anything has happened since:
+- the ticket has moved on from where the reopen left it;
+- it carries a different candidate;
+- it holds a sign-off the closed ticket did not have.
+
+Then the work is real and has to go through the workflow. Only the ticket's last reopen can
+be restored, and only once (SYRD-746).
+
 ---
 
 ## Working with audit

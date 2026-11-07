@@ -80,6 +80,7 @@ def test_server_keeps_identical_aliases_and_no_reverse_import() -> None:
         "set_blocked_reason": frozenset({"edit_fields"}),
         # SYRD-726: asking for a blocker review is request_dependency's authority.
         "request_blocker_review": frozenset({"add_comment", "await_role"}),
+        "restore_reopened": frozenset({"director_edit"}),  # SYRD-746
         # SYRD-537: a reminder snooze takes the hold's authority.
         "snooze_reminders": frozenset({"set_manually_controlled"}),
         "clear_reminder_snooze": frozenset({"set_manually_controlled"}),
@@ -148,7 +149,7 @@ def test_default_environment() -> None:
     assert table["set_blocked_reason"] == ["app", "main", "ops", "perf", "research"]
     # SYRD-726: likewise, the owner asking for a review of its own ticket's blocker.
     assert table["request_blocker_review"] == ["app", "main", "ops", "perf", "research"]
-    assert len(table) == 64, len(table)  # SYRD-672: hold_provider_account, clear_provider_account_hold; SYRD-548: set_report_intake; SYRD-598: withdraw_signoff; SYRD-626; SYRD-629; SYRD-616: extend_lease, interrupt_lease; SYRD-628: five cohort operations; SYRD-644: clear_provider_hold; SYRD-662: await_user; SYRD-673: set_audit_return; SYRD-714: notify_user; SYRD-723: set_blocked_reason; SYRD-726: request_blocker_review
+    assert len(table) == 65, len(table)  # SYRD-746: restore_reopened; SYRD-672: hold_provider_account, clear_provider_account_hold; SYRD-548: set_report_intake; SYRD-598: withdraw_signoff; SYRD-626; SYRD-629; SYRD-616: extend_lease, interrupt_lease; SYRD-628: five cohort operations; SYRD-644: clear_provider_hold; SYRD-662: await_user; SYRD-673: set_audit_return; SYRD-714: notify_user; SYRD-723: set_blocked_reason; SYRD-726: request_blocker_review
 
 
 def test_role_environment_is_read_at_import() -> None:

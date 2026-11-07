@@ -8326,6 +8326,18 @@ BEGIN
         END LOOP;
         RETURN proposed;
     END IF;
+
+    -- SYRD-746: a Director's restore of a mistaken reopen puts back exactly the closed disposition the reopen took
+    -- away, recorded when it did, and nothing else. The window names one ticket and is open for one statement,
+    -- opened only by restore_reopened_ticket; what passes through it must equal the recorded disposition, sign-off
+    -- by sign-off, so it can neither raise a sign-off that was not there nor carry any other commit.
+    IF nullif(current_setting('ticket_board.restore_reopen', true), '') = previous.id THEN
+        IF NOT ticket_board.reopen_restore_admits(previous, proposed) THEN
+            RAISE EXCEPTION 'a restore may put back only the closed disposition recorded when % was reopened', previous.id
+                USING ERRCODE='42501';
+        END IF;
+        RETURN proposed;
+    END IF;
     -- A Director edit changes fields the transition table has nothing to say
     -- about, at whatever stage the ticket is in. The window names one ticket
     -- and is open for one statement. It carries no sign-off: ticket_board
@@ -23552,3 +23564,172 @@ REVOKE ALL ON FUNCTION ticket_board.note_provider_refusal(text, jsonb) FROM PUBL
 REVOKE ALL ON FUNCTION ticket_board.hold_provider_account(text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION ticket_board.clear_provider_account_hold(text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION ticket_board.provider_account_hold_status() FROM PUBLIC;
+
+-- SYRD-746 (pgu1032): restore a mistaken reopen.
+-- What a reopen took away. One row each time a ticket leaves a stage the declared workflow calls terminal -- a reopen,
+-- or a narrated override out of one -- holding the closed disposition it left: the stage, its owner, the commit and
+-- its exemption, and every declared sign-off, as they were. Any later move of the ticket supersedes an unrestored row:
+-- what it would put back is no longer the ticket's last word.
+CREATE TABLE IF NOT EXISTS ticket_board.ticket_reopen_records (
+    id bigserial PRIMARY KEY,
+    ticket_id text NOT NULL REFERENCES ticket_board.tickets(id) ON DELETE CASCADE,
+    reopened_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    reopened_by text NOT NULL,
+    from_state text NOT NULL,
+    to_state text NOT NULL,
+    assignee text NOT NULL,
+    commit_hash text NOT NULL,
+    commit_exempt boolean NOT NULL,
+    signoffs jsonb NOT NULL,
+    superseded_at timestamptz,
+    restored_at timestamptz,
+    restored_by text,
+    restore_reason text,
+    CHECK ((restored_at IS NULL) = (restored_by IS NULL) AND (restored_at IS NULL) = (restore_reason IS NULL))
+);
+CREATE INDEX IF NOT EXISTS ticket_reopen_records_ticket ON ticket_board.ticket_reopen_records (ticket_id, id);
+
+-- Record a reopen, and supersede an unrestored one when the ticket moves again. Its actor is named from the session's
+-- own settings -- never by current_app_actor(), which refuses a system actor with no caller role (SYRD-744).
+CREATE OR REPLACE FUNCTION ticket_board.record_ticket_reopen()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE cfg jsonb := ticket_board.declared_workflow(); flag record; signoffs jsonb := '{}'::jsonb;
+BEGIN
+    IF cfg IS NULL OR nullif(current_setting('ticket_board.restore_reopen', true), '') = NEW.id THEN
+        RETURN NEW;  -- no declared workflow; or the restore itself, which marks its own row
+    END IF;
+    UPDATE ticket_board.ticket_reopen_records SET superseded_at = clock_timestamp()
+     WHERE ticket_id = NEW.id AND restored_at IS NULL AND superseded_at IS NULL;
+    IF NOT coalesce((SELECT (x->>'terminal')::boolean FROM jsonb_array_elements(cfg->'stages') x WHERE x->>'name' = OLD.state), false)
+       OR coalesce((SELECT (x->>'terminal')::boolean FROM jsonb_array_elements(cfg->'stages') x WHERE x->>'name' = NEW.state), false) THEN
+        RETURN NEW;
+    END IF;
+    FOR flag IN SELECT * FROM jsonb_each(cfg->'flags') LOOP
+        IF flag.value->>'kind' = 'signoff' THEN
+            signoffs := signoffs || jsonb_build_object(flag.key, ticket_board.workflow_flag(to_jsonb(OLD), flag.key, cfg));
+        END IF;
+    END LOOP;
+    INSERT INTO ticket_board.ticket_reopen_records (ticket_id, reopened_by, from_state, to_state, assignee, commit_hash,
+                                                    commit_exempt, signoffs)
+    VALUES (NEW.id, coalesce(nullif(current_setting('ticket_board.workflow_actor', true), ''),
+                             nullif(current_setting('ticket_board.caller_role', true), ''), session_user::text),
+            OLD.state, NEW.state, OLD.assignee, OLD.commit_hash, OLD.commit_exempt, signoffs);
+    RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS tickets_zz_reopen_record ON ticket_board.tickets;
+CREATE TRIGGER tickets_zz_reopen_record
+    AFTER UPDATE OF state ON ticket_board.tickets
+    FOR EACH ROW WHEN (OLD.state IS DISTINCT FROM NEW.state)
+    EXECUTE FUNCTION ticket_board.record_ticket_reopen();
+
+-- Whether this update is exactly the restore of the ticket's live reopen record: the recorded stage, owner, commit,
+-- exemption and every declared sign-off, and every other declared flag as it was.
+CREATE OR REPLACE FUNCTION ticket_board.reopen_restore_admits(previous ticket_board.tickets, proposed ticket_board.tickets)
+RETURNS boolean LANGUAGE plpgsql STABLE AS $$
+DECLARE cfg jsonb := ticket_board.declared_workflow(); rec ticket_board.ticket_reopen_records; flag record;
+BEGIN
+    SELECT * INTO rec FROM ticket_board.ticket_reopen_records r WHERE r.ticket_id = previous.id ORDER BY r.id DESC LIMIT 1;
+    IF rec.id IS NULL OR rec.restored_at IS NOT NULL OR rec.superseded_at IS NOT NULL
+       OR proposed.state IS DISTINCT FROM rec.from_state OR proposed.assignee IS DISTINCT FROM rec.assignee
+       OR proposed.commit_hash IS DISTINCT FROM rec.commit_hash OR proposed.commit_exempt IS DISTINCT FROM rec.commit_exempt THEN
+        RETURN false;
+    END IF;
+    FOR flag IN SELECT * FROM jsonb_each(cfg->'flags') LOOP
+        IF ticket_board.workflow_flag(to_jsonb(proposed), flag.key, cfg) IS DISTINCT FROM (CASE
+               WHEN flag.value->>'kind' = 'signoff' THEN coalesce((rec.signoffs->>flag.key)::boolean, false)
+               ELSE ticket_board.workflow_flag(to_jsonb(previous), flag.key, cfg) END) THEN
+            RETURN false;
+        END IF;
+    END LOOP;
+    RETURN true;
+END;
+$$;
+
+-- SYRD-746: the Director's bounded repair of a mistaken reopen. It puts back the closed disposition the ticket's last
+-- reopen recorded -- its stage, owner, commit provenance and sign-offs, all at once -- and only while nothing has
+-- happened since: the ticket still where the reopen left it, with no other candidate and no sign-off the closed ticket
+-- did not hold (an override out of Done keeps both, and only its stage is put back). It records the
+-- repair: a comment, a field-audit row for every field it moves, and the record marked restored. It never makes a
+-- sign-off that was not there, nor a commit that was not recorded, and it starts no review cycle.
+CREATE OR REPLACE FUNCTION ticket_board.restore_reopened_ticket(p_ticket text, p_reason text)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+DECLARE cfg jsonb := ticket_board.declared_workflow(); actor text; t ticket_board.tickets;
+    rec ticket_board.ticket_reopen_records; doc jsonb; flag record; field text; before jsonb; after jsonb; why text;
+BEGIN
+    PERFORM ticket_board.require_actor(ARRAY['director'], 'director_edit');
+    actor := ticket_board.current_app_actor();  -- the caller's role, which the record and comment name
+    why := btrim(coalesce(p_reason, ''));
+    IF why = '' THEN
+        RAISE EXCEPTION 'restoring a reopened ticket needs a reason: what the reopen mistook' USING ERRCODE = '22023';
+    END IF;
+    IF cfg IS NULL THEN
+        RAISE EXCEPTION 'this board has no declared workflow, so no reopen was recorded to restore' USING ERRCODE = '55000';
+    END IF;
+    SELECT * INTO t FROM ticket_board.tickets WHERE id = p_ticket FOR UPDATE;
+    IF t.id IS NULL THEN RAISE EXCEPTION 'no ticket %', p_ticket USING ERRCODE = '22023'; END IF;
+    SELECT * INTO rec FROM ticket_board.ticket_reopen_records r WHERE r.ticket_id = t.id ORDER BY r.id DESC LIMIT 1;
+    IF rec.id IS NULL THEN
+        RAISE EXCEPTION '% has no recorded reopen to restore', t.id USING ERRCODE = '55000';
+    ELSIF rec.restored_at IS NOT NULL THEN
+        RAISE EXCEPTION '%''s last reopen was already restored, by % at %', t.id, rec.restored_by, rec.restored_at
+            USING ERRCODE = '55000';
+    ELSIF rec.superseded_at IS NOT NULL OR t.state IS DISTINCT FROM rec.to_state THEN
+        RAISE EXCEPTION '% has moved since % reopened it (now in %): restoring would undo what happened since',
+            t.id, rec.reopened_by, t.state USING ERRCODE = '55000';
+    ELSIF btrim(t.commit_hash) <> '' AND t.commit_hash IS DISTINCT FROM rec.commit_hash THEN
+        RAISE EXCEPTION '% carries a new candidate (%) since it was reopened: restoring would discard it', t.id, t.commit_hash
+            USING ERRCODE = '55000';
+    END IF;
+    FOR flag IN SELECT * FROM jsonb_each(cfg->'flags') LOOP
+        IF flag.value->>'kind' = 'signoff' AND ticket_board.workflow_flag(to_jsonb(t), flag.key, cfg)
+           AND NOT coalesce((rec.signoffs->>flag.key)::boolean, false) THEN
+            RAISE EXCEPTION '% has a sign-off of its own since it was reopened (%): a review is under way', t.id, flag.key
+                USING ERRCODE = '55000';
+        END IF;
+    END LOOP;
+    before := to_jsonb(t);
+    doc := before || jsonb_build_object('state', rec.from_state, 'assignee', rec.assignee, 'commit_hash', rec.commit_hash,
+                                        'commit_exempt', rec.commit_exempt);
+    FOR flag IN SELECT * FROM jsonb_each(rec.signoffs) LOOP
+        doc := ticket_board.set_workflow_flag(doc, flag.key, (flag.value #>> '{}')::boolean);
+    END LOOP;
+    PERFORM set_config('ticket_board.restore_reopen', t.id, true);
+    UPDATE ticket_board.tickets
+       SET state = doc->>'state', assignee = doc->>'assignee', commit_hash = doc->>'commit_hash',
+           commit_exempt = (doc->>'commit_exempt')::boolean,
+           audit_signoff = coalesce((doc->>'audit_signoff')::boolean, audit_signoff),
+           inspector_signoff = coalesce((doc->>'inspector_signoff')::boolean, inspector_signoff),
+           user_signoff = coalesce((doc->>'user_signoff')::boolean, user_signoff),
+           workflow_flags = coalesce(doc->'workflow_flags', workflow_flags)
+     WHERE id = t.id;
+    PERFORM set_config('ticket_board.restore_reopen', '', true);
+    SELECT * INTO t FROM ticket_board.tickets WHERE id = t.id;
+    after := to_jsonb(t);
+    FOREACH field IN ARRAY ARRAY['state', 'assignee', 'commit_hash', 'commit_exempt', 'audit_signoff', 'inspector_signoff',
+                                 'user_signoff', 'workflow_flags'] LOOP
+        IF before->field IS DISTINCT FROM after->field THEN
+            INSERT INTO ticket_board.ticket_field_audit (ticket_id, actor, reason, field, old_value, new_value)
+            VALUES (t.id, actor, 'restore_reopened: ' || why, field, before->field, after->field);
+        END IF;
+    END LOOP;
+    UPDATE ticket_board.ticket_reopen_records SET restored_at = clock_timestamp(), restored_by = actor, restore_reason = why
+     WHERE id = rec.id;
+    PERFORM ticket_board.append_ticket_comment(t.id, actor, format(
+        'Restored the closed disposition that %s''s reopen at %s took away: %s, owned by %s, commit %s, sign-offs %s. '
+        'No review was repeated or made. Reason: %s',
+        rec.reopened_by, to_char(rec.reopened_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"'), rec.from_state,
+        rec.assignee, CASE WHEN rec.commit_hash = '' THEN CASE WHEN rec.commit_exempt THEN 'none (no code)' ELSE 'none' END
+                           ELSE rec.commit_hash END,
+        coalesce((SELECT string_agg(key || CASE WHEN value = 'true'::jsonb THEN ' yes' ELSE ' no' END, ', ' ORDER BY key)
+                    FROM jsonb_each(rec.signoffs)), 'none declared'), why));
+    RETURN jsonb_build_object('restored', true, 'id', t.id, 'state', t.state, 'assignee', t.assignee,
+                              'commit_hash', t.commit_hash, 'commit_exempt', t.commit_exempt, 'signoffs', rec.signoffs,
+                              'reopened_by', rec.reopened_by, 'reopened_at', rec.reopened_at);
+END;
+$$;
+REVOKE ALL ON ticket_board.ticket_reopen_records FROM PUBLIC;
+REVOKE ALL ON SEQUENCE ticket_board.ticket_reopen_records_id_seq FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.record_ticket_reopen() FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.reopen_restore_admits(ticket_board.tickets, ticket_board.tickets) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.restore_reopened_ticket(text, text) FROM PUBLIC;

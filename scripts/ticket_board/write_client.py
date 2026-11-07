@@ -14,9 +14,9 @@ from typing import Any, Mapping
 from urllib import error as urllib_error
 from urllib import parse, request
 try:
-    from .provider_hold_client import ProviderAccountHoldWrites
+    from .write_client_mixins import ProviderAccountHoldWrites, TicketRepairWrites
 except ImportError:  # pragma: no cover - `python write_client.py` runs outside the package
-    from provider_hold_client import ProviderAccountHoldWrites
+    from write_client_mixins import ProviderAccountHoldWrites, TicketRepairWrites
 
 CALLER_ROLE_HEADER = "X-Ticket-Board-Caller-Role"
 WRITE_TOKEN_HEADER = "X-Ticket-Board-Write-Token"
@@ -414,7 +414,7 @@ def _git_error_detail(proc: subprocess.CompletedProcess[str]) -> str:
 
 
 @dataclass(frozen=True)
-class TicketBoardWriteClient(ProviderAccountHoldWrites):
+class TicketBoardWriteClient(ProviderAccountHoldWrites, TicketRepairWrites):
     board_url: str = DEFAULT_BOARD_URL
     caller_role: str = field(default_factory=default_caller_role)
     timeout: float = 10.0

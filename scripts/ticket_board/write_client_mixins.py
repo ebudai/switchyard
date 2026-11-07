@@ -1,4 +1,7 @@
-"""The write client's provider account hold calls (SYRD-672), beside it so write_client.py does not grow."""
+"""Write client calls kept beside write_client.py, so that file does not grow past its size limit.
+
+Provider account holds (SYRD-672) and the restore of a mistaken reopen (SYRD-746).
+"""
 
 from __future__ import annotations
 
@@ -16,3 +19,11 @@ class ProviderAccountHoldWrites:
         """End a provider account's safety hold, once the operator confirms it is safe, with who confirmed it."""
         return self._post("/actions/clear_provider_account_hold", {"runtime": runtime, "reason": reason},
                           caller_role=caller_role)
+
+
+class TicketRepairWrites:
+    """Mixed into TicketBoardWriteClient, whose `_ticket_action` sends each as the caller."""
+
+    def restore_reopened(self, ticket_id: str, *, reason: str, caller_role: str | None = None) -> dict[str, Any]:
+        """Put back the closed disposition a mistaken reopen took away, as the board recorded it (SYRD-746)."""
+        return self._ticket_action(ticket_id, "restore_reopened", {"reason": reason}, caller_role=caller_role)

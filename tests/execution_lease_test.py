@@ -100,6 +100,15 @@ def check(condition: object, detail: str) -> None:
     CHECKS += 1
 
 
+def running(pid: int) -> bool:
+    """Not gone, and not an exited process waiting to be reaped."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return False
+    return stat[stat.rfind(")") + 2] not in "ZX"
+
+
 def alive(pid: int, start: int | None = None) -> bool:
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
@@ -230,11 +239,14 @@ def scenario(root: Path, full: bool) -> dict:
                 if "cursor_x" in fmt:
                     return subprocess.CompletedProcess(argv, 0, "2 4 20\n", "")
                 if fmt == "#{pane_pid}":
+                    if target in unseen:  # SYRD-740: tmux cannot answer for this pane
+                        raise subprocess.CalledProcessError(1, argv, "", "no server running")
                     return subprocess.CompletedProcess(argv, 0, f"{pane_pids[target[4:-4]]}\n", "")
                 return subprocess.CompletedProcess(argv, 0, "0\n", "")
             raise AssertionError(f"unexpected tmux call {argv}")  # anything that could interrupt a pane
 
         store = nl.PaneHookStateStore(state_dir)
+        unseen: set[str] = set()
         sends: list[tuple[str, str]] = []
         captures: list[str] = []
 
@@ -467,6 +479,84 @@ def scenario(root: Path, full: bool) -> dict:
                                             "FROM ticket_board.ticket_notification_queue WHERE target_role = 'director';"),
                              "records": sql("SELECT coalesce(string_agg(child || '=' || ticket_id, ' '), '') FROM "
                                             "ticket_board.background_child_alerts;")}
+            # 7. SYRD-740: the pane a leased command runs under cannot be seen -- tmux does not answer for it -- and the
+            #    Director interrupts it. MEFP's lease 33 was never signalled: a role pass skips a pane it cannot see.
+            hidden = spawn("app", scratch, "while :; do sleep 1; done # hidden-740")
+            passes(10)  # old enough to be recorded
+            hidden_id = (leases().get(hidden[0]) or {}).get("id")
+            unseen.add(targets["app"])
+            asked_at = time.time()
+            fixture.post_json(base, "/api/tickets/actions/interrupt_lease",
+                              {"lease": hidden_id, "reason": "its pane cannot be seen"}, caller="director")
+            for _ in range(20):
+                one_pass()
+                if not alive(*hidden):
+                    break
+                time.sleep(0.5)
+            stopped_after = time.time() - asked_at
+            passes(2)
+            seen["unseen_pane"] = {"recorded": hidden_id is not None, "alive": alive(*hidden), "stopped_after": stopped_after,
+                                   "row": sql(f"SELECT state || '|' || (interrupt->>'stage') || '|' || (interrupt->>'result') "
+                                              f"FROM ticket_board.execution_leases WHERE id = {hidden_id or 0};"),
+                                   "told_app": to_app("its pane cannot be seen")}
+            unseen.discard(targets["app"])
+            # And a command that left its pane's tree: its session's leader exits, and the member it started lives on
+            # outside the pane. Not under the pane is not gone; it can still be interrupted.
+            left = spawn("app", scratch, "(exec sleep 740.9) & sleep 12; exit 0 # left-740")
+            passes(16)  # recorded, then its leader gone
+            left_id = (leases().get(left[0]) or {}).get("id")
+            member = next((int(p.name) for p in Path("/proc").iterdir() if p.name.isdigit()
+                           and (p / "cmdline").exists() and b"740.9" in (p / "cmdline").read_bytes()), 0)
+            open_while_alive = sql(f"SELECT state FROM ticket_board.execution_leases WHERE id = {left_id or 0} "
+                                   "AND ended_at IS NULL;")
+            fixture.post_json(base, "/api/tickets/actions/interrupt_lease",
+                              {"lease": left_id, "reason": "it left its pane"}, caller="director")
+            passes(8)  # SIGINT is ignored by a background job; SIGTERM, a grace later, is not
+            seen["left_pane"] = {"recorded": left_id is not None, "member": member, "open_while_alive": open_while_alive,
+                                 "member_alive": bool(member) and running(member),
+                                 "row": sql(f"SELECT state || '|' || (interrupt->>'result') FROM "
+                                            f"ticket_board.execution_leases WHERE id = {left_id or 0};")}
+            # And a slow pass (Audit of fef749a1): an interrupt pending when an iteration starts, and one asked for while
+            # its first producer is still running, are both carried out while that producer runs -- not once it ends.
+            # MEFP's iterations took 90 to 120 seconds; this producer takes up to 20.
+            waiting = spawn("app", scratch, "while :; do sleep 1; done # waiting-740")
+            later = spawn("app", scratch, "while :; do sleep 1; done # later-740")
+            passes(10)  # both recorded
+            waiting_id = (leases().get(waiting[0]) or {}).get("id")
+            later_id = (leases().get(later[0]) or {}).get("id")
+            fixture.post_json(base, "/api/tickets/actions/interrupt_lease",
+                              {"lease": waiting_id, "reason": "pending before the pass"}, caller="director")
+            slow: dict = {}
+            first_producer = nl.quota_hold.run
+
+            def slow_producer(listener_, conn_) -> None:
+                first_producer(listener_, conn_)
+                slow["began"] = began = time.time()
+                while time.time() - began < 20 and not ("waiting_gone" in slow and "later_gone" in slow):
+                    if "later_asked" not in slow and time.time() - began >= 2:
+                        fixture.post_json(base, "/api/tickets/actions/interrupt_lease",
+                                          {"lease": later_id, "reason": "asked during the pass"}, caller="director")
+                        slow["later_asked"] = time.time()
+                    for name, proc in (("waiting_gone", waiting), ("later_gone", later)):
+                        if name not in slow and not alive(*proc):
+                            slow[name] = time.time()
+                    time.sleep(0.1)
+                slow["ended"] = time.time()
+
+            nl.quota_hold.run = slow_producer
+            try:
+                one_pass()
+            finally:
+                nl.quota_hold.run = first_producer
+            passes(2)
+            seen["slow_pass"] = {
+                "recorded": bool(waiting_id and later_id), "alive": [alive(*waiting), alive(*later)],
+                # How long after its request each stopped, while the producer ran; None: not while it ran.
+                "waiting_after": round(slow["waiting_gone"] - slow["began"], 1) if "waiting_gone" in slow else None,
+                "later_after": round(slow["later_gone"] - slow["later_asked"], 1) if "later_gone" in slow else None,
+                "producer_ran": round(slow.get("ended", 0) - slow.get("began", 0), 1),
+                "rows": sql(f"SELECT string_agg(state || '|' || (interrupt->>'result'), ' ' ORDER BY id) FROM "
+                            f"ticket_board.execution_leases WHERE id IN ({waiting_id or 0}, {later_id or 0});")}
             seen["pass_failures"] = sorted(set(failures))
             # What the board kept: the lease rows, the status a Director reads, every notice sent or waiting, the trace.
             kept = {"leases": sql("SELECT coalesce(string_agg(command, ' | '), '') FROM ticket_board.execution_leases;"),
@@ -631,6 +721,23 @@ def candidate(after: dict) -> None:
     check(len(gone["told_app"]) == 2 and any("it loops on PGU-700" in m for m in gone["told_app"]),
           f"App is told once, after, who stopped it and why: {gone['told_app']}")
 
+    unseen = after["unseen_pane"]
+    check(unseen["recorded"] and not unseen["alive"] and unseen["stopped_after"] < 8
+          and unseen["row"] == "interrupted|done|SIGINT; it ended",
+          f"SYRD-740: a command whose pane cannot be seen is still interrupted from its record, within seconds, and its "
+          f"lease reconciled: {unseen}")
+    left = after["left_pane"]
+    check(left["recorded"] and left["member"] and left["open_while_alive"] in ("running", "stale")
+          and not left["member_alive"] and left["row"] == "interrupted|SIGINT, then SIGTERM; it ended",
+          f"SYRD-740: a command whose leader exited, leaving its member outside the pane, is not ended while the member "
+          f"runs, and is still interrupted by its session's number: {left}")
+    slow = after["slow_pass"]
+    check(slow["recorded"] and slow["alive"] == [False, False]
+          and all(after_ is not None and after_ < 4 for after_ in (slow["waiting_after"], slow["later_after"]))
+          and slow["producer_ran"] < 15
+          and slow["rows"] == "interrupted|SIGINT; it ended interrupted|SIGINT; it ended",
+          f"SYRD-740: an interrupt pending when an iteration starts, and one asked for during its first producer, are "
+          f"carried out while that producer still runs, within seconds: {slow}")
     check(after.get("pass_failures") == [], f"the lease pass never failed: {after.get('pass_failures')}")
     check(all(found == [] for found in after["secrets_kept"].values())
           and "bash -c [redacted]" in after["masked_commands"]

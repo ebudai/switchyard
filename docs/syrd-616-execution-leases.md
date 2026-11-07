@@ -131,12 +131,36 @@ Ended leases are kept a week.
 
   The alert is deduplicated in the database, so a restarted listener does not
   repeat it.
-- **Interrupt.** The Director's interrupt is carried out in steps across
-  passes, never waiting inside one: SIGINT, then SIGTERM, then SIGKILL,
-  10 s apart. The signals go to the process groups of that lease's session
-  only, after checking its leader still has the recorded start tick. The role
-  is then told once who stopped it and why. A wrapped command also prints it
-  and exits 130.
+- **Interrupt.** The Director's interrupt is carried out in steps, never
+  waiting inside one: SIGINT, then SIGTERM, then SIGKILL, 10 s apart. The
+  signals go to the process groups of that lease's session only. The role is
+  then told once who stopped it and why. A wrapped command also prints it and
+  exits 130.
+
+  Since SYRD-740, the interrupt works from the lease's own record, not from
+  what is under a pane. A watch on a thread and database connection of its own
+  looks every second for as long as the listener listens, whichever pass the
+  listener is in, so a request is acted on within about a second. The listener
+  also looks before every delivery, and one look runs at a time.
+  - **Why it moved.** It used to be a step of the role pass, which runs once an
+    iteration after the other producer passes. MEFP's busy iterations were 90
+    to 120 seconds long, so the first signal waited for a whole iteration, and
+    each later step waited for another. A command
+    the pass could not find under its pane was never signalled at all: its
+    tmux pane did not answer, or its leader had exited and left its member
+    outside the pane. MEFP's lease 33 was closed "no signal; it ended" after
+    the Director had stopped its group by hand.
+  - **Which session it signals.** The session is the recorded leader's while
+    the leader still has its recorded start tick. Once the leader has exited,
+    it is the members still carrying the leader's number as their session.
+    The kernel does not reuse that number while they live. A different process
+    with the recorded number is not the lease's, and gets no signal. An exited
+    process waiting to be reaped counts as gone.
+  - **When it ends.** When nothing of the session is left, the lease ends,
+    saying what it was sent: "SIGINT, then SIGTERM; it ended".
+- **Ended means gone.** A lease ends as exited only when its process is gone,
+  by the same identity. A lease whose command has left its pane's tree but
+  still runs stays open, so the Director can still interrupt it.
 
 ### The Director's commands
 

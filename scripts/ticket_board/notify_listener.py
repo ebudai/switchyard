@@ -756,7 +756,7 @@ WHERE (r.definition->>'active')::boolean
         while not self.stop_event.is_set():
             if max_notifications is not None and self.delivered_count >= max_notifications:
                 break
-            row = self._claim_notification(conn)
+            execution_lease_pass.carry_out_interrupts(self, conn); row = self._claim_notification(conn)  # SYRD-740: and between deliveries
             if row is None:
                 break
             notification_id, ticket_id, target_role, message, payload, attempts = row
@@ -1121,7 +1121,7 @@ WHERE (r.definition->>'active')::boolean
 
     def listen_once(self, *, max_notifications: int | None = None) -> int:
         delivered_before = self.delivered_count
-        with self.connector(self.conninfo, **self._connector_kwargs()) as conn:
+        with self.connector(self.conninfo, **self._connector_kwargs()) as conn, execution_lease_pass.interrupt_watch(self):  # SYRD-740
             conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(self.channel)))
             self.logger.info("LISTEN %s established", self.channel)
             self._log_missing_hook_state()

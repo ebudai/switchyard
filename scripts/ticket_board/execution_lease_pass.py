@@ -22,11 +22,26 @@ any notice could start a turn (SYRD-589).
   (`background_child.origins`), so a stale command holds no later delivery.
 * **Clearing.** A new turn clears an alert; an exit ends the lease and clears
   its alert; an extension or an interrupt request clears it in the database.
-* **Interrupt.** The Director's request is carried out in steps across passes,
-  never waiting inside one: SIGINT, then SIGTERM, then SIGKILL `INTERRUPT_GRACE
-  _SECONDS` apart, to the process groups of the lease's session only, after
-  checking its leader is still the process recorded. The role is told once,
+* **Interrupt.** The Director's request is carried out by `carry_out_interrupts`,
+  in steps, never waiting inside one: SIGINT, then SIGTERM, then SIGKILL
+  `INTERRUPT_GRACE_SECONDS` apart, to the process groups of the lease's
+  session only. It works from the lease's own record, not from what is under a
+  pane. `interrupt_watch` runs it on a thread of its own, on its own
+  connection, every `INTERRUPT_LOOK_EVERY_SECONDS` for as long as the listener
+  listens, whichever pass the listener is in; the listener also runs it before
+  every delivery. A role pass runs once an iteration, and a busy iteration took
+  minutes, so the first signal went out a pass after a request, and each step
+  one more pass after that. A command no longer found under its pane was never
+  signalled at all: MEFP's lease 33 was closed "no signal; it ended" once the
+  Director had stopped it by hand (SYRD-740). The session is the recorded
+  leader's while the leader still has its recorded start tick, or, once the
+  leader is gone, the members still carrying its number as their session. That
+  number cannot be reused while they live. Otherwise there is nothing left to
+  signal, and the lease ends, saying what it was sent. The role is told once,
   after, with the reason.
+* **What ended.** A lease ends as exited only when its process is gone, by the
+  same identity. One that has left its pane's tree but still runs stays open,
+  so it can still be interrupted.
 
 The pane's text is never read. Never fatal: a failure is logged, and the pass
 goes on.
@@ -34,11 +49,13 @@ goes on.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
+import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from psycopg.types.json import Jsonb
 
@@ -51,6 +68,10 @@ OBSERVE_EVERY_SECONDS = 30.0
 #: The wait between the steps of the Director's interrupt.
 INTERRUPT_GRACE_SECONDS = 10.0
 INTERRUPT_STEPS = (("requested", "int", signal.SIGINT), ("int", "term", signal.SIGTERM), ("term", "kill", signal.SIGKILL))
+#: How often the interrupt watch looks, whatever the listener is doing; before a delivery it looks at most this often too.
+INTERRUPT_LOOK_EVERY_SECONDS = 1.0
+#: How long the end of a listen waits for the interrupt watch to finish the step it is in.
+INTERRUPT_WATCH_JOIN_SECONDS = 30.0
 PRUNE_EVERY_SECONDS = 3600.0
 #: A hard deadline is the wrapper's to enforce; only a command still running this long after it means the wrapper failed.
 HARD_SLACK_SECONDS = 60.0
@@ -233,12 +254,9 @@ def _role_pass(listener: Any, conn: Any, gate: Any, nl: Any, role: str, target: 
             continue
         told += _decide(conn, row, holder, role, turn, terminal, directory, table, proc_root, now)
     for key, row in open_leases.items():
-        if key not in holders:
-            interrupt = row.get("interrupt") or {}
-            if interrupt:
-                _finish_interrupt(conn, row, role, terminal, "it ended")
-            else:
-                _one(conn, "SELECT ticket_board.end_execution_lease(%s, 'exited', %s)", (row["id"], "the process exited"))
+        # Not under the pane is not gone: an interrupt is carried out, and a lease ended, by its own identity (SYRD-740).
+        if key not in holders and not row.get("interrupt") and lease_session(row, table, proc_root) is None:
+            _one(conn, "SELECT ticket_board.end_execution_lease(%s, 'exited', %s)", (row["id"], "the process exited"))
             seen_at.pop(f"{role}:{key}", None)
     return told
 
@@ -247,8 +265,7 @@ def _decide(conn: Any, row: dict[str, Any], holder: background_child.Holder, rol
             terminal: set[str], directory: Path, table: list, proc_root: Path, now: float) -> int:
     lease_id = int(row["id"])
     if row.get("interrupt"):
-        _step_interrupt(conn, row, holder, role, terminal, directory, table, proc_root, now)
-        return 0
+        return 0  # carry_out_interrupts' (SYRD-740)
     ticket = _text(row.get("ticket_id"))
     if ticket and _text(row.get("state")) != "stale":
         current, found = still_role_work(conn, role, ticket, terminal)
@@ -278,34 +295,149 @@ def _decide(conn: Any, row: dict[str, Any], holder: background_child.Holder, rol
                                     (lease_id, anchor, what))))
 
 
+def lease_session(row: dict[str, Any], table: list, proc_root: Path) -> int | None:
+    """The session a lease's process still runs in, by the lease's own record, or None when nothing of it is left.
+
+    Its leader, while it is still the process recorded (the same start tick). Once the leader is gone, the members
+    that still carry its number as their session: the kernel does not reuse the number while they live. A process
+    that now has the leader's number with another start tick is another process, and nothing is left of the lease's.
+    One that has exited and waits to be reaped counts as gone: its parent, not the lease, has to answer for it.
+    """
+    pid = int(row["pid"])
+    leader = next((entry for entry in table if int(entry[0]) == pid), None)
+    if leader is not None and not _exited(proc_root, pid):
+        if len(leader) > 3 and lease.start_ticks(pid, proc_root) == int(row["start_ticks"]):
+            return int(leader[3])
+        return None
+    return pid if any(len(entry) > 3 and int(entry[3]) == pid and not _exited(proc_root, int(entry[0]))
+                      for entry in table) else None
+
+
+def _exited(proc_root: Path, pid: int) -> bool:
+    """Whether `pid` has exited and is only waiting to be reaped: a zombie runs nothing, and can be sent nothing."""
+    try:
+        stat = (proc_root / str(pid) / "stat").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return True
+    return stat[stat.rfind(")") + 2:stat.rfind(")") + 3] in ("Z", "X")
+
+
+def carry_out_interrupts(listener: Any, conn: Any) -> int:
+    """Carry each requested interrupt one step further, from the lease's own record; returns how many moved on.
+
+    Called every second by `interrupt_watch`, whatever pass the listener is in, and before every delivery, at most
+    once a second and by one thread at a time, so a request is acted on within moments however long a pass takes,
+    and whether or not the command is still found under its role's pane (SYRD-740). Never fatal.
+    """
+    gate = getattr(listener.activity_gate, "__self__", None)
+    if gate is None or not hasattr(gate, "process_table_reader"):
+        return 0
+    one_at_a_time = listener.__dict__.setdefault("_execution_interrupts_lock", threading.Lock())
+    if not one_at_a_time.acquire(blocking=False):
+        return 0  # the other thread is carrying them out now
+    now = time.time()
+    moved = 0
+    try:
+        if now - listener.__dict__.get("_execution_interrupts_looked", 0.0) < INTERRUPT_LOOK_EVERY_SECONDS:
+            return 0
+        listener._execution_interrupts_looked = now
+        if not _present(listener, conn):
+            return 0
+        rows = _rows(conn, "SELECT * FROM ticket_board.execution_leases WHERE ended_at IS NULL AND interrupt IS NOT NULL "
+                           "ORDER BY id")
+        if not rows:
+            return 0
+        terminal = listener.activity_hold._terminal_states()
+        table = list(gate.process_table_reader())
+        proc_root = Path(gate.proc_root)
+        directory = lease.lease_dir(Path(gate.state_store.state_dir))
+        for row in rows:
+            moved += _step_interrupt(conn, row, _text(row["role"]), terminal, directory, table, proc_root, now)
+    except Exception as exc:  # The watch is never worth a pass.
+        listener.logger.warning("Execution lease interrupt failed: %s", exc)
+    finally:
+        one_at_a_time.release()
+    return moved
+
+
+@contextlib.contextmanager
+def interrupt_watch(listener: Any) -> Iterator[threading.Thread | None]:
+    """While the listener listens, carry out requested interrupts every second, on a thread and connection of their own.
+
+    An interrupt carried out only between the listener's passes waits for every producer pass, and on MEFP an iteration
+    took 90 to 120 seconds (SYRD-740). This watch does not wait for any of them. It needs the listener's real activity
+    gate, as `carry_out_interrupts` does; without one there is nothing to watch, and no thread is started.
+    """
+    gate = getattr(listener.activity_gate, "__self__", None)
+    if gate is None or not hasattr(gate, "process_table_reader"):
+        yield None
+        return
+    done = threading.Event()
+
+    def close(conn: Any) -> None:
+        if conn is not None:
+            with contextlib.suppress(Exception):
+                conn.close()
+
+    def watch() -> None:
+        conn = None
+        try:
+            while not done.is_set() and not listener.stop_event.is_set():
+                try:
+                    if conn is None or getattr(conn, "closed", False) or getattr(conn, "broken", False):
+                        close(conn)
+                        conn = None
+                        conn = listener.connector(listener.conninfo, **listener._connector_kwargs())
+                    carry_out_interrupts(listener, conn)
+                except Exception as exc:  # A lost connection is opened again at the next look.
+                    listener.logger.warning("Execution lease interrupt watch failed: %s", exc)
+                    close(conn)
+                    conn = None
+                done.wait(INTERRUPT_LOOK_EVERY_SECONDS)
+        finally:
+            close(conn)
+
+    thread = threading.Thread(target=watch, name="ticket-board-execution-interrupts", daemon=True)
+    thread.start()
+    try:
+        yield thread
+    finally:
+        done.set()
+        thread.join(INTERRUPT_WATCH_JOIN_SECONDS)
+
+
 def _session_groups(table: list, session: int, proc_root: Path) -> set[int]:
     return {background_child._process_group(proc_root, int(row[0])) for row in table
             if len(row) > 3 and int(row[3]) == session} - {0}
 
 
-def _step_interrupt(conn: Any, row: dict[str, Any], holder: background_child.Holder, role: str, terminal: set[str],
-                    directory: Path, table: list, proc_root: Path, now: float) -> None:
+def _step_interrupt(conn: Any, row: dict[str, Any], role: str, terminal: set[str], directory: Path, table: list,
+                    proc_root: Path, now: float) -> int:
     interrupt = dict(row["interrupt"])
     stage = _text(interrupt.get("stage"))
+    session = lease_session(row, table, proc_root)
+    groups = _session_groups(table, session, proc_root) if session is not None else set()
+    if not groups:
+        _finish_interrupt(conn, row, role, terminal,
+                          "its leader was gone before any signal" if stage == "requested" else "it ended")
+        return 1
     if stage != "requested" and now - _epoch(interrupt.get("stage_at")) < INTERRUPT_GRACE_SECONDS:
-        return
+        return 0
     step = next(((after, sig) for before, after, sig in INTERRUPT_STEPS if before == stage), None)
     if step is None:
-        return  # SIGKILL was sent; the lease ends when the session is gone
-    if lease.start_ticks(holder.pid, proc_root) != int(row["start_ticks"]):
-        _finish_interrupt(conn, row, role, terminal, "its leader was gone before any signal")
-        return
+        return 0  # SIGKILL was sent; the lease ends when the session is gone
     if stage == "requested":
-        lease.mark_interrupt(directory, holder.session, int(row["start_ticks"]),
+        lease.mark_interrupt(directory, session, int(row["start_ticks"]),
                              actor=_text(interrupt.get("requested_by")) or "Director", reason=_text(interrupt.get("reason")))
     after, sig = step
-    for pgid in _session_groups(table, holder.session, proc_root):
+    for pgid in groups:
         try:
             os.killpg(pgid, sig)
         except (ProcessLookupError, PermissionError):
             pass
     _one(conn, "SELECT ticket_board.record_execution_lease_interrupt(%s, %s, %s, NULL, NULL)",
          (row["id"], after, signal.Signals(sig).name))
+    return 1
 
 
 def _finish_interrupt(conn: Any, row: dict[str, Any], role: str, terminal: set[str], how: str) -> None:

@@ -7,10 +7,15 @@ decision instead, kept in that board's own root-owned registry record (`tenant_r
 `switchyard upgrade <slug> --only accept-reports`); nothing a tenant writes can make a board the default.
 
 - `report_boards` lists the registered boards a tenant could report to, read as root's records name them;
-- `choose_report_board` is `switchyard new`'s decision, made before anything is created: the one declared
-  board, an operator's explicit choice, an explicit opt-out, or -- when no board is registered at all --
-  none available. Two candidates are never chosen between silently, and a board root has not declared is
-  never offered as one: with none or several declared, `new` stops with the repair (SYRD-686);
+- `choose_report_board` is `switchyard new`'s decision, made before its role questions and before anything is
+  created: the one declared board, an operator's explicit choice, an explicit opt-out, or -- when no board is
+  registered at all -- the new board itself, as the host's receiver (SYRD-742). Two candidates are never chosen
+  between silently, and a board root has not declared is never offered as one: with none or several declared,
+  `new` stops with the repair (SYRD-686);
+- `declare_host_receiver` carries that last decision out once the first board answers: root's declaration, as
+  `--only accept-reports` makes it, so every later `new` on the host connects to it with no other command. A
+  receiver declared meanwhile is never replaced: every declaration is written under one host-wide lock
+  (`declarations_held`), and this one only if, under it, no other board is declared;
 - `record_report_decision` keeps that decision in root's provisioning directory, so `resume-provision`
   honours it after an interrupted `new`;
 - `record_report_outcome` writes what became of it into the tenant's root-owned registry record
@@ -28,6 +33,8 @@ by `upstream_report.refresh_upstream_report_credential`, into the tenant's owner
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import http.client
 import json
 import os
@@ -54,6 +61,9 @@ CONNECTED = "connected"
 FAILED = "failed"
 OPTED_OUT = "opted-out"
 UNAVAILABLE = "unavailable"
+#: `new`'s decision for the first board on a host: it is declared the host's report receiver (SYRD-742).
+RECEIVER = "receiver"
+FIRST_BOARD = "the first board on this host"
 
 PROBE_SECONDS = 3.0
 
@@ -251,9 +261,10 @@ def choose_report_board(
 
     Named (`--upstream-report-url`, `--upstream-report-board`): it must be a registered board other than
     `slug`. `--no-upstream-report`: an explicit opt-out. Otherwise the one board root declared; with no
-    other board registered, none is available. Anything else is refused, asked or not, with the repair: every
-    tenant's board mints a report token and answers at its URL, so offering each as a choice presented
-    ordinary tenant boards as report receivers (SYRD-686).
+    other board registered, `slug` is the host's first board and is declared its receiver once it answers
+    (SYRD-742). Anything else is refused, asked or not, with the repair: every tenant's board mints a report
+    token and answers at its URL, so offering each as a choice presented ordinary tenant boards as report
+    receivers (SYRD-686).
     """
     url = upstream_report_url.strip().rstrip("/")
     named = upstream_report_board.strip()
@@ -284,7 +295,9 @@ def choose_report_board(
         return ReportChoice(CONNECT, board=default.slug, url=default.url,
                             source="the host's declared report board")
     if not boards:
-        return ReportChoice(UNAVAILABLE, source="no other board is registered on this host")
+        # The host's first board: nothing registered could take its reports, and it is the board that takes the
+        # host's. Said before the confirmation, and declared by root once it answers (SYRD-742).
+        return ReportChoice(RECEIVER, board=slug, source=FIRST_BOARD)
     raise SystemExit(
         f"switchyard: {slug} needs a decision about Switchyard reports before it is created: {why}, and a board "
         f"root has not declared is not offered as one. {undecided_repair(boards, registry_dir=registry_dir)}, then run this again; or re-run "
@@ -294,6 +307,11 @@ def choose_report_board(
 
 def choice_summary(slug: str, choice: ReportChoice, *, registry_dir: Path | None = None) -> str:
     """The line `switchyard new` says before its confirmation, and again when it is done."""
+    if choice.state == RECEIVER:
+        return (f"switchyard: Switchyard reports: {slug} is {FIRST_BOARD}, so it is declared the board that takes "
+                f"this host's tenant reports, once it answers; every later `switchyard new` on this host connects to "
+                f"it with no other command. It files to no board itself. Re-run with --no-upstream-report to "
+                f"declare nothing")
     if choice.state == CONNECT:
         return (f"switchyard: Switchyard reports: {slug} files them to {choice.board} at {choice.url} "
                 f"({choice.source}), connected before any pane starts")
@@ -350,7 +368,7 @@ def recorded_report_decision(slug: str) -> ReportChoice | None:
     if document.get("schema") != DECISION_SCHEMA or document.get("project") != slug:
         return None
     state = str(document.get("state") or "")
-    if state not in (CONNECT, OPTED_OUT, UNAVAILABLE):
+    if state not in (CONNECT, OPTED_OUT, UNAVAILABLE, RECEIVER):
         return None
     return ReportChoice(state, board=str(document.get("board") or ""), url=str(document.get("url") or ""),
                         source=str(document.get("source") or ""))
@@ -597,6 +615,10 @@ def connect_chosen_report_board(
     from scripts import team_launcher as launcher
 
     slug = config.project
+    if choice.state == RECEIVER:
+        summary = declare_host_receiver(config, registry_dir=registry_dir, print_func=print_func)
+        print_func(summary)
+        return config, summary
     if choice.state != CONNECT:
         record_report_outcome(slug, choice.state, detail=choice.source, registry_dir=registry_dir,
                               print_func=print_func)
@@ -639,7 +661,8 @@ def resume_report_connection(
     """`resume-provision`'s report step, before it starts any role: what `new` decided, carried out.
 
     A recorded outcome other than a failure is left as it is. Otherwise root's record of `new`'s decision
-    is honoured. With none, nothing is chosen: `new` keeps it before it creates anything, so its absence is a
+    is honoured; a host's first board records no outcome of its own, so its declaration is made here if `new`
+    could not make it, and made again it writes nothing (SYRD-742). With none, nothing is chosen: `new` keeps it before it creates anything, so its absence is a
     provision this release did not start, and the host's default now is not what its operator chose then --
     an opt-out or another board would be silently reversed (Audit of 265dbd9b). It is said, with the repair.
     """
@@ -660,16 +683,98 @@ def resume_report_connection(
 # ------------------------------------------------------------------ the declaration
 
 
+def declare_host_receiver(
+    config: ProjectConfig,
+    *,
+    registry_dir: Path | None = None,
+    home_for_user: Callable[[str], Path | None] | None = None,
+    wait: Callable[[str], bool] | None = None,
+    print_func: Callable[[str], None] = print,
+) -> str:
+    """The first board on a host declared the host's report receiver, as root (SYRD-742): the summary line.
+
+    `switchyard new` decided it before anything existed, because nothing else was registered. It is carried out
+    as `--only accept-reports` does it -- the board must answer as itself, and gets its key for project-bound
+    credentials -- once the new board has started. A board declared by then is never replaced: whether one is, is
+    decided under the declarations' lock as this one is written, so one declared while this board started or was
+    validated is seen (Audit of baafa275). This one is then left undeclared, and said so. A declaration that cannot be made yet is said with the one command that makes it;
+    `resume-provision` tries again.
+    """
+    slug = config.project
+
+    def not_replaced(others: Sequence[str]) -> str:
+        return (f"switchyard: WARNING: {slug} was to be this host's report receiver, but {', '.join(others)} "
+                f"{'is' if len(others) == 1 else 'are'} declared already, and a declared receiver is never "
+                f"replaced: {slug} was not declared, takes no tenant reports, and files to none. Connect it with "
+                f"`{repair_command(slug)}`.")
+
+    others = declared_others(slug, registry_dir=registry_dir)
+    if others:  # said at once; it is decided again, under the declarations' lock, as it is written
+        return not_replaced(others)
+    if wait is None:
+        from scripts.board_tab import wait_for_board as wait
+    url = next((b.url for b in report_boards(registry_dir=registry_dir) if b.slug == slug), "")
+    if url:
+        wait(url + "/")  # just started: given its start-up before it is asked whether it answers as itself
+    status = declare_report_board(config, accept=True, sole=True, registry_dir=registry_dir,
+                                  home_for_user=home_for_user, print_func=print_func)
+    if status == NOT_SOLE:
+        return not_replaced(declared_others(slug, registry_dir=registry_dir))
+    if status != 0:
+        return (f"switchyard: WARNING: {slug} is not yet this host's report receiver, so later `switchyard new` "
+                f"runs refuse until it is. Declare it, once it answers, with `{declare_command(slug)}`.")
+    return (f"switchyard: Switchyard reports: {slug} is this host's report receiver, declared by root; every later "
+            f"`switchyard new` on this host connects to it with no other command")
+
+
+@contextlib.contextmanager
+def declarations_held(registry_dir: Path | None = None):
+    """The host's report declarations, held: an exclusive lock on root's registry directory itself.
+
+    Every write of a board's declaration is made under it, so what a writer reads of the others' declarations is
+    still so when it writes its own. A first board waits for its start-up and is validated before it takes it,
+    and another setup could declare a receiver in that while (Audit of baafa275, SYRD-742). The lock is the
+    directory's own, so nothing is added to it; it is released when its descriptor is closed, however the
+    holder ends.
+    """
+    from scripts import team_launcher as launcher
+
+    directory = registry_dir or launcher.switchyard_registry_dir()
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def declared_others(slug: str, *, registry_dir: Path | None = None) -> list[str]:
+    """Every registered board but `slug` whose root-owned record declares it takes tenant reports."""
+    from scripts import team_launcher as launcher
+
+    return sorted(entry.slug for entry in launcher._registry_project_entries(registry_dir)
+                  if entry.slug != slug and is_declared(_registry_record(entry.slug, registry_dir)))
+
+
+#: `declare_report_board`'s answer when `sole` was asked and another board is declared: nothing was written.
+NOT_SOLE = 2
+
+
 def declare_report_board(
     config: ProjectConfig,
     *,
     accept: bool,
     dry_run: bool = False,
+    sole: bool = False,
     registry_dir: Path | None = None,
     home_for_user: Callable[[str], Path | None] | None = None,
     print_func: Callable[[str], None] = print,
 ) -> int:
-    """`switchyard upgrade <slug> --only accept-reports | refuse-reports`: root's declaration, nothing else."""
+    """`switchyard upgrade <slug> --only accept-reports | refuse-reports`: root's declaration, nothing else.
+
+    `sole`: declare it only if no other board is declared, decided under `declarations_held` as it is written --
+    a host's first board (SYRD-742); `NOT_SOLE` when another is, with nothing written.
+    """
     slug = config.project
     if accept:
         board = next((b for b in report_boards(registry_dir=registry_dir) if b.slug == slug), None)
@@ -695,11 +800,21 @@ def declare_report_board(
         print_func(f"switchyard: would record that {slug} {'takes' if accept else 'does not take'} tenant reports; "
                    "nothing written")
         return 0
-    problem = _write_record_key(slug, SINK_KEY, {"accepted": True} if accept else None, registry_dir=registry_dir)
+    try:
+        with declarations_held(registry_dir):
+            others = declared_others(slug, registry_dir=registry_dir)
+            if sole and accept and others:
+                print_func(f"switchyard: {slug} was not declared to take tenant reports: {', '.join(others)} "
+                           f"{'is' if len(others) == 1 else 'are'} declared already, and a declared receiver is "
+                           "never replaced. Nothing was changed.")
+                return NOT_SOLE
+            problem = _write_record_key(slug, SINK_KEY, {"accepted": True} if accept else None,
+                                        registry_dir=registry_dir)
+    except OSError as exc:
+        problem = f"this host's report declarations cannot be held ({exc})"
     if problem:
         print_func(f"switchyard: {slug}'s declaration was not recorded: {problem}")
         return 1
-    others = [b.slug for b in report_boards(exclude=slug, registry_dir=registry_dir) if b.declared]
     print_func(f"switchyard: {slug} {'takes' if accept else 'does not take'} reports from this host's other tenants"
                + ("; `switchyard new` connects every new tenant to it by default" if accept and not others else "")
                + (f"; with {', '.join(others)} also declared, `switchyard new` refuses until one is named"

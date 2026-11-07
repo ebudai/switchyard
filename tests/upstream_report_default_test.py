@@ -266,17 +266,17 @@ def test_no_single_default_is_never_guessed() -> None:
             check(h.tree() == before, f"{label}: and nothing written: {said}")
 
 
-def test_nothing_registered_is_unavailable_not_refused() -> None:
+def test_nothing_registered_is_not_refused() -> None:
     from scripts import upstream_report_sinks as sinks
 
     with host() as h:
         (h.registry / "mefp.json").unlink()
         choice = sinks.choose_report_board("pie", registry_dir=h.registry)
-        check(choice.state == sinks.UNAVAILABLE, f"no other board at all: unavailable, and creation goes on: {choice}")
+        # SYRD-742: the host's first board is its receiver (tests/host_report_receiver_test.py), not unavailable.
+        check(choice.state == sinks.RECEIVER, f"no other board at all: not refused, and creation goes on: {choice}")
         summary = sinks.choice_summary("pie", choice, registry_dir=h.registry)
-        check(summary.startswith("switchyard: WARNING: pie will not be able to file Switchyard reports")
-              and "`sudo switchyard upgrade pie --only upstream-report`" in summary,
-              f"with the consequence and the repair: {summary}")
+        check(summary.startswith("switchyard: Switchyard reports: pie is the first board on this host"),
+              f"and said: {summary}")
 
 
 def test_an_explicit_choice_must_be_a_registered_board_not_its_own() -> None:

@@ -327,12 +327,13 @@ def test_the_seams_and_nothing_bound_read_through_the_launcher() -> None:
     summary = [i for i, s in enumerate(fn.body) if "router_onboarding.summary_line(" in ast.unparse(s)]
     # SYRD-624: and the documentation gate's, by its own module, imported right where it is used.
     gate_summary = [i for i, s in enumerate(fn.body) if "documentation_onboarding.summary_line(" in ast.unparse(s)]
-    # SYRD-674: and where its reports go, decided by its own module, imported right where it is used.
+    # SYRD-674: and where its reports go, decided by its own module, imported right where it is used -- since
+    # SYRD-742 before the role questions, so ahead of Router's and the gate's summaries.
     report_choice = [i for i, s in enumerate(fn.body) if "upstream_report_sinks.choose_report_board(" in ast.unparse(s)]
     check(local == [(0, "from scripts import team_launcher as launcher"), (decided[0] + 1, "from scripts.desktop_access import validate_policy"),
+                    (report_choice[0] - 1, "from scripts import upstream_report_sinks"),
                     (summary[0] - 1, "from scripts import router_onboarding"),
-                    (gate_summary[0] - 1, "from scripts import documentation_onboarding"),
-                    (report_choice[0] - 1, "from scripts import upstream_report_sinks")]
+                    (gate_summary[0] - 1, "from scripts import documentation_onboarding")]
           and "validate_policy(" in ast.unparse(fn.body[decided[0] + 2]),
           f"the desktop validation is imported inside the phase, right after the policy is decided, then used: {local}")
 

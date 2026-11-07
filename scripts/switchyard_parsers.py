@@ -145,7 +145,9 @@ def _build_switchyard_new_parser() -> argparse.ArgumentParser:
         metavar="SLUG",
         help=(
             "the registered project whose board this project files reports to "
-            "(default: the host's one declared report board, else you are asked)"
+            "(default: the host's one declared report board; with no board registered yet, this project's own "
+            "board becomes the host's report receiver; otherwise refused before the role questions, with the "
+            "repair)"
         ),
     )
     parser.add_argument(

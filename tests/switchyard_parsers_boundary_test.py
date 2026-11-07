@@ -398,7 +398,10 @@ def test_the_launcher_reexports_the_twenty_one_and_builds_them_there() -> None:
 #: --upstream-report-token-file, and upgrade's --only gains accept-reports and refuse-reports. Applied to the
 #: baseline's record by rule, so nothing else about either parser can have moved.
 REPORT_PARSERS = {
-    "_build_switchyard_new_parser": "the host's one declared report board, else you are asked",
+    # SYRD-742: the first board on a host is its receiver, and an undecided host is refused before the questions.
+    "_build_switchyard_new_parser": ("the host's one declared report board; with no board registered yet, this "
+                                     "project's own board becomes the host's report receiver; otherwise refused "
+                                     "before the role questions, with the repair"),
     "_build_switchyard_upgrade_parser": "the URL or board already recorded, else the host's one declared report board",
 }
 #: SYRD-721: upgrade's narrow step also declares the report parent and issues ancestor credentials, and its

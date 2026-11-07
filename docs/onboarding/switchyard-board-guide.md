@@ -642,8 +642,18 @@ and the board it connects becomes the project's report parent.
 
   With exactly one board declared, `switchyard new` connects every new tenant to it
   before any pane starts, and says so before its confirmation and again at the end.
-- **No single declared board.** `switchyard new` refuses before creating anything and
-  names the repair:
+- **The first board on a host is its receiver.** When `switchyard new` runs on a host
+  with no board registered at all, the board it creates is declared the host's report
+  receiver, once it answers, as `--only accept-reports` would declare it. It says so
+  before its confirmation. Every later `switchyard new` on that host, by any user,
+  connects to it with no other command. It is done once per host: a receiver declared
+  in the meantime is never replaced, and running it again writes nothing.
+  `--no-upstream-report` declares nothing. If the new board does not answer in time,
+  `switchyard new` names the one command that finishes it, and `resume-provision` tries
+  again.
+- **No single declared board.** On a host that has boards but no single declared,
+  working receiver, `switchyard new` refuses right after its root check, before the role
+  questions and before creating anything, and names the repair:
   - with none declared, the `--only accept-reports` to run, naming a board only when
     root's own registry records show this host's tenants connected to that one board;
   - with several declared, the ones to choose between.

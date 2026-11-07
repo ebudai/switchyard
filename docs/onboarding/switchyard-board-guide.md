@@ -879,6 +879,14 @@ rotating workers means stopping some and starting others; the document is not ed
 persistent (non-ephemeral) implementer is routed by the Director and never pulls. The board
 never starts a worker, so claims never exceed the workers you run (SYRD-573).
 
+**Rework waits for its author.** Rework returned to a busy author waits in the ready stage,
+pinned to that author, and no other worker may claim it. If the author then holds nothing but
+cannot take it (stopped, or its provider held for quota), the board records that at once. Once
+it has lasted the policy's `idle_alert_seconds` while another worker sits idle, the Director is
+told once: who the author is, why it cannot take the ticket, and who is idle. Nothing is moved.
+Start the author to keep its conversation, or take the ticket out of the ready stage and route
+it to an idle worker (SYRD-736).
+
 **A package keeps its conversation.** On a pull board an ephemeral implementer normally starts
 each new ticket in a cleared conversation. A ticket that shares a parent hierarchy (`parent_id`,
 at any depth) with the ticket the same worker had just before continues that conversation

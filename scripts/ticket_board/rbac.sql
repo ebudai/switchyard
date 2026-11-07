@@ -577,6 +577,9 @@ GRANT EXECUTE ON FUNCTION ticket_board.note_director_capacity(jsonb, double prec
 GRANT EXECUTE ON FUNCTION ticket_board.record_director_capacity_attempt(bigint, integer, text, timestamptz)
     TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.director_capacity_status() TO ticket_board_service;
+-- SYRD-736: the listener reports pull-ready rework pinned to a worker that cannot take it.
+GRANT EXECUTE ON FUNCTION ticket_board.notify_pull_pinned_rework_strands(jsonb, jsonb, timestamptz)
+    TO ticket_board_listener;
 
 -- SYRD-668: last, after every grant above. The board's own principals are the
 -- role users this file creates and its service and listener, and nothing is

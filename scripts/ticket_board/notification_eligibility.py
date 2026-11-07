@@ -427,7 +427,8 @@ WHERE id = %s
         if kind in {"pull_idle_capacity", "ticket_context", "delivery_proof", "background_hold", "composer_hold",
                     "background_child", "blocked_pane", "uat_question", "execution_lease",
                     "provider_quota_hold", "invalid_user_wait", "audit_return_missing",
-                    "report_follow_up"}:  # SYRD-539, 540, 565, 557, 570, 583, 633, 629, 616, 644, 662, 673, 677
+                    "report_follow_up",
+                    "pull_pinned_rework"}:  # SYRD-539, 540, 565, 557, 570, 583, 633, 629, 616, 644, 662, 673, 677, 736
             return target_role == "director"
         # SYRD-725: the User's answer to an operator wait is the Director's, while a blocker it names stands.
         if kind == "operator_response":

@@ -100,15 +100,20 @@ def run(listener: Any, conn: Any) -> int:
         return 0
     claimed = 0
     idle: dict[str, str] = {}
+    unavailable: dict[str, str] = {}  # SYRD-736: why each claimant that is not idle capacity cannot take work
     eligibility: dict[str, str] = {}
     held = _held(listener, conn)
     for role in pull_claimant_pool(listener.workflow or {}):
         if role in held:
-            continue  # its provider is out of quota (SYRD-644): it cannot work a ticket, and is not idle capacity
+            # its provider is out of quota (SYRD-644): it cannot work a ticket, and is not idle capacity
+            unavailable[role] = "its provider is held for quota"
+            continue
         reason = eligibility[role] = why_not_eligible(gate, role)
         if reason:
             if reason not in NOT_RUNNING:
                 idle[role] = reason
+            else:
+                unavailable[role] = f"it is not running ({reason})"
             continue
         try:
             result = _scalar(conn.execute("SELECT ticket_board.claim_ready_ticket(%s)", (role,)).fetchone())
@@ -121,7 +126,7 @@ def run(listener: Any, conn: Any) -> int:
             claimed += 1
             listener.logger.info("Pull pickup: %s claimed %s", role, result.get("ticket"))
         elif result and result.get("reason") == "nothing ready":
-            idle[role] = "idle, nothing claimable"
+            idle[role] = "idle, nothing claimable"  # SYRD-736's SQL reads exactly this as able to take work
     session_context.passes(listener, conn, gate)  # SYRD-540: bind, confirm and restart-repair conversations
     try:
         demand_start.trigger(listener, conn, eligibility, NOT_RUNNING)  # SYRD-688: work no running worker took
@@ -132,4 +137,9 @@ def run(listener: Any, conn: Any) -> int:
                      (json.dumps(idle, sort_keys=True),))
     except Exception as exc:  # logged, never fatal to the pass
         listener.logger.warning("Pull idle-capacity check failed: %s", exc)
+    try:  # SYRD-736: rework pinned to a worker that cannot take it, told to the Director once it has waited
+        conn.execute("SELECT ticket_board.notify_pull_pinned_rework_strands(%s::jsonb, %s::jsonb, clock_timestamp())",
+                     (json.dumps(idle, sort_keys=True), json.dumps(unavailable, sort_keys=True)))
+    except Exception as exc:  # logged, never fatal to the pass
+        listener.logger.warning("Pinned-rework check failed: %s", exc)
     return claimed

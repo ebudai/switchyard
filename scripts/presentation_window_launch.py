@@ -176,6 +176,8 @@ def _launch_separate(
     output_path: Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
     process_launcher: Callable[..., Any] | None,
+    shown: Callable[[], set[str]] | None = None,
+    print_func: Callable[[str], None] | None = None,
 ) -> None:
     # The account that owns the sessions does not necessarily own a screen.
     # Naming it as the GUI user is what sent a launch at the owner's own
@@ -197,6 +199,16 @@ def _launch_separate(
     # desktop half needs, and the caller -- who owns both -- does the rest
     # (SYRD-90).
     if _hand_off_desktop_half(config, state, gui_user=gui_user):
+        return
+    # An ordinary launch asks, before this process opens a window itself, whether a terminal is showing these
+    # slots already: a launch over a project still on screen opened a second window beside it -- `sudo switchyard
+    # resume-provision test9` did, over the one `switchyard test9` had opened (SYRD-743). Only the launch asks:
+    # an explicit bootstrap is asked for a window, and gets one.
+    showing = shown() if shown is not None else set()
+    if showing:
+        (print_func or print)(
+            f"switchyard: {config.project}'s presentation window is already open ({len(showing)} terminal "
+            f"{'tab is' if len(showing) == 1 else 'tabs are'} showing its slots); not opening another")
         return
     # After the handoff: a caller that reached this process through the
     # tenant-control bridge was admitted by the very grant the tabs need, and

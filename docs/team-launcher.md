@@ -348,6 +348,24 @@ account to anyone.
 **Teardown** removes the sudoers rule, the grant and the staged helper, so a
 torn-down tenant leaves no part of its bridge behind.
 
+## One presentation window
+
+A launch opens a project's presentation window only when no terminal is showing
+it. Before this process would open the window itself, the launch asks the
+project's display slots, as their owner, which terminals are attached that
+presentation did not create. If any are, the window is already open: the launch
+re-points the slots as usual, says "presentation window is already open … not
+opening another", and leaves that window, its tabs and every worker session as
+they were. So `sudo switchyard resume-provision <slug>`, or another launch, over
+a project already on screen leaves exactly one window, whoever runs it: root,
+for a tenant another account owns, asks as that owner. With no window showing,
+the launch opens one, and the next launch opens none.
+
+Two things still open a window regardless:
+- `switchyard present bootstrap`, which is asked for one;
+- a launch through the tenant-control bridge, whose window is the caller's to
+  open, so it is handed back as before (SYRD-743).
+
 ## Who the presentation window runs as
 
 Nothing in a role presentation window runs as root.

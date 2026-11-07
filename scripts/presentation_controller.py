@@ -826,6 +826,10 @@ def launch_presentation(
             config_path=config_path,
             runner=runner,
             process_launcher=process_launcher,
+            # What shows these slots now, asked as their owner, whoever runs this: root for another account's
+            # tenant included (SYRD-743).
+            shown=lambda: external_presentation_clients(config, int(state["slot_count"]), runner=owner_runner),
+            print_func=print_func,
         )
     else:
         raise SystemExit(f"switchyard: unsupported presentation launch layout {layout!r}")

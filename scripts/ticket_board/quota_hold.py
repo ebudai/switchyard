@@ -33,7 +33,7 @@ import os
 import subprocess
 from typing import Any
 
-from . import provider_quota
+from . import provider_quota, provider_refusal
 
 GRACE_ENV = "TICKET_BOARD_QUOTA_HOLD_GRACE_SECONDS"
 RECHECK_ENV = "TICKET_BOARD_QUOTA_HOLD_RECHECK_SECONDS"
@@ -159,6 +159,8 @@ def run(listener: Any, conn: Any) -> dict[str, Any]:
                                     "FROM ticket_board.role_runtime_assignments "
                                     "WHERE process_pid IS NOT NULL").fetchall()
         }
+        # SYRD-672: a safety refusal holds its whole account first; a quota is a smaller matter.
+        provider_refusal.run(listener, conn, registrations)
         facts: dict[str, Any] = {}
         noted: dict[str, Any] = {}
         for role, target in sorted(gate.role_targets.items()):
@@ -221,7 +223,11 @@ def hold_delivery(listener: Any, conn: Any, notification_id: int, attempts: int,
     Asked at claim and again just before the send, like every other hold on
     delivery. A notice to the held role waits -- nothing about its work is
     cancelled -- and goes at the release, as the one fresh attempt.
+
+    A held provider account (SYRD-672) is asked first, and fails closed.
     """
+    if provider_refusal.hold_delivery(listener, conn, notification_id, attempts, kind, target_role, payload, phase):
+        return True
     if not getattr(listener, "_provider_quota_holds_present", False):
         return False
     try:

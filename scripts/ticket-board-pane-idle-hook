@@ -374,6 +374,43 @@ def _last_api_error(transcript_path: object) -> dict:
     return {}
 
 
+#: A provider's safety refusal (SYRD-672), carried across later writes so a listener that was down still sees it.
+#: Its classification and identity only: never the prompt, the response or the pane's text.
+REFUSAL_FIELD = "last_refusal"
+
+
+def _last_refusal(transcript_path: object) -> dict:
+    """Whether the turn's last assistant entry is a refusal (Claude Code: `stop_reason: "refusal"`), and which one."""
+    try:
+        path = Path(str(transcript_path))
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            handle.seek(max(size - TRANSCRIPT_TAIL_BYTES, 0))
+            tail = handle.read().decode("utf-8", errors="replace")
+    except (OSError, ValueError):
+        return {}
+    for line in reversed(tail.splitlines()):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict) or record.get("type") not in {"assistant", "user"}:
+            continue
+        message = record.get("message") if isinstance(record.get("message"), dict) else {}
+        if record.get("type") == "user" or message.get("stop_reason") != "refusal":
+            return {}  # the turn's last word was not a refusal
+        details = message.get("stop_details") if isinstance(message.get("stop_details"), dict) else {}
+        return {"evidence": str(record.get("uuid") or "")[:64], "category": str(details.get("category") or "")[:32],
+                "transcript_at": str(record.get("timestamp") or "")[:40]}
+    return {}
+
+
+def _refusal_record(source: str, payload: dict, refusal: dict) -> dict:
+    identity = _pane_root_identity(os.getpid())
+    return {**refusal, "source": source, "observed_at": time.time(), "session_id": str(payload.get("session_id") or "")[:128],
+            **({"pane_pid": identity[0], "pane_start_time": identity[1]} if identity else {})}
+
+
 def _record_provider_failure(state_dir: str | Path, target: str, source: str, payload: object) -> Path | None:
     """Add what ended the turn to the pane's record, leaving its state as it was (SYRD-644).
 
@@ -398,13 +435,17 @@ def _record_provider_failure(state_dir: str | Path, target: str, source: str, pa
     # keeps the handling it had.
     if payload.get("error") == "rate_limit" and quota.get("status") == "rejected":
         record.update({"state": "idle", "source": source, "updated_at": time.time()})
+    refusal = _last_refusal(payload.get("transcript_path"))
+    if refusal.get("evidence"):
+        record[REFUSAL_FIELD] = _refusal_record(source, payload, refusal)
     record["provider_error"] = {
         "source": source,
         "error": str(payload.get("error") or "unknown")[:64],
         "observed_at": time.time(),
         "session_id": str(payload.get("session_id") or "")[:128],
         "quota": quota,
-        "message": " ".join(str(payload.get("last_assistant_message") or "").split())[:PROVIDER_MESSAGE_CHARS],
+        # A refusal's words are the refused exchange's: none are kept (SYRD-672).
+        "message": "" if refusal else " ".join(str(payload.get("last_assistant_message") or "").split())[:PROVIDER_MESSAGE_CHARS],
         **({"pane_pid": identity[0], "pane_start_time": identity[1]} if identity else {}),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -416,7 +457,7 @@ def _record_provider_failure(state_dir: str | Path, target: str, source: str, pa
 
 def _write_state(state_dir: str | Path, target: str, state: str, *, source: str = "",
                  background_work: dict | None = None, session_start: dict | None = None,
-                 checkout: dict | None = None, hermes_runs: dict | None = None) -> Path:
+                 checkout: dict | None = None, hermes_runs: dict | None = None, refusal: dict | None = None) -> Path:
     normalized_state = state.strip().lower()
     if normalized_state not in {"idle", "busy", "blocked"}:
         raise ValueError("pane hook state must be idle, busy, or blocked")
@@ -467,6 +508,12 @@ def _write_state(state_dir: str | Path, target: str, state: str, *, source: str 
         payload["last_checkout"] = checkout
     elif isinstance(previous, dict) and isinstance(previous.get("last_checkout"), dict):
         payload["last_checkout"] = previous["last_checkout"]
+    # The latest safety refusal, carried the same way (SYRD-672): the board keys its hold by the refusal's own
+    # identity, so the same record never holds an account twice and a listener that was down still sees it.
+    if refusal:
+        payload[REFUSAL_FIELD] = refusal
+    elif isinstance(previous, dict) and isinstance(previous.get(REFUSAL_FIELD), dict):
+        payload[REFUSAL_FIELD] = previous[REFUSAL_FIELD]
     # Which Hermes runs are in flight (SYRD-556). Every Hermes write passes it;
     # any other source has no Hermes runs to record.
     if hermes_runs is not None:
@@ -1160,9 +1207,11 @@ def main(argv: list[str] | None = None) -> int:
         # Read first: this turn end's input says whether the session is done or
         # paused on background work, and the state written must say which.
         payload = _read_stdin_json(timeout=args.stdin_timeout)
+        refusal = _last_refusal(payload.get("transcript_path")) if isinstance(payload, dict) else {}
         _write_state(state_dir, target, args.state, source=args.source,
                      background_work=_background_work(payload, args.source),
-                     checkout={**_checkout(payload), "at": time.time()})
+                     checkout={**_checkout(payload), "at": time.time()},
+                     refusal=_refusal_record(args.source, payload, refusal) if refusal.get("evidence") else None)
     elif _is_session_start_hook_source(args.source):
         # Read first: the conversation this SessionStart opened is recorded
         # with the state it writes (SYRD-540).

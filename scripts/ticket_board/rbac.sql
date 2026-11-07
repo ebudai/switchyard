@@ -616,4 +616,25 @@ BEGIN
 END;
 $strangers$;
 
+-- SYRD-672 (pgu1030): provider account holds.
+REVOKE ALL ON ticket_board.provider_account_holds FROM PUBLIC;
+REVOKE ALL ON ticket_board.provider_refusal_evidence FROM PUBLIC;
+REVOKE ALL ON SEQUENCE ticket_board.provider_account_holds_id_seq FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.role_account_runtime(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.role_account_hold(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.provider_account_hold_actor(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.begin_provider_account_hold(text, text, text, text, text, text, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.note_provider_refusal(text, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.hold_provider_account(text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.clear_provider_account_hold(text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.provider_account_hold_status() FROM PUBLIC;
+GRANT SELECT ON ticket_board.provider_account_holds TO ticket_board_service, ticket_board_listener;
+GRANT SELECT ON ticket_board.provider_refusal_evidence TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.role_account_runtime(text) TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.role_account_hold(text) TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.note_provider_refusal(text, jsonb) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.hold_provider_account(text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.clear_provider_account_hold(text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.provider_account_hold_status() TO ticket_board_service, ticket_board_listener;
+
 COMMIT;

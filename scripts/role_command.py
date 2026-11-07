@@ -223,6 +223,10 @@ def role_registers_runtime(role: RoleConfig) -> bool:
     return bool(socket_path) and str(role.env.get("TICKET_BOARD_PROCESS_AUTHORITY") or "") == "1"
 
 
+#: Claude Code's own switch for its refusal fallback (in its binary, 2.1.318; SYRD-672).
+CLAUDE_REFUSAL_FALLBACK_ENV = "CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK"
+
+
 def cli_command_for_role(
     role: RoleConfig,
     *,
@@ -242,6 +246,10 @@ def cli_command_for_role(
         "TICKET_BOARD_PANE_SESSION_DIR": str(session_dir.expanduser()),
     }
     env.update(hermes_env_for_role(role, session_dir=session_dir))
+    if launcher._command_name(role.cli[0]) == "claude":
+        # SYRD-672: Claude Code re-sends a refused request to another model on the same account unless told not to;
+        # a safety refusal is a circuit breaker, so nothing is ever sent again from the refusing pane by itself.
+        env[CLAUDE_REFUSAL_FALLBACK_ENV] = "1"
     if pane_state_dir is not None:
         env["TICKET_BOARD_PANE_STATE_DIR"] = str(pane_state_dir.expanduser())
     if session_id:

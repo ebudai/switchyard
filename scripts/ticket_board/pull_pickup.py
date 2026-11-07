@@ -75,14 +75,21 @@ def _scalar(row: Any) -> Any:
     return next(iter(row.values())) if isinstance(row, dict) else row[0]
 
 
-def _held(listener: Any, conn: Any) -> set[str]:
-    """Roles whose provider is held for quota now; empty on a board older than holds."""
+def _held(listener: Any, conn: Any) -> dict[str, str]:
+    """Roles whose provider is held now, each with why; empty on a board older than holds."""
     if not getattr(listener, "_provider_quota_holds_present", False):
-        return set()
-    rows = conn.execute("SELECT h.role FROM ticket_board.provider_quota_holds h "
-                        "WHERE ticket_board.role_provider_hold_is_current(h.role, clock_timestamp())").fetchall()
+        return {}
     decode = lambda value: value.decode() if isinstance(value, (bytes, bytearray, memoryview)) else str(value)  # noqa: E731
-    return {decode(row["role"] if isinstance(row, dict) else row[0]) for row in rows}
+    roles = lambda rows: [decode(row["role"] if isinstance(row, dict) else row[0]) for row in rows]  # noqa: E731
+    held = dict.fromkeys(roles(conn.execute("SELECT h.role FROM ticket_board.provider_quota_holds h WHERE "
+                                            "ticket_board.role_provider_hold_is_current(h.role, clock_timestamp())")
+                               .fetchall()), "its provider is held for quota")
+    if getattr(listener, "_provider_account_holds_present", False):
+        # SYRD-672: every role on a held provider account, registered or not; the account hold is the reason.
+        held.update(dict.fromkeys(roles(conn.execute("SELECT w.name AS role FROM ticket_board.workflow_roles w "
+                                                     "WHERE ticket_board.role_account_hold(w.name) IS NOT NULL").fetchall()),
+                                  "its provider account is held after a safety refusal"))
+    return held
 
 
 def run(listener: Any, conn: Any) -> int:
@@ -105,8 +112,9 @@ def run(listener: Any, conn: Any) -> int:
     held = _held(listener, conn)
     for role in pull_claimant_pool(listener.workflow or {}):
         if role in held:
-            # its provider is out of quota (SYRD-644): it cannot work a ticket, and is not idle capacity
-            unavailable[role] = "its provider is held for quota"
+            # its provider is out of quota (SYRD-644), or its account is held (SYRD-672): it cannot work a ticket, and is
+            # not idle capacity
+            unavailable[role] = held[role]
             continue
         reason = eligibility[role] = why_not_eligible(gate, role)
         if reason:

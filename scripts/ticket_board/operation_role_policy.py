@@ -90,6 +90,10 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
     "end_cohort_drain": {"director"},
     # SYRD-644: ending a provider quota hold early is the Director's.
     "clear_provider_hold": {"director"},
+    # SYRD-672: a provider account's safety hold, by hand and its clear: the Director, or the User when the Director's
+    # own account is held.
+    "hold_provider_account": {"director", "user"},
+    "clear_provider_account_hold": {"director", "user"},
     "set_report_intake": {"director"},
     # SYRD-541: the integrator's bounded size decisions.
     "approve_size_exception": {"director"},
@@ -120,6 +124,10 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
 #: instead (SYRD-49, SYRD-78). This layer has to ask the same question, or it
 #: refuses an operation it advertises and the database would accept (SYRD-180).
 CONTROL_OVERRIDE_OPERATIONS = {"force_move", "override_move"}
+#: SYRD-672: a provider account's safety hold, by hand, and its clear. The Director's -- a role holding
+#: set_manually_controlled -- or the User's, the workflow's user-kind role, for when the Director's own account is the
+#: one held. No capability marks the User alone, so it is admitted by its kind; the database checks the same.
+OPERATOR_OR_CONTROL_OPERATIONS = frozenset({"hold_provider_account", "clear_provider_account_hold"})
 
 #: Operations that are COMPOSITIONS of declarable capabilities. A declared
 #: workflow cannot grant these by name: they are deliberately absent from

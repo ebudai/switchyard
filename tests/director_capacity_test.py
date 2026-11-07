@@ -751,12 +751,16 @@ def boundary_checks(got: dict) -> None:
 
 
 def mirrors() -> None:
-    """schema.sql's last definition of each of pgu1028's functions is pgu1028's, byte for byte."""
+    """schema.sql's last definition of each of pgu1028's functions is pgu1028's, byte for byte, unless a later
+    migration redefines it."""
     body = MIGRATION.read_text().split("BEGIN;\n\n", 1)[1].rsplit("\nCOMMIT;\n", 1)[0]
     schema = (ROOT / "scripts/ticket_board/schema.sql").read_text()
     at = schema.rfind(body)
+    # A function a later migration redefines is that migration's to mirror (SYRD-672: user_events_after).
+    from schema_function_drift import owning_migration
     heads = [f"CREATE OR REPLACE FUNCTION ticket_board.{name}(" for name in (
-        "user_events_after", "note_director_capacity", "record_director_capacity_attempt", "director_capacity_status")]
+        "user_events_after", "note_director_capacity", "record_director_capacity_attempt", "director_capacity_status")
+        if owning_migration(name).name == MIGRATION.name]
     check(at >= 0 and all(at <= schema.rfind(h) < at + len(body) for h in heads),
           "schema.sql's last copies of pgu1028's functions are pgu1028's, byte for byte")
 

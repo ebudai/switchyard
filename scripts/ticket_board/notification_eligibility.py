@@ -430,6 +430,11 @@ WHERE id = %s
                     "report_follow_up",
                     "pull_pinned_rework"}:  # SYRD-539, 540, 565, 557, 570, 583, 633, 629, 616, 644, 662, 673, 677, 736
             return target_role == "director"
+        # SYRD-672: a provider account hold's notice is the Director's while that hold stands, whatever its ticket does.
+        if kind == "provider_safety_hold":
+            row = conn.execute("SELECT EXISTS (SELECT FROM ticket_board.provider_account_holds WHERE id = %s "
+                               "AND cleared_at IS NULL) AS current", (int(parsed.get("hold") or 0),)).fetchone()
+            return target_role == "director" and bool(row["current"] if isinstance(row, dict) else row[0])
         # SYRD-725: the User's answer to an operator wait is the Director's, while a blocker it names stands.
         if kind == "operator_response":
             row = conn.execute("SELECT ticket_board.operator_response_is_current(%s::jsonb) AS current",

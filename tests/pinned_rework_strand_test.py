@@ -223,7 +223,7 @@ def scenario(root: Path, shape: str, before_root: Path | None) -> dict:
             seen["gone"] = strand()
             gate.role_identities.pop("app")
             real_held = pull_pickup._held
-            pull_pickup._held = lambda _listener, _conn: {"app"}
+            pull_pickup._held = lambda _listener, _conn: {"app": "its provider is held for quota"}
             try:
                 passes(1)
                 seen["held"] = strand()

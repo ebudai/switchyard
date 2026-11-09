@@ -40,6 +40,44 @@ not a decision provisioning may make quietly:
 switchyard new --desktop-gui-user desktop-owner
 ```
 
+## The agent account's browser
+
+A project's provider CLIs run as its agent account, so a browser sign-in opens
+whatever that account's link handlers name, not the desktop owner's choice.
+Once the desktop owner has approved desktop access, `switchyard new` copies
+that owner's default browser into the account it provisions, before the first
+provider sign-in:
+
+```
+switchyard: browser: example-agent opens links with firefox.desktop, desktop-owner's default browser, set once now: a later change of desktop-owner's default is not copied. Change it deliberately with `sudo -u example-agent -H xdg-settings set default-web-browser NAME.desktop`.
+```
+
+- **What is copied.** The owner's own answer for `x-scheme-handler/https`,
+  `x-scheme-handler/http` and `text/html`, asked as the owner and never written.
+  All three must name the same application, installed where every account can
+  see it (`/usr/share/applications` and the like). It is set as the agent
+  account itself, with `xdg-settings`: the same three handlers, plus KDE's
+  `BrowserApplication` where KDE's config tool is installed.
+- **Once, at creation.** Upgrade, launch and resume never copy a browser, and a
+  later change of the owner's default is not followed. An existing project is
+  never changed by installing or upgrading Switchyard.
+- **Left alone, and said so:**
+  - a headless project;
+  - an existing account reused by `switchyard new` that already names its own
+    browser;
+  - an owner whose handlers disagree, or name an application only that owner
+    can see.
+
+  In each case provisioning goes on.
+
+To change an existing agent account's browser, deliberately, run as root:
+
+```sh
+sudo -u example-agent -H xdg-settings set default-web-browser firefox.desktop
+# and on KDE, its own setting too:
+sudo -u example-agent -H env XDG_CURRENT_DESKTOP=KDE KDE_SESSION_VERSION=6 xdg-settings set default-web-browser firefox.desktop
+```
+
 ## Headless, and explicit policies
 
 For a project without desktop clipboard access, on a host with or without a

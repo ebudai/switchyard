@@ -591,6 +591,14 @@ def _prepare_new_project_accounts(
             print_func(f"switchyard: created user {owner_user} with shell {display_shell}; linger enabled")
     else:
         print_func(f"switchyard: using existing user {owner_user} (not modifying)")
+    # Before any provider signs in: the agent account opens links in the consenting desktop user's default browser,
+    # copied once, here, and never on upgrade, launch or resume (SYRD-751).
+    from scripts import browser_inheritance
+
+    browser_inheritance.inherit_desktop_browser(
+        selected_desktop_policy, owner_user=owner_user, created=owner_result.created, runner=runner,
+        print_func=print_func,
+    )
     if resolved_agy_credential_source:
         credential_state = launcher._agy_credential_state(owner_user, home_base)
         if credential_state == launcher.AGY_CREDENTIAL_INSTALLED:

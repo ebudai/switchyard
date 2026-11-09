@@ -255,7 +255,8 @@ def record_upstream_report_link(
         written["document"] = raw
     print_func(
         f"switchyard: recorded {config.project}'s upstream report board {wanted_url} and "
-        f"credential {token_file}, so its next launch carries both"
+        f"credential {token_file}, so its next launch carries both: "
+        f"`switchyard restart-role {config.project} <role>` relaunches a running pane"
     )
     return replace(
         config, upstream_report_url=wanted_url, upstream_report_token_file=token_file

@@ -377,7 +377,12 @@ def report_tenant_release_upgrade(
         )
         print_func(
             "switchyard: panes must be restarted after the release update to pick up hook installer, "
-            "hook binary, or pane launcher changes; this command does not restart panes"
+            "hook binary, or pane launcher changes; this command does not restart panes. Restart each role with "
+            f"`switchyard restart-role {config.project} <role>` (SYRD-750) from the Director's pane -- its own last, "
+            f"which it hands to a successor -- or, as the operator, `sudo switchyard restart-role {config.project} <role>`. "
+            "A whole-project "
+            f"`switchyard stop {config.project}` and `start` is needed only when the board, its listener or the "
+            "window must restart too; reopening the window alone restarts no pane"
         )
     return status
 

@@ -150,6 +150,53 @@ indistinguishable from one that passed. Insist the suite makes skips visible and
 
 ---
 
+## Restarting a role's pane
+
+A role's pane runs the release, prompt and environment it was started with. An upgrade
+says "panes must be restarted"; a new onboarding prompt, a newly provisioned report link
+(`TICKET_BOARD_TENANT_REPORT_TOKEN_FILE`) and new hooks all reach a pane only when it next
+starts. Restart one role at a time:
+
+```
+switchyard restart-role <project> <role> [--while-holding <ticket>] [--dry-run]
+```
+
+- **Who may run it.** You, from your own registered pane, or the operator, as root:
+  `sudo switchyard restart-role <project> <role>`, which runs it as the project's owner.
+  It decides who is asking from the kernel and the board, never from anything the caller
+  says, so it refuses a sibling role's pane and a process in no pane.
+- **What it does.** It ends the role's pane process and starts the replacement through the
+  launcher's own path, with the current release's hooks, the role's prompt and the
+  environment the launcher gives it now. The role's recorded conversation resumes,
+  according to its ephemerality and context rules. The command then proves the restart:
+  every process of the old pane ended, the board registered a new process, and the board
+  variables the launcher gives the role reached it. If not, it says so and fails.
+- **When it refuses,** nothing is changed:
+  - the role is working: a live turn, or a command still running from its pane. Your own
+    turn is no refusal when you restart your own pane, but any other process in it is,
+    such as a background command the restart would end;
+  - it runs a leased command;
+  - its provider is held, for quota or by a safety hold;
+  - its pane runs a process the board did not register, or one it has no registration for;
+  - it is not an active workflow role;
+  - the board does not answer, because the project is stopped;
+  - another restart of it, or its successor's, is in flight;
+  - it holds a ticket you did not name with `--while-holding`. Its conversation resumes
+    after the restart, but you have to mean it.
+- **A role whose pane is gone** while the board is up is started the same way. That is the
+  recovery for a disconnected pane.
+- **Your own pane.** Run it from your pane as the last thing in your turn: the turn that
+  runs it is busy until it ends, and that is expected. The command never ends the pane it runs in. It arms a successor outside the pane (SYRD-713), which
+  ends your pane once the command exits, starts it again on your recorded conversation,
+  and waits for the board to register the new process. If no successor can be armed, it
+  ends nothing and prints the operator's command, `sudo switchyard restart-role <project> <role>`.
+- **After an upgrade,** restart every role this way, yours last.
+- **When stop and start are still needed.** A whole-project `switchyard stop <project>`
+  and `switchyard start <project>` is needed only when the board, its listener or the
+  window must restart too. Reopening the presentation window (relaunching the project's
+  window) restarts no pane. The panes' sessions survive it and keep running what they
+  started with.
+
 ## Merge, or kick back?
 
 Merge when the work is correct and verified, even if coverage could be better — then file
@@ -487,7 +534,8 @@ The prompt is delivered at the start of a *fresh* conversation, so:
   re-injecting a remit into a session that already has one only crowds it.
 
 So setting a prompt never interrupts work in progress. If you need a role to pick
-one up now, restart that role rather than expecting the running conversation to
+one up now, restart that role (`switchyard restart-role <project> <role>`, see
+"Restarting a role's pane") rather than expecting the running conversation to
 change under it.
 
 **Your own prompt, during rollout.** Until this project has been migrated, a
@@ -622,7 +670,7 @@ A role can run Hermes on the host's local model service (`--local-qwen`; see
 - **Ephemeral Hermes roles,** local or cloud, start each ticket with Hermes's memory
   and session search off. A Hermes pane started before its role became ephemeral, or
   before this release, is held at its next hand-off (`hermes_ticket_boundary_open`) until
-  you restart that role. That restart starts fresh: the conversation it held open is set
+  you restart that role with `switchyard restart-role <project> <role>`. That restart starts fresh: the conversation it held open is set
   aside (`ticket_boundary_cutover`), and a ticket still bound to it may be parked for you.
   `docs/syrd-727-hermes-ticket-boundary.md` says exactly what "fresh" means for Hermes.
 - **Re-pin, roll back, remove.** A new model or engine is a new packet the User approves,

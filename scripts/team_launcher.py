@@ -31,8 +31,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Collection, Iterable, Mapping, Sequence
 
-from scripts.ticket_board import runtime_catalog
-from scripts.ticket_board import terminal_select
+from scripts.ticket_board import runtime_catalog, terminal_select
 from scripts.ticket_board.prompt_schema import (
     KIND_MULTI,
     KIND_SINGLE,
@@ -999,6 +998,7 @@ from scripts.project_role_runtime import _role_named, set_project_role_runtime_c
 from scripts.repository_boundary_repair import switchyard_repair_boundary_command
 from scripts.role_model_selection import hold_role_selections_for_upgrade, role_selections_after_upgrade
 from scripts.role_model_selection import reconcile_role_models_command, refuse_restart_on_another_model
+from scripts.role_restart import restart_role_command  # SYRD-750
 from scripts.root_plan_reconstruction import (
     REGENERATED_PLAN_FIELDS,
     _regenerated_field_divergence,

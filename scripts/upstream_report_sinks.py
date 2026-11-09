@@ -529,7 +529,7 @@ def running_panes_note(
     # A pane launched before the link has none of the three report variables, its origin project included.
     by_hand = (f"until then file by hand with `ticket-board-write --report-board-url {url} --report-token-file "
                f"{token_file} file-report --origin-project {config.project} ...`")
-    relaunch = f"`switchyard stop {config.project}` then `switchyard start {config.project}`"
+    relaunch = f"`switchyard restart-role {config.project} <role>` for each, the Director's own last (SYRD-750)"
     if problem:
         return (f"switchyard: whether {config.project}'s panes are running could not be told ({problem}); any "
                 f"pane launched before now files reports only after a relaunch ({relaunch}); {by_hand}.")

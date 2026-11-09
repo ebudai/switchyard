@@ -161,6 +161,6 @@ not name the commit carrying it; reinstall from a deployed release rather than
 from a working checkout.
 
 Installing the file is not the same as the runtime using it. A CLI reads its skill
-directory at startup, so restart the pane's CLI after an install, and confirm by
+directory at startup, so restart the pane after an install (`switchyard restart-role <project> <role>`), and confirm by
 asking that session to load `switchyard-board` rather than by checking that the
 file exists.

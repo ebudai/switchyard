@@ -396,7 +396,8 @@ def test_the_deploy_report() -> None:
               and said[3] == f"  <recorded deploy-release: {QUOTE(['switchyard', 'deploy-release', 'p379', '--commit', NEW])}>"
               and said[4].startswith("switchyard: if it stops, it says where")
               and said[5].startswith("switchyard: each recorded step prints where its record is")
-              and said[6].endswith("this command does not restart panes") and len(said) == 7
+              and "this command does not restart panes" in said[6]  # SYRD-750: and names the command that does
+              and "`switchyard restart-role p379 <role>`" in said[6] and len(said) == 7
               and not any("install units" in line or "<units>" in line or "<deploy>" in line for line in said),
               f"a root-owned unit source: the one recorded deploy-release, and no unit installed by hand: {said}")
         st = status(provisioned_system_unit=Path(tmp) / "tenant" / "p379-ticket-board.service")

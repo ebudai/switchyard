@@ -461,10 +461,26 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         if args.prompt_file is not None:
             forwarded += ["--prompt-file", str(args.prompt_file)]
         return workflow_manage.main(forwarded)
-    if argv[0].casefold() in {"set-role-runtime", "reconcile-role-models"}:
-        # SYRD-579 shares this block: both change what a role runs and restart it.
+    if argv[0].casefold() in {"set-role-runtime", "reconcile-role-models", "restart-role"}:
+        # SYRD-579 shares this block: both change what a role runs and restart it. SYRD-750: so does restart-role.
         reconcile = argv[0].casefold() == "reconcile-role-models"
-        if reconcile:
+        restart = argv[0].casefold() == "restart-role"
+        if restart:
+            parser = argparse.ArgumentParser(
+                prog="switchyard restart-role",
+                description=(
+                    "Restart one role's pane, its own included, after an upgrade or a prompt or environment change: "
+                    "the replacement runs the current release's hooks, the role's prompt and environment, and resumes "
+                    "its recorded conversation. Refused, with nothing changed, while the role is working, runs a "
+                    "leased command, has its provider held, or holds a ticket not named with --while-holding."
+                ),
+            )
+            parser.add_argument("project", help="registered project name or slug")
+            parser.add_argument("role", help="the role whose pane to restart")
+            parser.add_argument("--while-holding", action="append", default=[], metavar="TICKET",
+                                help="go ahead although the role holds this ticket; its conversation resumes")
+            parser.add_argument("--dry-run", action="store_true", help="say what would happen, change nothing")
+        elif reconcile:
             parser = argparse.ArgumentParser(
                 prog="switchyard reconcile-role-models",
                 description=(
@@ -493,6 +509,9 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         args = parser.parse_args(argv[1:])
         entry = launcher._resolve_switchyard_project(args.project)
         config = launcher._load_switchyard_project_config_for_command(entry, argv)
+        if restart:
+            return launcher.restart_role_command(config, config_path=entry.config_path, role_name=args.role,
+                                                 while_holding=args.while_holding, dry_run=args.dry_run)
         if reconcile:
             return launcher.reconcile_role_models_command(
                 config,

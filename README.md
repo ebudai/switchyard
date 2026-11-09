@@ -109,6 +109,7 @@ Commands:
   set-role-runtime change an existing role's agent runtime and reconnect its panes
   reconcile-role-models
                    keep the model each role chose, or its configured one, and restart only those
+  restart-role     restart one role's pane, the Director's own included, on the current release
   agy-credential   show, set, or clear this host's agy credential source
   role-prompt      show, set, or clear a role's onboarding prompt
   design-stage     add a designer-owned design stage and the Director's design review
@@ -129,7 +130,7 @@ Commands:
                    let the control role resume one legacy conversation of its own
   local-model      preview, install and control the opt-in host-wide local model service
 
-Bare project names start or attach the project. Recognized commands: board-skill, new, register, upgrade, repair-boundary, approve-desktop, adopt-workflow, migrate-workflow, rebind-workflow-panes, resume-provision, finish-upgrade, cutover-roles, publication-status, rollout-log, recover-display, privileged-action, install-shared-release, release-status, deploy-release, database-auth, add-role, worker-pool, set-owner-identity, present, attach, replace-window, set-vcs-close-role, set-role-runtime, reconcile-role-models, agy-credential, seed-role-credentials, role-prompt, design-stage, router-role, documentation-gate, publisher, onboarding-readiness, stop, start, teardown, status, validate-models, paste-image, adopt-conversation, local-model.
+Bare project names start or attach the project. Recognized commands: board-skill, new, register, upgrade, repair-boundary, approve-desktop, adopt-workflow, migrate-workflow, rebind-workflow-panes, resume-provision, finish-upgrade, cutover-roles, publication-status, rollout-log, recover-display, privileged-action, install-shared-release, release-status, deploy-release, database-auth, add-role, worker-pool, set-owner-identity, present, attach, replace-window, set-vcs-close-role, set-role-runtime, reconcile-role-models, restart-role, agy-credential, seed-role-credentials, role-prompt, design-stage, router-role, documentation-gate, publisher, onboarding-readiness, stop, start, teardown, status, validate-models, paste-image, adopt-conversation, local-model.
 ```
 
 <!-- switchyard-help:end -->

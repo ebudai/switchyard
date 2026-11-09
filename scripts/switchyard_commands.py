@@ -106,6 +106,9 @@ SWITCHYARD_COMMANDS = (
     # Settles a role whose own session chose another model than its
     # configuration, which a launch and an upgrade refuse to restart (SYRD-579).
     "reconcile-role-models",
+    # Restarts one role's pane -- the caller's own through a successor -- after an upgrade or a prompt or
+    # environment change, refusing while it works (SYRD-750).
+    "restart-role",
     "agy-credential",
     "seed-role-credentials",
     "role-prompt",
@@ -186,7 +189,7 @@ SWITCHYARD_UNPRIVILEGED_COMMANDS = frozenset(
     {
         "present", "attach", "board-skill", "role-prompt", "design-stage", "router-role", "documentation-gate",
         "publisher", "set-role-runtime",
-        "reconcile-role-models", "finish-upgrade", "worker-pool", "privileged-action", "status",
+        "reconcile-role-models", "restart-role", "finish-upgrade", "worker-pool", "privileged-action", "status",
         "paste-image", "adopt-conversation", "local-model",
     }
 )
@@ -225,6 +228,7 @@ Commands:
   set-role-runtime change an existing role's agent runtime and reconnect its panes
   reconcile-role-models
                    keep the model each role chose, or its configured one, and restart only those
+  restart-role     restart one role's pane, the Director's own included, on the current release
   agy-credential   show, set, or clear this host's agy credential source
   role-prompt      show, set, or clear a role's onboarding prompt
   design-stage     add a designer-owned design stage and the Director's design review

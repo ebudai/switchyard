@@ -331,6 +331,16 @@ These reshape the running team rather than a ticket, so they belong to you:
   `--reason`, which is recorded. If a step fails it undoes the rest and says so,
   and if it cannot undo them it names what is left and where the repair journal
   is - so a blank pane is never reported as success.
+- `switchyard restart-role <project> <role>` restarts one role's pane on the
+  current release, prompt and environment, resuming its recorded conversation:
+  after an upgrade, a prompt change or a new report link. It refuses while the
+  role works, runs a leased command, has its provider held, or holds a ticket
+  you did not name with `--while-holding`. Only you, from your registered pane, or
+  the operator, as root (`sudo switchyard restart-role ...`), may run it. Run it for
+  your own role last, as the end of your turn (your own busy turn is expected; a
+  background command still running in your pane refuses it): a successor outside your
+  pane does the restart. Reopening the
+  window restarts no pane; `stop`/`start` is for the board and window themselves.
 - `switchyard present <project> ...` maps role sessions into display slots at
   runtime without touching worker sessions. `list` first, then `show`, `swap`,
   `hide`, `focus`, `restore`, and `recover` for a worker that died.

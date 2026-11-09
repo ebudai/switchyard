@@ -142,7 +142,8 @@ def not_connected_for_reports(environ: Any) -> str:
         f"with one narrow step that runs no other upgrade phase: `sudo switchyard upgrade {project} --only "
         "upstream-report --upstream-report-board <slug>` (the parent's project; with none named, the parent root already "
         "recorded, or the host's declared report board). It verifies the parent's chain, records it, and issues a "
-        "credential for each ancestor; the next launch of each pane carries the link. Nothing was filed."
+        "credential for each ancestor; the next launch of each pane carries the link: `switchyard restart-role "
+        f"{project} <role>` relaunches one (the Director's own from its pane, through a successor). Nothing was filed."
     )
 
 

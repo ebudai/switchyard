@@ -92,7 +92,7 @@ def role(name: str) -> types.SimpleNamespace:
 
 def project(tmp: Path) -> types.SimpleNamespace:
     return types.SimpleNamespace(project="p713", roles=[role("director"), role("main"), role("ops")],
-                                 board_url="http://board.invalid")
+                                 board_url="http://board.invalid", run_as_user="")
 
 
 @contextmanager
@@ -270,6 +270,22 @@ def main() -> int:
           in " ".join(out), f"and comes back on the recorded conversation, resumed: {record} {out}")
     check(not any("main" in " ".join(c) or "ops" in " ".join(c) for c in calls), "no neighbouring pane is touched")
     check(out[0] == "armed", "and it armed before ending anything")
+
+    # SYRD-752: the display slots that showed the role show its successor, proven, once it is verified back.
+    from scripts import role_restart
+    for unbound in ("", "slot 1 shows nothing (detached), not director"):
+        asked: list = []
+        with mock.patch.object(role_restart, "reconnect_slots",
+                               lambda cfg, **k: asked.append((k["role_name"], str(k["config_path"]))) or unbound):
+            rc, out, record = run(handoff(), [{}, {"process_pid": 200, "process_start_time": 5000}, successor])
+        check(asked == [("director", str(tmp / "p713.json"))] and record.get("state") == "complete"
+              and rc == (1 if unbound else 0) and record.get("slots_unbound", "") == unbound,
+              f"its display slots are reconnected after the verified comeback; one left unbound is recorded and fails "
+              f"the executor: {asked} {rc} {record}")
+    asked = []
+    with mock.patch.object(role_restart, "reconnect_slots", lambda cfg, **k: asked.append(k) or ""):
+        run(handoff(), [{"process_pid": 200, "process_start_time": 5000}])
+    check(asked == [], "a successor that never came back reconnects nothing")
 
     rc, out, record = run(handoff(), [{"process_pid": 200, "process_start_time": 5000}])
     check(rc == 1 and record.get("state") == "stopped" and record.get("recover") == "switchyard recover-display p713",
@@ -518,8 +534,14 @@ def main() -> int:
     argv, kwargs = spawned[0]
     check(problem == "" and kwargs.get("start_new_session") is True and kwargs.get("close_fds") is True,
           f"the executor is started in its own session: {problem!r} {kwargs}")
-    check(argv[-1] == "successor" and "p713" not in " ".join(argv) and "env" not in kwargs,
+    env = kwargs.get("env") or {}
+    check(argv[-1] == "successor" and "p713" not in " ".join(argv) and env
+          and not any("p713" in value or "x" * 32 in value for value in env.values()),
           f"and its authority is not on its argv or environment: {argv}")
+    from scripts import launch_environment
+    check(env == launch_environment.launch_environment(),
+          "SYRD-752: it starts from the launch environment -- not the caller pane's identity or its agent CLI's "
+          "nesting variables, which its relaunch of the pane would carry")
     child = rsr._ARMED[("p713", "director")].child
     check(child.stdin.getvalue().count(b"\n") == 1, "armed, it has been given the handoff and nothing more")
     rsr.release_armed(config, director, print_func=lambda line: None)

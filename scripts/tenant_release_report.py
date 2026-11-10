@@ -380,7 +380,8 @@ def report_tenant_release_upgrade(
             "hook binary, or pane launcher changes; this command does not restart panes. Restart each role with "
             f"`switchyard restart-role {config.project} <role>` (SYRD-750) from the Director's pane -- its own last, "
             f"which it hands to a successor -- or, as the operator, `sudo switchyard restart-role {config.project} <role>`. "
-            "A whole-project "
+            "Run it as it is: it clears the pane's identity and agent-CLI variables from the launch itself, and "
+            "reconnects the window's display slots for each role it restarts (SYRD-752). A whole-project "
             f"`switchyard stop {config.project}` and `start` is needed only when the board, its listener or the "
             "window must restart too; reopening the window alone restarts no pane"
         )

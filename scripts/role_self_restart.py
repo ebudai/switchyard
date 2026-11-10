@@ -250,10 +250,15 @@ def arm_successor(
     log.parent.mkdir(parents=True, exist_ok=True)
     try:
         with open(log, "ab") as sink:
+            # SYRD-752: from the environment a launch for another pane starts from -- never the caller's pane
+            # identity or its agent CLI's nesting variables, which its relaunch of the pane would otherwise carry.
+            # Everything the successor may do is in the handoff on its stdin; nothing of it is in the environment.
+            from scripts import launch_environment
+
             child = (spawn or _spawn)(
                 [sys.executable, "-I", "-B", str(Path(__file__).resolve()), "successor"],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sink, cwd="/",
-                start_new_session=True, close_fds=True,
+                start_new_session=True, close_fds=True, env=launch_environment.launch_environment(),
             )
     except OSError as exc:
         return f"the successor executor for {role.role} could not be started ({exc}); nothing was stopped"
@@ -486,10 +491,16 @@ def run_successor(
         resumed = _resumes(launcher.process_tree_argvs(successor.pid),
                            _resume_args_for_role(role, handoff.provider_session))
         if recorded == handoff.provider_session and resumed:
-            write("complete", successor=[successor.pid, successor.start_time], provider_session=recorded)
             print_func(f"switchyard: {handoff.role} is back as process {successor.pid} on conversation {recorded}; "
                        f"transaction {handoff.transaction} complete")
-            return 0
+            # SYRD-752: the display slots that showed it show its successor, proven as `present list` reads them.
+            from scripts.role_restart import reconnect_slots
+
+            unbound = reconnect_slots(config, config_path=Path(handoff.config_path), role_name=handoff.role,
+                                      runner=runner, print_func=print_func)
+            write("complete", successor=[successor.pid, successor.start_time], provider_session=recorded,
+                  **({"slots_unbound": unbound} if unbound else {}))
+            return 1 if unbound else 0
         why = (f"its successor, process {successor.pid}, records conversation {recorded or 'none'} and "
                f"{'resumes' if resumed else 'does not resume'} {handoff.provider_session}")
         write("failed", reason=why, successor=[successor.pid, successor.start_time],

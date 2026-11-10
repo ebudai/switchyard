@@ -339,7 +339,10 @@ These reshape the running team rather than a ticket, so they belong to you:
   the operator, as root (`sudo switchyard restart-role ...`), may run it. Run it for
   your own role last, as the end of your turn (your own busy turn is expected; a
   background command still running in your pane refuses it): a successor outside your
-  pane does the restart. Reopening the
+  pane does the restart. Run it as it is; clear no environment first. It keeps your
+  pane's identity and your agent CLI's own variables out of the launch, reconnects the
+  window's display slots, and, if the replacement fails after the old pane ended,
+  says the role is stopped and how to start it again. Reopening the
   window restarts no pane; `stop`/`start` is for the board and window themselves.
 - `switchyard present <project> ...` maps role sessions into display slots at
   runtime without touching worker sessions. `list` first, then `show`, `swap`,

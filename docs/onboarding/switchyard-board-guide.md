@@ -807,7 +807,9 @@ not the pane you meant.
 
 Before launching another agent CLI or a neutral probe from inside a pane, clear
 the identity variables. Do **not** clear them for `ticket-board-read` or
-`ticket-board-write`; those commands need the pane's real identity.
+`ticket-board-write`; those commands need the pane's real identity. Nor for
+`switchyard restart-role`: it builds the launch's environment itself, without the
+pane's identity or its agent CLI's own variables (SYRD-752).
 
 ```bash
 env -u PGU_PANE_SESSION_ID -u TICKET_BOARD_PANE_SESSION_ID \

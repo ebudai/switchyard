@@ -165,12 +165,25 @@ switchyard restart-role <project> <role> [--while-holding <ticket>] [--dry-run]
   `sudo switchyard restart-role <project> <role>`, which runs it as the project's owner.
   It decides who is asking from the kernel and the board, never from anything the caller
   says, so it refuses a sibling role's pane and a process in no pane.
+- **Run it as it is.** Clear nothing first. The command builds the launch's environment
+  itself: none of your pane's identity (its session id, pane target, board role) and none
+  of your agent CLI's own variables (`CLAUDECODE`, `CLAUDE_CODE_*`, and the like for every
+  supported runtime) reach the role it starts. The role gets its own values from its
+  configuration.
 - **What it does.** It ends the role's pane process and starts the replacement through the
   launcher's own path, with the current release's hooks, the role's prompt and the
   environment the launcher gives it now. The role's recorded conversation resumes,
   according to its ephemerality and context rules. The command then proves the restart:
-  every process of the old pane ended, the board registered a new process, and the board
-  variables the launcher gives the role reached it. If not, it says so and fails.
+  - every process of the old pane ended;
+  - the board registered a new process, which stays up;
+  - the board variables the launcher gives the role reached it.
+
+  If not, it says so and fails.
+- **The window shows it again.** Every display slot that showed the role is reconnected
+  to the replacement, and each is checked the way `switchyard present <project> list`
+  reads it. There is no `present show` step left for anyone. If a slot still does not show
+  the role, the command fails and prints the exact
+  `switchyard present <project> show --slot <n> <role>` that reconnects it.
 - **When it refuses,** nothing is changed:
   - the role is working: a live turn, or a command still running from its pane. Your own
     turn is no refusal when you restart your own pane, but any other process in it is,
@@ -182,15 +195,29 @@ switchyard restart-role <project> <role> [--while-holding <ticket>] [--dry-run]
   - the board does not answer, because the project is stopped;
   - another restart of it, or its successor's, is in flight;
   - it holds a ticket you did not name with `--while-holding`. Its conversation resumes
-    after the restart, but you have to mean it.
+    after the restart, but you have to mean it;
+  - its replacement could not start: its CLI is not on the PATH its pane gets, its working
+    directory is gone, or its local model's service is stopped. These are checked before
+    anything is ended.
+- **If the replacement fails after the old pane ended,** the command tries one more
+  start. If that fails too, it does not say "nothing changed". It says the role is
+  stopped, keeps its recorded conversation, and names the command that starts it again
+  once the cause is fixed: `switchyard restart-role <project> <role>`.
 - **A role whose pane is gone** while the board is up is started the same way. That is the
   recovery for a disconnected pane.
 - **Your own pane.** Run it from your pane as the last thing in your turn: the turn that
-  runs it is busy until it ends, and that is expected. The command never ends the pane it runs in. It arms a successor outside the pane (SYRD-713), which
-  ends your pane once the command exits, starts it again on your recorded conversation,
-  and waits for the board to register the new process. If no successor can be armed, it
+  runs it is busy until it ends, and that is expected. The command never ends the pane it
+  runs in. It arms a successor outside the pane (SYRD-713), started from the same clean
+  environment. The successor ends your pane once the command exits, starts it again on
+  your recorded conversation, waits for the board to register the new process, and
+  reconnects your display slots. If no successor can be armed, it
   ends nothing and prints the operator's command, `sudo switchyard restart-role <project> <role>`.
 - **After an upgrade,** restart every role this way, yours last.
+- **History.** Before this was built in, the command run from a Claude Code pane refused
+  ("ambient pane session id ... does not match recorded session"). With the pane's
+  identity cleared by hand, it started each Claude role as a child of the caller's own
+  session, and the role ended without coming back. Clearing the variables by hand is not
+  the procedure any more.
 - **When stop and start are still needed.** A whole-project `switchyard stop <project>`
   and `switchyard start <project>` is needed only when the board, its listener or the
   window must restart too. Reopening the presentation window (relaunching the project's

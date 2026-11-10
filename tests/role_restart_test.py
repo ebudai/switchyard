@@ -87,11 +87,13 @@ class Board:
         self.reservations: dict = {role: None}
         self.leases: list = []
         self.holds: dict = {"holds": []}
+        self.gets: list[str] = []
 
     def opener(self, url: str, timeout: float = 0):
         if self.down:
             raise OSError("connection refused")
         path = url.split("/api/", 1)[1]
+        self.gets.append(path)
         body = {"workflow": self.workflow, "runtime-assignments": {"assignments": self.assignments},
                 "reservations": {"reservations": self.reservations}, "execution-leases": {"leases": self.leases},
                 "provider-holds": self.holds}[path]
@@ -111,6 +113,8 @@ def project(*, report_link: bool = False):
         path.write_text(json.dumps(doc))
         config = launcher.load_project_config("p750", path)
         (base / "proc").mkdir()
+        for name in ("app", "director"):
+            (base / name).mkdir()
         yield config, path, Kernel(base / "proc"), base
 
 
@@ -140,11 +144,20 @@ class Rig:
         self.me = 999_999  # this command's own process: in no pane of the stand-in kernel unless a case puts it there
         self.keep_old = False  # the reload leaves the old pane's root running
         self.ensure_then = lambda: None  # what else the reload leaves behind
+        #: Each launch's outcome, in order (SYRD-752): "ok"; "refuse" (ends nothing, exit 1); "die" (ends the old pane,
+        #: its replacement dies starting, exit 0); "fail" (ends the old pane, starts nothing, exit 1).
+        self.plan: list[str] = []
+        self.launch_envs: list[dict[str, str]] = []
+        self.missing: set[str] = set()  # programs not on the pane's PATH
         if role != "director":
             kernel.spawn(*self.caller_pane)
             self.board.assignments["director"] = {"process_pid": 3900, "process_start_time": 300, "generation": 3}
 
     def runner(self, argv, **_kw):
+        if argv[:2] == ["test", "-d"]:
+            return subprocess.CompletedProcess(argv, 0 if Path(argv[2]).is_dir() else 1, "", "")
+        if argv[:1] == ["env"] and "command -v" in " ".join(argv):
+            return subprocess.CompletedProcess(argv, 1 if argv[-1] in self.missing else 0, "", "")
         if "has-session" in argv:
             return subprocess.CompletedProcess(argv, 0 if self.alive else 1, "", "")
         if "display-message" in argv:
@@ -153,6 +166,15 @@ class Rig:
 
     def ensure(self, role, *, mode, **_kw):
         self.reloads.append((role.role, mode))
+        self.launch_envs.append(dict(os.environ))
+        outcome = self.plan.pop(0) if self.plan else "ok"
+        if outcome == "refuse":
+            return 1
+        if outcome in {"die", "fail"}:
+            if self.alive and self.pane_pid:
+                self.kernel.kill(self.pane_pid)
+            self.alive = False
+            return 0 if outcome == "die" else 1
         old = self.pane_pid
         if self.alive and old and not self.keep_old:
             self.kernel.kill(old)
@@ -232,7 +254,7 @@ def test_a_reload_that_replaced_nothing_is_no_restart() -> None:
         rig = Rig(config, path, kernel, base)
         registered(rig)
         rig.ensure = lambda role, **kw: rig.reloads.append((role.role, kw["mode"])) or 0  # says 0, ends and starts nothing
-        check(rig.run() == 1 and any("did not come back registered" in s for s in rig.said),
+        check(rig.run() == 1 and any("was not restarted: its old pane still runs (pid 4100)" in s for s in rig.said),
               f"the old process still registered and running is not reported as its own replacement: {rig.said}")
 
 
@@ -390,8 +412,9 @@ def test_a_disconnected_role_is_started_and_must_register_anew() -> None:
         rig2.board.assignments["app"] = {"process_pid": 4100, "process_start_time": 500, "generation": 7}
         rig2.alive, rig2.pane_pid = False, 0
         rig2.ensure = lambda role, **kw: rig2.reloads.append((role.role, kw["mode"])) or 0  # starts nothing
-        check(rig2.run() == 1 and any("did not come back registered" in s for s in rig2.said),
-              f"a start the board never registers is a failure, not a recovery: {rig2.said}")
+        check(rig2.run() == 1 and len(rig2.reloads) == 2 and any("app is stopped: its replacement did not come up" in s
+                                                                  for s in rig2.said),
+              f"a start the board never registers is a failure, not a recovery -- after one second start: {rig2.said}")
 
 
 def in_own_pane(rig: Rig) -> None:
@@ -523,6 +546,163 @@ def test_every_depth_of_the_pane_is_counted() -> None:
               f"live work deep in its own pane is refused, its own deep children are not: {rig.said}")
 
 
+HOSTILE = {
+    # The Director's pane identity...
+    "TICKET_BOARD_PANE_SESSION_ID": "director-conv", "PGU_PANE_SESSION_ID": "director-conv",
+    "TICKET_BOARD_PANE_TARGET": "p750-director:0.0", "TICKET_BOARD_CALLER_ROLE": "director", "TMUX_PANE": "%7",
+    # ...and what its agent CLIs set for the commands they run.
+    "CLAUDECODE": "1", "CLAUDE_CODE_CHILD_SESSION": "1", "CLAUDE_CODE_SESSION_ID": "s", "CLAUDE_CODE_ENTRYPOINT": "cli",
+    "CLAUDE_CODE_MESSAGING_SOCKET": "/tmp/x.sock", "CLAUDE_PID": "1", "CLAUDE_EFFORT": "high",
+    "CODEX_THREAD_ID": "t", "CODEX_SANDBOX": "seatbelt", "HERMES_SESSION_ID": "h", "HERMES_TUI_RESUME": "1",
+    "COPILOT_CLI_VERSION": "1", "ANTIGRAVITY_LS_ADDRESS": "127.0.0.1:1",
+}
+KEPT = {"TMUX": "/tmp/tmux-1/default,1,0", "TICKET_BOARD_PANE_STATE_DIR": "/run/user/1/p750-ticket-board/pane-state",
+        "TICKET_BOARD_PANE_SESSION_DIR": "/home/o/.local/state/pgu/pane-sessions", "CODEX_HOME": "/home/o/.codex"}
+
+
+def test_the_launch_never_carries_the_callers_identity_or_runtime_nesting() -> None:
+    """SYRD-752: from the Director's pane the launch refused (its session id is not the role's) or, cleared of that,
+    started each Claude role as a child of the Director's own Claude session, which ended and did not come back."""
+    from scripts import role_pane_entry
+    with project() as (config, path, kernel, base), mock.patch.dict(os.environ, {**HOSTILE, **KEPT}):
+        rig = Rig(config, path, kernel, base)
+        registered(rig)
+        session_dir = launcher.role_session_dir(config, config.roles[0])
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / launcher.session_file_name(config.roles[0].target)).write_text(
+            json.dumps({"target": config.roles[0].target, "session_id": "app-conv"}))
+        conflicts: list[str] = []
+        real = rig.ensure
+        rig.ensure = lambda role, **kw: conflicts.append(role_pane_entry._ambient_session_conflict_for_role(
+            role, session_dir=kw["session_dir"])) or real(role, **kw)
+        code = rig.run()
+        launched = rig.launch_envs[0] if rig.launch_envs else {}
+        check(code == 0 and conflicts == [""],
+              f"the launcher's own ambient-session check passes: the Director's session id never reaches it: {conflicts} {rig.said}")
+        check(not set(HOSTILE) & set(launched),
+              f"no caller identity or runtime nesting variable is in the launch: {sorted(set(HOSTILE) & set(launched))}")
+        check(all(launched.get(k) == v for k, v in KEPT.items()),
+              "what is not the caller's identity is kept: the tmux server's address, this account's pane stores, a "
+              "runtime's configuration")
+        check(all(os.environ.get(k) == v for k, v in {**HOSTILE, **KEPT}.items()),
+              "and this process's own environment is put back exactly once the launch is done")
+
+
+def test_what_would_fail_the_start_refuses_before_anything_ends() -> None:
+    """SYRD-752: fail closed up front on what the replacement's start would fail on."""
+    from scripts import hermes_local_profile
+    cases = {
+        "its CLI not on the pane's PATH": (lambda r: r.missing.add("claude"), "claude, which its pane runs, is not on the PATH"),
+        "its working directory gone": (lambda r: __import__("shutil").rmtree(r.config.roles[0].workdir),
+                                       "is not a directory its account can enter"),
+    }
+    for label, (prepare, words) in cases.items():
+        with project() as (config, path, kernel, base):
+            rig = Rig(config, path, kernel, base)
+            registered(rig)
+            prepare(rig)
+            code = rig.run()
+            check(code == 1 and rig.reloads == [] and any(words in s for s in rig.said)
+                  and any("nothing was changed" in s for s in rig.said),
+                  f"{label}: refused before anything is ended: {rig.said}")
+    with project() as (config, path, kernel, base), \
+            mock.patch.object(hermes_local_profile, "start_refusal", lambda role, **k: "switchyard: its local model is stopped"):
+        rig = Rig(config, path, kernel, base)
+        registered(rig)
+        check(rig.run() == 1 and rig.reloads == [] and any("its local model is stopped" in s for s in rig.said),
+              f"a local model whose service is stopped: refused first, not after the pane is ended: {rig.said}")
+
+
+def test_the_directors_own_pane_is_not_handed_over_to_a_start_that_would_fail() -> None:
+    """Audit on ce2e6d4e: the successor ends the pane first, so what its start would fail on is refused before a
+    successor is armed or released -- the Director's pane keeps running."""
+    from scripts import hermes_local_profile
+    cases = {
+        "its CLI not on the pane's PATH": (lambda r: r.missing.add("codex"), "codex, which its pane runs, is not on the PATH"),
+        "its working directory gone": (lambda r: __import__("shutil").rmtree(r.config.roles[1].workdir),
+                                       "is not a directory its account can enter"),
+        "its local model stopped": (None, "its local model is stopped"),
+    }
+    for label, (prepare, words) in cases.items():
+        with project() as (config, path, kernel, base), mock.patch.object(
+                hermes_local_profile, "start_refusal",
+                (lambda role, **k: "switchyard: its local model is stopped") if prepare is None else (lambda role, **k: "")):
+            rig = Rig(config, path, kernel, base, role="director")
+            in_own_pane(rig)
+            rig.busy = True  # the normal state of the turn that runs it
+            if prepare is not None:
+                prepare(rig)
+            code = rig.run()
+            check(code == 1 and rig.armed == [] and rig.released == [] and rig.reloads == []
+                  and read_alive(kernel, 4100) and any(words in s for s in rig.said)
+                  and any("nothing was changed" in s for s in rig.said),
+                  f"its own pane, {label}: refused before any successor is armed; the pane keeps running: {rig.said}")
+
+
+def test_a_launch_that_fails_after_the_old_pane_ended_is_never_nothing_changed() -> None:
+    """SYRD-752: the old panes ended and "refused, nothing changed" was not true."""
+    with project() as (config, path, kernel, base):
+        rig = Rig(config, path, kernel, base)
+        registered(rig)
+        rig.plan = ["refuse"]
+        code = rig.run()
+        check(code == 1 and read_alive(kernel, 4100) and any("before ending anything. Nothing was changed." in s for s in rig.said),
+              f"the launcher refusing before it ends anything: nothing changed, truly: {rig.said}")
+    with project() as (config, path, kernel, base):
+        rig = Rig(config, path, kernel, base)
+        registered(rig)
+        rig.plan = ["die"]  # the replacement died starting; the second start works
+        code = rig.run()
+        check(code == 0 and rig.reloads == [("app", "reload"), ("app", "attach-or-start")]
+              and any("restarted app on a second start (its pane did not stay up and register the first time)" in s
+                      for s in rig.said),
+              f"one bounded second start recovers it, and says so: {rig.reloads} {rig.said}")
+    for first in ("die", "fail"):
+        with project() as (config, path, kernel, base):
+            rig = Rig(config, path, kernel, base)
+            registered(rig)
+            rig.plan = [first, "fail"]
+            code = rig.run()
+            said = " ".join(rig.said)
+            polls = rig.board.gets.count("runtime-assignments") - 1  # less the one board_facts read
+            check(polls <= 2, f"{first}: the wait for a registration ends once the role's session is gone, not at "
+                              f"its deadline: {polls} polls")
+            check(code == 1 and len(rig.reloads) == 2 and "app is stopped: its old pane was ended" in said
+                  and "`switchyard restart-role p750 app` starts it again" in said
+                  and "nothing was changed" not in said.lower(),
+                  f"{first}, then a failed second start: stopped, said so exactly, with the command that starts it: {rig.said}")
+
+
+def read_alive(kernel: Kernel, pid: int) -> bool:
+    return (kernel.root / str(pid)).exists()
+
+
+def test_every_display_slot_that_showed_it_shows_its_replacement() -> None:
+    """SYRD-752: after the restarts the User saw the roles as disconnected until `present show` was run by hand."""
+    from scripts import presentation_controller, runtime_handover
+    for unbound in ("", "slot 2 shows nothing (detached), not app"):
+        with project() as (config, path, kernel, base):
+            rig = Rig(config, path, kernel, base)
+            registered(rig)
+            order: list[str] = []
+            real = rig.ensure
+            rig.ensure = lambda role, **kw: order.append("launch") or real(role, **kw)
+            with mock.patch.object(presentation_controller, "presentation_enabled", lambda c, **k: True), \
+                    mock.patch.object(presentation_controller, "reconnect_role_slots",
+                                      lambda c, **k: order.append(f"reconnect {k['role_name']}") or (0, 2)), \
+                    mock.patch.object(runtime_handover, "slot_binding_problem",
+                                      lambda c, **k: order.append(f"prove {k['slots']}") or unbound):
+                code = rig.run()
+            check(order == ["launch", "reconnect app", "prove (0, 2)"],
+                  f"the slots are reconnected once the replacement is proven, then proven themselves: {order}")
+            if not unbound:
+                check(code == 0 and any("display slot(s) 0, 2 show app again" in s for s in rig.said),
+                      f"every slot that showed it shows it again, with no step left for the User: {rig.said}")
+            else:
+                check(code == 1 and any("`switchyard present p750 show --slot 2 app`" in s for s in rig.said),
+                      f"a slot still not showing it fails the command, with its exact reconnect: {rig.said}")
+
+
 def test_the_directors_own_pane_with_no_successor() -> None:
     with project() as (config, path, kernel, base):
         rig2 = Rig(config, path, kernel, base, role="director")
@@ -533,12 +713,30 @@ def test_the_directors_own_pane_with_no_successor() -> None:
               f"no successor: nothing ended, and the operator's exact command: {rig2.said}")
 
 
+def test_its_own_help_says_what_it_does_automatically() -> None:
+    """SYRD-752 (Librarian): `switchyard restart-role --help` describes the clean launch, the display reconnect and
+    the recovery -- not only the old refusals."""
+    import contextlib
+    from scripts import switchyard_dispatch
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), mock.patch.object(sys, "argv", ["switchyard"]):
+        try:
+            switchyard_dispatch.switchyard_main(["restart-role", "--help"])
+        except SystemExit:
+            pass
+    text = " ".join(out.getvalue().split())
+    for words in ("clear nothing first", "CLAUDECODE, CLAUDE_CODE_*", "Every display slot that showed the role shows its replacement",
+                  "`switchyard present ... show`", "its CLI not on its pane's PATH", "one more start is tried",
+                  "reported stopped -- not 'nothing changed'", "the `switchyard restart-role` that starts it again"):
+        check(words in text, f"its help says: {words!r}: {text[:200]}")
+
+
 def test_discoverable_where_a_restart_is_needed() -> None:
     from scripts import switchyard_commands
 
     help_text = switchyard_commands.switchyard_help_text()
     check("restart-role" in launcher.SWITCHYARD_COMMANDS and "restart-role" in switchyard_commands.SWITCHYARD_UNPRIVILEGED_COMMANDS
-          and "restart-role     restart one role's pane" in help_text,
+          and "restart-role     restart one role's pane cleanly, reconnect its display, and recover a failed start" in help_text,
           "switchyard --help names restart-role, an owner's (unprivileged) command")
     for path, needle in (("scripts/tenant_release_report.py", "switchyard restart-role"),
                          ("scripts/upstream_report_sinks.py", "switchyard restart-role"),

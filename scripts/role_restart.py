@@ -57,6 +57,8 @@ from typing import Any, Callable, Sequence
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 
+from scripts import launch_environment
+
 BOARD_TIMEOUT_SECONDS = 5.0
 REGISTER_TIMEOUT_SECONDS = 90.0
 POLL_SECONDS = 1.0
@@ -298,6 +300,32 @@ def caller_authority(config: Any, facts: dict[str, Any], *, runner: Callable[...
     return ""
 
 
+def reconnect_slots(config: Any, *, config_path: Path, role_name: str, runner: Callable[..., Any],
+                    print_func: Callable[[str], None]) -> str:
+    """Re-attach every display slot that showed the role to its replacement, and prove each shows it live, as
+    `present list` reads it (SYRD-752: after a restart the User saw the roles as disconnected). '' when every slot is
+    back, or none showed it; else what is not, with the exact command that reconnects it."""
+    from scripts import presentation_controller, runtime_handover
+
+    if not presentation_controller.presentation_enabled(config, config_path=config_path):
+        return ""
+    try:
+        slots = tuple(presentation_controller.reconnect_role_slots(config, config_path=config_path,
+                                                                   role_name=role_name, runner=runner))
+        unbound = runtime_handover.slot_binding_problem(config, config_path=config_path, role_name=role_name,
+                                                        slots=slots, runner=runner)
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - the pane is back; the display is reported, not hidden
+        slots = presentation_controller.slots_showing_role(config, config_path=config_path, role_name=role_name)
+        unbound = f"its display slots could not be reconnected ({type(exc).__name__}: {exc})"
+    if unbound:
+        fixes = "; ".join(f"`switchyard present {config.project} show --slot {slot} {role_name}`" for slot in slots)
+        print_func(f"switchyard: {role_name} is back, but {unbound}. Reconnect: {fixes or 'no slot shows it'}")
+        return unbound
+    if slots:
+        print_func(f"switchyard: display slot(s) {', '.join(map(str, slots))} show {role_name} again")
+    return ""
+
+
 def refusals(role: Any, facts: dict[str, Any], *, pane: tuple[int, int] | None, busy: bool,
              while_holding: Sequence[str], others: Sequence[int] = ()) -> list[str]:
     """Every reason not to restart this role now; empty when it may be."""
@@ -334,11 +362,63 @@ def refusals(role: Any, facts: dict[str, Any], *, pane: tuple[int, int] | None, 
     return out
 
 
+def _command_program(command: Sequence[str]) -> tuple[str, str]:
+    """(the PATH the pane command sets, the program it runs) of an `env -u NAME ... KEY=VALUE ... program ...` line."""
+    path, index = "", 0
+    if command and command[0] == "env":
+        index = 1
+        while index < len(command):
+            word = command[index]
+            if word == "-u":
+                index += 2
+                continue
+            name, sep, value = word.partition("=")
+            if sep and name and "/" not in name:
+                path = value if name == "PATH" else path
+                index += 1
+                continue
+            break
+    return path, (command[index] if index < len(command) else "")
+
+
+def launch_preflight(config: Any, role: Any, *, session_dir: Path, pane_state_dir: Path,
+                     role_runner: Callable[..., Any]) -> list[str]:
+    """What would make the replacement's start fail, found before the old pane is ended (SYRD-752): a local model
+    whose service is stopped, a working directory that is not one, a pane command that cannot be built, or a program
+    it runs that is not on the PATH it runs with -- each as the role's own account sees it."""
+    from scripts import team_launcher as launcher
+    from scripts.hermes_local_profile import start_refusal
+
+    out: list[str] = []
+    refusal = start_refusal(role)
+    if refusal:
+        out.append(refusal.removeprefix("switchyard: "))
+    if role_runner(["test", "-d", str(role.workdir)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+        out.append(f"its working directory {role.workdir} is not a directory its account can enter")
+    try:
+        with launch_environment.applied():
+            command = launcher.cli_command_for_role(role, session_dir=session_dir, pane_state_dir=pane_state_dir,
+                                                    resume=False, bin_user=config.run_as_user)
+    except SystemExit as exc:
+        return [*out, f"its pane command cannot be built ({exc})"]
+    path, program = _command_program(command)
+    for name in dict.fromkeys(p for p in (program, str(role.cli[0])) if p):
+        found = role_runner(["env", f"PATH={path}", "sh", "-c", 'command -v -- "$1" >/dev/null 2>&1', "sh", name],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+        if not found:
+            out.append(f"{name}, which its pane runs, is not on the PATH its pane gets ({path or 'none'})")
+    return out
+
+
 def _await_registration(config: Any, role: str, old: tuple[int, int] | None, *, opener: Callable[..., Any],
-                        sleep: Callable[[float], None], clock: Callable[[], float], proc_root: Path) -> dict | None:
-    """The board's new registration for the role -- a live process other than `old` -- or None at the deadline."""
+                        sleep: Callable[[float], None], clock: Callable[[], float], proc_root: Path,
+                        session_alive: Callable[[], bool] = lambda: True) -> dict | None:
+    """The board's new registration for the role -- a live process other than `old` -- or None at the deadline, or
+    as soon as the role's session is gone: a pane that died starting registers nothing."""
     deadline = clock() + REGISTER_TIMEOUT_SECONDS
     while clock() < deadline:
+        if not session_alive():
+            return None
         try:
             row = (_get(f"{str(config.board_url).rstrip('/')}/api/runtime-assignments", opener).get("assignments")
                    or {}).get(role) or {}
@@ -411,12 +491,17 @@ def restart_role_command(
         busy = alive and not own and role_runtime._is_busy(role, pane_state_dir=pane_state_dir, runner=role_runner)
         others = other_work(pane[0], root) if own and pane else []
         problems = refusals(role, facts, pane=pane, busy=busy, while_holding=while_holding, others=others)
+        session_dir = launcher.role_session_dir(config, role)
+        if not problems:
+            # Its own pane too (Audit on ce2e6d4e): the successor ends the pane before its start can fail, so what
+            # that start would fail on is refused here, before a successor is armed or released.
+            problems = [f"its replacement could not start: {why}" for why in launch_preflight(
+                config, role, session_dir=session_dir, pane_state_dir=pane_state_dir, role_runner=role_runner)]
         if problems:
             for problem in problems:
                 print_func(f"switchyard: refusing to restart {role.role}: {problem}")
             print_func("switchyard: nothing was changed.")
             return 1
-        session_dir = launcher.role_session_dir(config, role)
         conversation = launcher.session_id_for_role(role, session_dir) or "none recorded"
         verb = "start" if not alive else "restart"
         if dry_run:
@@ -447,17 +532,78 @@ def restart_role_command(
         before = pane_tree(pane[0], root) if pane else {}
         if not pane and registered.get("process_pid"):
             before = {int(registered["process_pid"]): int(registered.get("process_start_time") or 0)}
-        result = (ensure or launcher.ensure_visible_role_session_for_viewer)(
-            role, mode="reload" if alive else "attach-or-start", session_dir=session_dir,
-            pane_state_dir=pane_state_dir, bin_user=config.run_as_user, runner=role_runner)
+        def session_alive() -> bool:
+            return role_runner(launcher.tmux_has_session_args(role), stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL).returncode == 0
+
+        def launch(mode: str) -> int:
+            # From an environment built for it: never the caller's pane identity, nor its agent CLI's nesting
+            # variables, whatever this pane carries (SYRD-752).
+            with launch_environment.applied():
+                return (ensure or launcher.ensure_visible_role_session_for_viewer)(
+                    role, mode=mode, session_dir=session_dir, pane_state_dir=pane_state_dir,
+                    bin_user=config.run_as_user, runner=role_runner)
+
         old = pane or ((facts["registration"] or {}).get("process_pid"),
                        (facts["registration"] or {}).get("process_start_time"))
-        row = _await_registration(config, role.role, old, opener=opener, sleep=sleep, clock=clock, proc_root=root) \
-            if result == 0 else None
+        wanted = expected_board_environment(config, role)
+
+        def came_up(result: int) -> tuple[dict | None, list[str], str]:
+            """(its registration, board variables it lacks, why it is not up) after one start."""
+            row = _await_registration(config, role.role, old, opener=opener, sleep=sleep, clock=clock,
+                                      proc_root=root, session_alive=session_alive) if result == 0 else None
+            if row is None:
+                return None, [], f"launcher exit {result}" if result else "its pane did not stay up and register"
+            stale: list[str] = sorted(wanted)
+            for _ in range(ENVIRONMENT_POLLS):  # the pane's command may still be starting under its shell
+                found = pane_environment(int(row["process_pid"]), role.role, root)
+                stale = sorted(key for key, value in wanted.items() if found.get(key) != value)
+                if not stale or not session_alive():
+                    break
+                sleep(POLL_SECONDS)
+            if stale and not session_alive():  # registered, then died starting: not up, which a second start meets
+                return None, [], "its pane registered, then did not stay up"
+            if not stale:
+                # Seen running is not up: a CLI that exits as it starts -- as a nested one did -- is seen for an
+                # instant. It must still run as the role after the launcher's own stability window for a start.
+                settle = clock() + launcher.DETACHED_SESSION_STABILITY_SECONDS
+                while clock() < settle and session_alive():
+                    sleep(POLL_SECONDS)
+                identity = (row.get("process_pid"), row.get("process_start_time"))
+                if not session_alive() or _process(row.get("process_pid"), root) != identity or pane_environment(
+                        int(row["process_pid"]), role.role, root).get("TICKET_BOARD_CALLER_ROLE") != role.role:
+                    return None, [], "its pane started, then did not stay up"
+            return row, stale, ""
+
+        result = launch("reload" if alive else "attach-or-start")
+        if result != 0 and alive and before and not any(ended(pid, start, root) for pid, start in before.items()):
+            # The launcher refused before it ended anything: every process of the old pane still runs.
+            print_func(f"switchyard: refusing to restart {role.role}: the launcher refused it (exit {result}) before "
+                       "ending anything. Nothing was changed.")
+            return 1
+        row, stale, first = came_up(result)
+        second = ""
         if row is None:
-            print_func(f"switchyard: {role.role} did not come back registered (launcher exit {result}); "
-                       f"`switchyard status {config.project}` says where it stands, and "
-                       f"`switchyard recover-display {config.project}` recovers a role still stopped")
+            # The old pane is ended, or was already gone: one bounded second start, from the same environment.
+            row, stale, again = came_up(launch("reload" if session_alive() else "attach-or-start"))
+            if row is None:
+                tried = f"{first}; a second start: {again}"
+                still = sorted(pid for pid, start in before.items() if not ended(pid, start, root)) if alive else []
+                if still:
+                    print_func(f"switchyard: {role.role} was not restarted: its old pane still runs (pid "
+                               f"{', '.join(map(str, still))}), and no replacement registered ({tried}); "
+                               f"`switchyard status {config.project}` shows where it stands")
+                    return 1
+                gone = "its old pane was ended and " if alive else ""
+                print_func(f"switchyard: {role.role} is stopped: {gone}its replacement did not come up ({tried}). Its "
+                           f"recorded conversation ({conversation}) is kept. Once the cause is fixed, `switchyard "
+                           f"restart-role {config.project} {role.role}` starts it again; `switchyard status "
+                           f"{config.project}` shows where it stands")
+                return 1
+            second = f" on a second start ({first} the first time)"
+        if stale:
+            print_func(f"switchyard: {role.role} came back as pid {row['process_pid']} but without the current "
+                       f"{', '.join(stale)}; it was not restarted cleanly")
             return 1
         deadline = clock() + OLD_GONE_SECONDS
         lingering = [pid for pid, start in before.items() if not ended(pid, start, root)]
@@ -470,23 +616,13 @@ def restart_role_command(
                        "restarted cleanly -- end them, then check `switchyard status "
                        f"{config.project}`")
             return 1
-        wanted = expected_board_environment(config, role)
-        stale: list[str] = sorted(wanted)
-        for _ in range(ENVIRONMENT_POLLS):  # the pane's command may still be starting under its shell
-            found = pane_environment(int(row["process_pid"]), role.role, root)
-            stale = sorted(key for key, value in wanted.items() if found.get(key) != value)
-            if not stale:
-                break
-            sleep(POLL_SECONDS)
-        if stale:
-            print_func(f"switchyard: {role.role} came back as pid {row['process_pid']} but without the current "
-                       f"{', '.join(stale)}; it was not restarted cleanly")
-            return 1
-        print_func(f"switchyard: {verb}ed {role.role}: pid {row['process_pid']} (generation {row.get('generation')}) "
-                   f"replaces {old[0] or 'nothing'}{', which has ended' if before else ''}, registered by the board, "
-                   f"with the current release's hooks, prompt and {len(wanted)} board variable(s); its recorded "
-                   f"conversation ({conversation}) resumes where its rules keep it")
-        return 0
+        print_func(f"switchyard: {verb}ed {role.role}{second}: pid {row['process_pid']} (generation "
+                   f"{row.get('generation')}) replaces {old[0] or 'nothing'}{', which has ended' if before else ''}, "
+                   f"registered by the board, with the current release's hooks, prompt and {len(wanted)} board "
+                   f"variable(s); its recorded conversation ({conversation}) resumes where its rules keep it")
+        unbound = reconnect_slots(config, config_path=config_path, role_name=role.role, runner=runner,
+                                  print_func=print_func)
+        return 1 if unbound else 0
     finally:
         lock.close()
 

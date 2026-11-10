@@ -471,8 +471,16 @@ def switchyard_main(argv: list[str] | None = None) -> int:
                 description=(
                     "Restart one role's pane, its own included, after an upgrade or a prompt or environment change: "
                     "the replacement runs the current release's hooks, the role's prompt and environment, and resumes "
-                    "its recorded conversation. Refused, with nothing changed, while the role is working, runs a "
-                    "leased command, has its provider held, or holds a ticket not named with --while-holding."
+                    "its recorded conversation. Run it as it is, from the Director's pane: the launch never carries "
+                    "the calling pane's identity or its agent CLI's own variables (CLAUDECODE, CLAUDE_CODE_* and "
+                    "their like), so clear nothing first. Every display slot that showed the role shows its "
+                    "replacement afterwards; a slot that does not fails the command with the exact `switchyard "
+                    "present ... show` that reconnects it. Refused, with nothing changed, while the role is working, "
+                    "runs a leased command, has its provider held, or holds a ticket not named with --while-holding, "
+                    "or when its replacement could not start (its CLI not on its pane's PATH, its working directory "
+                    "gone, its local model stopped). If the replacement still fails after the old pane ended, one "
+                    "more start is tried; if that fails too, the role is reported stopped -- not 'nothing changed' "
+                    "-- with its recorded conversation kept and the `switchyard restart-role` that starts it again."
                 ),
             )
             parser.add_argument("project", help="registered project name or slug")

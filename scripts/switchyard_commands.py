@@ -228,7 +228,7 @@ Commands:
   set-role-runtime change an existing role's agent runtime and reconnect its panes
   reconcile-role-models
                    keep the model each role chose, or its configured one, and restart only those
-  restart-role     restart one role's pane, the Director's own included, on the current release
+  restart-role     restart one role's pane cleanly, reconnect its display, and recover a failed start
   agy-credential   show, set, or clear this host's agy credential source
   role-prompt      show, set, or clear a role's onboarding prompt
   design-stage     add a designer-owned design stage and the Director's design review

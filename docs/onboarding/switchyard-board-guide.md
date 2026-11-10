@@ -209,7 +209,7 @@ system working, not a bug to route around.
 - `force-move` / `override-move` — last resort; **always narrate in a comment**
 
 **Non-user roles**
-- `request-dependency <id> --role <role> --reason "..."` — the action to use when your
+- `request-dependency <id> --role <role> --reason-file PATH` — the action to use when your
   work is waiting on somebody. It records the reason as a comment AND sets the durable
   wait in one transaction, so the board cannot end up believing the work is yours and
   moving while you wait. This exists because on SYRD-131 the reason was written as a
@@ -217,7 +217,7 @@ system working, not a bug to route around.
   with nobody holding it until the idle-owner escalation reached the director over an
   hour later (SYRD-133). Prefer it over bare `await-role`: same wait, plus the sentence
   the awaited role needs in order to act. It does not reassign; the work is still yours.
-- `set-blocked-reason <id> --blocked-reason "..."` (or `--clear`) — implementers: keep
+- `set-blocked-reason <id> --blocked-reason-file PATH` (or `--clear`) — implementers: keep
   the ticket's blocker explanation current while you own it in an implementation stage,
   as you find, refine or resolve the reason, instead of leaving the Director to rewrite
   it (SYRD-723). It changes that text and nothing else: no blocker, state, assignee or
@@ -227,7 +227,7 @@ system working, not a bug to route around.
   pane, over the board's socket, and the board refuses it on another owner's ticket,
   once the ticket has left implementation, and from a replaced or retired runtime. Each
   change is recorded in the ticket's field audit under your role and runtime.
-- `request-blocker-review <id> --ref operator:<name> --reason "..."` — implementers: when
+- `request-blocker-review <id> --ref operator:<name> --reason-file PATH` — implementers: when
   the Director kept a standing external blocker while you finished work it waited on, and
   that work is done and recorded, tell the Director it is ready for review (SYRD-726).
   `request-dependency` is refused while the blocker stands, and a plain comment reaches no
@@ -238,14 +238,14 @@ system working, not a bug to route around.
   answered with a comment, the release, or the blockers recorded again. A notice for a
   blocker released before it was delivered is dropped. It works only from your own
   registered pane, over the board's socket, on a ticket you own in an implementation stage.
-- External blockers (director) — `set-blockers <id> --blocked-by syrd:SYRD-269 --blocked-reason "..."`
+- External blockers (director) — `set-blockers <id> --blocked-by syrd:SYRD-269 --blocked-reason-file PATH`
   records a wait on another board's work (SYRD-270); `--blocked-by operator:<name>` records a
   wait on a person whose step has no ticket (SYRD-273). It never resolves by itself, whatever
   the other board does; while it stands the ticket keeps its stage and owner, its
   reminders and handoffs are silent, and submission is refused. While an `operator:<name>`
   blocker stands, a User comment on the ticket notifies the Director once instead of the
   owner (SYRD-725); the comment releases nothing. End it with
-  `release-external-blocker <id> --ref syrd:SYRD-269 --reason "..."`, adding `--commit <sha>`
+  `release-external-blocker <id> --ref syrd:SYRD-269 --reason-file PATH`, adding `--commit <sha>`
   when the wait was for a commit this board could not see: the release is then refused
   until this board's own repository resolves it. The release moves nothing. A
   `blocked_reason` with an empty `blocked_by` is a note, not a wait: it suppresses no
@@ -255,7 +255,7 @@ system working, not a bug to route around.
   its declared transition, with the UAT steps on the ticket, so it reaches User Review after
   every gate it owes. Entering User Review itself needs every sign-off the ticket owes, the
   Director's override included. The one wait on the User is the Director's
-  `await-user <id> --reason "..." --request "..."`, in a stage the workflow lists in its
+  `await-user <id> --reason-file PATH --request-file PATH`, in a stage the workflow lists in its
   optional `user_waits`; the request shows on the ticket's card. A wait on the User the board
   does not admit is reported on the ticket (`user_wait`), put in the Director's queue, and
   repaired the ordinary way: `clear-awaiting-role`, or the owner finishes the stage.
@@ -408,7 +408,7 @@ Two equivalent paths. Both enforce the same rules.
 
 ```bash
 ticket-board-write submit-to-audit PGU-123 --commit-hash abc1234
-ticket-board-write audit-sign-off PGU-123 --text "..."
+ticket-board-write audit-sign-off PGU-123 --text-file PATH
 ```
 
 The pane supplies `TICKET_BOARD_CALLER_ROLE`; do not replace it with another
@@ -431,8 +431,8 @@ Every report takes two steps (SYRD-602).
 
 ```bash
 ticket-board-write file-report \
-  --title "Switchyard issue title" \
-  --body "What failed, what you expected, and any reproduction steps." \
+  --title-file title.txt \
+  --body-file report.md \
   --external-source-ref "$TICKET_BOARD_PROJECT:local-context"
 ```
 
@@ -529,7 +529,7 @@ ancestor, for example a library defect that is also a platform defect. Having an
 is not a reason to file more than once. Nothing fans out unless you say `--to all`.
 
 ```bash
-ticket-board-write file-report --to all --title "..." --body "..." --external-source-ref mefp:MEFP-12
+ticket-board-write file-report --to all --title-file title.txt --body-file report.md --external-source-ref mefp:MEFP-12
 # preview: "Destination: All ancestors (Stellaris API, Switchyard). This would create 2 NEW tickets ..."
 # then the same command with --submit-upstream --expect <digest>
 ```
@@ -703,8 +703,8 @@ request is the reporter's, written on the ticket by the board service either way
 is honoured only when the upstream board's Director has said so:
 
 ```bash
-ticket-board-write set-report-intake --backlog-requests backlog --reason "tenant reports may wait in Backlog"
-ticket-board-write set-report-intake --backlog-requests triage  --reason "every report is triaged first"
+ticket-board-write set-report-intake --backlog-requests backlog --reason-file PATH
+ticket-board-write set-report-intake --backlog-requests triage  --reason-file PATH
 ```
 
 With no policy set, a deferred report lands in Triage with its request shown. `--defer` is
@@ -729,12 +729,27 @@ c.add_comment("PGU-123", text="...")
 c.mark_done("PGU-123", commit_hash="abc1234")
 ```
 
-### Writing comment bodies safely
+### Writing free text safely
 
-Use a **quoted heredoc**. In a double-quoted `--body`, backticks execute:
+Every free-text option (`--text`, `--reason`, `--body`, `--blocked-reason`, `--note`, `--request` and the rest)
+takes a file (`--reason-file PATH`) or standard input (`--reason -`). Use a **quoted heredoc** or a file. In
+double quotes the shell runs backticks and `$(...)` before the board sees the text: Markdown backticks around a
+command become that command running in your pane. Every role's pane has a pre-tool guard,
+`ticket-board-shell-guard`, installed for Claude Code, Codex, agy, Copilot and Hermes. It refuses a shell call
+that would let the shell evaluate a board command's text, before anything runs, and says how to resend it.
+Single quotes break on an apostrophe. Write the reason into a file before using a `--reason-file PATH`
+example, or pass it through a quoted heredoc:
 
 ```bash
-ticket-board-write create-ticket --title "..." --body "$(cat <<'EOF'
+ticket-board-write request-dependency PGU-123 --role ops --reason - <<'EOF'
+The `--plan` default still reads $OLD_DEFAULT; "quotes" and backticks stay literal.
+EOF
+```
+
+`"$(cat <<'EOF' ... EOF)"` is the same quoted heredoc, read through `cat`, and is accepted too:
+
+```bash
+ticket-board-write create-ticket --title-file title.txt --body "$(cat <<'EOF'
 Body text with `backticks` and $variables, safely inert.
 EOF
 )"
@@ -754,7 +769,9 @@ specialty, or that needs a Director decision first, do not proceed because the
 error is rare. Use `implementer_kick_back` with a one-sentence reason:
 
 ```bash
-ticket-board-write implementer-kick-back <id> --reason "This is app's renderer, not main's."
+ticket-board-write implementer-kick-back <id> --reason - <<'EOF'
+This is app's renderer, not main's.
+EOF
 ```
 
 The ticket goes to Analysis for the Director, never straight back through
@@ -912,7 +929,7 @@ shared ancestor. The board checks, once and durably, that:
 Blockers, titles, branches and queue order never count. The decision and its reason are the
 ticket's `context_continuation`. A check that cannot be completed starts fresh and tells you
 once. To start a package's first ticket fresh anyway, before it is handed over, run
-`ticket-board-write force-fresh-context <ticket> --reason "..."` (SYRD-626).
+`ticket-board-write force-fresh-context <ticket> --reason-file PATH` (SYRD-626).
 
 **Blocked is not deferred.** If a ticket waits on another, set a blocker and leave it in
 its owning stage. Moving it to backlog reads as abandoned.

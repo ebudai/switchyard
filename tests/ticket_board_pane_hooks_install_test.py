@@ -350,8 +350,8 @@ def test_installer_seeds_codex_hook_trust_for_fresh_owner_only() -> None:
         assert config_path.exists(), "fresh install with --seed-codex-hook-trust-if-new must create config.toml"
         config = _load_toml(config_path)
 
-    assert len(entries) == 6  # SYRD-695: PreToolUse, PostToolUse
-    assert "seeded Codex hook trust for 6 installed hooks" in proc.stdout
+    assert len(entries) == 7  # SYRD-695: PreToolUse, PostToolUse; SYRD-753: the shell guard, PreToolUse's own group
+    assert "seeded Codex hook trust for 7 installed hooks" in proc.stdout
     assert "hooks" in config
     trusted_by_event = {event: trusted.get(hook_key) == current_hash for event, hook_key, current_hash in entries}
     assert trusted_by_event == {
@@ -384,7 +384,7 @@ def test_installer_does_not_seed_codex_hook_trust_without_opt_in_flag() -> None:
         trusted = codex_trusted_hashes(home)
         config_exists = (home / ".codex" / "config.toml").exists()
 
-    assert len(entries) == 6  # SYRD-695: PreToolUse, PostToolUse
+    assert len(entries) == 7  # SYRD-695: PreToolUse, PostToolUse; SYRD-753: the shell guard
     assert "seeded Codex hook trust" not in proc.stdout
     assert trusted == {}
     assert not config_exists

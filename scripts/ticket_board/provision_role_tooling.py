@@ -57,6 +57,8 @@ ROLE_STAGED_EXECUTABLES: tuple[str, ...] = (
     # hook: a role that could rewrite this could make it answer "allow" for a
     # session that is not in bypass at all (SYRD-234).
     "ticket-board-claude-permission-hook",
+    # SYRD-753: every runtime's pre-tool hook, run from here root-owned.
+    "ticket-board-shell-guard",
     "switchyard-board-skill",
     # SYRD-123: publishing a candidate is a push again. The account every role
     # runs as holds the project's GitHub credential, so this needs no grant, no

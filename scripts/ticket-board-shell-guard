@@ -1,0 +1,1250 @@
+#!/usr/bin/env python3
+"""Refuse a provider's shell tool call that would let the shell evaluate a board command's prose (SYRD-753).
+
+On MEFP (2026-11-10) Ops, a Codex role, wrote the tool call
+`ticket-board-write return-delivery-finding MEFP-1075 --reason "... `pkexec /usr/bin/cp --no-clobber` ..."`.
+Codex runs every shell tool call as `bash -c <command>`, so bash ran the Markdown-quoted text as a command
+substitution before the board client started: a root PolicyKit request, left running after the turn.
+
+Nothing the board client does can undo that: the shell has already run the text by the time it starts. So this
+program runs as the pre-tool hook of every supported runtime, reads the command the model asked for, and refuses
+it, before any process starts, when the prose of a board command would reach a shell evaluation:
+- a free-text option of `ticket-board-write` or `switchyard` (`--reason`, `--text`, `--body`, ...), or the
+  message of `directorctl send` / `callback`, holding backticks, `$(...)`, `$((...))`, `<(...)`, or a `$name`
+  mixed into the prose;
+- that prose read from standard input (`--reason -`, `--text-file -`) through an unquoted heredoc, a here-string
+  or a pipe that does any of those;
+- a board command inside a string handed to `sh -c`, `bash -c`, `eval` and the like that the outer shell
+  expands first.
+
+What passes is what keeps prose literal: a quoted heredoc (`--reason - <<'EOF'`, or `"$(cat <<'EOF' ... EOF)"`),
+`--reason-file PATH`, single quotes, and double quotes with nothing to expand. Other options (`--commit
+$(git rev-parse HEAD)`) and every other command are none of this program's business.
+
+The refusal tells the model the safe form. The answer is written in each runtime's own shape (`--runtime`):
+Claude Code and Codex read PreToolUse `permissionDecision`, Copilot reads `permissionDecision` at the top level,
+agy reads `decision: deny`, Hermes reads `decision: block`. A payload this program cannot read, or a command
+naming no board command, is allowed: it never stands between a role and its ordinary tools.
+
+Standard library only: it is staged beside `ticket-board-pane-idle-hook` and run from a role's home.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import json
+import os
+import re
+import shutil
+import stat
+import sys
+from dataclasses import dataclass, field, replace
+
+#: The free-text options of `ticket-board-write` (write_cli.add_free_text_argument; tests/shell_guard_test.py
+#: pins this to the parser), with the structured options that can carry prose, and `switchyard`'s `--reason`.
+PROSE_FLAGS = frozenset({
+    "--audit-prompt", "--blocked-reason", "--body", "--comment-text", "--do-this", "--implementation", "--message",
+    "--note", "--rationale", "--reason", "--recommendations", "--request", "--text", "--then-choose", "--title",
+    "--you-should-see", "--set", "--value", "--patch-json", "--payload-json",
+})
+FLAG_COMMANDS = frozenset({"ticket-board-write", "switchyard"})
+#: directorctl subcommand -> index of the first argument that is its message.
+DIRECTORCTL_MESSAGE_FROM = {"send": 2, "callback": 1}
+BOARD_COMMANDS = FLAG_COMMANDS | {"directorctl"}
+SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "mksh", "fish", "busybox"})
+EXECUTING = ("backticks", "command substitution", "arithmetic expansion", "process substitution")
+RUNTIMES = ("claude", "codex", "copilot", "agy", "hermes")
+NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def mentions_command(text: str, names=BOARD_COMMANDS) -> bool:
+    """A complete executable name, optionally behind a path; never a directory/prefix such as switchyard-agent."""
+    return any(re.search(r"(?<![A-Za-z0-9_.-])" + re.escape(name) + r"(?![A-Za-z0-9_./-])", text)
+               for name in names)
+
+
+class Unreadable(Exception):
+    """The command is not shell syntax this program can follow (an unterminated quote, say)."""
+
+
+class UncertainProblem(str):
+    """An unsupported part of an inspected script, relevant only if that script can reach board text."""
+
+@dataclass
+class Word:
+    source: str = ""                                  # the text as written
+    plain: str = ""                                   # quotes removed, every expansion replaced by NUL
+    hazards: list[tuple[str, str]] = field(default_factory=list)  # (kind, the text as written)
+    quoted: bool = False
+    nested: list["Command"] = field(default_factory=list)  # commands inside its substitutions
+
+    @property
+    def literal(self) -> str | None:
+        return None if self.hazards or "\0" in self.plain else self.plain
+
+    @property
+    def lone_parameter(self) -> bool:
+        """`"$TEXT"` or `${TEXT}`: a prepared value passed whole, which the shell does not run or re-read."""
+        return self.plain == "\0" and len(self.hazards) == 1 and self.hazards[0][0] == "parameter"
+
+
+@dataclass
+class Redirect:
+    op: str
+    target: Word
+    body: str | None = None        # a heredoc's body
+    body_expands: bool = False     # its delimiter was unquoted
+    body_hazards: list[tuple[str, str]] = field(default_factory=list)
+
+
+@dataclass
+class Command:
+    words: list[Word] = field(default_factory=list)
+    redirects: list[Redirect] = field(default_factory=list)
+    piped_from: "Command | None" = None
+    context_text: str = ""  # physical line of this command; unrelated script lines do not count
+    function_scope: int = 0
+
+
+class Scanner:
+    """A reader of POSIX/bash command syntax: enough to know which text the shell evaluates and which it passes on."""
+
+    def __init__(self, text: str):
+        self.s = text
+        self.i = 0
+        self.pending: list[Redirect] = []
+        self.function_scope = self.function_depth = 0
+        self.next_function_scope = 1
+        self.function_pending = False
+
+    # -- characters ----------------------------------------------------------------------------------------------
+    def peek(self, offset: int = 0) -> str:
+        j = self.i + offset
+        return self.s[j] if j < len(self.s) else ""
+
+    def commands(self, stop: str = "") -> list[Command]:
+        """Every simple command up to `stop` (")" or "`") or the end, nested ones included."""
+        found: list[Command] = []
+        current = Command()
+        word: Word | None = None
+        pipe_into = False
+        cases: list[str] = []  # subject -> in -> pattern -> body, nested cases have their own frame
+
+        def end_word() -> None:
+            nonlocal word
+            if word is not None:
+                found.extend(word.nested)
+                head = all(w.literal in ("then", "do", "else", "{") for w in current.words)
+                literal = word.literal if not word.quoted else None
+                if literal == "function" and head:
+                    self.function_pending = True
+                if literal == "{" and self.function_pending:
+                    self.function_scope = self.next_function_scope
+                    self.next_function_scope += 1
+                    self.function_depth = 1
+                    self.function_pending = False
+                    current.words.clear()  # `function name {` is a definition header, not the body's first command
+                    current.function_scope = self.function_scope
+                elif literal == "{" and self.function_depth:
+                    self.function_depth += 1
+                elif literal == "}" and self.function_depth:
+                    self.function_depth -= 1
+                    if self.function_depth == 0:
+                        self.function_scope = 0
+                if literal == "case" and head and (not cases or cases[-1] == "body"):
+                    cases.append("subject")
+                elif cases and cases[-1] == "subject":
+                    cases[-1] = "in"
+                elif cases and cases[-1] == "in":
+                    if literal != "in":
+                        raise Unreadable("case subject has no in")
+                    cases[-1] = "pattern"
+                elif cases and cases[-1] == "pattern":
+                    if literal == "esac":
+                        cases.pop()
+                elif literal == "esac" and cases and head:
+                    cases.pop()
+                else:
+                    current.words.append(word)
+                word = None
+
+        def end_command(piped: bool = False) -> None:
+            nonlocal current, pipe_into
+            end_word()
+            if current.words or current.redirects:
+                found.append(current)
+                previous = current
+            else:
+                previous = None
+            current = Command(piped_from=previous if piped else None)
+            pipe_into = piped
+
+        while True:
+            c = self.peek()
+            if c == "":
+                if stop:
+                    raise Unreadable(f"no closing {stop}")
+                break
+            if c == ")" and cases and cases[-1] == "pattern":
+                end_word()
+                if cases and cases[-1] == "pattern":
+                    cases[-1] = "body"
+                    self.i += 1
+                    continue
+                # The word just ended may be esac, followed by the enclosing substitution's ')'.
+            if stop and c == stop:
+                self.i += 1
+                break
+            if c in " \t":
+                end_word()
+                self.i += 1
+            elif c == "\n":
+                end_command()
+                self.i += 1
+                self.read_heredoc_bodies()
+            elif c == "#" and word is None:
+                while self.peek() not in ("", "\n"):
+                    self.i += 1
+            elif c == "\\" and self.peek(1) == "\n":
+                self.i += 2
+            elif c in ";&|":
+                two = self.s[self.i:self.i + 2]
+                if cases and cases[-1] == "pattern" and c == "|":
+                    end_word()
+                    self.i += 1
+                    continue
+                if cases and cases[-1] == "body" and two in (";;", ";&"):
+                    end_command()
+                    cases[-1] = "pattern"
+                    self.i += 3 if self.s.startswith(";;&", self.i) else 2
+                    continue
+                if two == "&>":
+                    end_word()
+                    appending = self.s.startswith("&>>", self.i)
+                    self.redirect(current, ">>" if appending else ">", skip=3 if appending else 2)
+                    continue
+                piped = c == "|" and two != "||"
+                self.i += 2 if two in ("&&", "||", "|&", ";;") else 1
+                end_command(piped=piped)
+            elif c in "<>":
+                if self.peek(1) == "(":
+                    word = word or Word()
+                    start = self.i
+                    self.substitution(word, "process substitution", 2)
+                    word.source += self.s[start:self.i]
+                    continue
+                if word is not None and word.source.isdigit():
+                    word = None  # the descriptor the redirection names
+                end_word()
+                self.redirect(current)
+            elif c == "(" and word is not None and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", word.literal or "") and self.peek(1) == ")":
+                # A function's name() signature is syntax; its body is still scanned as commands below.
+                word = None
+                end_command()
+                self.function_pending = True
+                self.i += 2
+            elif c == "(" and word is not None and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*\+?=", word.literal or ""):
+                end_word()  # array assignment: inspect substitutions in the array, without losing its closing ')'
+                self.i += 1
+                found.extend(self.commands(")"))
+            elif c == "(" and word is None:
+                if cases and cases[-1] == "pattern":
+                    self.i += 1  # optional opening parenthesis of a case pattern
+                    continue
+                self.i += 1
+                found.extend(self.commands(")"))
+            elif c == ")" and not stop:
+                raise Unreadable("unbalanced )")
+            else:
+                if not current.words and word is None:
+                    line_start = self.s.rfind("\n", 0, self.i) + 1
+                    line_end = self.s.find("\n", self.i)
+                    current.context_text = self.s[line_start:line_end if line_end >= 0 else len(self.s)]
+                    current.function_scope = self.function_scope
+                word = word or Word()
+                self.word_part(word)
+        end_command()
+        if cases:
+            raise Unreadable("unterminated case statement")
+        return found
+
+    def redirect(self, current: Command, op: str = "", skip: int = 0) -> None:
+        if not op:
+            for candidate in ("<<<", "<<-", "<<", "<>", "<&", ">>", ">&", ">|", "<", ">"):
+                if self.s.startswith(candidate, self.i):
+                    op, skip = candidate, len(candidate)
+                    break
+        self.i += skip
+        while self.peek() in (" ", "\t"):
+            self.i += 1
+        target = Word()
+        while self.peek() and self.peek() not in " \t\n;&|<>()":
+            self.word_part(target)
+        redirect = Redirect(op, target)
+        current.redirects.append(redirect)
+        if op in ("<<", "<<-"):
+            redirect.body_expands = not target.quoted and "\\" not in target.source
+            self.pending.append(redirect)
+
+    def read_heredoc_bodies(self) -> None:
+        for redirect in self.pending:
+            delimiter = redirect.target.plain
+            lines: list[str] = []
+            while self.i < len(self.s):
+                end = self.s.find("\n", self.i)
+                line = self.s[self.i:] if end < 0 else self.s[self.i:end]
+                self.i = len(self.s) if end < 0 else end + 1
+                if (line.lstrip("\t") if redirect.op == "<<-" else line) == delimiter:
+                    break
+                lines.append(line)
+            redirect.body = "\n".join(lines) + ("\n" if lines else "")
+            if redirect.body_expands:
+                inner = Scanner(redirect.body)
+                probe = Word()
+                while inner.i < len(inner.s):
+                    inner.double_quoted_char(probe, heredoc=True)
+                redirect.body_hazards = probe.hazards
+        self.pending = []
+
+    # -- words ---------------------------------------------------------------------------------------------------
+    def word_part(self, word: Word) -> None:
+        c = self.peek()
+        start = self.i
+        if c == "\\":
+            word.plain += self.peek(1)
+            self.i += 2
+        elif c == "'":
+            end = self.s.find("'", self.i + 1)
+            if end < 0:
+                raise Unreadable("unterminated single quote")
+            word.plain += self.s[self.i + 1:end]
+            word.quoted = True
+            self.i = end + 1
+        elif c == '"':
+            word.quoted = True
+            self.i += 1
+            while self.peek() != '"':
+                if self.peek() == "":
+                    raise Unreadable("unterminated double quote")
+                self.double_quoted_char(word)
+            self.i += 1
+        elif c == "$" and self.peek(1) == "'":
+            word.quoted = True
+            self.i += 2
+            while self.peek() != "'":
+                if self.peek() == "":
+                    raise Unreadable("unterminated $'...'")
+                word.plain += self.peek(1) if self.peek() == "\\" else self.peek()
+                self.i += 2 if self.peek() == "\\" else 1
+            self.i += 1
+        elif c in "$`":
+            self.expansion(word)
+        else:
+            word.plain += c
+            self.i += 1
+        word.source += self.s[start:self.i]
+
+    def double_quoted_char(self, word: Word, heredoc: bool = False) -> None:
+        c = self.peek()
+        if c == "\\" and self.peek(1) in ("$", "`", "\\", "\n") + (() if heredoc else ('"',)):
+            word.plain += self.peek(1)
+            self.i += 2
+        elif c in "$`":
+            self.expansion(word)
+        else:
+            word.plain += c
+            self.i += 1
+
+    def expansion(self, word: Word) -> None:
+        start = self.i
+        if self.peek() == "`":
+            self.i += 1
+            body = ""
+            while self.peek() != "`":
+                if self.peek() == "":
+                    raise Unreadable("unterminated backtick")
+                if self.peek() == "\\" and self.peek(1) in "`$\\":
+                    self.i += 1
+                body += self.peek()
+                self.i += 1
+            self.i += 1
+            try:
+                word.nested.extend(Scanner(body).commands())
+            except Unreadable:
+                pass
+            word.hazards.append(("backticks", self.s[start:self.i]))
+            word.plain += "\0"
+            return
+        nxt = self.peek(1)
+        if nxt == "(" and self.peek(2) == "(":
+            depth, self.i = 0, self.i + 1
+            while True:
+                ch = self.peek()
+                if ch == "":
+                    raise Unreadable("unterminated $((")
+                depth += ch == "("
+                depth -= ch == ")"
+                self.i += 1
+                if depth == 0:
+                    break
+            word.hazards.append(("arithmetic expansion", self.s[start:self.i]))
+            word.plain += "\0"
+        elif nxt == "(":
+            self.substitution(word, "command substitution", 2)
+        elif nxt == "{":
+            depth, self.i = 0, self.i + 1
+            while True:
+                ch = self.peek()
+                if ch == "":
+                    raise Unreadable("unterminated ${")
+                depth += ch == "{"
+                depth -= ch == "}"
+                self.i += 1
+                if depth == 0:
+                    break
+            text = self.s[start:self.i]
+            kind = "command substitution" if ("$(" in text or "`" in text) else "parameter"
+            word.hazards.append((kind, text))
+            word.plain += "\0"
+        elif nxt and (NAME.match(nxt) or nxt in "0123456789@*#?$!-"):
+            self.i += 1
+            match = NAME.match(self.s, self.i)
+            self.i = match.end() if match else self.i + 1
+            word.hazards.append(("parameter", self.s[start:self.i]))
+            word.plain += "\0"
+        else:
+            word.plain += "$"
+            self.i += 1
+
+    def substitution(self, word: Word, kind: str, skip: int) -> None:
+        start = self.i
+        self.i += skip
+        inner = Scanner(self.s)
+        inner.i = self.i
+        nested = inner.commands(")")
+        self.i = inner.i
+        word.nested.extend(nested)
+        word.plain += "\0"
+        if kind == "command substitution" and literal_read(nested):
+            return
+        word.hazards.append((kind, self.s[start:self.i]))
+
+
+def literal_read(commands: list[Command]) -> bool:
+    """`$(cat <<'EOF' ... EOF)`, `$(cat PATH)` or `$(< PATH)`: text read as it is, which runs nothing it reads."""
+    if len(commands) != 1:
+        return False
+    command = commands[0]
+    names = [word.literal for word in command.words]
+    if any(name is None for name in names) or any(r.op not in ("<", "<<", "<<-") for r in command.redirects):
+        return False
+    if any(r.op != "<" and r.body_hazards for r in command.redirects):
+        return False
+    if any(r.target.literal is None for r in command.redirects if r.op == "<"):
+        return False
+    if not names:
+        return len(command.redirects) == 1 and command.redirects[0].op == "<"
+    return os.path.basename(names[0] or "") == "cat" and all(not (n or "").startswith("-") or n == "--" for n in names[1:])
+
+
+# -- the decision --------------------------------------------------------------------------------------------------
+def scan(command: str) -> list[Command]:
+    return Scanner(command).commands()
+
+
+def _prose_problem(word: Word, what: str) -> str:
+    for kind, text in word.hazards:
+        if kind in EXECUTING:
+            return f"the shell would run {_quote(text)} in {what} as a command ({kind}) instead of passing it on"
+    parameters = [text for kind, text in word.hazards if kind == "parameter"]
+    if parameters and not word.lone_parameter:
+        return f"the shell would replace {_quote(parameters[0])} in {what} with a variable's value instead of passing it on"
+    return ""
+
+
+def _stdin_problem(command: Command, what: str) -> str:
+    for redirect in command.redirects:
+        if redirect.op in ("<<", "<<-") and redirect.body_hazards:
+            kind, text = redirect.body_hazards[0]
+            verb = "run" if kind in EXECUTING else "expand"
+            return (f"the heredoc feeding {what} has an unquoted delimiter ({redirect.target.source}), so the shell "
+                    f"would {verb} {_quote(text)} in it")
+        if redirect.op == "<<<":
+            return _prose_problem(redirect.target, f"the here-string feeding {what}")
+    producer = command.piped_from
+    while producer is not None:
+        for word in producer.words[1:]:
+            problem = _prose_problem(word, f"the text piped into {what}")
+            if problem:
+                return problem
+        problem = _stdin_problem(Command(redirects=producer.redirects), f"the text piped into {what}")
+        if problem:
+            return problem
+        producer = producer.piped_from
+    return ""
+
+
+#: Words that run the command after them: (option flags that take a value). Shell keywords that start a command
+#: list are skipped the same way, so `do "$B" ...` is read as running "$B".
+WRAPPERS = {
+    "env": {"-u", "-C", "-S", "--unset", "--chdir", "--split-string"}, "command": set(), "builtin": set(),
+    "exec": {"-a"}, "nohup": set(), "time": set(), "nice": {"-n", "--adjustment"}, "ionice": {"-c", "-n", "-p"},
+    "timeout": {"-s", "-k", "--signal", "--kill-after"}, "setsid": set(), "stdbuf": {"-i", "-o", "-e"},
+    "xargs": {"-I", "-n", "-P", "-d", "-s", "-L", "-E", "-a", "--max-args", "--max-procs", "--delimiter"},
+    "sudo": {"-u", "-g", "-C", "-h", "-p", "-U", "-r", "-t", "-D", "--user", "--group"}, "doas": {"-u", "-C"},
+    "runuser": {"-u", "-g", "-G", "--user", "--group"}, "flock": {"-w", "-E", "--timeout"}, "unbuffer": set(),
+    "switchyard-bounded": {"--deadline", "--quiet-after"}, "chronic": set(),
+    "do": set(), "then": set(), "else": set(), "elif": set(), "if": set(), "while": set(), "until": set(),
+    "!": set(), "{": set(),
+}
+ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+DECLARERS = frozenset({"export", "local", "declare", "typeset", "readonly"})
+
+
+@dataclass
+class Context:
+    """What one command line says about itself before it runs: names that are board commands, and literal values."""
+    text: str
+    names: set[str] = field(default_factory=set)        # board commands, with functions and aliases that run one
+    values: dict[str, str] = field(default_factory=dict)  # NAME -> its literal value, from NAME=value in this line
+    scripts: dict[str, str | None] = field(default_factory=dict)  # staged path -> known text, None if unreadable
+    cwd: str | None = field(default_factory=os.getcwd)
+    script_path: str | None = None
+    unknown_files: bool = False
+    unknown_roots: set[str] = field(default_factory=set)
+    file_links: dict[str, str] = field(default_factory=dict)
+    privileged_files: bool = False
+    board_reach: set[str] | None = None
+    script_graph: dict[tuple, set[str]] | None = None
+
+    def mentions_board(self, command: Command | None = None) -> bool:
+        text = command.context_text if command is not None and command.context_text else self.text
+        return mentions_command(text, self.names)
+
+    def resolve(self, word: Word) -> str | None:
+        """The word's value when it is literal, or a lone `$NAME` whose literal value this line assigned."""
+        if word.literal is not None:
+            return word.literal
+        if word.lone_parameter:
+            name = word.hazards[0][1].strip("${}")
+            return self.values.get(name)
+        if word.hazards and all(kind == "parameter" for kind, _ in word.hazards):
+            value = word.plain
+            for _, parameter in word.hazards:
+                name = parameter.strip("${}")
+                if not NAME.fullmatch(name) or name not in self.values:
+                    return None
+                value = value.replace("\0", self.values[name], 1)
+            return value
+        if self.script_path:
+            sibling = re.fullmatch(r'"\$\(dirname "\$\{BASH_SOURCE\[0\]\}"\)(/[^"$`]+)"', word.source)
+            if sibling:
+                return os.path.normpath(os.path.dirname(self.script_path) + sibling.group(1))
+        return None
+
+
+def command_position(command: Command) -> int | None:
+    """Index of the word this simple command runs, past assignments, wrappers and their options; None if none."""
+    words, i = command.words, 0
+    while i < len(words):
+        literal = words[i].literal
+        if ASSIGNMENT.match(words[i].plain):
+            i += 1
+            continue
+        wrapper = WRAPPERS.get(os.path.basename(literal)) if literal is not None else None
+        if wrapper is None:
+            return i
+        i += 1
+        while i < len(words):
+            option = words[i].literal
+            if option is None:
+                break
+            if option == "--":
+                i += 1
+                break
+            if option in wrapper:
+                i += 2
+            elif option.startswith("-") or ASSIGNMENT.match(option) or re.fullmatch(r"[0-9.]+[smhd]?", option):
+                i += 1
+            else:
+                break
+    return None
+
+
+def _board_problems(command: Command, name: str, args: list[Word]) -> list[str]:
+    problems: list[str] = []
+    if name == "directorctl":
+        subcommand = args[0].literal if args else None
+        start = DIRECTORCTL_MESSAGE_FROM.get(subcommand or "")
+        for word in args[start:] if start is not None else []:
+            problems.append(_prose_problem(word, f"the message of `directorctl {subcommand}`"))
+        return [p for p in problems if p]
+    index = 0
+    while index < len(args):
+        word = args[index]
+        flag, _, inline = word.plain.partition("=")
+        index += 1
+        stdin_flag = flag.endswith("-file") and flag[:-5] in PROSE_FLAGS
+        if flag not in PROSE_FLAGS and not stdin_flag:
+            continue
+        what = f"`{name} {flag}`"
+        if "=" in word.plain:
+            value = word
+        elif index < len(args):
+            value = args[index]
+            index += 1
+        else:
+            continue
+        value_text = inline if value is word else value.literal
+        if value_text in ("-", "/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"):
+            problems.append(_stdin_problem(command, what))
+        elif not stdin_flag:
+            problems.append(_prose_problem(value, what))
+    return [p for p in problems if p]
+
+
+def _unknown_command_problems(command: Command, word: Word, args: list[Word]) -> list[str]:
+    """A command run through a value this guard cannot read could be a board command: fail closed on its text."""
+    what = f"the arguments of {_quote(word.source)}, a command this guard cannot name before it runs"
+    problems = _board_problems(command, "ticket-board-write", args)
+    for arg in args:
+        executing = [(kind, text) for kind, text in arg.hazards if kind in EXECUTING]
+        if executing:
+            problems.append(f"the shell would run {_quote(executing[0][1])} in {what} ({executing[0][0]})")
+    return [p.replace("`ticket-board-write ", "`" + word.source + " ") for p in problems]
+
+
+MAX_SCRIPT_BYTES = 1 << 20
+
+def _immutable_system_script(path: str) -> bool:
+    """An unresolved role-owned write cannot replace a root-only package script or any of its parents."""
+    if os.geteuid() == 0 or not path.startswith(("/usr/", "/opt/")):
+        return False
+    try:
+        current = path
+        while True:
+            info = os.lstat(current)
+            if info.st_uid != 0 or info.st_mode & 0o022 or stat.S_ISLNK(info.st_mode):
+                return False
+            if current == "/":
+                return True
+            current = os.path.dirname(current)
+    except OSError:
+        return False
+
+
+def _path(path: str, ctx: Context) -> str | None:
+    if os.path.isabs(path):
+        return os.path.normpath(path)
+    return os.path.abspath(os.path.join(ctx.cwd, path)) if ctx.cwd is not None else None
+
+
+def _read_script(path: str, ctx: Context, links: int = 0) -> str:
+    """Read one bounded regular script as this role, without opening links, devices or FIFOs. Never execute it."""
+    full = _path(path, ctx)
+    if full is None:
+        raise Unreadable("the script's working directory is unresolved")
+    if full in ctx.file_links:
+        if links >= 40:
+            raise Unreadable("a modeled file-link chain is unresolved or cyclic")
+        return _read_script(ctx.file_links[full], ctx, links + 1)
+    if full in ctx.scripts:
+        text = ctx.scripts[full]
+        if text is None:
+            raise Unreadable(f"the content written to {path} cannot be determined before execution")
+        return text
+    if (ctx.unknown_files or any(full == root or full.startswith(root + os.sep) for root in ctx.unknown_roots)) and (ctx.privileged_files or not _immutable_system_script(full)):
+        raise Unreadable(f"an earlier file replacement may change {path} before the shell reads it")
+    try:
+        fd = os.open(full, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or not info.st_mode & 0o444 or info.st_size > MAX_SCRIPT_BYTES:
+                raise Unreadable(f"{path} is not a readable regular script of at most {MAX_SCRIPT_BYTES} bytes")
+            data = bytearray()
+            while len(data) <= MAX_SCRIPT_BYTES:
+                chunk = os.read(fd, min(65536, MAX_SCRIPT_BYTES + 1 - len(data)))
+                if not chunk:
+                    break
+                data.extend(chunk)
+            if len(data) > MAX_SCRIPT_BYTES or b"\0" in data:
+                raise Unreadable(f"{path} is too large or is not a text script")
+            return data.decode("utf-8")
+        finally:
+            os.close(fd)
+    except (OSError, UnicodeError) as exc:
+        raise Unreadable(f"cannot safely read script {path} ({type(exc).__name__})") from None
+
+
+def _script_problems(path: str | None, ctx: Context, depth: int) -> list[str]:
+    try:
+        if path is None:
+            raise Unreadable("the shell script path is unresolved")
+        text = _read_script(path, ctx)
+        reach = {"direct"} if mentions_command(text, ctx.names) else set()
+        # Known shell-to-interpreter self trampolines have no shell body after the unconditional exec.
+        if not reach:
+            match = re.search(r'^exec (?:wish|tclsh|perl) [^\n]*["\']?\$0["\']?[^\n]*$', text, re.M)
+            if match and all(not line.strip() or line.lstrip().startswith("#") for line in text[:match.start()].splitlines()):
+                text = text[:match.end()]
+        graph = ctx.script_graph if ctx.script_graph is not None else {}
+        key = (_path(path, ctx), text, ctx.cwd, tuple(sorted(ctx.scripts.items())), tuple(sorted(ctx.values.items())),
+               tuple(sorted(ctx.file_links.items())), ctx.unknown_files, tuple(sorted(ctx.unknown_roots)), ctx.privileged_files)
+        if key in graph:
+            if ctx.board_reach is not None:
+                ctx.board_reach.update(graph[key])
+            return []
+        if len(graph) >= 64:
+            if ctx.board_reach is not None:
+                ctx.board_reach.add("unbounded static shell-input graph")
+            return ["a static shell-input graph is too large to determine board-command reach"]
+        graph[key] = reach
+        # A script starts with the invoking shell's cwd, not the directory that contains the script.
+        problems = problems_in(text, 0, replace(ctx, board_reach=reach, script_graph=graph), script_path=_path(path, ctx))
+        if ctx.board_reach is not None:
+            ctx.board_reach.update(reach)
+        return problems
+    except Unreadable as exc:
+        full = _path(path, ctx) if path is not None else None
+        absent = full is not None and not os.path.lexists(full) and full not in ctx.scripts and full not in ctx.file_links and not ctx.unknown_files and not any(full == root or full.startswith(root + os.sep) for root in ctx.unknown_roots)
+        if ctx.board_reach is not None and (path is None or path == "" or os.path.isdir(full or "") or absent):
+            return [UncertainProblem(f"an inspected script has an unresolved shell input ({exc})")]
+        if ctx.board_reach is not None:
+            ctx.board_reach.add("unreadable static shell input")
+        return [f"a shell would execute a script this guard cannot inspect ({exc})"]
+
+
+def _executable_script_problems(path: str, ctx: Context, depth: int) -> list[str]:
+    full = _path(path, ctx)
+    if full in ctx.scripts or full in ctx.file_links:
+        return _script_problems(path, ctx, depth)
+    search = os.pathsep.join(_path(p or ".", ctx) or "" for p in ctx.values.get("PATH", os.defpath if
+                            "PATH" not in os.environ else os.environ["PATH"]).split(os.pathsep))
+    executable = full if "/" in path else shutil.which(path, path=search)
+    if executable is None:
+        return []
+    # Resolve a command's package symlink, then inspect its shebang with a bounded nonblocking regular-file read.
+    executable = os.path.realpath(executable)
+    try:
+        fd = os.open(executable, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return []
+            header = os.read(fd, 4096)
+        finally:
+            os.close(fd)
+    except OSError:
+        return _script_problems(path, ctx, depth) if path.endswith((".sh", ".bash", ".zsh")) else []
+    first = header.split(b"\n", 1)[0].decode("utf-8", "replace")
+    shebang = first[2:].split() if first.startswith("#!") else []
+    if shebang and any(os.path.basename(s) in SHELLS for s in shebang):
+        return _script_problems(executable, ctx, depth)
+    # Executable text without a shebang is interpreted by the invoking shell after ENOEXEC.
+    if not shebang and header and b"\0" not in header:
+        return _script_problems(executable, ctx, depth)
+    return []
+
+
+def _source_problems(path: str | None, ctx: Context, depth: int) -> list[str]:
+    if path is None or "/" in path:
+        return _script_problems(path, ctx, depth)
+    # `source name`/`. name` searches PATH; bash may also use cwd. Inspect all possible readable matches.
+    full = _path(path, ctx)
+    candidates = [path] if full is not None and (full in ctx.scripts or full in ctx.file_links or os.path.lexists(full)) else []
+    for directory in ctx.values.get("PATH", os.environ.get("PATH", os.defpath)).split(os.pathsep):
+        candidate = _path(os.path.join(directory or ".", path), ctx)
+        if candidate is not None and (candidate in ctx.scripts or candidate in ctx.file_links or os.path.lexists(candidate)):
+            candidates.append(candidate)
+    return [problem for candidate in dict.fromkeys(candidates or [path])
+            for problem in _script_problems(candidate, ctx, depth)]
+
+
+def _producer_text(command: Command, ctx: Context) -> str | None:
+    """Deterministic cat/heredoc, echo, and printf staging; anything requiring execution is unknown."""
+    at = command_position(command)
+    if at is None:
+        return None
+    name = os.path.basename(ctx.resolve(command.words[at]) or "")
+    args = [ctx.resolve(w) for w in command.words[at + 1:]]
+    if any(a is None for a in args):
+        return None
+    if name == "cat":
+        bodies = [r.body for r in command.redirects if r.op in ("<<", "<<-") and not r.body_hazards]
+        return bodies[0] if len(bodies) == 1 and not args else None
+    if name == "echo":
+        return " ".join(args) + "\n" if not any(a.startswith("-") or "\\" in a for a in args) else None
+    if name != "printf" or not args:
+        return None
+    fmt, values = args[0], iter(args[1:])
+    result, i = "", 0
+    while i < len(fmt):
+        ch = fmt[i]
+        if ch == "%":
+            i += 1
+            if i >= len(fmt) or fmt[i] not in ("s", "%"):
+                return None
+            result += next(values, "") if fmt[i] == "s" else "%"
+        elif ch == "\\":
+            i += 1
+            if i >= len(fmt) or fmt[i] not in {"n", "t", "r", "\\"}:
+                return None
+            result += {"n": "\n", "t": "\t", "r": "\r", "\\": "\\"}[fmt[i]]
+        else:
+            result += ch
+        i += 1
+    # printf repeats its format for surplus values; refuse to guess at unsupported rendering.
+    return result if next(values, None) is None else None
+
+
+def _record_script_output(command: Command, ctx: Context) -> None:
+    for redirect in command.redirects:
+        if redirect.op not in (">", ">>", ">|"):
+            continue
+        target = ctx.resolve(redirect.target)
+        path = _path(target, ctx) if target is not None else None
+        if path is None:
+            continue
+        text = _producer_text(command, ctx)
+        if redirect.op == ">>":
+            try:
+                previous = _read_script(target, ctx)
+            except Unreadable:
+                previous = None
+            text = previous + text if previous is not None and text is not None else None
+        for _ in range(40):
+            if path not in ctx.file_links:
+                break
+            path = ctx.file_links[path]
+        else:
+            ctx.unknown_files = True
+        ctx.scripts[path] = text
+
+
+def _record_file_replacement(command: Command, at: int, ctx: Context) -> None:
+    """Only visible cp/mv/install/ln operations: track literal file bytes, invalidate unresolved destinations."""
+    name = os.path.basename(ctx.resolve(command.words[at]) or "")
+    if name not in {"cp", "mv", "install", "ln"}:
+        return
+    ctx.privileged_files |= any(os.path.basename(w.literal or "") in {"sudo", "pkexec", "doas", "su", "runuser"}
+                                for w in command.words[:at])
+    args = [ctx.resolve(w) for w in command.words[at + 1:]]
+    if any(arg in {"--help", "--version"} for arg in args):
+        return
+    if any(arg is None for arg in args):
+        # An unresolved operand can also be an option (including -t/--target-directory), so its destination is unknown.
+        ctx.unknown_files = True
+        ctx.scripts.clear()
+        ctx.file_links.clear()
+        return
+    operands, target_dir, no_directory, symbolic, no_clobber, uncertain = [], None, False, False, False, False
+    link_copy = False
+    relative, backup = False, False
+    with_value = {"-m", "-o", "-g", "-S", "--mode", "--owner", "--group", "--suffix", "--context"}
+    index, options = 0, True
+    while index < len(args):
+        arg = args[index]
+        index += 1
+        if options and arg == "--":
+            options = False
+        elif options and arg is not None and arg.startswith("--target-directory="):
+            target_dir = arg.split("=", 1)[1]
+        elif options and arg in {"-t", "--target-directory"}:
+            target_dir = args[index] if index < len(args) else None
+            index += 1
+            uncertain |= target_dir is None
+        elif options and arg is not None and arg.startswith("-t") and len(arg) > 2:
+            target_dir = arg[2:]
+        elif options and arg in with_value:
+            index += 1
+            uncertain |= arg in {"-S", "--suffix"}
+        elif options and arg is not None and arg.startswith("-"):
+            if name == "install" and arg in {"-d", "--directory"}:
+                return  # creates directories without replacing a file's contents
+            no_directory |= arg in {"-T", "--no-target-directory"}
+            symbolic |= name == "ln" and (arg == "--symbolic" or not arg.startswith("--") and "s" in arg)
+            relative |= name == "ln" and (arg == "--relative" or not arg.startswith("--") and "r" in arg)
+            link_copy |= name == "cp" and (arg in {"--link", "--symbolic-link"} or
+                                          not arg.startswith("--") and any(c in arg for c in "ls"))
+            no_clobber |= arg == "--no-clobber" or not arg.startswith("--") and "n" in arg and name != "ln"
+            backup |= arg.startswith("--backup") or not arg.startswith("--") and "b" in arg
+            uncertain |= (name != "ln" and not arg.startswith("--") and any(c in arg for c in "rRa")) or arg in {
+                "--recursive", "--archive", "--parents"}
+        else:
+            operands.append(arg)
+    destination = target_dir if target_dir is not None else operands.pop() if len(operands) >= 2 else None
+    target = _path(destination, ctx) if destination is not None else None
+    if target is None:
+        ctx.unknown_files = True
+        ctx.scripts.clear()
+        ctx.file_links.clear()
+        return
+    directory = target_dir is not None or not no_directory and os.path.isdir(target)
+    if uncertain or backup or not operands or len(operands) != 1 and not directory:
+        if backup:
+            target = target if directory else os.path.dirname(target)
+        for root in {target, os.path.realpath(target)}:
+            ctx.unknown_roots.add(root)
+            ctx.scripts = {p: text for p, text in ctx.scripts.items() if p != root and not p.startswith(root + os.sep)}
+            ctx.file_links = {p: origin for p, origin in ctx.file_links.items() if p != root and not p.startswith(root + os.sep)}
+        return
+    for source in operands:
+        if source is None and directory:
+            ctx.unknown_roots.add(target)
+            ctx.scripts = {p: text for p, text in ctx.scripts.items() if not p.startswith(target + os.sep)}
+            ctx.file_links = {p: origin for p, origin in ctx.file_links.items() if not p.startswith(target + os.sep)}
+            continue
+        dest = os.path.join(target, os.path.basename(source)) if directory else target
+        if no_clobber and (dest in ctx.scripts or dest in ctx.file_links or os.path.lexists(dest)):
+            continue
+        try:
+            if source is None:
+                raise Unreadable("unresolved replacement source")
+            # A symbolic link's relative target is relative to the link's directory, not the command's cwd.
+            origin = (os.path.join(os.path.dirname(dest), source) if symbolic and not relative
+                      and not os.path.isabs(source) else source)
+            text = _read_script(origin, ctx)
+        except Unreadable:
+            text = None
+        ctx.scripts[dest] = text
+        if name == "ln" or link_copy:
+            origin = _path(origin, ctx) if source is not None else None
+            if origin is not None:
+                ctx.file_links[dest] = origin
+        elif name in {"mv", "install"}:
+            ctx.file_links.pop(dest, None)
+        elif dest in ctx.file_links:
+            alias = dest
+            for _ in range(40):
+                if alias not in ctx.file_links:
+                    break
+                alias = ctx.file_links[alias]
+            ctx.scripts[alias] = text
+        if name == "cp" and os.path.islink(dest):
+            ctx.scripts[os.path.realpath(dest)] = text
+        if name == "mv" and source is not None:
+            moved = _path(source, ctx)
+            if moved is not None and moved != dest:
+                ctx.scripts[moved] = None
+
+
+def _interpreter_problems(command: Command, at: int, ctx: Context, depth: int) -> list[str]:
+    """Only directly visible interpreter code that explicitly launches a shell; no general program analysis."""
+    name = os.path.basename(ctx.resolve(command.words[at]) or "")
+    if not re.fullmatch(r"python(?:[0-9.]+)?|node|nodejs|perl|ruby", name):
+        return []
+    args = command.words[at + 1:]
+    for i, word in enumerate(args[:-1]):
+        if word.literal not in ("-c", "-e", "--eval"):
+            continue
+        code = ctx.resolve(args[i + 1])
+        if code is None:
+            return ["an interpreter's visible shell string cannot be resolved"] if ctx.mentions_board(command) else []
+        if not name.startswith("python"):
+            if re.search(r"\b(?:exec|execSync|system|popen|spawn)\s*\(", code) and mentions_command(code, ctx.names):
+                return ["an interpreter explicitly launches a shell with board text; use direct argv and a text file"]
+            return []
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return ["an interpreter's board shell string cannot be inspected"] if ctx.mentions_board(command) else []
+        values = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        values[target.id] = node.value.value
+
+        def literal(node):
+            if isinstance(node, ast.Name):
+                return values.get(node.id)
+            try:
+                return ast.literal_eval(node)
+            except (ValueError, TypeError):
+                return None
+
+        problems = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not node.args:
+                continue
+            method = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+            if method not in {"system", "popen", "getoutput", "getstatusoutput", "run", "Popen", "call",
+                              "check_call", "check_output"}:
+                continue
+            shell = method in ("system", "popen", "getoutput", "getstatusoutput") or any(
+                k.arg == "shell" and literal(k.value) is True for k in node.keywords)
+            value = literal(node.args[0])
+            if isinstance(value, (list, tuple)) and len(value) >= 3 and os.path.basename(str(value[0])) in SHELLS:
+                if "-c" in value:
+                    index = value.index("-c") + 1
+                    shell, value = True, value[index] if index < len(value) else None
+            if isinstance(value, (list, tuple)) and len(value) >= 2 and os.path.basename(str(value[0])) in SHELLS:
+                if isinstance(value[1], str) and not value[1].startswith("-"):
+                    problems.extend(_script_problems(value[1], ctx, depth))
+            if shell:
+                if isinstance(value, str):
+                    problems.extend(problems_in(value, depth + 1, ctx))
+                elif mentions_command(code, ctx.names):
+                    problems.append("an interpreter explicitly launches an unresolved shell string with board text")
+        return problems
+    return []
+
+
+def _nested_shell_problems(command: Command, at: int, ctx: Context, depth: int) -> list[str]:
+    words = command.words
+    name = os.path.basename(ctx.resolve(words[at]) or "")
+    scripts: list[Word] = []
+    if name == "eval":
+        rest = words[at + 1:]
+        joined = Word(source=" ".join(w.source for w in rest), plain=" ".join(w.plain for w in rest))
+        for w in rest:
+            joined.hazards.extend(w.hazards)
+        scripts.append(joined)
+    elif name in SHELLS or name in ("source", "."):
+        for later in range(at + 1, len(words)):
+            flag = words[later].literal or ""
+            if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", flag) and name in SHELLS and later + 1 < len(words):
+                scripts.append(words[later + 1])
+                break
+            if not flag.startswith("-"):
+                path = ctx.resolve(words[later])
+                if flag != "-":
+                    return (_source_problems(path, ctx, depth) if name in ("source", ".") else
+                            _script_problems(path, ctx, depth))
+                break
+        if not scripts:
+            for redirect in command.redirects:
+                if redirect.op == "<":
+                    return _script_problems(ctx.resolve(redirect.target), ctx, depth)
+                if redirect.op in ("<<", "<<-") and redirect.body is not None:
+                    if redirect.body_hazards:
+                        return [UncertainProblem("a shell's script input uses an expanding heredoc")]
+                    return problems_in(redirect.body, depth + 1, ctx)
+            if command.piped_from is not None:
+                text = _producer_text(command.piped_from, ctx)
+                return problems_in(text, depth + 1, ctx) if text is not None else [
+                    UncertainProblem("a shell's piped script input cannot be determined before execution")]
+    problems: list[str] = []
+    for script in scripts:
+        text = ctx.resolve(script)
+        if text is not None:
+            # An explicit new shell's -c string has no script BASH_SOURCE; eval stays in the current script.
+            problems.extend(problems_in(text, depth + 1, ctx, script_path="" if name in SHELLS else None))
+        elif ctx.mentions_board(command):
+            problems.append("a board command may run from a string a shell evaluates again (`sh -c`, `eval`) whose "
+                            "text this guard cannot read before it runs")
+    return problems
+
+
+def _context(commands: list[Command], text: str, outer: Context | None) -> Context:
+    ctx = Context(text=text, names=set(outer.names) if outer else set(BOARD_COMMANDS),
+                  values=dict(outer.values) if outer else {}, scripts=dict(outer.scripts) if outer else {},
+                  cwd=outer.cwd if outer else os.getcwd(), script_path=outer.script_path if outer else None,
+                  unknown_files=outer.unknown_files if outer else False,
+                  unknown_roots=set(outer.unknown_roots) if outer else set(),
+                  file_links=dict(outer.file_links) if outer else {}, board_reach=outer.board_reach if outer else None,
+                  privileged_files=outer.privileged_files if outer else False,
+                  script_graph=outer.script_graph if outer else None)
+    if mentions_command(text, ctx.names):
+        # A function or alias whose body names a board command runs one under its own name.
+        ctx.names |= set(re.findall(r"(?:^|[\s;&|(])function\s+([A-Za-z_][\w.-]*)", text))
+        ctx.names |= set(re.findall(r"(?:^|[\s;&|(])([A-Za-z_][\w.-]*)\s*\(\)", text))
+        ctx.names |= set(re.findall(r"\balias\s+([A-Za-z_][\w.-]*)=", text))
+    return ctx
+
+
+def _record_values(command: Command, ctx: Context) -> None:
+    words = command.words
+    declaring = bool(words) and words[0].literal in DECLARERS
+    for word in words[1:] if declaring else words:
+        match = ASSIGNMENT.match(word.plain)
+        if not match:
+            break
+        name = match.group(0)[:-1]
+        if word.literal is None:
+            ctx.values.pop(name, None)
+        else:
+            ctx.values[name] = word.literal[match.end():]
+
+
+def problems_in(command_text: str, depth: int = 0, outer: Context | None = None, *, cwd: str | None = None,
+                script_path: str | None = None) -> list[str]:
+    """Why this shell command would let the shell evaluate a board command's prose; empty when it would not."""
+    if depth > 4:
+        return [UncertainProblem("board commands nested in shell strings too deeply to read")]
+    names = outer.names if outer else BOARD_COMMANDS
+    try:
+        commands = scan(command_text)
+    except Unreadable as exc:
+        if mentions_command(command_text, names):
+            return [f"the command names a board command but is not shell syntax this guard can follow ({exc})"]
+        if outer is None or outer.board_reach is None:
+            return []
+        commands = []
+        for line in command_text.splitlines():
+            try:
+                partial = scan(line)
+                first = command_position(partial[0]) if partial else None
+                token = partial[0].words[first].literal if first is not None else None
+                if first is None or (token and ("/" in token or token.endswith((".sh", ".bash")) or shutil.which(token))) or os.path.basename(token or "") in SHELLS | {"source", ".", "cp", "mv", "install", "ln", "cd"}:
+                    commands.extend(partial)  # follow supported shell-file paths, not fragments of quoted awk/Tcl bodies
+                elif token and re.fullmatch(r"[A-Za-z_][\w.-]*", token):
+                    commands.extend(partial[:1])  # its PATH may be assigned literally in an earlier readable line
+            except Unreadable:
+                pass
+    ctx = _context(commands, command_text, outer)
+    if cwd is not None:
+        ctx.cwd = os.path.abspath(cwd)
+    if script_path is not None:
+        ctx.script_path = script_path
+    problems: list[str] = []
+    scopes = {0: ctx}
+    for command in commands:
+        # Defining a function does not execute its filesystem effects at top level. Its body is inspected in its
+        # own state, so a visible copy followed by a shell within that body is still checked.
+        if command.function_scope not in scopes:
+            scopes[command.function_scope] = _context([], command_text, scopes[0])
+        ctx = scopes[command.function_scope]
+        _record_values(command, ctx)
+        at = command_position(command)
+        if at is None:
+            continue
+        word, args = command.words[at], command.words[at + 1:]
+        resolved = ctx.resolve(word)
+        name = os.path.basename(resolved or "")
+        _record_script_output(command, ctx)
+        _record_file_replacement(command, at, ctx)
+        if name == "cd":
+            directory = ctx.resolve(args[0]) if args else os.environ.get("HOME")
+            ctx.cwd = _path(directory, ctx) if directory is not None else None
+        problems.extend(_nested_shell_problems(command, at, ctx, depth))
+        problems.extend(_interpreter_problems(command, at, ctx, depth))
+        if resolved is None:
+            unknown = _unknown_command_problems(command, word, args)
+            board_shape = any(re.fullmatch(r"[A-Z][A-Z0-9]*-[0-9]+", w.plain) or
+                              w.plain.split("=", 1)[0] in {"--reason", "--blocked-reason", "--reason-file"} or
+                              re.match(r"^(?:add-comment$|return-delivery-finding$|request-|submit-|audit-|workflow-action$)", w.plain)
+                              for w in args)
+            if ctx.board_reach is not None and not board_shape:
+                unknown = [UncertainProblem(p) for p in unknown]
+            elif unknown and ctx.board_reach is not None:
+                ctx.board_reach.add("unresolved command with board prose")
+            problems.extend(unknown)
+        elif name in ctx.names:
+            problems.extend(_board_problems(command, name if name in BOARD_COMMANDS else "ticket-board-write", args))
+        else:
+            if resolved is not None:
+                problems.extend(_executable_script_problems(resolved, ctx, depth))
+            for later, other in enumerate(args):  # a board command after something this guard does not know
+                if os.path.basename(other.literal or "") in ctx.names:
+                    problems.extend(_board_problems(command, os.path.basename(other.literal or ""), args[later + 1:]))
+                    break
+    if ctx.board_reach is not None and not ctx.board_reach:
+        return [p for p in problems if not isinstance(p, UncertainProblem)]
+    return problems
+
+
+def _quote(text: str) -> str:
+    text = text if len(text) <= 80 else text[:77] + "..."
+    return "`" + text.replace("`", "'") + "`"
+
+
+def refusal(problems: list[str]) -> str:
+    return (
+        "Switchyard refused this command before it ran (SYRD-753): " + "; ".join(dict.fromkeys(problems)) + ". "
+        "Board text must reach the board as written. Pass it through a quoted heredoc, which the shell leaves alone:\n"
+        "ticket-board-write <action> <ticket> --reason - <<'EOF'\n"
+        "your text, with `backticks`, $dollars and \"quotes\" kept literal\n"
+        "EOF\n"
+        "or write it to a file and pass --reason-file PATH (the same holds for --text, --body and every other "
+        "free-text option). Nothing was run."
+    )
+
+
+# -- the runtimes' payloads ------------------------------------------------------------------------------------------
+def command_of(payload: object) -> str | None:
+    """The shell command a pre-tool payload asks to run, from any supported runtime's shape, or None."""
+    if not isinstance(payload, dict):
+        return None
+    candidates: list[object] = []
+    for key in ("tool_input", "toolInput", "args", "input"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            candidates.extend([value.get("command"), value.get("cmd"), value.get("CommandLine")])
+    tool_args = payload.get("toolArgs")
+    if isinstance(tool_args, str):
+        try:
+            tool_args = json.loads(tool_args)
+        except ValueError:
+            tool_args = None
+    if isinstance(tool_args, dict):
+        candidates.extend([tool_args.get("command"), tool_args.get("cmd")])
+    call = payload.get("toolCall")
+    if isinstance(call, dict) and isinstance(call.get("args"), dict):
+        candidates.extend([call["args"].get("CommandLine"), call["args"].get("command")])
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+        if isinstance(candidate, list) and candidate and all(isinstance(part, str) for part in candidate):
+            if len(candidate) >= 3 and os.path.basename(candidate[0]) in SHELLS and re.fullmatch(r"-[A-Za-z]*c", candidate[-2]):
+                return candidate[-1]
+            return " ".join(_sh_quote(part) for part in candidate)
+    return None
+
+
+def _sh_quote(part: str) -> str:
+    return part if re.fullmatch(r"[A-Za-z0-9_./:=@%+,-]+", part) else "'" + part.replace("'", "'\\''") + "'"
+
+
+def answer(runtime: str, reason: str) -> dict:
+    if runtime in ("claude", "codex"):
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                       "permissionDecisionReason": reason}}
+    if runtime == "copilot":
+        return {"permissionDecision": "deny", "permissionDecisionReason": reason}
+    if runtime == "agy":
+        return {"decision": "deny", "reason": reason}
+    return {"decision": "block", "reason": reason}
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--runtime", required=True, choices=RUNTIMES)
+    args = parser.parse_args(argv)
+    raw = sys.stdin.buffer.read().decode("utf-8", "replace")
+    try:
+        payload = json.loads(raw)
+        command = command_of(payload)
+    except ValueError:
+        command = None
+    problems: list[str] = []
+    if command is not None:
+        try:
+            cwd = payload.get("cwd") if isinstance(payload, dict) else None
+            inputs = [payload.get(k) for k in ("tool_input", "toolInput", "args", "input")]
+            tool_args = payload.get("toolArgs")
+            if isinstance(tool_args, str):
+                try:
+                    tool_args = json.loads(tool_args)
+                except ValueError:
+                    tool_args = None
+            inputs.append(tool_args)
+            call = payload.get("toolCall")
+            if isinstance(call, dict):
+                inputs.append(call.get("args"))
+            for item in inputs:
+                if isinstance(item, dict):
+                    cwd = item.get("workdir") or item.get("cwd") or item.get("Cwd") or item.get("working_directory") or cwd
+            problems = problems_in(command, cwd=cwd if isinstance(cwd, str) else None)
+        except Exception as exc:  # the guard's own fault: refuse only what it was there to look at
+            if mentions_command(command):
+                problems = [f"the guard could not read the command ({type(exc).__name__})"]
+    if problems:
+        sys.stdout.write(json.dumps(answer(args.runtime, refusal(problems))) + "\n")
+    elif args.runtime == "agy":
+        sys.stdout.write("{}\n")  # agy reads a JSON object from every hook
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

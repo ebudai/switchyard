@@ -101,7 +101,7 @@ Nothing a person reads needs to change: the change is invisible to users, or
 the implementer already updated every surface consistently.
 
 ```bash
-ticket-board-write documentation-no-change <ID> --reason "<what you checked, and why nothing needs to change>"
+ticket-board-write documentation-no-change <ID> --reason-file PATH
 ```
 
 The reason is required and recorded on the ticket under your name, so say what
@@ -130,7 +130,7 @@ alone.
 5. Sign off with the command it prints:
 
 ```bash
-ticket-board-write documentation-sign-off <ID> --commit <your commit> [--note "<anything Audit should know>"]
+ticket-board-write documentation-sign-off <ID> --commit <your commit> [--note-file PATH]
 ```
 
 The board checks, before anything moves, that your commit is published at
@@ -144,7 +144,7 @@ review's verdict is kept.
 ### Kick the ticket back with findings
 
 ```bash
-ticket-board-write documentation-kick-back <ID> --reason "<the concrete findings>"
+ticket-board-write documentation-kick-back <ID> --reason-file PATH
 ```
 
 Return it to its implementer when:

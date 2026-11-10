@@ -206,10 +206,19 @@ END $$;
 
 
 def documented_commands() -> list[tuple[str, str]]:
-    """Every `ticket-board-write` line in the relay guidance, joined across its backslashes."""
+    """Every `ticket-board-write` line in the relay guidance, joined across its backslashes.
+
+    Since SYRD-753 a payload is written as a quoted heredoc read through `cat`, `"$(cat <<'EOF' ... EOF\n)"`, so the
+    shell never quotes the User's words. Each such block is folded into the one argument the shell would pass.
+    """
+    import re
+    import shlex
+
     found = []
     for doc in (ROOT / "skills/switchyard-director/SKILL.md", ROOT / "docs/onboarding/switchyard-director-guide.md"):
-        text = doc.read_text(encoding="utf-8").replace("\\\n", " ")
+        text = doc.read_text(encoding="utf-8")
+        text = re.sub(r'"\$\(cat <<\'EOF\'\n(.*?)\nEOF\n\)"', lambda m: shlex.quote(m.group(1)), text, flags=re.S)
+        text = text.replace("\\\n", " ")
         for line in text.splitlines():
             line = line.strip()
             if line.startswith("ticket-board-write ") and ("relay_user" in line or "add-user-acceptance-relay" in line):

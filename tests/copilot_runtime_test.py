@@ -499,8 +499,12 @@ def test_the_installer_adds_a_file_of_its_own_and_touches_nothing_else() -> None
         ours = hooks_dir / "ticket-board-pane-state.json"
         check(ours.is_file(), f"the installer wrote Copilot's hook file: {sorted(p.name for p in hooks_dir.iterdir())}")
         document = json.loads(ours.read_text())
-        check(document["version"] == 1 and set(document["hooks"]) == set(INSTALLER_MODULE.COPILOT_HOOK_EVENTS),
-              document)
+        check(document["version"] == 1
+              and set(document["hooks"]) == set(INSTALLER_MODULE.COPILOT_HOOK_EVENTS) | {"preToolUse"}, document)
+        # SYRD-753: preToolUse runs the shell guard staged beside the installer, as Copilot.
+        guard = document["hooks"].pop("preToolUse")
+        check(guard == [{"type": "command", "timeoutSec": 30,
+                         "bash": f"{INSTALLER.parent / 'ticket-board-shell-guard'} --runtime copilot"}], guard)
         for event, entries in document["hooks"].items():
             check(len(entries) == 1 and entries[0]["type"] == "command" and f"copilot.{event}" in entries[0]["bash"]
                   and str(home / ".local/bin/ticket-board-pane-idle-hook") in entries[0]["bash"],

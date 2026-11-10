@@ -1,6 +1,6 @@
 """An implementer keeps its own ticket's blocker explanation current (SYRD-723).
 
-`ticket-board-write set-blocked-reason <id> --blocked-reason "..."` replaces the ticket's `blocked_reason`, and
+`ticket-board-write set-blocked-reason <id> --blocked-reason-file PATH` replaces the ticket's `blocked_reason`, and
 `--clear` empties it. That text is all it touches. It is for the role that owns the ticket in an implementation
 stage, from that role's own pane; the Director's `set-blockers` and the board UI's edit are unchanged.
 

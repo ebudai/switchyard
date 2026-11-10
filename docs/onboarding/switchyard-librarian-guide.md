@@ -144,7 +144,9 @@ Documentation stage assigned to the caller.
 ### 1. No documentation change
 
 ```bash
-ticket-board-write documentation-no-change PGU-123 --reason "Checked --help for x and y, the board guide's Who may do what, examples/z.json: all already describe the new flag."
+ticket-board-write documentation-no-change PGU-123 --reason - <<'EOF'
+Checked --help for x and y, the board guide's Who may do what, examples/z.json: all already describe the new flag.
+EOF
 ```
 
 For a ticket with no user-visible documentation effect, or whose implementer
@@ -173,7 +175,7 @@ When the documentation can be made true by editing documentation alone:
 5. Sign off with the command it prints:
 
 ```bash
-ticket-board-write documentation-sign-off PGU-123 --commit <your commit> --note "optional note for Audit"
+ticket-board-write documentation-sign-off PGU-123 --commit <your commit> --note-file PATH
 ```
 
 Before anything moves, the board checks that the commit is known to its trusted
@@ -204,7 +206,9 @@ refusal says which. If it holds:
 ### 3. Kick back with findings
 
 ```bash
-ticket-board-write documentation-kick-back PGU-123 --reason "docs/operator.md 'Restarting' still says --force, which this change removed, and the help string for --plan in scripts/deploy.py describes the old default; the new default needs a code change to print correctly."
+ticket-board-write documentation-kick-back PGU-123 --reason - <<'EOF'
+docs/operator.md 'Restarting' still says --force, which this change removed, and the help string for --plan in scripts/deploy.py describes the old default; the new default needs a code change to print correctly.
+EOF
 ```
 
 The ticket returns to its recorded implementer, with the findings as the

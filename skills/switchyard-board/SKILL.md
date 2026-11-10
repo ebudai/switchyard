@@ -120,15 +120,24 @@ what this board actually supports; `<action> --help` gives its required options.
 Prefer that over remembering a command you saw once - operations are per-project
 and they change.
 
-Write comment bodies through a quoted heredoc, so backticks and `$` in the text
-stay inert:
+Give every free-text option - `--text`, `--reason`, `--body`, `--blocked-reason`
+and the rest - through a quoted heredoc on standard input, or a file, so
+backticks, `$` and quotes in the text stay inert:
 
 ```bash
-ticket-board-write add-comment "$TICKET_BOARD_TICKET_PREFIX-123" --text "$(cat <<'EOF'
+ticket-board-write add-comment "$TICKET_BOARD_TICKET_PREFIX-123" --text - <<'EOF'
 Body with `backticks` and $variables, safely literal.
 EOF
-)"
+ticket-board-write request-dependency "$TICKET_BOARD_TICKET_PREFIX-123" --role ops --reason-file reason.md
 ```
+
+Never put prose inside double quotes. There the shell runs backticks and
+`$(...)` as commands before the board sees the text, and Markdown backticks
+around a command become that command running in your pane. Every role's pane has
+a pre-tool guard that refuses such a command before it runs, and says so; take
+the refusal at its word and resend through a heredoc. Single quotes break on an
+apostrophe. For a file example below, write the reason into PATH first; its bytes
+are read as data. For standard input, use a quoted heredoc.
 
 ## Commit provenance
 
@@ -163,10 +172,10 @@ A ticket that cannot proceed stays in its own stage with its own assignee. Do no
 move it to backlog; that reads as abandoned.
 
 ```bash
-ticket-board-write request-dependency <id> --role <role> --reason "what they have to do"
-ticket-board-write set-blockers <id> --blocked-by <other-ticket-id> --blocked-reason "..."
-ticket-board-write set-blocked-reason <id> --blocked-reason "..."   # or --clear
-ticket-board-write request-blocker-review <id> --ref <standing external blocker> --reason "..."
+ticket-board-write request-dependency <id> --role <role> --reason-file PATH
+ticket-board-write set-blockers <id> --blocked-by <other-ticket-id> --blocked-reason-file PATH
+ticket-board-write set-blocked-reason <id> --blocked-reason-file PATH   # or --clear
+ticket-board-write request-blocker-review <id> --ref <standing external blocker> --reason-file PATH
 ticket-board-write await-role <id> --role <role>
 ticket-board-write clear-awaiting-role <id>
 ```
@@ -191,7 +200,7 @@ dependency; you are told once when it is released, with the result. While a pers
 stands, a User comment on your ticket goes to the director, not to you: the release is what
 tells you. If the director kept the blocker while you finished work it waited on, and that work
 is now done and recorded, ask for the review once:
-`request-blocker-review <id> --ref operator:<name> --reason "what is done, and where the evidence is"`.
+`request-blocker-review <id> --ref operator:<name> --reason-file PATH`.
 It tells the director, names the blocker and gives your reason, and releases nothing. The same
 request again changes nothing. A new one waits until the director answers: a comment, the
 release, or the blocker recorded again. `await-role` is the bare
@@ -261,7 +270,7 @@ another implementation specialty, or that needs a Director decision before
 anyone builds it. Do not start it because misroutes are rare. Hand it back:
 
 ```bash
-ticket-board-write implementer-kick-back <id> --reason "<whose it is, or what needs deciding, in a sentence>"
+ticket-board-write implementer-kick-back <id> --reason-file PATH
 ```
 
 It goes to the Director's triage, never back through Router, and the board

@@ -40,7 +40,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BEFORE = "a1bcdade8a18bb0bf56e6bb58f01a45e3b1983fe"  # main before SYRD-280
 DOCS = ("skills/switchyard-director/SKILL.md", "docs/onboarding/switchyard-director-guide.md")
-REVOKE = 'ticket-board-write director-edit <id> --set audit_signoff=false --reason "<why the approval no longer holds>"'
+#: SYRD-753: arbitrary reasons are file input; the shell never quotes their prose.
+REVOKE = "ticket-board-write director-edit <id> --set audit_signoff=false --reason-file PATH"
 CHECKS = 0
 
 
@@ -151,8 +152,9 @@ def scenario(root: Path) -> dict:
                                      "--reason", "Ops withdrawing Audit's approval.")
             out["after_refusals"] = row(board, "MEFP-8")
             # The documented command, verbatim, with its placeholders filled.
-            documented = shlex.split(REVOKE.replace("<id>", "MEFP-8").replace(
-                "<why the approval no longer holds>", "The README correction must be reviewed before integration."))
+            reason_file = cluster.root / "revocation-reason.txt"
+            reason_file.write_text("The README correction must be reviewed before integration.")
+            documented = shlex.split(REVOKE.replace("<id>", "MEFP-8").replace("PATH", str(reason_file)))
             out["revoked"] = cli(board, "director", *documented[1:])
             out["after_revoke"] = row(board, "MEFP-8")
             out["revoke_comment"] = last_comment(board, "MEFP-8")

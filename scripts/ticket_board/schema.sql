@@ -5237,7 +5237,7 @@ BEGIN
     ORDER BY b.position
     LIMIT 1;
     IF standing_ref IS NOT NULL THEN
-        RAISE EXCEPTION 'external blocker % stands until it is released: release-external-blocker % --ref % --reason "<what happened>"',
+        RAISE EXCEPTION 'external blocker % stands until it is released: release-external-blocker % --ref % --reason-file PATH',
             standing_ref, p_ticket_id, standing_ref;
     END IF;
 
@@ -20689,7 +20689,7 @@ BEGIN
             anchor, 'escalation', 'director',
             format('%s''s %s account is out of quota%s: "%s". Its deliveries and nudges, and alerts about it, wait '
                    'until %s%s; then it gets one fresh try. Its tickets, reservations and context are untouched. '
-                   'Clear early with: ticket-board-write clear-provider-hold %s --reason "..."',
+                   'Clear early with: ticket-board-write clear-provider-hold %s --reason-file PATH',
                    p_role, reg.runtime, CASE WHEN p_evidence->>'limit' <> '' THEN ' (' || (p_evidence->>'limit') || ')' ELSE '' END,
                    left(coalesce(p_evidence->>'message', ''), 240), to_char(v_deadline AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI "UTC"'),
                    CASE WHEN v_reset IS NULL THEN ' (the provider gave no reset time; this is a recheck)' ELSE ' (its reset, plus a grace)' END,
@@ -20817,7 +20817,7 @@ RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ticket_boar
             'renewals', h.renewals, 'released_at', h.released_at, 'ended_at', h.ended_at, 'end_reason', h.end_reason,
             'joined_hold', h.joined_hold,
             'clear', CASE WHEN h.state IN ('held', 'released')
-                          THEN format('ticket-board-write clear-provider-hold %s --reason "..."', h.role) END)
+                          THEN format('ticket-board-write clear-provider-hold %s --reason-file PATH', h.role) END)
             ORDER BY h.state = 'ended', h.id DESC)
         FROM (SELECT * FROM ticket_board.provider_quota_holds
               WHERE state IN ('held', 'released') OR ended_at > p_now - interval '1 day'
@@ -23307,7 +23307,7 @@ BEGIN
                    'start, claim or route, and no request to the provider. Tickets, reservations and context are kept. '
                    'Choose: inspect it by hand; move the work to another provider (switchyard set-role-runtime); or, '
                    'once the operator confirms the account is safe, clear it: '
-                   'ticket-board-write clear-provider-account-hold %s --reason "..."',
+                   'ticket-board-write clear-provider-account-hold %s --reason-file PATH',
                    p_runtime, new_id,
                    CASE p_kind WHEN 'refusal' THEN format('%s''s provider refused a request on safety grounds%s',
                                                           p_role, CASE WHEN p_category <> '' THEN ' (' || p_category || ')' ELSE '' END)

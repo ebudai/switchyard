@@ -28,6 +28,10 @@ LEGACY_HOOK_BASENAME = "pgu-ticket-board-pane-idle-hook"
 # program rather than copied into the role's home, because a role that could
 # rewrite it could widen its own session (SYRD-234).
 CLAUDE_PERMISSION_HOOK_BASENAME = "ticket-board-claude-permission-hook"
+# Every runtime's pre-tool hook: refuses a shell tool call that would let the
+# shell evaluate a board command's prose (SYRD-753). Staged root-owned beside
+# this program for the same reason as the permission hook.
+SHELL_GUARD_BASENAME = "ticket-board-shell-guard"
 DEFAULT_PROJECT = os.environ.get("TICKET_BOARD_PROJECT", "").strip() or os.environ.get("PGU_TICKET_BOARD_PROJECT", "").strip() or "pgu"
 DEFAULT_PANE_STATE_DIR = (
     Path(os.environ["TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
@@ -121,6 +125,7 @@ def _contains_managed_hook(value: Any) -> bool:
         HOOK_BASENAME in value
         or LEGACY_HOOK_BASENAME in value
         or CLAUDE_PERMISSION_HOOK_BASENAME in value
+        or SHELL_GUARD_BASENAME in value
     )
 
 
@@ -174,7 +179,12 @@ def _install_hook_binary(source: Path, destination: Path) -> None:
     destination.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
-def _merge_tool_activity_hooks(config: dict[str, Any], cli: str, hook_bin: Path, state_dir: Path, session_dir: Path) -> None:
+def _guard_command(guard: Path, runtime: str) -> str:
+    return _shell_command([guard, "--runtime", runtime])
+
+
+def _merge_tool_activity_hooks(config: dict[str, Any], cli: str, hook_bin: Path, state_dir: Path, session_dir: Path,
+                               guard: Path) -> None:
     """Every tool call of a turn, recorded beside the pane's state and never in it (SYRD-695).
 
     The turn hooks say only when a turn starts and ends, so a long turn of
@@ -183,11 +193,16 @@ def _merge_tool_activity_hooks(config: dict[str, Any], cli: str, hook_bin: Path,
     moving.
     """
     for event in ("PreToolUse", "PostToolUse"):
-        _merge_hook_entries(config, event, [_hook_entry(_shell_command(
-            [hook_bin, "activity", "--source", f"{cli}.{event}", "--state-dir", state_dir, "--session-dir", session_dir]))])
+        entries = [_hook_entry(_shell_command(
+            [hook_bin, "activity", "--source", f"{cli}.{event}", "--state-dir", state_dir, "--session-dir", session_dir]))]
+        if event == "PreToolUse":
+            # After the activity entry, as a group of its own: Codex trusts a hook by its position and content, so
+            # the activity hook an owner approved keeps its approval, and the guard is approved as a new hook.
+            entries.append(_hook_entry(_guard_command(guard, cli)))
+        _merge_hook_entries(config, event, entries)
 
 
-def _install_claude_hooks(home: Path, hook_bin: Path, permission_hook: Path) -> Path:
+def _install_claude_hooks(home: Path, hook_bin: Path, permission_hook: Path, guard: Path) -> Path:
     path = home / ".claude" / "settings.json"
     config = _load_json(path)
     state_dir = DEFAULT_PANE_STATE_DIR
@@ -308,12 +323,12 @@ def _install_claude_hooks(home: Path, hook_bin: Path, permission_hook: Path) -> 
         "PermissionRequest",
         [_hook_entry(_shell_command([permission_hook]))],
     )
-    _merge_tool_activity_hooks(config, "claude", hook_bin, state_dir, session_dir)
+    _merge_tool_activity_hooks(config, "claude", hook_bin, state_dir, session_dir, guard)
     _write_json(path, config)
     return path
 
 
-def _install_codex_hooks(home: Path, hook_bin: Path) -> Path:
+def _install_codex_hooks(home: Path, hook_bin: Path, guard: Path) -> Path:
     path = home / ".codex" / "hooks.json"
     config = _load_json(path)
     state_dir = DEFAULT_PANE_STATE_DIR
@@ -374,7 +389,7 @@ def _install_codex_hooks(home: Path, hook_bin: Path) -> Path:
     )
     # New entries are new hook content to Codex: an owner whose trust records predate them approves them in `/hooks`,
     # as for any hook-content change. A pane whose tool calls are not recorded is judged as it was before.
-    _merge_tool_activity_hooks(config, "codex", hook_bin, state_dir, session_dir)
+    _merge_tool_activity_hooks(config, "codex", hook_bin, state_dir, session_dir, guard)
     _write_json(path, config)
     return path
 
@@ -427,7 +442,7 @@ def _seed_codex_hook_trust_if_new(
     return f"seeded Codex hook trust for {len(entries)} installed hooks"
 
 
-def _install_gemini_hooks(home: Path, hook_bin: Path) -> Path:
+def _install_gemini_hooks(home: Path, hook_bin: Path, guard: Path) -> Path:
     # agy 1.0.8 moved hook discovery to the shared Gemini config tree.
     # The old antigravity-cli/settings.json path is still used for other
     # settings, but current agy logs report hooks loaded from hooks.json files.
@@ -503,6 +518,8 @@ def _install_gemini_hooks(home: Path, hook_bin: Path) -> Path:
             "Stop": [
                 _flat_command_hook(f"{stop_command} >/dev/null && printf '{{}}'")
             ],
+            # A tool event takes a matcher group; "" matches every tool (agy's own hook contract).
+            "PreToolUse": [{"matcher": "", "hooks": [_flat_command_hook(_guard_command(guard, "agy"))]}],
         },
     )
     _write_json(path, config)
@@ -544,11 +561,11 @@ def _copilot_roots(home: Path, extra: list[str] | None = None) -> list[Path]:
     return roots
 
 
-def _install_copilot_hooks(home: Path, hook_bin: Path, extra_roots: list[str] | None = None) -> list[Path]:
-    return [_install_copilot_hooks_at(root, hook_bin) for root in _copilot_roots(home, extra_roots)]
+def _install_copilot_hooks(home: Path, hook_bin: Path, guard: Path, extra_roots: list[str] | None = None) -> list[Path]:
+    return [_install_copilot_hooks_at(root, hook_bin, guard) for root in _copilot_roots(home, extra_roots)]
 
 
-def _install_copilot_hooks_at(root: Path, hook_bin: Path) -> Path:
+def _install_copilot_hooks_at(root: Path, hook_bin: Path, guard: Path) -> Path:
     path = root / "hooks" / COPILOT_HOOK_FILE
     hooks: dict[str, Any] = {}
     for event, state in COPILOT_HOOK_EVENTS.items():
@@ -557,6 +574,7 @@ def _install_copilot_hooks_at(root: Path, hook_bin: Path) -> Path:
         if event == "sessionStart":
             argv.append("--record-session")
         hooks[event] = [{"type": "command", "bash": _shell_command(argv), "timeoutSec": 30}]
+    hooks["preToolUse"] = [{"type": "command", "bash": _guard_command(guard, "copilot"), "timeoutSec": 30}]
     _write_json(path, {"version": 1, "hooks": hooks})
     try:
         settings = json.loads("\n".join(line for line in (root / "settings.json").read_text(
@@ -569,7 +587,7 @@ def _install_copilot_hooks_at(root: Path, hook_bin: Path) -> Path:
     return path
 
 
-def _install_hermes_hooks(home: Path, hook_bin: Path) -> Path:
+def _install_hermes_hooks(home: Path, hook_bin: Path, guard: Path) -> Path:
     path = home / ".hermes" / "config.yaml"
     config = _load_yaml(path)
     session_start_command = _shell_command(
@@ -642,6 +660,7 @@ def _install_hermes_hooks(home: Path, hook_bin: Path) -> Path:
         "post_llm_call": [{"command": llm_end_command}],
         "on_session_end": [{"command": session_end_command}],
         "on_session_finalize": [{"command": session_finalize_command}],
+        "pre_tool_call": [{"command": _guard_command(guard, "hermes")}],
     }
     for event, entries in managed_entries.items():
         existing = hooks.get(event, [])
@@ -675,15 +694,16 @@ def install(args: argparse.Namespace) -> int:
     permission_hook = Path(args.claude_permission_hook).expanduser()
     if not permission_hook.is_file():
         raise SystemExit(f"claude permission hook not found: {permission_hook}")
+    guard = _shell_guard(args)
     had_codex_hooks = (home / ".codex" / "hooks.json").exists()
     had_codex_trust_records = bool(codex_trusted_hashes(home))
     _install_hook_binary(hook_source, hook_bin)
     written = [
-        _install_claude_hooks(home, hook_bin, permission_hook),
-        _install_codex_hooks(home, hook_bin),
-        _install_gemini_hooks(home, hook_bin),
-        _install_hermes_hooks(home, hook_bin),
-        *_install_copilot_hooks(home, hook_bin, args.copilot_home),
+        _install_claude_hooks(home, hook_bin, permission_hook, guard),
+        _install_codex_hooks(home, hook_bin, guard),
+        _install_gemini_hooks(home, hook_bin, guard),
+        _install_hermes_hooks(home, hook_bin, guard),
+        *_install_copilot_hooks(home, hook_bin, guard, args.copilot_home),
     ]
     codex_seed_result = ""
     if args.seed_codex_hook_trust_if_new:
@@ -701,6 +721,13 @@ def install(args: argparse.Namespace) -> int:
     return 0
 
 
+def _shell_guard(args: argparse.Namespace) -> Path:
+    guard = Path(args.shell_guard).expanduser()
+    if not guard.is_file():
+        raise SystemExit(f"shell guard not found: {guard}")
+    return guard
+
+
 def install_copilot(args: argparse.Namespace) -> int:
     """Only Copilot's hook file, only in the roots named: what a Copilot pane writes into its own COPILOT_HOME
     before it starts, as the account it runs as (SYRD-634). Nothing else of the account is touched."""
@@ -708,9 +735,10 @@ def install_copilot(args: argparse.Namespace) -> int:
     roots = [str(root) for root in args.copilot_home]
     if not roots:
         raise SystemExit("install-copilot needs at least one --copilot-home")
+    guard = _shell_guard(args)
     for root in _copilot_roots(home, roots):
         if str(root) in roots:
-            print(f"wrote {_install_copilot_hooks_at(root, Path(args.bin_path).expanduser())}")
+            print(f"wrote {_install_copilot_hooks_at(root, Path(args.bin_path).expanduser(), guard)}")
     return 0
 
 
@@ -726,6 +754,15 @@ def verify_state(args: argparse.Namespace) -> int:
         return 1
     print("pane hook state present for all notification targets")
     return 0
+
+
+def _add_shell_guard_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--shell-guard",
+        default=str(Path(__file__).resolve().parent / SHELL_GUARD_BASENAME),
+        help="every runtime's pre-tool hook that keeps board text from the shell (SYRD-753); defaults to the copy "
+             "staged beside this program, so a role cannot rewrite it",
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -751,6 +788,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "staged beside this program, so a role cannot rewrite what decides for it"
         ),
     )
+    _add_shell_guard_argument(install_parser)
     install_parser.add_argument(
         "--seed-codex-hook-trust-if-new",
         action="store_true",
@@ -769,6 +807,7 @@ def _build_parser() -> argparse.ArgumentParser:
     copilot_parser.add_argument("--bin-path", default=str(Path.home() / ".local" / "bin" / HOOK_BASENAME),
                                 help="the installed hook program the hooks run")
     copilot_parser.add_argument("--copilot-home", action="append", default=[], help="an absolute COPILOT_HOME; repeatable")
+    _add_shell_guard_argument(copilot_parser)
     copilot_parser.set_defaults(func=install_copilot)
 
     verify_parser = subparsers.add_parser("verify-state", help="verify all live panes have written hook state")

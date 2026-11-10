@@ -173,8 +173,8 @@ def _when(epoch: float) -> str:
 
 def _actions(lease_id: int, role: str) -> str:
     return (f"Nothing was stopped. Inspect it: `ticket-board-read leases --role {role}`; extend it: "
-            f"`ticket-board-write extend-lease {lease_id} --minutes 30 --reason \"...\"`; interrupt only it: "
-            f"`ticket-board-write interrupt-lease {lease_id} --reason \"...\"`; or leave it running")
+            f"`ticket-board-write extend-lease {lease_id} --minutes 30 --reason-file PATH`; interrupt only it: "
+            f"`ticket-board-write interrupt-lease {lease_id} --reason-file PATH`; or leave it running")
 
 
 def _epoch(value: Any) -> float:
@@ -275,7 +275,7 @@ def _decide(conn: Any, row: dict[str, Any], holder: background_child.Holder, rol
                     f"{_when(holder.started_at)} for {ticket}, which is now {found['state']} "
                     f"({'unassigned' if owner == 'unassigned' else 'assigned to ' + owner}): `{_text(row['command'])}`"
                     f"{' in ' + holder.cwd if holder.cwd else ''}. It no longer holds {role}'s later work. "
-                    f"Nothing was stopped. To end only it: `ticket-board-write interrupt-lease {lease_id} --reason \"...\"`")
+                    f"Nothing was stopped. To end only it: `ticket-board-write interrupt-lease {lease_id} --reason-file PATH`")
             return int(bool(_one(conn, "SELECT ticket_board.note_execution_lease_alert(%s, 'stale', %s, %s)",
                                  (lease_id, ticket, what))))
     if turn is not None and row.get("turn_started_at") is not None and abs(_epoch(row["turn_started_at"]) - turn) > 0.001:

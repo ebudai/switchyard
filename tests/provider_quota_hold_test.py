@@ -674,7 +674,7 @@ def test_holds_from_fresh_evidence_only() -> None:
             current = [h for h in status if h["current"]]
             check({h["role"] for h in current} == {"app", "ops"}
                   and all(h["runtime"] == "claude" and h["evidence_at"] and h["deadline"] and h["reset_at"]
-                          and h["clear"] == f'ticket-board-write clear-provider-hold {h["role"]} --reason "..."'
+                          and h["clear"] == f"ticket-board-write clear-provider-hold {h['role']} --reason-file PATH"
                           and "PRIVATE PROMPT" not in json.dumps(h) for h in current),
                   f"status: who, which provider, evidence time, reset, and the clear command; no prompt: {current}")
             read = subprocess.run([sys.executable, str(ROOT / "scripts/ticket-board-read"), "--board-url", rig.base, "holds"],

@@ -496,8 +496,8 @@ def preflight(
             blockers.append(str(exc).removeprefix("switchyard: "))
         if busy and not force:
             blockers.append(
-                f"{role.target} is busy; wait for an idle checkpoint, or pass --force with --reason "
-                "to interrupt it deliberately"
+                f"{role.target} is busy; wait for an idle checkpoint, or pass --force with "
+                "--reason to interrupt it deliberately"
             )
     return (
         RuntimePreflight(

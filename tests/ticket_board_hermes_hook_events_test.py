@@ -22,6 +22,7 @@ EXPECTED_HERMES_EVENTS = {
     "post_llm_call",
     "on_session_end",
     "on_session_finalize",
+    "pre_tool_call",  # SYRD-753: the shell guard
 }
 
 

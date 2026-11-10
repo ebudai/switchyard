@@ -97,5 +97,5 @@ def describe(payload: dict[str, Any]) -> str:
         lines.append(f"  holds: {', '.join(h.get('roles') or []) or 'no role now'}; nothing reaches them until it is cleared"
                      + (f"; {h['refusals']} refusal(s) seen" if h.get("refusals") else ""))
         lines.append(f"  clear, once the account is confirmed safe: ticket-board-write clear-provider-account-hold "
-                     f"{h['runtime']} --reason \"...\"")
+                     f"{h['runtime']} --reason-file PATH")
     return "\n".join(lines) if lines else "No provider quota holds."

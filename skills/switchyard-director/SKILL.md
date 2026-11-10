@@ -123,7 +123,7 @@ advance it or defer it deliberately - never both nothing.
   ordinary way work changes hands and the only one that keeps the record
   coherent; it is not an override.
 - Hand a ticket to a different owner *in the stage it is already in* with
-  `reassign <id> --assignee <role> --reason "..."`. It changes the owner and
+  `reassign <id> --assignee <role> --reason-file PATH`. It changes the owner and
   nothing else: no stage, no gate, no sign-off. Use it when the work is in the
   right place and the wrong hands - a role that is not running, an implementer
   who is oversubscribed. It is an ordinary operation, not an override, and the
@@ -234,7 +234,7 @@ carried when it was given.
   be resubmitted on the same commit - withdraw it before the owner submits:
 
   ```bash
-  ticket-board-write director-edit <id> --set audit_signoff=false --reason "<why the approval no longer holds>"
+  ticket-board-write director-edit <id> --set audit_signoff=false --reason-file PATH
   ```
 
   `inspector_signoff` and `user_signoff` work the same way. The reason is
@@ -258,7 +258,7 @@ carried when it was given.
   reference for one. Recording it closes the dependency handoff that asked for
   it, and nothing repeats. An external or operator blocker never resolves by
   itself, whatever happens elsewhere: end it with
-  `release-external-blocker <id> --ref <ref> --reason "..."`. For a person, the
+  `release-external-blocker <id> --ref <ref> --reason-file PATH`. For a person, the
   reason is where their result is recorded, and the owner is told once. While
   an `operator:<name>` blocker stands, a User comment on the ticket is told to
   you, once, and not to its owner: read it, then release the blocker
@@ -294,8 +294,7 @@ at, `await-role` marks it and surfaces it to you. It clears when that role acts,
 not when they reply.
 
 A wait on the User is yours alone, and only in a stage the workflow's
-`user_waits` lists: `ticket-board-write await-user <id> --reason "..." --request
-"<what the User is asked to do or decide>"`. Nobody can name the User through
+`user_waits` lists: `ticket-board-write await-user <id> --reason-file PATH --request-file PATH`. Nobody can name the User through
 `request-dependency` or `await-role`. Work ready for UAT goes through the gates
 into User Review instead, and operator work outside the board is an
 `operator:<name>` blocker. A wait on the User the board does not admit shows in
@@ -594,8 +593,9 @@ top of the ticket, above everything else, beside Accept and Send to Director.
 
 ```bash
 ticket-board-write uat-instructions <id> \
-  --do-this "Run \`switchyard status\` in a terminal." \
-  --you-should-see "A line for each project, each saying running."
+  --do-this-file steps.md \
+  --you-should-see-file expected.md
+# Write the exact steps into steps.md and the expected result into expected.md first.
 # --then-choose defaults to: Accept if that happened; if not, Send to Director with a short message.
 # Long or command-heavy text: --do-this-file PATH (and so on), so the shell leaves it alone.
 ticket-board-write uat-instructions <id> --reconfirm   # same steps, for the ticket as it is now
@@ -630,9 +630,15 @@ sign-off stay. You decide from there, through `workflow-action`:
 ```bash
 ticket-board-write workflow-action <id> director_return_to_uat        # back to the User (prepare or --reconfirm steps first)
 ticket-board-write workflow-action <id> director_send_to_implementer \
-  --payload-json '{"reason": "<what to fix, from the User's message>"}'   # back to implementation; Audit runs again
+  --payload-json "$(cat <<'EOF'
+{"reason": "<what to fix, from the User's message>"}
+EOF
+)"   # back to implementation; Audit runs again
 ticket-board-write workflow-action <id> director_route_feedback \
-  --payload-json '{"reason": "<why it needs triage>"}'                  # to analysis
+  --payload-json "$(cat <<'EOF'
+{"reason": "<why it needs triage>"}
+EOF
+)"                  # to analysis
 ```
 
 Defer and cancel are available from it too.
@@ -648,14 +654,23 @@ declared transitions, so they are taken through `workflow-action`:
 ```bash
 # acceptance of a coded ticket: name the candidate the ticket already carries
 ticket-board-write workflow-action <id> relay_user_sign_off \
-  --payload-json '{"reason": "<what the user reported>", "commit_hash": "<the commit the ticket carries>"}'
+  --payload-json "$(cat <<'EOF'
+{"reason": "<what the user reported>", "commit_hash": "<the commit the ticket carries>"}
+EOF
+)"
 # acceptance of a no-code ticket (commit_exempt, no commit): a reason and NO commit_hash key at all --
 # an empty "commit_hash" is refused
 ticket-board-write workflow-action <id> relay_user_sign_off \
-  --payload-json '{"reason": "<what the user reported>"}'
+  --payload-json "$(cat <<'EOF'
+{"reason": "<what the user reported>"}
+EOF
+)"
 # rejection, only where relay_user_kick_back is listed (a board whose User still returns work)
 ticket-board-write workflow-action <id> relay_user_kick_back \
-  --payload-json '{"reason": "<what the user reported>"}'
+  --payload-json "$(cat <<'EOF'
+{"reason": "<what the user reported>"}
+EOF
+)"
 ```
 
 If the acceptance relay is not listed, your workflow was declared after the
@@ -698,7 +713,7 @@ dependency -- and does not transition, the ticket stays theirs and stops. Their
 own submission is owner-scoped, so you cannot take it for them.
 
 ```bash
-ticket-board-write recover-stalled-ticket <id> --reason "why you are moving it"
+ticket-board-write recover-stalled-ticket <id> --reason-file PATH
 ```
 
 It takes the one declared no-code transition that ticket's owner could have
@@ -731,7 +746,7 @@ moves, and the ticket shows in your queue. Record the return; it moves nothing,
 and Audit then kicks back as usual:
 
 ```bash
-ticket-board-write set-audit-return <id> --stage <stage> --assignee <owner> --reason "why it goes there"
+ticket-board-write set-audit-return <id> --stage <stage> --assignee <owner> --reason-file PATH
 ```
 
 The stage must be live (not the one being left, a parking stage or a closed

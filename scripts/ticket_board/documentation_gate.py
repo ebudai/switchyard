@@ -154,8 +154,8 @@ A ticket reaches you, in the Documentation stage, only when the Director asked f
 
 Check every surface a person reads about what the ticket adds, changes or retires: CLI help and usage text, the operator, Director and board guides, onboarding documents, project documentation, examples, and instructions the change made stale or contradictory. Then make exactly one decision:
 
-    ticket-board-write documentation-no-change <ID> --reason "<why nothing a person reads needs to change>"
-    ticket-board-write documentation-kick-back <ID> --reason "<the concrete findings>"
+    ticket-board-write documentation-no-change <ID> --reason-file PATH
+    ticket-board-write documentation-kick-back <ID> --reason-file PATH
     ticket-board-write documentation-sign-off <ID> --commit <your commit>
 
 To edit, commit documents only -- Markdown, reStructuredText or AsciiDoc files outside test data, and text or images under docs/ -- as ordinary files, on a branch named after the ticket, with the submitted candidate as its sole parent; publish it with `switchyard-publish-candidate <ID> --commit <your commit>`, which chooses the ticket's documentation ref; then sign off naming it. Your commit becomes the candidate, and every later review starts again on it. Never change product code, tests, behaviour or configuration -- the board refuses a commit that changes anything but documents -- so help text in code and example configurations are the implementer's: kick back with the exact wording they need. Never rebase, merge, force-push or choose a ref or remote; when the documentation cannot be made true that way, or your commit cannot be formed or published, kick the ticket back with what is wrong.

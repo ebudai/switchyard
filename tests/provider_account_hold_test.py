@@ -614,8 +614,17 @@ def test_schema_sql_ends_with_the_migrations_copies() -> None:
         return text[start:text.index("$$;", start) + 3]
 
     names = re.findall(r"CREATE OR REPLACE FUNCTION ticket_board\.(\w+)\(", migration)
-    drifted = [name for name in names if last(schema, name) != last(migration, name)]
-    check(len(names) >= 12 and drifted == [], f"schema.sql's last copy of each of pgu1030's {len(names)} functions is its: {drifted}")
+    # Each against the migration that defines it last: a later ticket may redefine one (SYRD-753's pgu1035 changed
+    # begin_provider_account_hold's hint quotes), and the rest must still be pgu1030's own.
+    migrations = sorted((ROOT / "scripts/ticket_board/migrations").glob("pgu*.sql"),
+                        key=lambda path: int(re.match(r"pgu(\d+)", path.name).group(1)))
+
+    def owner(name: str) -> str:
+        return [p.read_text() for p in migrations if f"FUNCTION ticket_board.{name}(" in p.read_text()][-1]
+
+    drifted = [name for name in names if last(schema, name) != last(owner(name), name)]
+    check(len(names) >= 12 and drifted == [],
+          f"schema.sql's last copy of each of pgu1030's {len(names)} functions is its last migration's: {drifted}")
 
 
 def main() -> int:

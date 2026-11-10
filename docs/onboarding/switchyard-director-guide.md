@@ -251,7 +251,7 @@ was the mistake, for example because you compared the wrong repository, put the 
 back in one step:
 
 ```
-ticket-board-write restore-reopened <ticket> --reason "what the reopen mistook, and how you checked"
+ticket-board-write restore-reopened <ticket> --reason-file PATH
 ```
 
 The board recorded the ticket's closed disposition when it left its terminal stage, whether
@@ -344,7 +344,7 @@ or waives a gate (SYRD-625).
 
 **Recover a stalled ticket rather than overriding it.** When an owner reports
 completion or a dependency and does not transition, `recover-stalled-ticket <id>
---reason "..."` takes the one declared no-code transition that owner could have
+--reason-file PATH` takes the one declared no-code transition that owner could have
 taken: no gate or sign-off is skipped, the work stops at its next required gate,
 and that gate's owner is notified once. It always exists, and for a review whose
 sign-off was given under a hold it is the command that pays it. `force-move` and
@@ -360,8 +360,8 @@ top of the ticket in three parts -- Do this, You should see, Then choose --
 beside the User's Accept and Send to Director:
 
 ```bash
-ticket-board-write uat-instructions <id> --do-this "<the exact command or UI action>" \
-  --you-should-see "<the concrete result that means it worked>"
+ticket-board-write uat-instructions <id> --do-this-file steps.md \
+  --you-should-see-file expected.md
 ticket-board-write uat-instructions <id> --reconfirm   # the same steps, for the ticket as it is now
 ```
 
@@ -389,15 +389,24 @@ subcommand of their own, and they exist only where the ticket's
 ```bash
 # acceptance, coded ticket: name the candidate the ticket already carries
 ticket-board-write workflow-action <id> relay_user_sign_off \
-  --payload-json '{"reason": "User completed the steps and accepted", "commit_hash": "<the commit the ticket carries>"}'
+  --payload-json "$(cat <<'EOF'
+{"reason": "User completed the steps and accepted", "commit_hash": "<the commit the ticket carries>"}
+EOF
+)"
 # acceptance, no-code ticket (commit_exempt and no commit): the reason and NO commit_hash key;
 # an empty "commit_hash" is refused as an invalid commit
 ticket-board-write workflow-action <id> relay_user_sign_off \
-  --payload-json '{"reason": "User accepted the recommendation in conversation"}'
+  --payload-json "$(cat <<'EOF'
+{"reason": "User accepted the recommendation in conversation"}
+EOF
+)"
 # rejection, where relay_user_kick_back is listed: a board whose User still returns work,
 # not one where Send to Director hands the ticket to you
 ticket-board-write workflow-action <id> relay_user_kick_back \
-  --payload-json '{"reason": "User reports <what failed>"}'
+  --payload-json "$(cat <<'EOF'
+{"reason": "User reports <what failed>"}
+EOF
+)"
 ```
 
 The rejection returns the ticket along the ordinary correction path, clears the
@@ -449,7 +458,7 @@ Resubmitting the same commit keeps the approval and skips the review it already 
 that approval no longer holds, withdraw it before the owner submits:
 
 ```bash
-ticket-board-write director-edit <id> --set audit_signoff=false --reason "<why the approval no longer holds>"
+ticket-board-write director-edit <id> --set audit_signoff=false --reason-file PATH
 ```
 
 The same goes for `inspector_signoff` and `user_signoff`. The reason is recorded on the
@@ -774,16 +783,16 @@ the refused pane to write anything, however defensive the work is.
 What you can do, in order of preference:
 1. **Inspect by hand.** `ticket-board-read holds` lists each held account, what held it, and the roles it holds.
    Attach to the refused pane only to look. Never type into it.
-2. **Move the work** to a role on another provider: `ticket-board-write reassign <ticket> --assignee <role> --reason "..."`, or
+2. **Move the work** to a role on another provider: `ticket-board-write reassign <ticket> --assignee <role> --reason-file PATH`, or
    change a role's runtime with `switchyard set-role-runtime`. The ticket keeps its stage, comments and history, and
    nothing is sent to the held account.
 3. **Clear the hold,** only once the operator has confirmed the account is safe:
-   `ticket-board-write clear-provider-account-hold <cli> --reason "who confirmed it, and how"`. The board records
+   `ticket-board-write clear-provider-account-hold <cli> --reason-file PATH`. The board records
    who cleared it and why. Waiting notices then go, each checked again first. The refusal that began the hold can
    never begin another. A new refusal begins a new hold.
 
 When you suspect a refusal the board did not recognise (Hermes, agy and Copilot write none it can read), hold the
-account yourself: `ticket-board-write hold-provider-account <cli> --reason "what you saw"`. The User can do both,
+account yourself: `ticket-board-write hold-provider-account <cli> --reason-file PATH`. The User can do both,
 which matters when your own account is held.
 
 ## Host health the board depends on

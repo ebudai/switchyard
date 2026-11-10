@@ -1,6 +1,6 @@
 """The owner asks the Director to review a standing external blocker (SYRD-726).
 
-`ticket-board-write request-blocker-review <id> --ref operator:eric --reason "..."` tells the Director, once, that
+`ticket-board-write request-blocker-review <id> --ref operator:eric --reason-file PATH` tells the Director, once, that
 the blocker it names is ready to review, and why. It is for the role working the ticket in an implementation stage,
 from that role's own pane, while the blocker stands -- when `request-dependency` is refused because of it. It
 releases nothing and moves nothing: only the Director releases, replaces or keeps a blocker, and its release tells

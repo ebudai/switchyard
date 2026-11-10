@@ -1,6 +1,6 @@
 """The Director restores a mistaken reopen (SYRD-746).
 
-`ticket-board-write restore-reopened <id> --reason "..."` puts back the closed disposition the ticket's last reopen
+`ticket-board-write restore-reopened <id> --reason-file PATH` puts back the closed disposition the ticket's last reopen
 took away -- its stage, owner, commit provenance and sign-offs, at once -- as the board recorded it when the ticket left
 its terminal stage. It is refused unless nothing has happened since: the ticket still where the reopen left it, with no
 candidate and no sign-off of its own. It never makes a sign-off that was not there or a commit that was not recorded,

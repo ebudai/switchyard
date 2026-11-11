@@ -190,8 +190,13 @@ system working, not a bug to route around.
   - `publication_return` — back to the implementer when the candidate must change (main
     advanced, more than one commit, a merge, history differs, published nowhere), every
     sign-off cleared, with the exact diagnostic;
-  - `publication_escalate` — to `publication_failed`, the Director's, for anything else.
+  - `publication_escalate` — to `publication_failed`, the Director's, for anything else,
+    including a main the Publisher did not move (`provenance`).
 - Nobody else can take those three moves. You never publish main yourself.
+  `switchyard-publish-candidate` publishes your candidate ref and nothing else. It refuses
+  a ref that is the branch the remote's HEAD names, a symbolic ref, or the target of one,
+  and a commit already on that branch. Its push runs no hook of your worktree's. If the
+  branch moved onto your commit while it ran, it fails: do not submit, tell the Director.
 
 **Director**
 - `route` — the general move, from almost anywhere to almost anywhere. Director-only.

@@ -99,20 +99,49 @@ The journal steps are `started`, `prepared`, `pushing`, `pushed` and
      repository is the trusted cache.
    - The cache's `origin` is the public repository, and the push goes to its
      push URL (`remote.origin.pushurl` when set).
-   - The integration branch is the one the public repository's `HEAD` names.
+   - The integration branch is the one the Publisher's own journal last
+     published to on that repository (SYRD-754). The public `HEAD` must name
+     the same branch; it decides only before the first publication, and never
+     a `roles/...` branch. A branch that is a symbolic ref is refused. A
+     changed publication target or branch is escalated, and becomes the
+     target only through the Director's answer to that escalation.
 3. **Trusted-cache state.**
    - The candidate must resolve in the cache to the exact recorded commit. If
      it is missing, it is fetched there by its SHA from the cache's origin.
-   - The cache's copy of the branch is brought up to the public tip.
-4. **Lineage.** A candidate already on the public branch is recorded as
+4. **Provenance (SYRD-754).** The public tip must be the tip the Publisher
+   last verified, or reached from it only by the Publisher's own journalled
+   pushes, each one commit leased on the tip before it. A tip moved any other
+   way is escalated as `provenance`: a role's push, a ref alias, a rewind, or
+   the candidate itself already on main. The escalation names the commits
+   nobody published. Nothing is pushed, the trusted cache is not brought to
+   that tip, and nothing is recorded. The Director restores main and retries,
+   or accepts the tip and retries; this ticket then takes exactly that tip as
+   its base. Only after this check is the cache's copy of the branch brought
+   up to the public tip. It is never fetched by branch name into the tracking
+   ref. It is fetched into `refs/publisher/incoming` with `--refmap=` (a fetch
+   from `origin` would otherwise move the tracking ref by its configured
+   refspec), must be exactly the proven tip, and only then is
+   `refs/remotes/origin/<branch>` moved, compare-and-swap. A branch that moved
+   in between leaves the cache as it was and is escalated. The read-back after
+   the push, and the cache refresh after it, are held to the same rule. At the
+   start of every attempt the Publisher marks that tracking ref
+   (`refs/publisher/integration`) under the cache's integration lock
+   (`switchyard-integration.lock` in its git directory). The board's
+   refresh-on-miss takes the same lock around its fetch: it fetches every
+   branch but the marked one, waits for the Publisher at most 10 s, and skips
+   the cache when the lock cannot be taken or the lock file cannot be opened. A
+   refresh that ran before the mark and moved the branch off the record is
+   undone by the escalation that finds it: the cache is put back to the last
+   verified tip. A copy merely behind the record is left as it is.
+5. **Lineage.** A candidate already on the public branch is recorded as
    published, with no push. Otherwise it must be exactly one commit whose only
    parent is the public tip.
-5. **Bundle.** A bundle of that one commit is built from the trusted cache, in
+6. **Bundle.** A bundle of that one commit is built from the trusted cache, in
    the Publisher's scratch repository under
    `$XDG_STATE_HOME/switchyard/publisher/<project>/`. It must hold one head
    (the candidate) and one prerequisite (the tip), and its sha256 is journalled.
    A bundle that is missing or changed when an attempt resumes is rebuilt.
-6. **Push.** The push is made from a fresh repository that holds only the
+7. **Push.** The push is made from a fresh repository that holds only the
    public branch and the verified bundle:
 
    ```
@@ -127,10 +156,10 @@ The journal steps are `started`, `prepared`, `pushing`, `pushed` and
    variables, no prompts, and `ssh -o BatchMode=yes`. So no role's
    `insteadOf`, hook path or credential helper can redirect or change what is
    pushed.
-7. **Verify.** The public branch is read back through the public URL until it
+8. **Verify.** The public branch is read back through the public URL until it
    carries the candidate, at most 5 times. The trusted cache's
    `refs/remotes/origin/<branch>` is refreshed and checked too.
-8. **Record.** `publisher_finish` writes the evidence comment and takes
+9. **Record.** `publisher_finish` writes the evidence comment and takes
    `publication_published`, in one transaction. The database refuses the
    record unless:
    - the journal reached `verified`;
@@ -147,9 +176,11 @@ happens twice.
 - **Returned to the implementer** when the candidate or its lineage must
   change. The comment carries the exact diagnostic, and every sign-off is
   cleared. This happens when:
-  - public main advanced past the candidate's parent (the comment names the
-    paths both sides changed);
-  - main moved during the push, and the lease refused it;
+  - public main advanced past the candidate's parent through the Publisher's
+    own publication of other work (the comment names the paths both sides
+    changed);
+  - main moved during the push to a tip the Publisher made, and the lease
+    refused it (a tip anything else made is the `provenance` escalation);
   - the candidate is several commits, or a merge;
   - its history differs from main;
   - it is published nowhere.
@@ -158,7 +189,9 @@ happens twice.
   - a refused credential;
   - a hook or branch-protection refusal;
   - transient failures that outlasted the retries;
-  - an unusable publication target;
+  - an unusable publication target, or one that changed;
+  - a public branch moved by something other than the Publisher
+    (`provenance`, SYRD-754);
   - missing sign-offs or unresolved size findings;
   - a journal refusal;
   - a git helper failure;
@@ -168,7 +201,8 @@ happens twice.
 
 ## Mechanical repairs (the whole list)
 
-- a stale trusted-cache branch, refreshed;
+- a stale or missing trusted-cache branch, refreshed by a fetch, only up to a
+  tip whose provenance is proven (SYRD-754);
 - a candidate missing from the cache, fetched by its SHA from the cache's
   origin;
 - a missing or changed bundle, or a scratch repository git cannot read,

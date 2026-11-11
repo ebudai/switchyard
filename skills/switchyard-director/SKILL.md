@@ -548,6 +548,14 @@ Anything else lands in `publication_failed` with the exact diagnostic and the
 repairs it tried: a credential, a hook or branch protection, the publication
 target, the journal, sign-offs or size review. Fix the cause, then send the
 ticket back with `publication_retry`, or return it with `publication_kick_back`.
+
+A main the Publisher did not move is `provenance`: a role's push, an alias, a
+rewind, or the candidate already on main. It names the commits nobody
+published, and nothing was pushed, cached or recorded. Restore main to the tip
+it names and retry, or accept that tip as reviewed and retry: the ticket then
+builds on exactly that tip. A changed cache origin or a HEAD naming another
+branch is `authority`, and a retry makes it the target. Treat a provenance
+escalation as a release-integrity finding, never as routine.
 Never integrate a ticket by hand while it is in `publication`. This section,
 the live workflow and command help are the current operating contract;
 `docs/syrd-625-publisher.md` is historical design and rollout evidence only.

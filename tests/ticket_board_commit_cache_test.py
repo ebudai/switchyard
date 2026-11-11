@@ -136,8 +136,10 @@ def test_surface_keeps_two_app_methods_and_moves_the_rest() -> None:
     imported = {
         node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
     } | {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
-    # The standard library only; os and pwd say which directory the board may not search (SYRD-682).
-    assert imported == {"__future__", "os", "pwd", "re", "subprocess", "pathlib", "commit_cache_reader"}, imported
+    # The standard library only; os and pwd say which directory the board may not search (SYRD-682); contextlib,
+    # fcntl and time hold the Publisher's integration lock around a refresh (SYRD-754).
+    assert imported == {"__future__", "os", "pwd", "re", "subprocess", "pathlib", "commit_cache_reader",
+                        "contextlib", "fcntl", "time", "typing"}, imported
     assert "://" not in source and "git@" not in source
 
 
@@ -184,12 +186,58 @@ def test_refresh_is_bounded_origin_only_and_skips_failures() -> None:
         for mode in ("hang", "fail"):
             with Recorder(fetch=mode) as rec:
                 assert commit_cache.refresh_commit_repos(dirs) is False
-            assert rec.calls == [([*secure_git(repos.cache), "-c", "remote.origin.uploadpack=git-upload-pack",
+            assert rec.calls == [([*secure_git(repos.cache), "symbolic-ref", "-q", "refs/publisher/integration"], 30),
+                                 ([*secure_git(repos.cache), "-c", "remote.origin.uploadpack=git-upload-pack",
                                   "-c", "core.sshCommand=/usr/bin/ssh", "-c", "core.gitProxy=",
                                   "fetch", "--quiet", "--prune", "origin"], 30)], rec.calls
         with Recorder() as rec:
             assert commit_cache.refresh_commit_repos(dirs) is True
-        assert [call[1] for call in rec.calls] == [30]
+        assert [call[1] for call in rec.calls] == [30, 30]
+        # SYRD-754: once the Publisher has marked its integration branch, the board's refresh leaves it alone.
+        main_before = git("--git-dir", str(repos.cache), "rev-parse", "refs/remotes/origin/main")
+        git("--git-dir", str(repos.cache), "symbolic-ref", "refs/publisher/integration", "refs/remotes/origin/main")
+        work = repos.remote.parent / "work"
+        (work / "g").write_text("unreviewed")
+        git("add", "g", cwd=work)
+        git("commit", "-qm", "pushed to main by a role", cwd=work)
+        unreviewed = git("rev-parse", "HEAD", cwd=work)
+        git("push", "-q", str(repos.remote), f"{unreviewed}:refs/heads/main", f"{unreviewed}:refs/heads/roles/main/new",
+            cwd=work)
+        with Recorder() as rec:
+            assert commit_cache.refresh_commit_repos((repos.cache,)) is True
+        assert rec.calls[-1][0][-3:] == ["--refmap=", "+refs/heads/*:refs/remotes/origin/*", "^refs/heads/main"], \
+            rec.calls
+        assert git("--git-dir", str(repos.cache), "rev-parse", "refs/remotes/origin/main") == main_before
+        assert git("--git-dir", str(repos.cache), "rev-parse", "refs/remotes/origin/roles/main/new") == unreviewed
+        assert commit_cache.resolve_known_commit((repos.cache,), unreviewed) == (unreviewed, [])
+        git("--git-dir", str(repos.cache), "symbolic-ref", "-d", "refs/publisher/integration")
+        # The refresh runs under the cache's integration lock: held elsewhere (the Publisher), it waits, then leaves
+        # the cache alone this time, fetching nothing.
+        import fcntl
+        lock = repos.cache / commit_cache.INTEGRATION_LOCK
+        wait, commit_cache.LOCK_WAIT_SECONDS = commit_cache.LOCK_WAIT_SECONDS, 0.2
+        try:
+            with open(lock, "a") as holder:
+                fcntl.flock(holder, fcntl.LOCK_EX)
+                with Recorder() as rec:
+                    assert commit_cache.refresh_commit_repos((repos.cache,)) is False
+                assert not any("fetch" in call[0] for call in rec.calls), rec.calls
+            with Recorder() as rec:
+                assert commit_cache.refresh_commit_repos((repos.cache,)) is True
+            assert any("fetch" in call[0] for call in rec.calls), rec.calls
+            # A lock file the board can neither create nor open: an account that cannot write the git directory
+            # cannot write its refs either, so nothing is fetched.
+            lock.unlink()
+            mode = repos.cache.stat().st_mode
+            repos.cache.chmod(0o555)
+            try:
+                with Recorder() as rec:
+                    assert commit_cache.refresh_commit_repos((repos.cache,)) is False
+                assert not any("fetch" in call[0] for call in rec.calls), rec.calls
+            finally:
+                repos.cache.chmod(mode)
+        finally:
+            commit_cache.LOCK_WAIT_SECONDS = wait
         assert commit_cache.resolve_known_commit(dirs, repos.b[:10].upper()) == (repos.b, [repos.missing])
         assert commit_cache.refresh_commit_repos((repos.missing,)) is False
 

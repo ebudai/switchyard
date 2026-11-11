@@ -79,11 +79,9 @@ def candidate(bench: pb.Bench, implementer: str = "app") -> tuple[str, str]:
 
 
 def moved_on(bench: pb.Bench) -> str:
-    """Somebody else changes the same file on public main: the candidate can no longer be fast-forwarded."""
-    world = bench.world
-    theirs = world.commit([world.main()], {"src/app.py": f"print('theirs {bench.number}')\n"}, "someone else")
-    world.land_on_main(theirs)
-    return theirs
+    """Somebody else's approved change to the same file, published by the Publisher (the one way main moves,
+    SYRD-754): the candidate can no longer be fast-forwarded."""
+    return bench.integrate({"src/app.py": f"print('theirs {bench.number}')\n"})
 
 
 def queue_row(bench: pb.Bench, t: str) -> dict:
@@ -108,7 +106,7 @@ def returned_to_busy_author(bench: pb.Bench, t: str, holding: str, theirs: str, 
           f"{label}: the return and the queue notice are both the Publisher's, and nothing is anybody's else: "
           f"{said} {nobody}")
     check(pb.attempts(board, t)[-1]["state"] == "returned" and bench.world.main() == theirs,
-          f"{label}: the attempt ended returned, and public main is exactly what somebody else put there")
+          f"{label}: the attempt ended returned, and public main is exactly what the Publisher put there")
 
 
 def first_attempt(bench: pb.Bench) -> None:

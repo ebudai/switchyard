@@ -21,6 +21,17 @@ somewhere it was not meant to go:
   the answer has to be exactly the commit that was sent. Submission records a
   public commit, so "the push reported success" is not the same claim as "the
   public ref is at this commit" and the second one is the one that matters.
+* NOT MAIN (SYRD-754). Only the Publisher moves the integration branch, after
+  review. So the integration branch is the one the remote's HEAD names, read
+  with every symbolic ref the remote has, and a candidate is refused when its
+  ref is that branch, is a symbolic ref, or is the target of one: on a
+  filesystem remote a push to `roles/ops/x` that is an alias of `main` moves
+  `main`. A commit already on the integration branch is refused rather than
+  "published": it got there without the Publisher, which is the Director's to
+  hear about. The push itself runs no hook of the worktree's (`--no-verify`,
+  `core.hooksPath=/dev/null`), and the remote's report must name only the
+  candidate ref. Afterwards the integration branch is read again: if it now
+  carries the commit, the run fails and says not to submit.
 
 And one thing after the push: the board's own copy of the repository is brought
 up to the ref that was just published, so submitting is a local question by the
@@ -152,17 +163,79 @@ def librarian_ref(args: argparse.Namespace, commit: str, worktree: Path) -> str:
     return candidate_ref(LIBRARIAN_ROLE, args.ticket_id, parents[0])
 
 
-def remote_ref_commit(remote: str, ref: str, *, cwd: Path) -> str:
-    """What the remote says the ref is, right now. Empty when it has no such ref."""
-    listed = git(["ls-remote", remote, f"refs/heads/{ref}"], cwd=cwd)
+def remote_refs(remote: str, ref: str, *, cwd: Path) -> tuple[dict[str, str], dict[str, str]]:
+    """Every ref the remote has, right now, and every symbolic ref with its target, in one read."""
+    listed = git(["ls-remote", "--symref", remote], cwd=cwd)
     if listed.returncode != 0:
         sys.stderr.write(listed.stderr)
         fail(f"could not read {ref} from {remote}; nothing was pushed")
+    tips: dict[str, str] = {}
+    symbolic: dict[str, str] = {}
     for line in listed.stdout.splitlines():
-        parts = line.split()
-        if len(parts) == 2 and parts[1] == f"refs/heads/{ref}":
-            return parts[0].strip().lower()
-    return ""
+        if line.startswith("ref: "):
+            target, _, name = line[5:].partition("\t")
+            symbolic[name.strip()] = target.strip()
+            continue
+        oid, _, name = line.partition("\t")
+        if COMMIT.fullmatch(oid.strip().lower()):
+            tips[name.strip()] = oid.strip().lower()
+    return tips, symbolic
+
+
+def integration_branch(symbolic: dict[str, str]) -> str:
+    """The branch the remote's HEAD names, which only the Publisher moves. Empty when HEAD names none."""
+    target = symbolic.get("HEAD", "")
+    return target[len("refs/heads/"):] if target.startswith("refs/heads/") else ""
+
+
+def alias_problem(ref: str, integration: str, symbolic: dict[str, str]) -> str | None:
+    """Why a push to `ref` could move another branch on this remote -- above all the integration branch."""
+    full = f"refs/heads/{ref}"
+    if integration and ref.casefold() == integration.casefold():
+        return (f"{ref} is the remote's integration branch (its HEAD names it). Only the Publisher moves it, "
+                f"after review; publish under another roles/... name")
+    if full in symbolic:
+        return (f"{ref} is a symbolic ref on the remote, to {symbolic[full]}: a push to it would move "
+                f"{symbolic[full]}, not publish a candidate. Publish under another name")
+    aliases = sorted(name for name, target in symbolic.items() if target == full)
+    if aliases:
+        one = len(aliases) == 1
+        return (f"{', '.join(aliases)} on the remote {'is a symbolic ref' if one else 'are symbolic refs'} to {full}: "
+                f"a push to it would move {'that' if one else 'those'} too. Publish under another name")
+    return None
+
+
+def carries(commit: str, tip: str, remote: str, *, cwd: Path) -> bool:
+    """Whether `tip` (a commit on the remote) is `commit` or descends from it; fetched first when missing here."""
+    if not tip:
+        return False
+    if tip == commit:
+        return True
+    if git(["cat-file", "-e", f"{tip}^{{commit}}"], cwd=cwd).returncode != 0:
+        fetched = git(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", remote, tip], cwd=cwd)
+        if fetched.returncode != 0:
+            sys.stderr.write(fetched.stderr)
+            fail(f"could not read {tip[:12]} from {remote} to tell whether it carries {commit[:12]}; "
+                 "nothing was pushed")
+    return git(["merge-base", "--is-ancestor", commit, tip], cwd=cwd).returncode == 0
+
+
+def protected_tips(tips: dict[str, str], integration: str) -> dict[str, str]:
+    """The integration branch and every name PROTECTED_REFS keeps, as the remote has them."""
+    names = {f"refs/heads/{name}" for name in PROTECTED_REFS}
+    if integration:
+        names.add(f"refs/heads/{integration}")
+    return {name: tips.get(name, "") for name in sorted(names)}
+
+
+def pushed_refs(porcelain: str) -> list[str]:
+    """Every remote ref a `git push --porcelain` report says it touched (updated, created, forced, or up to date)."""
+    touched = []
+    for line in porcelain.splitlines():
+        fields = line.split("\t")
+        if len(fields) >= 2 and len(fields[0]) == 1 and ":" in fields[1]:
+            touched.append(fields[1].rsplit(":", 1)[1])
+    return touched
 
 
 def board_commit_repositories(board_url: str) -> tuple[list[str], str]:
@@ -287,7 +360,20 @@ def main(argv: list[str]) -> int:
         ))
         return 0
 
-    public_before = remote_ref_commit(args.remote, ref, cwd=worktree)
+    tips, symbolic = remote_refs(args.remote, ref, cwd=worktree)
+    integration = integration_branch(symbolic)
+    problem = alias_problem(ref, integration, symbolic)
+    if problem is not None:
+        fail(f"{problem}. Nothing was pushed")
+    guarded = protected_tips(tips, integration)
+    for name, tip in guarded.items():
+        if carries(commit, tip, args.remote, cwd=worktree):
+            fail(
+                f"{commit[:12]} is already on {name} of {args.remote} ({tip[:12]}). Only the Publisher puts a "
+                "commit there, after review, so it reached the integration branch some other way. Nothing was "
+                "pushed. Do NOT submit it: tell the Director, who decides what becomes of that branch"
+            )
+    public_before = tips.get(f"refs/heads/{ref}", "")
     if public_before == commit:
         # Already there. A retry after something later in the run failed is an
         # ordinary thing to do, so it verifies and reports rather than refusing.
@@ -306,8 +392,10 @@ def main(argv: list[str]) -> int:
             # ref that moves in between is refused by the forge rather than
             # overwritten, which is the only place that comparison is race-free.
             lease = [f"--force-with-lease=refs/heads/{ref}:{public_before}"]
+        # No hook of the worktree's runs: a pre-push or reference-transaction hook could push anything.
         pushed = git(
-            ["push", *lease, args.remote, f"{commit}:refs/heads/{ref}"], cwd=worktree
+            ["-c", "core.hooksPath=/dev/null", "push", "--no-verify", "--porcelain", *lease, args.remote,
+             f"{commit}:refs/heads/{ref}"], cwd=worktree
         )
         sys.stdout.write(pushed.stdout)
         sys.stderr.write(pushed.stderr)
@@ -317,8 +405,21 @@ def main(argv: list[str]) -> int:
                 "has moved. Fix the cause and run this again; if the remote refuses your "
                 "credential, tell the Director rather than working around it."
             )
+        others = [name for name in pushed_refs(pushed.stdout) if name != f"refs/heads/{ref}"]
+        if others:
+            fail(f"the push to {args.remote} reported {', '.join(others)} as well as refs/heads/{ref}. Do NOT "
+                 "submit this commit: tell the Director what the remote now reads")
 
-    public_after = remote_ref_commit(args.remote, ref, cwd=worktree)
+    tips_after, _symbolic = remote_refs(args.remote, ref, cwd=worktree)
+    for name, before in guarded.items():
+        after = tips_after.get(name, "")
+        if after != before and carries(commit, after, args.remote, cwd=worktree):
+            fail(
+                f"{name} on {args.remote} moved from {before[:12] or 'nothing'} to {after[:12]} while this ran, "
+                f"and now carries {commit[:12]}. Only the Publisher may move it, after review. Do NOT submit "
+                "this commit: tell the Director, with what the remote now reads"
+            )
+    public_after = tips_after.get(f"refs/heads/{ref}", "")
     if public_after != commit:
         fail(
             f"{args.remote}/{ref} reads {public_after[:12] or 'nothing'} rather than the "

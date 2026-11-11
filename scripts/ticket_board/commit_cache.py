@@ -9,11 +9,15 @@ authority and every database transaction.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import os
 import pwd
 import re
 import subprocess
+import time
 from pathlib import Path
+from typing import Iterator
 
 from .commit_cache_reader import CacheReader, cache_reader
 
@@ -25,6 +29,45 @@ from .commit_cache_reader import CacheReader, cache_reader
 #: locally when the ask is filed, and accepting it would prove only that
 #: somebody asked.
 PUBLISHED_REF_NAMESPACE = "refs/remotes/origin"
+#: The Publisher's mark in a trusted cache: a symbolic ref to the tracking ref of the integration branch, which
+#: only the Publisher moves, to a tip whose provenance it proved (SYRD-754; publisher.INTEGRATION_REF).
+INTEGRATION_REF = "refs/publisher/integration"
+#: The lock, in a trusted cache's git directory, that the Publisher's changes to that cache and the board's
+#: refresh of it are made under, so neither runs inside the other (SYRD-754).
+INTEGRATION_LOCK = "switchyard-integration.lock"
+#: How long the board's refresh waits for the Publisher before it leaves that cache alone this time.
+LOCK_WAIT_SECONDS = 10.0
+
+
+@contextlib.contextmanager
+def integration_lock(git_dir: Path, wait: float = LOCK_WAIT_SECONDS) -> Iterator[bool]:
+    """Hold the cache's integration lock: yields True when held, False when it could not be taken in `wait`
+    seconds or the lock file can neither be created nor opened (an account that cannot create a file in the git
+    directory cannot write its refs either). An exclusive flock, on whatever descriptor could be opened."""
+    path = Path(git_dir) / INTEGRATION_LOCK
+    fd = -1
+    for flags in (os.O_RDWR | os.O_CREAT, os.O_RDONLY):
+        try:
+            fd = os.open(path, flags | os.O_CLOEXEC | os.O_NOFOLLOW, 0o644)
+            break
+        except OSError:
+            continue
+    if fd < 0:
+        yield False
+        return
+    try:
+        deadline, held = time.monotonic() + wait, False
+        while not held:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                held = True
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.05)
+        yield held
+    finally:
+        os.close(fd)
 #: How long the board will wait for its own copy of the repository to catch up
 #: with a commit somebody has just published. Short enough that a submission
 #: does not hang on an unreachable forge, long enough for an ordinary fetch.
@@ -202,21 +245,39 @@ def refresh_commit_repos(commit_git_dirs: tuple[Path, ...]) -> bool:
             git_args = commit_repo_git_args(commit_git_dir)
         except ValueError:
             continue
-        try:
-            fetched = subprocess.run(
-                [*git_args, "-c", "remote.origin.uploadpack=git-upload-pack",
-                 "-c", "core.sshCommand=/usr/bin/ssh", "-c", "core.gitProxy=",
-                 "fetch", "--quiet", "--prune", "origin"],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=COMMIT_REFRESH_TIMEOUT_SECONDS,
-                env=_git_env(),
-            )
-        except subprocess.TimeoutExpired:
-            continue
+        # Under the Publisher's lock: a refresh never runs between its reading and its moving this cache, and the
+        # mark it writes first is seen by every refresh that starts after it (SYRD-754).
+        with integration_lock(cache_reader(commit_git_dir).git_dir, wait=LOCK_WAIT_SECONDS) as held:
+            if not held:
+                continue
+            try:
+                kept = publisher_kept(git_args)
+                fetched = subprocess.run(
+                    [*git_args, "-c", "remote.origin.uploadpack=git-upload-pack",
+                     "-c", "core.sshCommand=/usr/bin/ssh", "-c", "core.gitProxy=",
+                     "fetch", "--quiet", "--prune", "origin", *kept],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=COMMIT_REFRESH_TIMEOUT_SECONDS,
+                    env=_git_env(),
+                )
+            except subprocess.TimeoutExpired:
+                continue
         refreshed = refreshed or fetched.returncode == 0
     return refreshed
+
+
+def publisher_kept(git_args: list[str]) -> list[str]:
+    """The refresh's refspecs when the Publisher has marked its integration branch in this cache: every branch
+    but that one, whose tracking ref only the Publisher moves (SYRD-754). None otherwise, so the cache's own
+    configured refspecs apply as before. Bounded like the fetch: a read that hangs skips this repository."""
+    marked = subprocess.run([*git_args, "symbolic-ref", "-q", INTEGRATION_REF], capture_output=True, text=True,
+                            check=False, env=_git_env(), timeout=COMMIT_REFRESH_TIMEOUT_SECONDS).stdout.strip()
+    branch = marked[len(PUBLISHED_REF_NAMESPACE) + 1:] if marked.startswith(PUBLISHED_REF_NAMESPACE + "/") else ""
+    if not PUBLISHABLE_REF.fullmatch(branch):
+        return []
+    return ["--refmap=", f"+refs/heads/*:{PUBLISHED_REF_NAMESPACE}/*", f"^refs/heads/{branch}"]
 
 
 def _first_answer(commit_git_dirs: tuple[Path, ...], args: list[str]) -> str | None:

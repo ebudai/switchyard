@@ -14,13 +14,24 @@ For one ticket the Publisher:
 2. finds its authority: the board's single commit repository is the trusted
    cache, that cache's `origin` is the public repository (its push URL, when
    one is configured, is where the push goes), and the integration branch is
-   the one the public repository's HEAD names;
-3. checks the trusted cache: the candidate resolves there to the exact
-   recorded commit, and the cache's copy of the public branch is current;
-4. reads the public branch's tip. A candidate already on it was published
-   earlier -- by a run that stopped before it could record so, say -- and is
-   recorded without pushing again. Otherwise the candidate must have exactly
-   one parent, and that parent must be the tip;
+   the one the Publisher's own journal last published to there -- the public
+   repository's HEAD must agree, and names it only before the first
+   publication. A branch that is a symbolic ref, or one in a role's
+   `roles/...` namespace, is refused;
+3. checks the candidate resolves in the trusted cache to the exact recorded
+   commit;
+4. reads the public branch's tip and proves where it came from (SYRD-754):
+   it must be the tip the Publisher last verified, or reached from it only by
+   the Publisher's own journalled pushes. A tip anything else moved the branch
+   to -- a role's push, a ref alias, a rewind -- is escalated to the Director,
+   and is neither published over, nor brought into the trusted cache, nor
+   recorded; the Director's answer to that escalation (publication_retry, or a
+   kick-back and a new approval) is what lets this ticket take exactly that
+   tip as its base. Only then is the trusted cache's copy of the branch
+   brought up to it. A candidate already on the tip was published earlier --
+   by a run that stopped before it could record so, say -- and is recorded
+   without pushing again. Otherwise the candidate must have exactly one
+   parent, and that parent must be the tip;
 5. builds a bundle of exactly that one commit from the trusted cache, checks
    its one head and one prerequisite, and journals its sha256;
 6. publishes from a fresh repository holding nothing but the public branch and
@@ -36,8 +47,10 @@ Every step is journalled before the next one starts (`publisher_step`), so a
 run that stops anywhere is resumed from facts by the next pass.
 
 What it repairs, and nothing else (each repair is recorded in the evidence):
-a stale trusted-cache branch; a candidate missing from the cache, fetched by
-its SHA from the cache's own origin; a missing or changed bundle or scratch
+a stale trusted-cache branch, by a fetch and only up to a tip whose provenance
+is proven -- nothing here writes the public repository but the push; a
+candidate missing from the cache, fetched by its SHA from the cache's own
+origin; a missing or changed bundle or scratch
 repository, rebuilt; an attempt that no longer matches its ticket, superseded
 by the board; and a transient remote read or push, retried at most
 `TRANSIENT_TRIES` times. None of them can change the candidate's SHA, tree or
@@ -50,8 +63,9 @@ What it hands back, once:
   the public branch moved past its parent, its history differs, it is not
   exactly one commit on the tip, or it is published nowhere;
 * `escalated` to the Director -- something only the Director can fix: the
-  publication target, a credential, a policy or hook refusal, sign-offs or size
-  review not satisfied, the journal, a git helper failure, transient failures
+  publication target, a public branch moved by something other than the
+  Publisher (`provenance`), a credential, a policy or hook refusal, sign-offs
+  or size review not satisfied, the journal, a git helper failure, transient failures
   that outlasted the retries, or a publication the trusted cache cannot be made
   to show.
 """
@@ -71,6 +85,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from .commit_cache import INTEGRATION_LOCK, INTEGRATION_REF, integration_lock
 from .commit_repos import explicit_commit_git_dirs
 
 SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -86,6 +101,10 @@ STEPS = ("started", "prepared", "pushing", "pushed", "verified")
 #: Where a candidate is held in the Publisher's own repositories.
 CANDIDATE_REF = "refs/publisher/candidate"
 PUBLIC_REF = "refs/publisher/public"
+#: Where the trusted cache takes the public branch in, before it is proven to be the tip already proven.
+INCOMING_REF = "refs/publisher/incoming"
+#: How long the Publisher waits for a board refresh to finish with the trusted cache (commit_cache.INTEGRATION_LOCK).
+CACHE_LOCK_SECONDS = 120.0
 
 TRANSIENT = ("could not resolve host", "connection timed out", "connection reset", "connection refused",
              "connection closed", "the remote end hung up", "early eof", "temporary failure", "timed out after",
@@ -227,6 +246,21 @@ class Journal:
             raise director("journal", f"the board refused to journal step {step}: "
                                       f"{str(exc).splitlines()[0] if str(exc) else type(exc).__name__}") from None
 
+    def history(self) -> list[dict[str, Any]]:
+        """The board's record of what the Publisher did to public branches, oldest first (SYRD-754).
+
+        Every attempt that journalled `pushing` -- the step written immediately before a push, with the tip it
+        is leased on -- and every escalation that named a tip something else put there, or a publication target
+        or integration branch the journal does not know.
+        """
+        rows = self.conn.execute(
+            "SELECT json_build_object('id', id, 'ticket', ticket_id, 'state', state, 'step', step, "
+            "'expected_parent', expected_parent, 'facts', facts)::text FROM ticket_board.publication_attempts "
+            "WHERE step IN ('pushing', 'pushed', 'verified') OR (state = 'escalated' AND (facts ? 'unrecorded_tip' "
+            "OR facts ? 'unrecorded_target' OR facts ? 'unrecorded_branch')) "
+            "ORDER BY id").fetchall()
+        return [json.loads(_value(row)) for row in rows]
+
     def finish(self, attempt: int, outcome: str, text: str, facts: dict[str, Any], repairs: list[str]) -> dict:
         return self._one("SELECT ticket_board.publisher_finish(%s, %s, %s, %s::jsonb, %s::jsonb)",
                          (attempt, outcome, text, json.dumps(facts), json.dumps(repairs)))
@@ -322,8 +356,139 @@ class Attempt:
         if named is None or tip is None or not BRANCH.fullmatch(named.group(1)) or ".." in named.group(1):
             raise director("authority", f"{public} does not name an integration branch with its HEAD "
                                         f"({head.stdout.strip() or 'empty answer'})")
+        branch = named.group(1)
+        # Where the Publisher publishes is what its journal says it published to, not what a remote's HEAD or a
+        # cache's configuration says today: either changing is the Director's to answer, once (SYRD-754).
+        anywhere = self.last_verified("")
+        if anywhere is not None and anywhere["facts"]["public_url"] != public \
+                and not self.answered("unrecorded_target", public, anywhere["id"]):
+            self.facts["unrecorded_target"] = public
+            raise director("authority", f"the trusted cache's origin is now {public}, but the Publisher publishes to "
+                                        f"{anywhere['facts']['public_url']} (attempt {anywhere['id']}, "
+                                        f"{anywhere['ticket']}). Put it back, or retry to make {public} the "
+                                        "publication target: its tip is then where the Publisher's record starts")
+        last = self.last_verified(public)
+        recorded = last["facts"]["branch"] if last is not None else ""
+        # A branch that is a symbolic ref moves with whatever it names (and a remote's HEAD reads straight through
+        # it): the journal's branch and the one HEAD names are both asked.
+        for name in dict.fromkeys(name for name in (recorded, branch) if name):
+            listed = self.remote("reading the public branch", "ls-remote", "--symref", public, f"refs/heads/{name}")
+            if listed.returncode != 0:
+                raise self.remote_failure(f"reading {public}", listed)
+            alias = re.search(rf"^ref: (\S+)\trefs/heads/{re.escape(name)}$", listed.stdout, re.MULTILINE)
+            if alias is not None:
+                raise director("authority", f"refs/heads/{name} of {public} is a symbolic ref to {alias.group(1)}: "
+                                            f"a push to either would move both. Make {name} an ordinary branch again")
+        if recorded and recorded != branch and not self.answered("unrecorded_branch", branch, last["id"]):
+            self.facts["unrecorded_branch"] = branch
+            raise director("authority", f"{public}'s HEAD names {branch}, but the Publisher publishes to "
+                                        f"{recorded} there (attempt {last['id']}, {last['ticket']}). "
+                                        "Moving a repository's HEAD does not change its integration branch: put HEAD "
+                                        f"back on {recorded}, or retry to make {branch} the integration branch")
+        if branch.split("/", 1)[0] == "roles":
+            raise director("authority", f"{public}'s HEAD names {branch}, a role's candidate namespace, not an "
+                                        "integration branch")
         self.facts.update({"commit_repository": str(cache), "public_url": public, "push_url": pushurl or public,
-                           "branch": named.group(1), "public_before": tip.group(1)})
+                           "branch": branch, "public_before": tip.group(1)})
+
+    def last_verified(self, public: str, branch: str = "") -> dict[str, Any] | None:
+        """The latest attempt that verified a publication to `public` (anywhere, when empty; to `branch`, when
+        named), or None."""
+        found = [entry for entry in self.journal.history()
+                 if entry["step"] == "verified" and (not public or entry["facts"].get("public_url") == public)
+                 and (not branch or entry["facts"].get("branch") == branch)
+                 and SHA.fullmatch(str(entry["facts"].get("public_after") or ""))]
+        return found[-1] if found else None
+
+    def answered(self, key: str, value: str, after: int) -> int:
+        """The escalation of this ticket, later than attempt `after`, that named `value` as its `key` -- which the
+        Director has answered, since only the Director sends a ticket back from there. 0 when there is none."""
+        found = [entry["id"] for entry in self.journal.history()
+                 if entry["state"] == "escalated" and entry["ticket"] == self.ticket
+                 and after < entry["id"] < int(self.info["attempt"]) and entry["facts"].get(key) == value]
+        return found[-1] if found else 0
+
+    def unrecorded(self, tip: str, repo: Path) -> str:
+        """Why public `tip` was not put there by the Publisher; empty when it was (SYRD-754).
+
+        Proven from the board's journal: `tip` is the last verified publication, or is reached from it only by
+        journalled pushes, each one commit leased on the tip before it, or is the exact tip an escalation of
+        this ticket named and the Director then sent the ticket back. With no verified publication to this
+        branch on record, its tip is where the record starts -- unless it already carries the candidate.
+        `repo` holds `tip` with its history, for the ancestry questions.
+        """
+        public, branch, full = self.facts["public_url"], self.facts["branch"], self.facts["candidate_full"]
+        history = [entry for entry in self.journal.history() if entry["facts"].get("public_url") == public
+                   and entry["facts"].get("branch") == branch]
+        last = self.last_verified(public, branch)
+        if last is None:
+            answered = self.answered("unrecorded_tip", tip, 0)
+            own = any(entry["id"] == int(self.info["attempt"]) and entry["step"] in ("pushing", "pushed", "verified")
+                      and entry["facts"].get("candidate_full") == tip for entry in history)
+            if self.landed(repo, tip) and not answered and not own:
+                self.facts.update({"unrecorded_tip": tip, "recorded_tip": ""})
+                return (f"no publication to {branch} is recorded on this board, and {branch} already carries "
+                        f"{short(full)}, which the Publisher never pushed")
+            self.facts["provenance"] = ({"recorded": "", "answered": answered} if answered and not own
+                                        else {"first": tip})
+            return ""
+        base = last["facts"]["public_after"]
+        pushes: dict[str, list[str]] = {}
+        for entry in history:
+            leased, pushed = entry.get("expected_parent") or "", str(entry["facts"].get("candidate_full") or "")
+            # A returned or escalated attempt made nothing unless git accepted its push.
+            made = entry["state"] not in ("returned", "escalated") or entry["facts"].get("pushed") is True
+            if (entry["step"] in ("pushing", "pushed", "verified") and made
+                    and SHA.fullmatch(leased) and SHA.fullmatch(pushed)):
+                pushes.setdefault(leased, []).append(pushed)
+        at, seen = base, {base}
+        while at != tip:
+            following = [c for c in pushes.get(at, []) if c not in seen
+                         and self.git("merge-base", "--is-ancestor", at, c, repo=repo).returncode == 0
+                         and self.git("merge-base", "--is-ancestor", c, tip, repo=repo).returncode == 0]
+            if not following:
+                break
+            at = following[0]
+            seen.add(at)
+        if at == tip:
+            self.facts["provenance"] = {"recorded": base, "attempt": last["id"]}
+            return ""
+        answered = self.answered("unrecorded_tip", tip, last["id"])
+        if answered:
+            self.facts["provenance"] = {"recorded": base, "attempt": last["id"], "answered": answered}
+            return ""
+        self.facts.update({"unrecorded_tip": tip, "recorded_tip": base, "recorded_attempt": last["id"]})
+        held = self.git("cat-file", "-e", f"{base}^{{commit}}", repo=repo).returncode == 0
+        if held and self.git("merge-base", "--is-ancestor", tip, base, repo=repo).returncode == 0:
+            how = f"{branch} was moved back, behind it"
+        elif held and self.git("merge-base", "--is-ancestor", base, tip, repo=repo).returncode == 0:
+            listed = self.local("listing the unpublished commits", "log", "--format=%h %s", f"{base}..{tip}",
+                                repo=repo).splitlines()
+            how = (f"{len(listed)} commit(s) on top of it that no Publisher attempt pushed: "
+                   + "; ".join(listed[:10]) + ("; ..." if len(listed) > 10 else ""))
+        else:
+            how = f"{branch}'s history no longer contains it"
+        return (f"public {branch} of {public} reads {short(tip)}, but the Publisher's last recorded publication "
+                f"left it at {short(base)} ({last['ticket']}, attempt {last['id']}), and {how}")
+
+    def provenance(self, tip: str, repo: Path) -> None:
+        """Escalate a tip the Publisher did not make, before anything is pushed, cached or recorded."""
+        why = self.unrecorded(tip, repo)
+        if why:
+            branch = self.facts["branch"]
+            restored = self.restore_cache()
+            if restored:
+                why += (f". The trusted cache's {branch} read {short(restored)}, which nobody published; it was put "
+                        f"back to {short(self.facts['recorded_tip'])}")
+            recorded = self.facts.get("recorded_tip") or ""
+            restore = short(recorded) if recorded else f"a tip without {short(self.facts['candidate_full'])}"
+            raise director("provenance", f"{why}. Something other than the Publisher moved {branch}: this attempt "
+                                         f"pushed nothing, did not bring the trusted cache to {short(tip)}, and "
+                                         "recorded nothing as published. The Director decides: restore "
+                                         f"{branch} to {restore} and retry, or accept "
+                                         f"{short(tip)} as reviewed and retry with it in place -- this ticket then "
+                                         f"takes exactly {short(tip)} as {branch}'s base, and any other tip is "
+                                         "refused again")
 
     @property
     def cache(self) -> Path:
@@ -351,19 +516,72 @@ class Attempt:
         tree = self.local("reading the candidate's tree", "rev-parse", f"{full}^{{tree}}", repo=self.cache)
         self.facts.update({"candidate_full": full, "parents": parents, "tree": tree})
 
-    def cache_current(self) -> None:
-        """The trusted cache's copy of the public branch, brought up to the tip the public repository names."""
-        branch, tip = self.facts["branch"], self.facts["public_before"]
+    def mark(self) -> None:
+        """Mark, before anything is read or moved, the tracking ref only the Publisher moves (SYRD-754).
+
+        Under the trusted cache's integration lock, which the board's refresh takes around its own fetch: a refresh
+        already running finishes first, and every refresh after this leaves that branch alone. What one that ran
+        before the mark did to the branch is put back by the escalation that finds it (`restore_cache`).
+        """
+        with integration_lock(self.cache, wait=CACHE_LOCK_SECONDS) as held:
+            if not held:
+                raise director("cache", f"the trusted cache {self.cache} stayed locked ({INTEGRATION_LOCK}) for "
+                                        f"{CACHE_LOCK_SECONDS:.0f}s; nothing was changed in it")
+            self.local("marking the branch only the Publisher moves", "symbolic-ref", INTEGRATION_REF,
+                       f"refs/remotes/origin/{self.facts['branch']}", repo=self.cache)
+
+    def restore_cache(self) -> str:
+        """Put the trusted cache's copy of the branch back on the Publisher's record when something else moved it
+        off: ahead of, or beside, the last verified tip (a refresh before the mark existed, say). A copy merely
+        behind the record is left as it is. Returns what it held, when it was put back; empty otherwise."""
+        recorded = str(self.facts.get("recorded_tip") or "")
+        if not SHA.fullmatch(recorded):
+            return ""
+        ref = f"refs/remotes/origin/{self.facts['branch']}"
+        held = self.git("rev-parse", "--verify", "--quiet", ref, repo=self.cache).stdout.strip()
+        if (not held or held == recorded
+                or self.git("merge-base", "--is-ancestor", held, recorded, repo=self.cache).returncode == 0
+                or self.git("cat-file", "-e", f"{recorded}^{{commit}}", repo=self.cache).returncode != 0):
+            return ""
+        self.local("putting the trusted cache back on the record", "update-ref", ref, recorded, held, repo=self.cache)
+        self.facts["cache_restored"] = held
+        return held
+
+    def adopt(self, tip: str, failed: Callable[[subprocess.CompletedProcess[str]], Handoff]) -> str:
+        """Bring the trusted cache's copy of the branch to exactly `tip`, whose provenance is already proven.
+
+        Never by fetching the branch name into the tracking ref: the branch can move between the proof and the
+        fetch (SYRD-754). It is fetched into INCOMING_REF, must be exactly `tip`, and only then is the tracking
+        ref moved, compare-and-swap on what it held. A branch that moved meanwhile leaves the cache as it was,
+        and is proven (and escalated) in its turn. Returns what the tracking ref held before.
+        """
+        branch = self.facts["branch"]
         ref = f"refs/remotes/origin/{branch}"
         held = self.git("rev-parse", "--verify", "--quiet", ref, repo=self.cache).stdout.strip()
         if held == tip:
-            return
-        fetched = self.remote("refreshing the trusted cache", "fetch", "--no-tags", "origin",
-                              f"+refs/heads/{branch}:{ref}", repo=self.cache)
+            return held
+        # `--refmap=`: a fetch from `origin` would otherwise also move the tracking ref by its configured refspec.
+        fetched = self.remote("refreshing the trusted cache", "fetch", "--no-tags", "--no-write-fetch-head",
+                              "--refmap=", "origin", f"+refs/heads/{branch}:{INCOMING_REF}", repo=self.cache)
+        incoming = self.git("rev-parse", "--verify", "--quiet", INCOMING_REF, repo=self.cache).stdout.strip()
+        self.git("update-ref", "-d", INCOMING_REF, repo=self.cache)
         if fetched.returncode != 0:
-            raise self.remote_failure("refreshing the trusted cache", fetched)
-        self.repaired(f"refreshed the trusted cache's {branch} from {short(held)} to "
-                      f"{short(self.git('rev-parse', ref, repo=self.cache).stdout.strip())}")
+            raise failed(fetched)
+        if incoming != tip:
+            self.provenance(incoming, self.cache)
+            raise director("cache", f"public {branch} moved from {short(tip)} to {short(incoming)} while the "
+                                    f"trusted cache was being brought up to {short(tip)}; it was left at "
+                                    f"{short(held)}")
+        self.local("moving the trusted cache's copy of the branch", "update-ref", ref, tip, held or "0" * 40,
+                   repo=self.cache)
+        return held
+
+    def cache_current(self) -> None:
+        """The trusted cache's copy of the public branch, brought up to the tip just proven."""
+        branch, tip = self.facts["branch"], self.facts["public_before"]
+        held = self.adopt(tip, lambda result: self.remote_failure("refreshing the trusted cache", result))
+        if held != tip:
+            self.repaired(f"refreshed the trusted cache's {branch} from {short(held)} to {short(tip)}")
 
     def workspace(self) -> Path:
         """The Publisher's own repository for reading the public branch and the candidate; rebuilt when unusable."""
@@ -476,6 +694,7 @@ class Attempt:
                 raise self.remote_failure(f"fetching {branch} for the push", fetched)
             moved = self.local("reading the public tip", "rev-parse", PUBLIC_REF, repo=repo)
             if moved != tip:
+                self.provenance(moved, repo)
                 self.facts["public_before"] = moved
                 raise back("lineage", f"public {branch} moved from {short(tip)} to {short(moved)} while "
                                       f"{short(full)} was being prepared. The Publisher only fast-forwards: rebuild "
@@ -495,6 +714,8 @@ class Attempt:
             shutil.rmtree(repo, ignore_errors=True)
         if pushed.returncode == 0:
             self.pushed = True
+            self.facts["pushed"] = True  # journalled: this attempt made its candidate public, whatever comes next
+            self.journal_step("pushing", tip)
             return
         if classify(pushed.stderr + pushed.stdout) == "race":
             return  # decided from what the public branch now says, by the read-back
@@ -519,10 +740,13 @@ class Attempt:
             tip = self.local("reading the public tip", "rev-parse", PUBLIC_REF, repo=work)
             if self.landed(work, tip):
                 self.confirmed = True
+                if tip not in (full, self.facts.get("public_before")):
+                    self.provenance(tip, work)  # moved past what was pushed or proven: by whom? (SYRD-754)
                 return tip
             if not self.pushed:
                 break
         if not self.pushed and tip != self.facts.get("public_before"):
+            self.provenance(tip, work)
             raise back("lineage", f"public {branch} moved to {short(tip)} before {short(full)} could be published "
                                   f"(the push was refused because {branch} was no longer {short(self.facts.get('public_before', ''))}). "
                                   f"The Publisher only fast-forwards: rebuild the candidate on {short(tip)} and "
@@ -532,31 +756,39 @@ class Attempt:
                                          "a refused push, though it still reads the tip the push was leased on"))
 
     def refresh_cache(self, tip: str) -> str:
-        """The trusted cache's copy of the public branch, brought up to `tip`, and checked."""
+        """The trusted cache's copy of the public branch, brought up to exactly `tip` (read back and proven)."""
         branch, full = self.facts["branch"], self.facts["candidate_full"]
-        ref = f"refs/remotes/origin/{branch}"
-        before = self.git("rev-parse", "--verify", "--quiet", ref, repo=self.cache).stdout.strip()
-        fetched = self.remote("refreshing the trusted cache", "fetch", "--no-tags", "origin",
-                              f"+refs/heads/{branch}:{ref}", repo=self.cache)
-        after = self.git("rev-parse", "--verify", "--quiet", ref, repo=self.cache).stdout.strip()
-        carries = after == full or self.git("merge-base", "--is-ancestor", full, after or full,
-                                            repo=self.cache).returncode == 0 and bool(after)
-        if fetched.returncode != 0 or not carries:
-            why = git_said(fetched) if fetched.returncode != 0 else f"it reads {short(after)}"
-            raise director("cache", f"{short(full)} is on public {branch} ({short(tip)}), but the board's trusted "
-                                    f"cache {self.cache} could not be brought up to it: {why}")
-        self.facts["cache_before"] = before
-        return after
+        self.facts["cache_before"] = self.adopt(tip, lambda result: director(
+            "cache", f"{short(full)} is on public {branch} ({short(tip)}), but the board's trusted cache "
+                     f"{self.cache} could not be brought up to it: {git_said(result)}"))
+        return tip
 
     def evidence(self, tip: str, cache_tip: str, already: bool) -> str:
         full, branch = self.facts["candidate_full"], self.facts["branch"]
         how = (f"It was already on public {branch} when this attempt read it, so nothing was pushed." if already else
                f"Pushed as a fast-forward from {short(self.facts['public_before'])}, compare-and-swap leased on that "
                f"tip, from bundle sha256 {self.facts.get('bundle_sha256', '')[:16]}.")
+        how += provenance_sentence(self.facts.get("provenance") or {}, branch)
         return (f"Published {full} (tree {self.facts.get('tree', '')[:12]}, parent "
                 f"{short((self.facts.get('parents') or [''])[0])}) to {branch} of {self.facts['public_url']}. {how} "
                 f"Public {branch} reads {short(tip)} and the board's trusted cache reads {short(cache_tip)}; both "
                 f"carry it. Attempt {self.info['attempt']}." + _repairs_sentence(self.repairs))
+
+
+def provenance_sentence(provenance: dict[str, Any], branch: str) -> str:
+    """What the evidence says about where the tip published on came from, when it is not simply the last record."""
+    if provenance.get("first"):
+        return (f" No earlier publication to {branch} is recorded on this board, so its tip "
+                f"{short(provenance['first'])} is where the Publisher's record starts.")
+    if provenance.get("answered") and not provenance.get("recorded"):
+        return (f" {branch} already carried it with no publication on record; attempt {provenance['answered']} "
+                "escalated that, and the ticket came back only through the Director, so that tip was taken as the "
+                "base.")
+    if provenance.get("answered"):
+        return (f" {branch} had been moved off the Publisher's record ({short(provenance['recorded'])}); attempt "
+                f"{provenance['answered']} escalated that, and the ticket came back only through the Director, so the "
+                "tip it named was taken as the base.")
+    return ""
 
 
 def _sha256(path: Path) -> str:
@@ -635,13 +867,15 @@ def run_attempt(attempt: Attempt) -> str:
         raise director("gate", f"missing sign-off {', '.join(info['missing_signoffs'])}; the Publisher does not "
                                "waive a gate")
     attempt.authority()
+    attempt.mark()
     attempt.candidate()
     if info.get("size_review") and info.get("size_problem"):
         raise director("gate", f"{info['size_problem']}; the Publisher does not waive a gate")
-    attempt.cache_current()
     work = attempt.workspace()
     attempt.lineage(work)
     tip = attempt.facts["public_before"]
+    attempt.provenance(tip, work)
+    attempt.cache_current()
     attempt.journal_step("started", "")
     already = attempt.landed(work, tip)
     if not already:

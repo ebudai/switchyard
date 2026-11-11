@@ -342,6 +342,18 @@ you, with the exact diagnostic: fix it, then `publication_retry`, or
 `publication_kick_back` to the implementer. It never rebases, merges, edits, force-pushes
 or waives a gate (SYRD-625).
 
+Only the Publisher moves the integration branch. A main it did not move lands in
+`publication_failed` as `provenance`. That covers a role's push, a ref alias, a rewind,
+and the candidate itself already on main. The comment names the commits nobody
+published. Nothing was pushed, the trusted cache was not brought to that tip, and nothing
+was recorded. You decide: restore main to the tip it names and `publication_retry`, or
+accept the tip as reviewed and `publication_retry` with it in place. That ticket then
+builds on exactly that tip, and any other tip is refused again. A trusted cache whose
+origin changed, or a public HEAD that names another branch, is escalated as `authority`;
+a retry makes the new target the target. `switchyard-publish-candidate` likewise refuses
+a candidate ref that is, or is aliased to, the branch HEAD names, and a commit already on
+it. It fails the run if main moved onto the commit while it pushed (SYRD-754).
+
 **Recover a stalled ticket rather than overriding it.** When an owner reports
 completion or a dependency and does not transition, `recover-stalled-ticket <id>
 --reason-file PATH` takes the one declared no-code transition that owner could have

@@ -16,6 +16,11 @@ every lineage return; every Director escalation; every mechanical repair; the
 crash points; the idempotent re-run; the lease race; the gates; the guard; the
 listener pass; a board without the Publisher; and a board upgraded from main's
 tree by this tree's migration.
+
+SYRD-754: public main moves only through the Publisher, so "somebody else's
+integration" here is another approved ticket the Publisher published; a main
+moved any other way is escalated (the race case here, and
+publisher_provenance_test for the rest).
 """
 
 from __future__ import annotations
@@ -51,7 +56,8 @@ GIT_ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAM
 
 def check(condition: object, detail: str) -> None:
     global CHECKS
-    assert condition, detail
+    if not condition:
+        raise AssertionError(f"FAILED CHECK: {detail}")
     CHECKS += 1
 
 
@@ -104,7 +110,7 @@ class World:
         git("--git-dir", str(self.cache), "fetch", "-q", "origin", f"+refs/heads/{ref}:refs/remotes/origin/{ref}")
 
     def land_on_main(self, commit: str) -> None:
-        """Somebody else's integration: public main moves to `commit`."""
+        """Public main moved to `commit` by something other than the Publisher: a role's own push, say."""
         git("push", "-q", str(self.public), f"{commit}:refs/heads/main", cwd=self.dev)
 
     def refresh_cache(self) -> None:
@@ -222,7 +228,7 @@ class Bench:
         self.notices()
 
     def ticket(self, implementer: str = "app", *, files: dict | None = None, parents: list[str] | None = None,
-               user_signoff: bool = False, publish: bool = True) -> tuple[str, str]:
+               user_signoff: bool = False, publish: bool = True, commit: str = "") -> tuple[str, str]:
         """A ticket routed, built, published, submitted and signed off by Audit. Returns (id, candidate)."""
         self.settle()
         self.number += 1
@@ -234,9 +240,11 @@ class Bench:
         if user_signoff:
             check(short(self.board.act(t, "set_workflow_flags", "director", needs_user_signoff=True)) == "ok",
                   f"{t} needs the User's sign-off")
-        candidate = self.world.commit(parents or [self.world.main()], files or {f"src/{t.lower()}.py": f"# {t}\n"},
-                                      f"{t}: the work")
-        if publish:
+        candidate = commit or self.world.commit(parents or [self.world.main()],
+                                                files or {f"src/{t.lower()}.py": f"# {t}\n"}, f"{t}: the work")
+        if commit:
+            pass  # an existing commit, already where the cache can find it
+        elif publish:
             self.world.publish(f"roles/{implementer}/{t.lower()}", candidate)
         else:
             git("--git-dir", str(self.world.cache), "fetch", "-q", str(self.world.dev), candidate)
@@ -245,6 +253,21 @@ class Bench:
         answer = self.board.act(t, "audit_sign_off", "audit")
         check(short(answer) == "ok", f"Audit signs off {t}: {short(answer)}")
         return t, candidate
+
+    def integrate(self, files: dict, implementer: str = "ops") -> str:
+        """Somebody else's approved work, published by the Publisher: public main moves the one legitimate way."""
+        settle, self.settle = self.settle, lambda: None
+        try:
+            t, candidate = self.ticket(implementer, files=files)
+        finally:
+            self.settle = settle
+        result = self.publish(t)
+        check(result["outcome"] == "published" and self.world.main() == candidate,
+              f"{t}, somebody else's work, is published by the Publisher: {result}")
+        check(short(self.board.act(t, "mark_done", "director", commit_hash=candidate)) == "ok", f"{t} closed")
+        self.made.remove(t)
+        self.notices()
+        return candidate
 
     def publish(self, ticket: str, runner: Runner | None = None, repositories=None) -> dict:
         with psycopg.connect(self.board.listener_url, autocommit=True) as conn:
@@ -335,11 +358,10 @@ def lineage(bench: Bench) -> None:
     # Main advanced past the candidate's parent, touching the same file.
     parent = world.main()
     t, candidate = bench.ticket(files={"src/app.py": "print('mine')\n"})
-    theirs = world.commit([world.main()], {"src/app.py": "print('theirs')\n", "docs/x.md": "x\n"}, "someone else")
-    world.land_on_main(theirs)
+    theirs = bench.integrate({"src/app.py": "print('theirs')\n", "docs/x.md": "x\n"})
     returned(bench, t, "public main advanced", f"built on {parent[:12]}", f"now {theirs[:12]}, 1 commit(s) later",
              "Paths both changed: src/app.py.")
-    check(world.main() == theirs, "public main is exactly what somebody else put there")
+    check(world.main() == theirs, "public main is exactly what the Publisher put there for somebody else")
     # Renewed gates: the rebuilt candidate goes through Audit again before the Publisher sees it.
     rebuilt = world.commit([theirs], {"src/app.py": "print('mine, rebuilt')\n"}, f"{t}: rebuilt")
     world.publish(f"roles/app/{t.lower()}", rebuilt)
@@ -481,12 +503,12 @@ def director_failures(bench: Bench) -> None:
 def repairs(bench: Bench) -> None:
     """Each mechanical repair, and proof that none of them changes the candidate, its parent, or any gate."""
     world, board = bench.world, bench.board
-    # A stale trusted cache: main moved and the cache was not told.
-    theirs = world.commit([world.main()], {"src/theirs.py": "t\n"}, "someone else, earlier")
-    world.land_on_main(theirs)
+    # A stale trusted cache: the Publisher moved main, and the cache's copy was put back since.
+    stale = world.main()
+    theirs = bench.integrate({"src/theirs.py": "t\n"})
+    git("--git-dir", str(world.cache), "update-ref", "refs/remotes/origin/main", stale)
     t, candidate = bench.ticket()
-    stale = world.cache_main()
-    check(stale != theirs, "the cache's main is behind the forge")
+    check(world.cache_main() == stale != theirs, "the cache's main is behind the forge")
     entered, body = row(board, t), world.obj(candidate)
     result = bench.publish(t)
     check(result["outcome"] == "published" and world.main() == candidate, f"published: {result}")
@@ -494,6 +516,13 @@ def repairs(bench: Bench) -> None:
     check(f"refreshed the trusted cache's main from {stale[:12]} to {theirs[:12]}" in said,
           f"the stale cache was repaired, and said so: {said}")
     unchanged(bench, t, candidate, entered, body)
+    # A missing one (SYRD-754): brought up to the tip the journal proves, from nothing.
+    git("--git-dir", str(world.cache), "update-ref", "-d", "refs/remotes/origin/main")
+    t, candidate = bench.ticket()
+    result = bench.publish(t)
+    check(result["outcome"] == "published" and world.cache_main() == candidate
+          and "refreshed the trusted cache's main from nothing to" in comments(board, t)[0],
+          f"a missing cache branch is rebuilt from the proven tip: {comments(board, t)}")
     # A candidate the cache lost but the forge has: fetched back by its SHA.
     t, candidate = bench.ticket()
     entered, body = row(board, t), world.obj(candidate)
@@ -558,7 +587,7 @@ def crashes(bench: Bench) -> None:
 
     def refreshing(argv):
         return ("fetch" in argv and str(world.cache) in argv
-                and "+refs/heads/main:refs/remotes/origin/main" in argv and world.main() != world.cache_main())
+                and "+refs/heads/main:refs/publisher/incoming" in argv and world.main() != world.cache_main())
 
     def before(which):
         def answer(argv):
@@ -612,12 +641,13 @@ def race(bench: Bench) -> None:
             world.land_on_main(theirs)
         return None
 
-    bench.notices()
-    result = bench.publish(t, Runner(land_first))
-    said = comments(bench.board, t)
-    check(result["outcome"] == "returned" and world.main() == theirs
-          and f"moved to {theirs[:12]} before {candidate[:12]} could be published" in said[0],
-          f"the compare-and-swap refused, nothing overwritten, the ticket returned: {result} {said}")
+    said = escalated(bench, t, "provenance", Runner(land_first), f"reads {theirs[:12]}",
+                     "1 commit(s) on top of it that no Publisher attempt pushed", moved=True)
+    check(world.main() == theirs and world.cache_main() != theirs,
+          f"the compare-and-swap refused, nothing overwritten, and a main nobody published is the Director's: {said}")
+    git("--git-dir", str(world.public), "update-ref", "refs/heads/main", git("--git-dir", str(world.public),
+                                                                             "rev-parse", f"{theirs}^"))
+    retry(bench, t, candidate)
     # Main rewound to an ancestor while the push was in flight: a plain push would fast-forward from there and
     # publish over a tip nobody approved; the lease names the tip that was checked, and refuses.
     t, candidate = bench.ticket()
@@ -628,12 +658,27 @@ def race(bench: Bench) -> None:
             git("--git-dir", str(world.public), "update-ref", "refs/heads/main", older)
         return None
 
-    bench.notices()
-    result = bench.publish(t, Runner(rewind_first))
-    said = comments(bench.board, t)
-    check(result["outcome"] == "returned" and world.main() == older
-          and f"moved to {older[:12]} before {candidate[:12]} could be published" in said[0],
-          f"a rewound main is not fast-forwarded over: the lease refused it: {result} {said}")
+    said = escalated(bench, t, "provenance", Runner(rewind_first), f"reads {older[:12]}", "main was moved back",
+                     moved=True)
+    check(world.main() == older, f"a rewound main is not fast-forwarded over: the lease refused it: {said}")
+    git("--git-dir", str(world.public), "update-ref", "refs/heads/main", git("--git-dir", str(world.public),
+                                                                             "rev-parse", f"{candidate}^"))
+    retry(bench, t, candidate)
+    # Main moved after the Publisher read it and before its push repository did: caught there, nothing pushed.
+    t, candidate = bench.ticket()
+    sneaked = world.commit([world.main()], {"src/sneak.py": "s\n"}, "landed before the push repository read main")
+
+    def land_before_push_fetch(argv):
+        if "fetch" in argv and any("/push-" in part for part in argv) and world.main() != sneaked:
+            world.land_on_main(sneaked)
+        return None
+
+    runner = Runner(land_before_push_fetch)
+    said = escalated(bench, t, "provenance", runner, f"reads {sneaked[:12]}", moved=True)
+    check(runner.count("push") == 0 and world.main() == sneaked, f"nothing was pushed over it: {said}")
+    git("--git-dir", str(world.public), "update-ref", "refs/heads/main", git("--git-dir", str(world.public),
+                                                                             "rev-parse", f"{candidate}^"))
+    retry(bench, t, candidate)
 
 
 def gates(bench: Bench) -> None:

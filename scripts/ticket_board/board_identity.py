@@ -131,6 +131,27 @@ def unit_endpoint(project: str, *, unit_dir: Path | None = None, owner_uid: int 
     return sockets[0], user
 
 
+def unit_service_accounts(project: str, *, unit_dir: Path | None = None, owner_uid: int | None = None,
+                          anchor: Path | None = None) -> tuple[set[str], list[str]]:
+    """The accounts root's units for this project's board and its canary run as (`User=`), and why a unit that exists
+    could not be read as root's (SYRD-757). A unit that is not there names nobody and is no problem."""
+    found: set[str] = set()
+    problems: list[str] = []
+    for name in (unit_name(project), f"{project}-ticket-board-canary.service"):
+        path = (unit_dir or UNIT_DIR) / name
+        if not os.path.lexists(path):
+            continue
+        try:
+            text = _read_unit(path, owner_uid=TRUSTED_OWNER_UID if owner_uid is None else owner_uid,
+                              anchor=anchor or ANCHOR)
+        except (BoardIdentityError, OSError) as exc:
+            problems.append(str(exc))
+            continue
+        found.update(line.strip()[len("User="):].strip() for line in text.splitlines()
+                     if line.strip().startswith("User="))
+    return found - {""}, problems
+
+
 def unit_board_address(project: str, *, unit_dir: Path | None = None, owner_uid: int | None = None,
                        anchor: Path | None = None) -> tuple[int, str]:
     """(the board's loopback TCP port, its ticket prefix), from root's unit for this project alone (SYRD-714)."""

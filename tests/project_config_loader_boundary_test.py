@@ -62,8 +62,9 @@ CHECKS = 0
 MOVED = ('load_project_config',)
 #: Measured on the baseline launcher: the moved body's call-time reads of launcher globals.
 SEAMS = {
-    # SYRD-663: and, as root, whether the owner the configuration names is the one root's records name.
-    'load_project_config': {'DEFAULT_CONFIG_DIR': 1, 'ProjectConfig': 1, '_control_repository_boundary_error': 1, '_default_board_socket': 1, '_default_board_url': 1, '_expand_path': 6, '_load_json': 1, '_normalized_path': 2, '_role_from_json': 1, '_validate_project_slug': 2, '_with_project_board_env': 1, 'default_session_dir_for_user': 1, 'parse_worker_pool': 1, 'read_tenant_document_no_follow': 1, 'root_owner_refusal': 1, 'validate_ticket_prefix': 1},
+    # SYRD-663: and, as root, whether the owner the configuration names is the one root's records name; SYRD-757: and
+    # whether every role's own account is the owner or a role account root made for the project.
+    'load_project_config': {'DEFAULT_CONFIG_DIR': 1, 'ProjectConfig': 1, '_control_repository_boundary_error': 1, '_default_board_socket': 1, '_default_board_url': 1, '_expand_path': 6, '_load_json': 1, '_normalized_path': 2, '_role_from_json': 1, '_validate_project_slug': 2, '_with_project_board_env': 1, 'default_session_dir_for_user': 1, 'parse_worker_pool': 1, 'read_tenant_document_no_follow': 1, 'root_owner_refusal': 1, 'root_role_account_refusal': 1, 'validate_ticket_prefix': 1},
 }
 #: Measured on the baseline launcher: every launcher definition outside it that names it, and how often.
 DISPATCH = {'_usable_switchyard_entry_for_project': {'load_project_config': 1}, 'switchyard_validate_models_command': {'load_project_config': 1}, 'main': {'load_project_config': 2}}
@@ -239,7 +240,7 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
     passed = ("_validate_project_slug", "validate_ticket_prefix", "_expand_path", "_normalized_path", "_load_json", "_role_from_json",
               "parse_worker_pool", "_default_board_socket", "ProjectConfig")
     stood = ("read_tenant_document_no_follow", "default_session_dir_for_user", "_default_board_url", "_with_project_board_env",
-             "_control_repository_boundary_error", "DEFAULT_CONFIG_DIR", "root_owner_refusal")
+             "_control_repository_boundary_error", "DEFAULT_CONFIG_DIR", "root_owner_refusal", "root_role_account_refusal")
     saved = {n: getattr(t, n) for n in (*FUNCTIONS, *passed, *stood)}
     saved_env = {k: os.environ.get(k) for k in ("HOME", "SYRD450_DIR")}
     saved_euid = os.geteuid
@@ -274,6 +275,11 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
             reached.add("root_owner_refusal")
             or ("owner_asked" in spec and spec["owner_asked"].append([project, run_as_user, norm(path)]))
             or spec.get("owner_refusal", ""))
+        # SYRD-757's read, likewise: answered without a record in `calls`; asserted on its own below.
+        t.root_role_account_refusal = lambda project, run_as_user, roles: (
+            reached.add("root_role_account_refusal")
+            or ("roles_asked" in spec and spec["roles_asked"].append([project, run_as_user, [r.role for r in roles]]))
+            or spec.get("role_refusal", ""))
         t._control_repository_boundary_error = lambda config, *, require_existing_user: note(
             "_control_repository_boundary_error", config.project, require_existing_user=require_existing_user) or spec.get("boundary")
         if spec.get("root"):
@@ -610,6 +616,27 @@ def test_root_is_refused_when_the_owner_is_not_roots_recorded_one() -> None:
     check([c[0] for c in got["calls"]] == [c[0] for c in GOLDEN["root: the no-follow reader answers"]["calls"]][:len(got["calls"])]
           and "_role_from_json" not in [c[0] for c in got["calls"]],
           f"and nothing past the owner is read: {[c[0] for c in got['calls']]}")
+
+
+def test_root_is_refused_when_a_role_account_is_not_one_root_made() -> None:
+    """SYRD-757: every load asks about every role's own account, with the owner it read, and a refusal ends it."""
+    from scripts import project_config_loader as m
+
+    for label in ("a minimal config", "root: the no-follow reader answers"):
+        spec = {**CASES[label], "roles_asked": []}
+        run_case(t, m, spec, REACHED)
+        result = GOLDEN[label]["result"]
+        check(spec.get("roles_asked") == [["p450", result["run_as_user"], [r["role"] for r in result["roles"]]]],
+              f"{label}: asked once, with the slug, the owner it read and every role: {spec.get('roles_asked')}")
+    spec = {**CASES["root: the no-follow reader answers"], "role_refusal": "p450's configuration: role 'a' names 'x'"}
+    got = run_case(t, m, spec, REACHED)
+    check(got["result"] == {"raised": "SystemExit", "message": "switchyard: p450's configuration: role 'a' names 'x'. Nothing was changed."},
+          f"a refusal is the loader's answer: {got['result']}")
+    names = [c[0] for c in got["calls"]]
+    golden = [c[0] for c in GOLDEN["root: the no-follow reader answers"]["calls"]]
+    check(names == golden[:len(names)] and "_role_from_json" in names and "_normalized_path" not in names
+          and "_control_repository_boundary_error" not in names and "_with_project_board_env" not in names,
+          f"and it comes after the roles are parsed, before any role's path is resolved or checked: {names}")
 
 
 def test_every_launcher_seam_is_reached() -> None:

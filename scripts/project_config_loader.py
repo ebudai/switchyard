@@ -124,6 +124,12 @@ def load_project_config(
         roles.append(launcher._role_from_json(config_project, raw, base=base, default_workdir=default_workdir))
     if len(roles) != len(roles_raw):
         raise SystemExit(f"{path} roles must all be JSON objects")
+    # A role's own account is the tenant's to write as well: root reads it to choose whose home a role's state comes
+    # from, who runs git in its worktree, and who its pane runs and re-executes as. Asked at every load root makes,
+    # before anything resolves a role's paths, so no route acts on an account root did not make (SYRD-757).
+    refusal = launcher.root_role_account_refusal(project_slug, run_as_user, roles)
+    if refusal:
+        raise SystemExit(f"switchyard: {refusal}. Nothing was changed.")
     slots = [role.slot for role in roles if role.slot is not None]
     if len(set(slots)) != len(slots):
         raise SystemExit(f"{path} contains duplicate role slot assignments")

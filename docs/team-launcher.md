@@ -1663,6 +1663,33 @@ Each role entry contains:
 - `workdir`: working directory for the tmux session. Omit it for PGU roles so
   they default to the shared `repository` checkout. Duplicate role workdirs are
   allowed only when the duplicate path is the shared checkout.
+- `run_as_user`: legacy, optional. The role's own account from the per-role
+  account era. While `role_state_isolation` is false, it decides:
+  - whose home the role's state is repatriated from on upgrade;
+  - which account runs git in the role's worktree;
+  - which account the role's pane starts and re-executes as.
+
+  So when root loads the configuration, the value must be one of:
+  - blank;
+  - the project's owner;
+  - the role account root made for this project: `<project>-<role>`, not
+    uid 0, a member of `<project>-roles`, and not the board's service account.
+    Root's packet puts the board's service account in that group too. Root's
+    records name that account: the provisioning record's `service_user`, and
+    `User=` in the board and canary units. If they cannot name it, no role
+    account is accepted.
+
+  Anything else is refused before anything is read, copied, run or launched.
+  That includes another tenant's account, `root` or another name for uid 0,
+  another role's account, and a `<project>-<role>` root did not put in that
+  group. The refusal names the role, the account and the reason (SYRD-757).
+
+  A `<project>-<role>` with no account behind it is accepted, so an old
+  configuration naming accounts root never made can still be upgraded. The
+  upgrade then repatriates nothing from it: it does not read `/home/<name>`.
+
+  The project's own `run_as_user` is held to root's records the same way
+  (SYRD-663).
 - `cli`: argv array for the CLI binary. The only supported CLI names are
   `claude`, `codex`, `agy`, `hermes`, and `copilot` (the standalone GitHub
   Copilot CLI, not the `gh copilot` extension); invalid names, including the retired

@@ -10,6 +10,9 @@
 - `root_checked_plan_identity` holds the tenant's own `plan.json` to the same
   records: its `owner_user`, `owner_home` and `board_root` are root's, or the
   plan is refused (SYRD-664).
+- `root_role_account_refusal` is why root may not act as or for an account a
+  role's own `run_as_user` names: anything but the owner must be a role account
+  root made for this project (SYRD-757).
 
 The command entry points ask `root_recorded_owner` strictly, before the
 configuration is read, and `load_project_config` asks `root_owner_refusal` on
@@ -22,11 +25,13 @@ at its top.
 
 from __future__ import annotations
 
+import grp
 import json
 import os
 import pwd
 import stat
 from pathlib import Path
+from typing import Sequence
 
 
 def root_recorded_owner(project: str, config_path: Path | None = None, *, strict: bool = True) -> tuple[str | None, str]:
@@ -136,6 +141,121 @@ def root_owner_refusal(project: str, run_as_user: str, config_path: Path | None 
         return (f"{project}'s configuration names {named!r} as its owner, and root provisioned it for "
                 f"{recorded!r}; root acts only for the owner it provisioned")
     return ""
+
+
+def _account(name: str) -> pwd.struct_passwd | None:
+    try:
+        return pwd.getpwnam(name)
+    except KeyError:
+        return None
+
+
+def _group(name: str) -> grp.struct_group | None:
+    try:
+        return grp.getgrnam(name)
+    except KeyError:
+        return None
+
+
+def _role_account_problem(project: str, role: str, account: str) -> str:
+    """Why `account` is not a role account root made for `role` of `project`, or "" (SYRD-757)."""
+    from scripts.ticket_board.project_provision import role_account_name, roles_group_name
+
+    if account == "root":
+        return "root does not act as its own tenant"
+    canonical = role_account_name(project, role)
+    if account != canonical:
+        return f"the only account root makes for {role} of {project} is {canonical!r}"
+    entry = _account(account)
+    if entry is None:
+        # A legacy configuration names the canonical account even where root never made it; nothing can be run as an
+        # account that does not exist, and the repatriation reads nothing for one (`repatriate_role_runtime_state`),
+        # so the upgrade can still drop the binding.
+        return ""
+    if entry.pw_uid == 0:
+        return "it is uid 0"
+    # The group root's provisioning adds this project's role accounts to (and its owner and board service). The
+    # canonical name alone could be another tenant's account -- `<other>-<role>` -- so the account must also be one
+    # root put in this project's group: /etc/group is root's record of that, as no tenant can write it.
+    group_name = roles_group_name(project)
+    group = _group(group_name)
+    if group is None:
+        return f"root has made no {group_name} group for {project}, so it made no role accounts for it"
+    if account not in group.gr_mem:
+        return f"it is not in {group_name}, the group root adds {project}'s role accounts to"
+    # Root's packet puts the board's service account in that group too, and its name is the operator's choice: one
+    # named `<project>-<role>` would pass for a role account and run the tenant's CLI with the board's database
+    # authority (Audit of ee692ce8). So it is refused by what root's own records say runs the board.
+    services, unknown = _board_service_accounts(project)
+    if account in services:
+        return f"it is the account {project}'s board service runs as, never a role's"
+    if unknown:
+        return f"root's records cannot say which account runs {project}'s board ({unknown}), so no role account is"
+    return ""
+
+
+def _board_service_accounts(project: str) -> tuple[set[str], str]:
+    """The accounts root's records say run `project`'s board, and why they cannot say, or ""; SYRD-757.
+
+    The default service account; the one root's provisioning record names (`service_user`); and the `User=` of
+    root's units for the board and its canary. A record that exists but cannot be read as root's is a reason, and so
+    is a project with neither a provisioning record nor a board unit: then root does not know which account it is.
+    """
+    from scripts import team_launcher as launcher
+    from scripts.ticket_board import board_identity
+    from scripts.ticket_board.project_provision import DEFAULT_SERVICE_USER
+
+    found, problems, recorded = {DEFAULT_SERVICE_USER}, [], False
+    baseline = launcher.privileged_baseline_plan_path(project)
+    if os.path.lexists(baseline):
+        document, problem = launcher.read_plan_no_follow(baseline, require_root_owned=True)
+        if document is None:
+            problems.append(f"its provisioning record cannot be read: {problem}")
+        else:
+            found.add(str(document.data.get("service_user") or "").strip())
+            recorded = True
+    try:
+        units, unreadable = board_identity.unit_service_accounts(project)
+    except board_identity.BoardIdentityError as exc:
+        units, unreadable = set(), [str(exc)]
+    found |= units
+    problems.extend(unreadable)
+    if not recorded and not units and not problems:
+        problems.append("it has neither a provisioning record nor a board unit")
+    return found - {""}, "; ".join(problems)
+
+
+def root_role_account_refusal(project: str, run_as_user: str, roles: Sequence[object]) -> str:
+    """Why root may not act as or for an account a role of `project` names, or "" (SYRD-757).
+
+    SYRD-663 holds the project's owner to root's records; a role's own `run_as_user` is the tenant's to write too.
+    Root reads it to decide whose home a legacy role's state is repatriated from, which account runs git in a role's
+    worktree, which account a pane command re-executes as, and which account a role's pane starts as. Any account
+    there but the owner itself must be a role account root made for this project: the canonical
+    `<project>-<role>`, not uid 0, in this project's roles group, and not the account root's records say its board
+    service runs as. Anything else -- another tenant, `root` or another name for uid 0, another role's account, a
+    `<project>-<role>` root did not put in the group, or the board's own service account -- is refused, before
+    anything acts on it; so is every role account of a project whose board account root's records cannot name. The canonical name with no account behind it is not refused: a legacy
+    configuration names it where root never made it, nothing can run as it, and the repatriation reads nothing for
+    it. A blank one is the owner's, which `root_owner_refusal` holds to root's records. Nothing is asked of anybody
+    but root.
+    """
+    if os.geteuid() != 0:
+        return ""
+    owner = (run_as_user or "").strip()
+    problems = []
+    for role in roles:
+        account = str(getattr(role, "run_as_user", "") or "").strip()
+        if not account or account == owner:
+            continue
+        name = str(getattr(role, "role", "") or "")
+        why = _role_account_problem(project, name, account)
+        if why:
+            problems.append(f"role {name!r} names {account!r} as its account, and {why}")
+    if not problems:
+        return ""
+    return (f"{project}'s configuration: " + "; ".join(problems)
+            + ". Root acts only as the project's owner or a role account it made for this project")
 
 
 #: The fields of the tenant's own plan that decide which account and which trees root acts in (SYRD-664).

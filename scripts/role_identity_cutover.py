@@ -538,8 +538,11 @@ def repatriate_role_runtime_state(
     for role in config.roles:
         target_session_dir = config.session_dir / "roles" / role.role
         sources = [(config.session_dir, owner)]
-        if role.run_as_user and role.run_as_user != owner:
-            sources.insert(0, (launcher.account_session_dir(role.run_as_user, project=config.project), role.run_as_user))
+        # As root, only an account that exists: the home lookup falls back to `/home/<name>` for one that does not.
+        legacy_account = role.run_as_user if role.run_as_user and role.run_as_user != owner and (  # SYRD-757
+            os.geteuid() != 0 or launcher.local_account_exists(role.run_as_user)) else ""
+        if legacy_account:
+            sources.insert(0, (launcher.account_session_dir(legacy_account, project=config.project), legacy_account))
         before: list[tuple[Path, str]] = []
         for source_dir, account in sources:
             record = _session_record(role, source_dir / launcher.session_file_name(role.target), account) \
@@ -602,8 +605,8 @@ def repatriate_role_runtime_state(
                     launcher.hermes_home_for_role(role, session_dir=target_session_dir),
                     owner=owner_ids, source_user=owner, owner_user=owner if by_descriptor else "",
                 )
-            if role.run_as_user and role.run_as_user != owner:
-                source_home = launcher.home_dir_for_user(role.run_as_user) or Path("/home") / role.run_as_user
+            if legacy_account:
+                source_home = launcher.home_dir_for_user(legacy_account) or Path("/home") / legacy_account
                 cli = launcher._command_name(role.cli[0]) if role.cli else ""
                 if cli == "claude":
                     _copy_tree_without_overwrite(

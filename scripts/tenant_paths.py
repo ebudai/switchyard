@@ -504,6 +504,7 @@ class Root:
     def _own(self, fd: int, display: str, mode: int | None, uid: int | None, gid: int | None,
              quiet: bool = False) -> None:
         status = os.fstat(fd)
+        _shared_inode(self, status, display, uid)
         changes = []
         if (uid is not None and status.st_uid != uid) or (gid is not None and status.st_gid != gid):
             changes.append(f"owner {status.st_uid}:{status.st_gid} -> "
@@ -638,7 +639,17 @@ def set_attrs(root: Root, paths: Sequence[str], mode: int | None, uid: int | Non
             os.close(parent)
 
 
+def _shared_inode(root: Root, status: os.stat_result, display: str, uid: int | None) -> None:
+    """A file another name may hold -- anywhere on this filesystem -- is changed only when it is already the account's
+    it goes to, or with no account the home owner's; a tenant's own hard-linked git objects pass (SYRD-760)."""
+    if stat.S_ISREG(status.st_mode) and status.st_nlink > 1 and root.fd is not None and \
+            status.st_uid != (os.fstat(root.fd).st_uid if uid is None else uid):
+        raise Refused(display, f"has {status.st_nlink} hard links and belongs to uid {status.st_uid}; root does not "
+                               "change a file another name may hold")
+
+
 def _acl_one(root: Root, fd: int, display: str, status: os.stat_result, modify, remove) -> None:
+    _shared_inode(root, os.fstat(fd), display, None)
     writes = edited(fd, status, modify, remove)
     if writes:
         root.report(f"{display}: ACL {', '.join('default' if name == DEFAULT else 'access' for name, _ in writes)}")

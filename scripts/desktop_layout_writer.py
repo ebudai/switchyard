@@ -64,6 +64,13 @@ def _open_owned_directory_chain(
                 os.mkdir(component, 0o700, dir_fd=fd)
                 created.append(str(walked))
                 child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                # The name is looked up again, in a directory the account can write: it can rename another directory
+                # onto it in between. What is opened is given away only if it is the one just made -- this process's
+                # own, and empty -- so nothing else in that directory is handed over (SYRD-760).
+                if os.fstat(child).st_uid != os.geteuid() or os.listdir(child):
+                    os.close(child)
+                    os.close(fd)
+                    return -1, f"{walked} changed between being made and being opened; nothing was given away", created
                 os.fchown(child, uid, gid)
                 os.fchmod(child, 0o700)
             except OSError as exc:

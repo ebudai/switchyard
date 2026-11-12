@@ -68,6 +68,17 @@ def _root_alone(path: Path, what: str) -> None:
 
 def _hooks_path(repository: Path) -> Path:
     """Return and pin the repository's hook path independently of user config."""
+    if _ACTING == "root":
+        # Before git reads anything there as root: a `.git` file names a directory nobody has proven root's, and a
+        # config somebody else can write decides what git does next. So the repository's own git entries are
+        # proven root's alone first, not only what git names from them afterwards (SYRD-760).
+        entry = repository / ".git"
+        if os.path.lexists(entry) and not (entry.is_dir() and not entry.is_symlink()):
+            raise RuntimeError(f"refusing to install hooks as root: {entry} is not a directory, so git would read "
+                               "a repository root has not proven its own")
+        for config in (repository / "config", entry / "config"):
+            if os.path.lexists(config):
+                _root_alone(config, "its git config")
     configured = _git(repository, "config", "--local", "--get", "core.hooksPath", check=False)
     if configured.stdout.strip():
         path = Path(_git(repository, "rev-parse", "--git-path", "hooks").stdout.strip())

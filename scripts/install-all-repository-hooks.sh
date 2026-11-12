@@ -33,7 +33,10 @@ if [[ "$DRY_RUN" -ne 1 && "$EUID" -ne 0 && "${SWITCHYARD_HOOK_INSTALL_ALLOW_NON_
     echo "install-all-repository-hooks: production rollout requires root" >&2
     exit 1
 fi
-[[ -x "$INSTALLER" ]] || { echo "install-all-repository-hooks: missing $INSTALLER" >&2; exit 1; }
+[[ -f "$INSTALLER" ]] || { echo "install-all-repository-hooks: missing $INSTALLER" >&2; exit 1; }
+# The installer imports `scripts.*`, so it runs as that module from the release root, never as a file whose own
+# directory would lead the import path; -E and -s keep PYTHON* variables and user site packages out of it (SYRD-760).
+INSTALL=(env -C "$SOURCE_ROOT" python3 -E -s -m scripts.repository_hooks)
 
 run_install() {
     if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -58,7 +61,7 @@ for repository in "$BARE_ROOT"/*.git; do
     project="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '-')"
     if [[ -n "${workflow_repository[$(readlink -m "$repository")]:-}" ]]; then
         printf 'MAIN GUARD (platform workflow): %s\n' "$repository"
-        run_install "$INSTALLER" --source-root "$SOURCE_ROOT" --project "$project" \
+        run_install "${INSTALL[@]}" --source-root "$SOURCE_ROOT" --project "$project" \
             --repository "$repository" --server-only
     else
         printf 'NO MAIN GUARD (no Switchyard workflow): %s\n' "$repository"
@@ -69,12 +72,13 @@ IFS=: read -r -a shared_repositories <<<"$SHARED_CHECKOUTS"
 for repository in "${shared_repositories[@]}"; do
     [[ -n "$repository" && -e "$repository/.git" ]] || continue
     printf 'FILE-SIZE WARNING ONLY: %s\n' "$repository"
-    run_install "$INSTALLER" --source-root "$SOURCE_ROOT" --project pgu \
+    run_install "${INSTALL[@]}" --source-root "$SOURCE_ROOT" --project pgu \
         --repository "$repository" --local-only
 done
 
 for registry in "$REGISTRY_DIR"/*.json; do
-    config_path="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["config_path"])' "$registry")"
+    # -I: as root, never with the current directory first on the import path, where a planted json.py would run.
+    config_path="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["config_path"])' "$registry")"
     printf 'REGISTERED WORKFLOW (warning + main guard): %s -> %s\n' "$registry" "$config_path"
-    run_install "$INSTALLER" --source-root "$SOURCE_ROOT" --project-config "$config_path"
+    run_install "${INSTALL[@]}" --source-root "$SOURCE_ROOT" --project-config "$config_path"
 done

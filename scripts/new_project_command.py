@@ -94,6 +94,9 @@ def new_project_command(
     #: configuration carries no model or effort, exactly as before (SYRD-115).
     role_models: Mapping[str, str] | None = None,
     role_efforts: Mapping[str, str] | None = None,
+    #: The owner and project directory `switchyard new` already decided and confirmed, before it handed the
+    #: artifact's directory to that owner. Root acts for those, never for what the artifact says by now (SYRD-758).
+    decided: tuple[str, Path] | None = None,
     print_func: Callable[[str], None] = print,
 ) -> int:
     from scripts import team_launcher as launcher
@@ -101,13 +104,32 @@ def new_project_command(
     if execute and dry_run:
         raise SystemExit("team-launcher: --execute and --dry-run are mutually exclusive")
     effective_source_repo = (source_repo or launcher._repo_root()).expanduser().resolve(strict=False)
-    design_artifact = launcher.load_project_design_artifact(from_artifact, expected_project=project) if from_artifact else None
+    from scripts import owner_writes
+
+    artifact_document = None
+    if from_artifact and decided is not None:
+        # `switchyard new` has handed the artifact's directory to the owner by now, so as root it is read once, by
+        # descriptor from the owner's roots -- the decided project directory among them -- never through a link the
+        # owner left; every decision below is taken from that one read (SYRD-758).
+        owner_writes.trust_project_root(*decided)
+        if owner_writes.root_writes_in(decided[0], from_artifact):
+            artifact_document = owner_writes.read_owner_json(decided[0], from_artifact)
+    design_artifact = launcher.load_project_design_artifact(
+        from_artifact, expected_project=project,
+        **({"document": artifact_document} if artifact_document is not None else {})) if from_artifact else None
     if design_artifact is not None:
         if owner_user is not None or repository is not None:
             raise SystemExit("team-launcher: --from owns owner/repository answers; do not also pass --owner-user or --repository")
         effective_owner = design_artifact.owner_user
         # As named, never resolved: root trusts it as the owner's project root below (SYRD-666).
         effective_repository = launcher._resolve_project_path(design_artifact.repository)
+        if decided is not None:
+            if effective_owner != decided[0]:
+                raise SystemExit(
+                    f"switchyard: {from_artifact} now names {effective_owner!r} as {project}'s owner, but this run "
+                    f"decided on {decided[0]!r} before handing the artifact's directory over; root acts only for "
+                    "the owner it decided. Nothing more was created.")
+            effective_owner, effective_repository = decided
         remote = design_artifact.remote
         default_branch = design_artifact.default_branch
         worktree_policy = design_artifact.worktree_policy
@@ -148,8 +170,6 @@ def new_project_command(
         board_service_traversal = True
     # The project directory this command was handed is root's own choice of where the owner's project lives: root's
     # writes for the owner go there by descriptor, while it is a real directory the owner owns (SYRD-608).
-    from scripts import owner_writes
-
     owner_writes.trust_project_root(effective_owner, effective_repository)
     if worktree_policy not in launcher.WORKTREE_POLICIES:
         raise SystemExit(f"team-launcher: worktree policy must be one of {sorted(launcher.WORKTREE_POLICIES)}")
@@ -159,7 +179,7 @@ def new_project_command(
         workflow=launcher.seed_director_onboarding(
             json.loads(workflow_config.read_text())
             if workflow_config
-            else launcher._load_json(from_artifact).get("workflow")
+            else (artifact_document if artifact_document is not None else launcher._load_json(from_artifact)).get("workflow")
             if from_artifact
             else None,
             effective_repository,

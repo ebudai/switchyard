@@ -823,6 +823,7 @@ def _prepare_new_project_board(
         enable_owner_linger=False,
         role_models=selected_role_models,
         role_efforts=selected_role_efforts,
+        decided=(owner_user, project_dir),  # SYRD-758: the artifact is the owner's by now
         print_func=print_func,
     )
     if result != 0:

@@ -233,13 +233,16 @@ def _artifact_capability_grants(raw: Any, *, path: Path) -> dict[str, object]:
     return result
 
 
-def load_project_design_artifact(path: Path, *, expected_project: str | None = None) -> ProjectDesignArtifact:
+def load_project_design_artifact(path: Path, *, expected_project: str | None = None,
+                                 document: dict[str, Any] | None = None) -> ProjectDesignArtifact:
+    """The design artifact at `path`; or `document`, when the caller has already read it (SYRD-758), with `path`
+    still the artifact's own place for its relative paths and messages."""
     from scripts import team_launcher as launcher
 
     # Absolute as named, not resolved: a relative `project.repository` is beneath the artifact as the caller named
     # it, never wherever a link at or above it points (SYRD-666).
     artifact_path = Path(os.path.abspath(path.expanduser()))
-    raw = launcher._load_json(artifact_path)
+    raw = dict(document) if document is not None else launcher._load_json(artifact_path)
     forbidden = launcher._artifact_forbidden_keys(raw)
     if forbidden:
         raise SystemExit(

@@ -324,8 +324,11 @@ def test_provisioning_its_arguments_and_the_steps_after_it() -> None:
                                             execute=True, runner=values["runner"], port_in_use=values["port_in_use"],
                                             socket_exists=values["socket_exists"], require_owner_user=False,
                                             enable_owner_linger=False, role_models=values["selected_role_models"],
-                                            role_efforts=values["selected_role_efforts"], print_func=values["print_func"]),
-              f"provisioned with every argument as before: {kw}")
+                                            role_efforts=values["selected_role_efforts"], print_func=values["print_func"],
+                                            # SYRD-758: and the owner and directory it decided, which the artifact no
+                                            # longer decides once its directory is the owner's.
+                                            decided=(values["owner_user"], values["project_dir"])),
+              f"provisioned with every argument as before, and what was decided: {kw}")
         identity = ("source_repo", "output_dir", "runner", "role_models", "role_efforts", "from_artifact", "port_in_use", "socket_exists")
         check(kw["source_repo"] is values["source_repo"] and kw["output_dir"] is values["provision_dir"]
               and kw["runner"] is values["runner"] and kw["role_models"] is values["selected_role_models"]

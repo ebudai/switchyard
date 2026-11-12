@@ -2118,6 +2118,20 @@ sudo switchyard new --from /path/to/porter.project.json --yes
 ```
 
 The artifact's `repository` is the project checkout opened by the generated team
-panes. The generated director role receives onboarding paths in its environment;
+panes.
+
+`switchyard new` decides the owner and project directory at the start. These
+come from the artifact, or from the prompts when there is none. Later the
+artifact's directory belongs to that owner, so the owner could rewrite the file
+before the database and board phase. That phase therefore uses the owner and
+directory decided at the start, not what the file says by then (SYRD-758):
+
+- an artifact that now names another owner, or `root`, is refused, and nothing
+  more is created;
+- a changed `repository` is ignored;
+- root reads the artifact once, without following a link the owner left, and
+  takes the plan and the workflow from that read.
+
+The generated director role receives onboarding paths in its environment;
 the director owns the unprivileged half after the board exists: seed the board,
 launch panes, onboard the team, and reshape stages or roles later if needed.

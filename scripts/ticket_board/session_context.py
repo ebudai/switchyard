@@ -360,7 +360,7 @@ def before_delivery(listener: Any, conn: Any, gate: Any, *, ticket_id: str, role
     "park" is a ticket whose restore failed: the notice is not sent at all.
     "deliver" after a restore comes with the board's restored note.
     """
-    if provider_refusal.typing_held(listener, conn, role):
+    if provider_refusal.typing_held(listener, conn, role, pause=False):  # SYRD-756: the pause held this notice already
         return "wait"  # SYRD-672: nothing is typed, and nothing parks, while the role's provider account is held
     status = _status(conn, ticket_id, role)
     if status.get("parked"):

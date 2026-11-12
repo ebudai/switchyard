@@ -387,6 +387,15 @@ def format_blockers(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _work_pause(client: Any) -> dict[str, Any]:
+    """The pause, or "not paused" from a board older than it or one that cannot say (SYRD-756)."""
+    try:
+        payload = client._get_json(client.root_url + "/api/work-pause")
+    except Exception:  # an older board has no such route; the queue is still worth showing
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def format_director(tickets: list[dict[str, Any]]) -> str:
     if not tickets:
         return "(none)"
@@ -450,6 +459,8 @@ def _build_parser() -> argparse.ArgumentParser:
     leases.add_argument("--role", default="", help="only this role's")
     leases.add_argument("--all", action="store_true", help="include ended leases the board still keeps")
     leases.add_argument("--json", action="store_true", help="print JSON")
+    pause = subparsers.add_parser("pause", help="show the Director's pause switch: mode, set by, reason, since, what is held (SYRD-756)")
+    pause.add_argument("--json", action="store_true", help="print JSON")
     holds = subparsers.add_parser("holds", help="show provider quota holds: who, until when, and how to clear (SYRD-644)")
     holds.add_argument("--json", action="store_true", help="print JSON")
     cohorts = subparsers.add_parser("cohorts", help="show provider cohorts: ceilings, quota, holders, changes (SYRD-628)")
@@ -526,7 +537,18 @@ def main(argv: list[str] | None = None) -> int:
             print_json(payload) if command_wants_json(args) else print(format_blockers(payload))
         elif command in {"director", "mine"}:
             payload = director_payload(client.get_board())
+            if not command_wants_json(args):  # SYRD-756: a pause first, where the Director looks
+                pause = _work_pause(client)
+                if pause.get("paused"):
+                    from .work_pause import describe as describe_pause
+
+                    print(describe_pause(pause) + "\n")
             print_json(payload) if command_wants_json(args) else print(format_director(payload))
+        elif command == "pause":
+            from .work_pause import describe as describe_pause
+
+            payload = client._get_json(client.root_url + "/api/work-pause")
+            print_json(payload) if command_wants_json(args) else print(describe_pause(payload))
         elif command == "leases":
             import urllib.parse
 

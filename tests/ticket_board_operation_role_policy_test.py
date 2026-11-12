@@ -149,7 +149,9 @@ def test_default_environment() -> None:
     assert table["set_blocked_reason"] == ["app", "main", "ops", "perf", "research"]
     # SYRD-726: likewise, the owner asking for a review of its own ticket's blocker.
     assert table["request_blocker_review"] == ["app", "main", "ops", "perf", "research"]
-    assert len(table) == 65, len(table)  # SYRD-746: restore_reopened; SYRD-672: hold_provider_account, clear_provider_account_hold; SYRD-548: set_report_intake; SYRD-598: withdraw_signoff; SYRD-626; SYRD-629; SYRD-616: extend_lease, interrupt_lease; SYRD-628: five cohort operations; SYRD-644: clear_provider_hold; SYRD-662: await_user; SYRD-673: set_audit_return; SYRD-714: notify_user; SYRD-723: set_blocked_reason; SYRD-726: request_blocker_review
+    # SYRD-756: the pause switch and its resume: the Director, or the User from the board page.
+    assert table["pause_work"] == ["director", "user"] and table["resume_work"] == ["director", "user"]
+    assert len(table) == 67, len(table)  # SYRD-756: pause_work, resume_work; SYRD-746: restore_reopened; SYRD-672: hold_provider_account, clear_provider_account_hold; SYRD-548: set_report_intake; SYRD-598: withdraw_signoff; SYRD-626; SYRD-629; SYRD-616: extend_lease, interrupt_lease; SYRD-628: five cohort operations; SYRD-644: clear_provider_hold; SYRD-662: await_user; SYRD-673: set_audit_return; SYRD-714: notify_user; SYRD-723: set_blocked_reason; SYRD-726: request_blocker_review
 
 
 def test_role_environment_is_read_at_import() -> None:

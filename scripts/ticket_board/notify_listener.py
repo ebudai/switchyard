@@ -49,7 +49,7 @@ from .pane_activity_gate import (
 )
 from .idle_nudges import IdleNudges
 from . import reminder_snooze
-from . import background_authorization, board_stall, blocked_pane, capacity_retry, delivery_proof, execution_lease_pass, handoff_children, publisher_pass, pull_pickup, quota_hold, replaced_delivery, review_balance, stall_episode
+from . import background_authorization, board_stall, blocked_pane, capacity_retry, delivery_proof, execution_lease_pass, handoff_children, publisher_pass, pull_pickup, quota_hold, replaced_delivery, review_balance, stall_episode, work_pause
 from .notification_ledger import NotificationLedger
 from .notification_activity_hold import (
     NotificationActivityHold, ActivityTrace, SELF_REMINDER_KINDS,
@@ -756,7 +756,7 @@ WHERE (r.definition->>'active')::boolean
         while not self.stop_event.is_set():
             if max_notifications is not None and self.delivered_count >= max_notifications:
                 break
-            execution_lease_pass.carry_out_interrupts(self, conn); row = self._claim_notification(conn)  # SYRD-740: and between deliveries
+            execution_lease_pass.carry_out_interrupts(self, conn); work_pause.run(self, conn); row = self._claim_notification(conn)  # SYRD-740, SYRD-756: and between deliveries
             if row is None:
                 break
             notification_id, ticket_id, target_role, message, payload, attempts = row
@@ -773,6 +773,8 @@ WHERE (r.definition->>'active')::boolean
             target = self.role_targets.get(target_role)
             if self.stop_event.is_set():
                 break
+            if work_pause.hold_delivery(self, conn, notification_id, attempts, kind, target_role, ticket_id, payload, "claim"):
+                continue  # SYRD-756: a paused role's notice waits, untouched, to be judged at the resume
             if target is None:
                 active_role = target_role in self.active_runtime_roles or (
                     bool(self.workflow) and any(
@@ -781,13 +783,9 @@ WHERE (r.definition->>'active')::boolean
                     )
                 )
                 if active_role:
-                    self.logger.info(
-                        "Requeueing notification %s: active role %s has no live runtime assignment",
-                        notification_id, target_role,
-                    )
-                    self.ledger.requeue(
-                        conn, notification_id, attempts, "role_runtime_unassigned"
-                    )
+                    self.logger.info("Requeueing notification %s: active role %s has no live runtime assignment",
+                                     notification_id, target_role)
+                    self.ledger.requeue(conn, notification_id, attempts, "role_runtime_unassigned")
                     continue
                 self.logger.warning("Acking notification %s with unknown target role %s", notification_id, target_role)
                 self.ledger.trace(
@@ -1031,6 +1029,8 @@ WHERE (r.definition->>'active')::boolean
             # waits out the Director's own activity here, and that is exactly
             # the window a reroute lands in: claiming it while the identity was
             # still current says nothing about whether it is current now.
+            if work_pause.hold_delivery(self, conn, notification_id, attempts, kind, target_role, ticket_id, payload, "pre_send_recheck"):
+                continue  # SYRD-756: a pause set while this waited holds it, first
             superseded_queue = self.eligibility._superseded_queue_notice(conn, ticket_id, payload)
             if superseded_queue is not None:
                 self.eligibility._drop_superseded_notification(

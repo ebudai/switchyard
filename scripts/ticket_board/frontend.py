@@ -14,6 +14,7 @@ from .frontend_script_director_capacity import SCRIPT_DIRECTOR_CAPACITY
 from .frontend_script_reports import SCRIPT_REPORTS
 from .frontend_script_stage_strip import SCRIPT_STAGE_STRIP, STYLE_STAGE_STRIP
 from .frontend_script_uat import SCRIPT_UAT, STYLE_UAT
+from .frontend_script_work_pause import MARKUP_WORK_PAUSE, SCRIPT_WORK_PAUSE, STYLE_WORK_PAUSE
 from .frontend_style import STYLE
 
 
@@ -34,6 +35,7 @@ def render_html(*, project: str = "pgu", project_name: str = "PGU", ticket_prefi
     normalized_prefix = str(ticket_prefix or normalized_project).strip().upper() or "PGU"
     board_title = f"{normalized_name} Ticket Board"
     markup = MARKUP.replace("__TICKET_BOARD_HEADING__", html.escape(board_title), 1)
+    markup = markup.replace('        <div id="directorCapacityAlert"', MARKUP_WORK_PAUSE + '        <div id="directorCapacityAlert"', 1)  # SYRD-756
     identity_script = _inline_json(
         {"project": normalized_project, "projectName": normalized_name, "ticketPrefix": normalized_prefix}
     )
@@ -48,6 +50,7 @@ def render_html(*, project: str = "pgu", project_name: str = "PGU", ticket_prefi
         + STYLE
         + STYLE_UAT
         + STYLE_STAGE_STRIP
+        + STYLE_WORK_PAUSE
         + "  </style>\n"
         + "</head>\n"
         + "<body>\n"
@@ -61,6 +64,7 @@ def render_html(*, project: str = "pgu", project_name: str = "PGU", ticket_prefi
         + SCRIPT_APP
         + SCRIPT_REPORTS
         + SCRIPT_DIRECTOR_CAPACITY
+        + SCRIPT_WORK_PAUSE
         + SCRIPT_STAGE_STRIP
         + "  </script>\n"
         + "</body>\n"

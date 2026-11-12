@@ -300,6 +300,22 @@ into User Review instead, and operator work outside the board is an
 `operator:<name>` blocker. A wait on the User the board does not admit shows in
 your queue: clear it (`clear-awaiting-role`) or have its owner finish the stage.
 
+## Pausing all work
+
+`ticket-board-write pause-work --mode drain|stop --reason-file PATH` pauses this project, or changes the pause's mode;
+`ticket-board-write resume-work --reason-file PATH` ends either mode. Both are recorded with who, when and why, and
+only you and the User may do them (the User from the board page).
+
+- **Drain**: nothing is typed into any role pane but yours. A turn already running finishes; board writes still work.
+- **Stop now**: drain, and each busy role's running turn is interrupted with its runtime's own interrupt (never
+  Ctrl-C, nothing killed, conversations kept). Each interrupted role is told once to record where it is; background
+  commands are reported to you with pid and ticket. The resume tells each such role once that work resumed.
+
+Your pane is exempt, a person typing into any pane still works, and the Publisher keeps publishing. Held notices go
+once at the resume if still current. Stall, idle-owner and lease clocks do not run while paused. Read it with
+`ticket-board-read pause`; it also heads `ticket-board-read director` and shows on the board page and in `switchyard
+status`. Prefer a pause to `switchyard stop` whenever the board itself should stay up.
+
 ## Roles, sessions and visible panes
 
 These reshape the running team rather than a ticket, so they belong to you:

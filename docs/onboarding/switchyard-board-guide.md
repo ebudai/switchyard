@@ -889,6 +889,22 @@ Notifications are delivered by typing into the assignee's pane. Two consequences
 - **Writing a ticket already triggers the notification.** Do not also send a message about
   it — you will deliver it twice.
 
+### When work is paused
+
+The Director (or the User) can pause all work in the project. `ticket-board-read pause` says whether it is, in which
+mode, who set it, why and since when; the board page shows a banner.
+
+- **Drain.** Nothing new is typed into your pane while it stands. Finish the turn you are in, record it as usual,
+  then stay idle. Board writes still work.
+- **Stop now.** Your running turn is interrupted on purpose with your CLI's own interrupt; the conversation is kept.
+  You then get one notice, starting `WORK PAUSED`: write one comment on your ticket saying what is done, what is
+  half-done and what is next, then start nothing new -- no command, ticket or transition. Background commands are
+  left running and reported to the Director.
+- **Resumed.** After a stop you get one notice starting `WORK RESUMED`: carry on from where you recorded you were.
+  Notices that waited while paused arrive then, once each, if they are still current.
+
+Only the Director and the User can pause or resume. The board refuses anyone else.
+
 ---
 
 ## Things that surprise people

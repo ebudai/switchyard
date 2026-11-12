@@ -653,4 +653,35 @@ REVOKE ALL ON FUNCTION ticket_board.restore_reopened_ticket(text, text) FROM PUB
 GRANT SELECT ON ticket_board.ticket_reopen_records TO ticket_board_service, ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.restore_reopened_ticket(text, text) TO ticket_board_service;
 
+-- SYRD-756 (pgu1036): the Director's pause switch.
+REVOKE ALL ON ticket_board.work_pauses FROM PUBLIC;
+REVOKE ALL ON ticket_board.work_pause_roles FROM PUBLIC;
+REVOKE ALL ON SEQUENCE ticket_board.work_pauses_id_seq FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.current_work_pause() FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.role_paused(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.unpaused_since(timestamptz, timestamptz) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.work_pause_actor(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.work_pause_notice_text(text, ticket_board.work_pauses, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.pause_work(text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.resume_work(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.note_work_pause_interrupt(bigint, text, text, double precision, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.note_work_pause_settled(bigint, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.note_work_pause_notice(bigint, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.report_work_pause_background(bigint, text, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.work_pause_notice_is_current(jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.work_pause_status() FROM PUBLIC;
+GRANT SELECT ON ticket_board.work_pauses TO ticket_board_service, ticket_board_listener;
+GRANT SELECT ON ticket_board.work_pause_roles TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.current_work_pause() TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.role_paused(text) TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.unpaused_since(timestamptz, timestamptz) TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.pause_work(text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.resume_work(text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.note_work_pause_interrupt(bigint, text, text, double precision, jsonb) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.note_work_pause_settled(bigint, text, text) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.note_work_pause_notice(bigint, text) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.report_work_pause_background(bigint, text, jsonb) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.work_pause_notice_is_current(jsonb) TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.work_pause_status() TO ticket_board_service, ticket_board_listener;
+
 COMMIT;

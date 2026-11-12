@@ -277,8 +277,8 @@ def _dismiss_usage_menus(listener: Any, conn: Any, gate: Any, registrations: dic
     for held in _held(conn, "h.state IN ('held', 'released') AND ticket_board.role_provider_hold_is_current(h.role, "
                             "clock_timestamp())"):
         target = gate.role_targets.get(held["role"])
-        if target is None or presses.get(held["id"], 0) >= MENU_PRESSES:
-            continue
+        if target is None or presses.get(held["id"], 0) >= MENU_PRESSES or provider_refusal.typing_held(listener, conn, held["role"]):
+            continue  # SYRD-756: a paused role's pane is pressed nothing
         try:
             capture = gate.capture_pane_runner(["tmux", "capture-pane", "-p", "-t", target],
                                                check=True, text=True, capture_output=True, timeout=2.0)

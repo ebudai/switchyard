@@ -111,6 +111,10 @@ def run(listener: Any, conn: Any) -> int:
         # claim made blind would hand work to a worker nobody checked.
         listener.logger.warning("Pull pickup skipped: no pane activity gate to judge eligibility")
         return 0
+    from . import work_pause
+
+    if work_pause.project_paused(listener, conn):
+        return 0  # SYRD-756: while work is paused no claim, pickup, idle-capacity alert or worker start begins
     claimed = 0
     idle: dict[str, str] = {}
     unavailable: dict[str, str] = {}  # SYRD-736: why each claimant that is not idle capacity cannot take work

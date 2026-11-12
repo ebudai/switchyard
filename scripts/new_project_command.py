@@ -262,6 +262,16 @@ def new_project_command(
                 f"team-launcher: a dry run as root writes {plan.project}'s artifacts by path, and {artifact_dir} is in "
                 f"{holder}'s tree; {remedy}. Nothing was written into it."
             )
+    if os.geteuid() == 0 and not owner_writes.root_writes_in(plan.owner_user, artifact_dir):
+        # Outside the owner's roots every artifact below is written by path, executing or not: only into a directory
+        # nobody but root can change -- not another tenant's tree, nor anything else somebody could plant a link in
+        # (SYRD-759; the dry run's own tenant-tree refusal above is SYRD-666's).
+        problem = owner_writes.root_alone_directory(artifact_dir)
+        if problem:
+            raise SystemExit(
+                f"team-launcher: root writes {plan.project}'s artifacts into {artifact_dir} by path, and only root may "
+                f"be able to change it ({problem}); name an output directory only root controls with "
+                "--new-output-dir, or leave it out. Nothing was written into it.")
     if desktop_policy is not None:
         from scripts.desktop_access import validate_policy
         selected = {"mode": "headless"} if str(desktop_policy) == "headless" else launcher._load_json(desktop_policy)

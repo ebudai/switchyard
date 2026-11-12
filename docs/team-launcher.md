@@ -2132,6 +2132,31 @@ directory decided at the start, not what the file says by then (SYRD-758):
 - root reads the artifact once, without following a link the owner left, and
   takes the plan and the workflow from that read.
 
+Outside the new owner's own roots, root writes `new`'s artifacts by path (the
+operator packet, units, the desktop policy, the launcher config). So it writes
+them only into a directory nobody but root can change (SYRD-759). That covers
+`switchyard new --output-dir D` and `team-launcher <p> new [--execute]
+--new-output-dir D`.
+
+- D, or the nearest existing directory above it, must be root's, not a link,
+  and writable by nobody else.
+- Every directory above that must be root's and not a link. One may be
+  writable by others only if it is sticky.
+- So root's own temporary directory under `/tmp` passes. A not-yet-existing
+  name directly in `/tmp` does not, because anybody could create it first.
+- Another tenant's tree, a role account's home, or a link is refused before
+  anything is written.
+
+A `--from` artifact outside the owner's roots is written back with the workflow
+only under the same condition. Otherwise root says so and leaves the artifact
+alone; the workflow is in the configuration anyway.
+
+`team-launcher`'s own commands run as root (`upgrade`, `add-role`,
+`set-vcs-close-role`, `stop`, `pane`, and the rest) now ask root's records who
+owns the project before reading its configuration, as `switchyard`'s commands
+do. A project root holds no record of is refused, and the refusal tells the
+operator to run the command as the project's owner.
+
 The generated director role receives onboarding paths in its environment;
 the director owns the unprivileged half after the board exists: seed the board,
 launch panes, onboard the team, and reshape stages or roles later if needed.

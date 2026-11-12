@@ -357,9 +357,18 @@ def write_new_project_launcher_artifacts(
                 owner_writes.rewrite_owner_file(plan.owner_user, artifact_path,
                                                 json.dumps(artifact_data, indent=2, sort_keys=True) + "\n")
         elif artifact_path and artifact_path.exists():
-            artifact_data = launcher._load_json(artifact_path)
-            artifact_data["workflow"] = plan.workflow
-            launcher._write_json_atomic(artifact_path, artifact_data)
+            # Outside the owner's roots this read and write are by path: as root only where nobody but root can
+            # change the directory; anywhere else the workflow is not written back, which loses nothing the board
+            # needs -- it is in the configuration (SYRD-759).
+            problem = owner_writes.root_alone_directory(artifact_path.parent) \
+                if owner_writes.root_writes_for(plan.owner_user) else ""
+            if problem:
+                print_func(f"switchyard: not writing the workflow back into {artifact_path}: it is outside "
+                           f"{plan.owner_user}'s roots and only root may be able to change its directory ({problem})")
+            else:
+                artifact_data = launcher._load_json(artifact_path)
+                artifact_data["workflow"] = plan.workflow
+                launcher._write_json_atomic(artifact_path, artifact_data)
     policy_file = output_dir / "desktop-policy.json"
     if (owner_writes.owner_file_status(plan.owner_user, policy_file) is not None) if in_tree else policy_file.exists():
         from scripts.desktop_access import validate_policy

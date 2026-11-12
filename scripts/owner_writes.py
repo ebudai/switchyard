@@ -190,6 +190,37 @@ def tenant_root_holding(path: Path, *accounts: str) -> str:
     return ""
 
 
+def root_alone_directory(path: Path) -> str:
+    """Why root may not write into the directory `path` by path, or "" when only root can change it (SYRD-759).
+
+    The directory -- or, where it is still to be made, the nearest one above it that exists, in which root would
+    make it -- must be root's, not a link, and writable by nobody else, so nobody can put a link at a name root is
+    about to write. Every directory above that must be root's and not a link, and may be writable by others only
+    where it is sticky: there nobody else can rename or replace root's own entry (root's own `mkdtemp` under `/tmp`).
+    Anything else -- a tenant's tree, a role account's home, any other directory somebody else could change -- is a
+    place where a link planted at or above the name would steer root's by-path writes.
+    """
+    text = os.path.abspath(str(path))
+    parts = [part for part in text.split("/") if part]
+    existing = len(parts)
+    while existing and not os.path.lexists("/" + "/".join(parts[:existing])):
+        existing -= 1
+    for index in range(existing + 1):
+        current = "/" + "/".join(parts[:index])
+        try:
+            info = os.lstat(current)
+        except OSError as exc:
+            return f"cannot inspect {current}: {exc.strerror or exc}"
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            return f"{current} is a link or not a directory"
+        if info.st_uid != 0:
+            return f"{current} is owned by uid {info.st_uid}, not root"
+        last = index == existing
+        if info.st_mode & 0o022 and (last or not info.st_mode & stat.S_ISVTX):
+            return f"{current} can be written by others"
+    return ""
+
+
 def root_writes_in(owner_user: str, path: Path) -> bool:
     """Whether root, writing `path` now, writes into one of `owner_user`'s roots -- and so must by descriptor.
 

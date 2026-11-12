@@ -745,6 +745,13 @@ def _prepare_new_project_accounts(
                                        (json.dumps(selected_desktop_policy, indent=2, sort_keys=True) + "\n").encode(),
                                        mode=0o600, parents_mode=0o755)
     else:
+        # By path from here on, so as root only into a directory nobody but root can change (SYRD-759).
+        problem = owner_writes.root_alone_directory(provision_dir) if os.geteuid() == 0 else ""
+        if problem:
+            raise SystemExit(
+                f"switchyard: --output-dir {provision_dir} is outside {owner_user}'s roots, where root writes by "
+                f"descriptor, and only root may be able to change it ({problem}); name a directory only root "
+                "controls, or leave --output-dir out. Nothing was written into it.")
         provision_dir.mkdir(parents=True, exist_ok=True)
         launcher._write_json_atomic(provision_dir / "desktop-policy.json", selected_desktop_policy)
     return NewProjectAccounts(

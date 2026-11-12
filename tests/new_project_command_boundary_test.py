@@ -215,7 +215,7 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
     import contextlib, dataclasses, json, os, shutil, tempfile
     from pathlib import Path as _P
     from types import SimpleNamespace
-    from scripts import root_packet, workflow_launcher
+    from scripts import owner_writes, root_packet, workflow_launcher
     calls: list = []
     printed: list = []
     tmp = _P(tempfile.mkdtemp(prefix="syrd426-")).resolve()
@@ -281,6 +281,12 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
     saved_assign, saved_geteuid = workflow_launcher.assign_projection_owner, os.geteuid
     saved_root_packet = (root_packet.stage_root_packet, root_packet.publish_packet_record, root_packet.trusted_launcher,
                          root_packet.root_controlled)
+    saved_owner_writes = (owner_writes.root_writes_in, owner_writes.root_alone_directory)
+    # SYRD-759's question, after the baseline: whether root may write the output directory by path. Answered here
+    # without a record in `calls`, so every measured case is the baseline's unchanged; what the command does with a
+    # refusal is asserted on its own below.
+    owner_writes.root_writes_in = lambda owner, path: False
+    owner_writes.root_alone_directory = lambda path: spec.get("root_alone", "")
     try:
         for d in ("repo", "src", "home/p426"):
             (tmp / d).mkdir(parents=True)
@@ -438,6 +444,7 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
         workflow_launcher.assign_projection_owner = saved_assign
         (root_packet.stage_root_packet, root_packet.publish_packet_record, root_packet.trusted_launcher,
          root_packet.root_controlled) = saved_root_packet
+        owner_writes.root_writes_in, owner_writes.root_alone_directory = saved_owner_writes
         for n, f in saved.items():
             setattr(t, n, f)
         shutil.rmtree(tmp)
@@ -703,6 +710,21 @@ def test_the_rules_hold_in_the_measured_record() -> None:
                   for line in GOLDEN["new: a dry run, a source that is not root's"]["printed"]),
           "without an installed release root owns, or with a source it does not, there is no root command, and the reason is said")
     check(result("team-launcher new, through main") == 0 and "new_project_command" in seams("team-launcher new, through main"), "main dispatches to the launcher's name")
+
+
+def test_root_writes_by_path_only_into_a_directory_only_root_controls() -> None:
+    """SYRD-759: executing as root, an output directory outside the owner's roots that somebody else could change is
+    refused before anything is staged or written into it."""
+    spec = {**CASES["new: execute as root, staged"], "root_alone": "/elsewhere is owned by uid 1019, not root"}
+    got = run(m, spec)
+    check(got["result"] == {"raised": "SystemExit", "message": (
+              "team-launcher: root writes p426's artifacts into TMP/out by path, and only root may be able to change it "
+              "(/elsewhere is owned by uid 1019, not root); name an output directory only root controls with "
+              "--new-output-dir, or leave it out. Nothing was written into it.")},
+          f"refused, with why: {got['result']}")
+    names = [c[0] for c in got["calls"]]
+    check("stage_root_packet" not in names and "write_new_project_launcher_artifacts" not in names and got["files"] == {},
+          f"and nothing was staged, written or run: {names} {got['files']}")
 
 
 def test_every_launcher_seam_is_reached() -> None:

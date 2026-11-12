@@ -22,6 +22,7 @@ suite that rebinds one there still intercepts it. This module imports
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from typing import Sequence
@@ -106,6 +107,14 @@ def main(argv: list[str] | None = None) -> int:
         resolved = launcher._resolve_launcher_project_config(args.project, explicit_config=args.config)
         config_path = resolved.config_path
         config_project = resolved.slug
+    if os.geteuid() == 0 and (args.command != "provision-runtime" or config_path.exists()):
+        # Before the configuration is read, as `switchyard`'s own entry points ask (SYRD-663): root acts only for a
+        # project its own records name an owner for. The loader alone passes a configuration root's records say
+        # nothing about, and its run_as_user -- blank, root or anybody -- then chose the owner (SYRD-759).
+        recorded, problem = launcher.root_recorded_owner(config_project, config_path)
+        if recorded is None or problem:
+            raise SystemExit(f"team-launcher: {problem or f'root holds no record of {config_project} that says whose project it is'}"
+                             "; run the command as the project's owner. Nothing was changed.")
     if args.command == "provision-runtime":
         config = launcher.load_project_config(config_project, config_path) if config_path.exists() else None
         return launcher.provision_runtime_command(args.runtime_user, config)

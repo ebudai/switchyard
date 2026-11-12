@@ -60,7 +60,7 @@ MOVED = ('_reject_removed_commands', 'main')
 #: Measured on the baseline launcher: each moved body's call-time reads of launcher globals, its sibling included.
 SEAMS = {
     '_reject_removed_commands': {'BOOTSTRAP_REPLACEMENT_COMMAND': 1, 'REMOVED_CONFIG_FREE_COMMANDS': 1},
-    'main': {'DEFAULT_CONFIG_DIR': 1, '_build_parser': 1, '_reject_removed_commands': 1, '_resolve_launcher_project_config': 2, '_role_by_name': 1, 'add_project_role_command': 1, 'attach_role_to_slot': 1, 'current_user_name': 1, 'default_pane_state_dir_for_user': 1, 'deploy_launcher_checkout': 1, 'design_project_command': 1, 'detach_role_from_slot': 1, 'ensure_configured_runtime_user': 1, 'ensure_launcher_checkout_current': 1, 'ensure_visible_role_session_for_viewer': 1, 'launch_project': 1, 'load_project_config': 2, 'new_project_command': 1, 'pane_command_args': 1, 'prepare_project_desktop': 1, 'present_project_board': 1, 'provision_runtime_command': 1, 'role_run_as_user': 1, 'role_session_dir': 4, 'run_detached_role': 1, 'run_role_pane': 1, 'seed_default_session_dir_from_legacy_sources': 1, 'set_project_vcs_close_role_command': 1, 'stop_project': 1, 'switchyard_teardown_command': 1, 'upgrade_project_command': 1},
+    'main': {'DEFAULT_CONFIG_DIR': 1, '_build_parser': 1, '_reject_removed_commands': 1, '_resolve_launcher_project_config': 2, '_role_by_name': 1, 'add_project_role_command': 1, 'attach_role_to_slot': 1, 'current_user_name': 1, 'default_pane_state_dir_for_user': 1, 'deploy_launcher_checkout': 1, 'design_project_command': 1, 'detach_role_from_slot': 1, 'ensure_configured_runtime_user': 1, 'ensure_launcher_checkout_current': 1, 'ensure_visible_role_session_for_viewer': 1, 'launch_project': 1, 'load_project_config': 2, 'new_project_command': 1, 'pane_command_args': 1, 'prepare_project_desktop': 1, 'present_project_board': 1, 'provision_runtime_command': 1, 'role_run_as_user': 1, 'root_recorded_owner': 1, 'role_session_dir': 4, 'run_detached_role': 1, 'run_role_pane': 1, 'seed_default_session_dir_from_legacy_sources': 1, 'set_project_vcs_close_role_command': 1, 'stop_project': 1, 'switchyard_teardown_command': 1, 'upgrade_project_command': 1},
 }
 #: Measured on the baseline launcher: every launcher definition outside the two that names them, and how often (none).
 DISPATCH = {}
@@ -71,9 +71,12 @@ READERS = {}
 #: SYRD-709 added one branch, deliberately: provision-runtime never falls back to a bundled config past a registry entry
 #: that cannot be used, or a registry that cannot be read. Every other refusal falls back as before.
 BRANCHES = ["args.command == 'design'", "args.command == 'new'", "args.command == 'provision-runtime' and args.config is None",
-            "' is registered, but ' in str(exc) or str(exc).startswith('switchyard: cannot resolve ')", "args.command == 'provision-runtime'", "args.command == 'upgrade'", "args.command == 'add-role'", 'not args.pane_mode or args.role', "args.command == 'set-vcs-close-role'", 'not args.pane_mode or args.role', "args.command == 'stop'", "args.command == 'teardown'", "args.command == 'deploy-launcher'", "args.command != 'pane' and (args.pane_mode or args.role)", "args.command == 'pane'", 'not args.pane_mode or not args.role', "args.pane_mode not in {'start', 'attach', 'attach-or-start', 'reload', 'attach-role', 'detach-role'}", "args.pane_mode not in {'attach', 'detach-role'}", 'pane_user and current_user_name() != pane_user', 'not args.skip_launcher_check', "args.pane_mode == 'attach-role'", 'args.slot is None', "args.pane_mode == 'detach-role'", 'args.no_attach and (not role.detached)', 'role.detached',
+            "' is registered, but ' in str(exc) or str(exc).startswith('switchyard: cannot resolve ')",
+            # SYRD-759: as root, root's records are asked who owns the project before the configuration is read.
+            "os.geteuid() == 0 and (args.command != 'provision-runtime' or config_path.exists())", 'recorded is None or problem',
+            "args.command == 'provision-runtime'", "args.command == 'upgrade'", "args.command == 'add-role'", 'not args.pane_mode or args.role', "args.command == 'set-vcs-close-role'", 'not args.pane_mode or args.role', "args.command == 'stop'", "args.command == 'teardown'", "args.command == 'deploy-launcher'", "args.command != 'pane' and (args.pane_mode or args.role)", "args.command == 'pane'", 'not args.pane_mode or not args.role', "args.pane_mode not in {'start', 'attach', 'attach-or-start', 'reload', 'attach-role', 'detach-role'}", "args.pane_mode not in {'attach', 'detach-role'}", 'pane_user and current_user_name() != pane_user', 'not args.skip_launcher_check', "args.pane_mode == 'attach-role'", 'args.slot is None', "args.pane_mode == 'detach-role'", 'args.no_attach and (not role.detached)', 'role.detached',
             "launched == 0 and args.command in ('start', 'attach-or-start') and (not args.dry_run)"]
-SHAPE = [16, 7, 1, 26]  # SYRD-680: one more branch, the start's board tab; SYRD-709: one more branch, and the refusal it re-raises
+SHAPE = [16, 8, 1, 28]  # SYRD-680: one more branch, the start's board tab; SYRD-709: one more branch, and the refusal it re-raises; SYRD-759: two more branches and a refusal, root's records asked first
 #: The BASELINE's own behaviour for the cases below (`gold452.py`, run on the baseline launcher under the guard).
 GOLDEN = {
     'removed: bootstrap': {'result': {'raised': 'SystemExit', 'message': 'team-launcher: bootstrap has been removed; use `switchyard new` to create a launchable project config', 'code_type': 'str'}, 'calls': [['_reject_removed_commands', [['p452', 'bootstrap']], {}]], 'stdout': [], 'stderr': []},
@@ -299,7 +302,7 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
     stood = (*COMMANDS, "_resolve_launcher_project_config", "load_project_config", "prepare_project_desktop", "role_run_as_user", "current_user_name",
              "default_pane_state_dir_for_user", "ensure_launcher_checkout_current", "ensure_configured_runtime_user",
              "seed_default_session_dir_from_legacy_sources", "role_session_dir", "pane_command_args", "DEFAULT_CONFIG_DIR",
-             "REMOVED_CONFIG_FREE_COMMANDS", "BOOTSTRAP_REPLACEMENT_COMMAND")
+             "REMOVED_CONFIG_FREE_COMMANDS", "BOOTSTRAP_REPLACEMENT_COMMAND", "root_recorded_owner")
     saved = {n: getattr(t, n) for n in (*FUNCTIONS, *passed, *stood)}
     saved_run, saved_argv, saved_columns = _subprocess.run, _sys.argv, os.environ.get("COLUMNS")
     try:
@@ -310,6 +313,12 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
             setattr(t, n, command(n))
         t._resolve_launcher_project_config = resolve
         t.load_project_config = load
+        # SYRD-759's read, after the baseline: asked only as root, which no measured case is, so every measured case is
+        # the baseline's unchanged; what the dispatch does with its answer is asserted on its own below.
+        t.root_recorded_owner = lambda project, config_path=None: (
+            reached.add("root_recorded_owner")
+            or ("owner_asked" in spec and spec["owner_asked"].append([project, str(config_path)]))
+            or spec.get("recorded_owner", ("p452-owner", "")))
         t.prepare_project_desktop = lambda config_: note("prepare_project_desktop", config_) or prepared
         t.role_run_as_user = lambda config_, role: note("role_run_as_user", config_, role) or spec.get("pane_user", "")
         t.current_user_name = lambda: note("current_user_name") or spec.get("me", "p452-agent")
@@ -482,7 +491,8 @@ def test_the_seams_read_through_the_launcher_and_nothing_bound() -> None:
     shape = [sum(isinstance(x, k) for x in ast.walk(main)) for k in (ast.Return, ast.Raise, ast.Try, ast.If)]
     check(shape == SHAPE, f"main: its returns, refusals, try (the provision-runtime fallback) and branches, as many as in the baseline: {shape}")
     top = [ast.unparse(n) for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
-    check(top == ["from __future__ import annotations", "import subprocess", "import sys", "from typing import Sequence"] and not [n for n in tree.body if isinstance(n, ast.If)],
+    # SYRD-759: and `os`, for the root check before the configuration is read.
+    check(top == ["from __future__ import annotations", "import os", "import subprocess", "import sys", "from typing import Sequence"] and not [n for n in tree.body if isinstance(n, ast.If)],
           f"the standard library only, nothing for annotations: {top}")
     names = [n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef, ast.Assign, ast.AnnAssign))]
     check(names == list(MOVED), f"the two functions, in the baseline's order, and nothing else: {names}")
@@ -675,6 +685,34 @@ def test_the_rules_hold_in_the_measured_record() -> None:
           and call("reload", "launch_project")[2]["layout_mode"] == "separate" and call("start", "launch_project")[2]["report_session_records"] is True
           and (s["dry_run"], s["force_reload"], s["allow_stale_launcher"], s["no_launcher_self_deploy"], s["layout_mode"]) == (True, True, True, True, "viewer"),
           "otherwise the launch, in the command's mode, reporting session records, with every option")
+
+
+def test_root_dispatch_asks_roots_records_before_the_configuration() -> None:
+    """SYRD-759: as root, `team-launcher` asks root's records who owns the project before it reads the configuration,
+    as `switchyard`'s entry points do; a project they say nothing about is refused, and nobody but root is asked."""
+    saved = os.geteuid
+    try:
+        os.geteuid = lambda: 0
+        asked: list = []
+        got = run(m, {**CASES["the loader refuses"], "load_refuses": False, "owner_asked": asked,
+                      "recorded_owner": (None, "")})
+        check(asked and asked[0][0] == "p452" and "load_project_config" not in [c[0] for c in got["calls"]]
+              and "root holds no record of p452 that says whose project it is; run the command as the project's owner. "
+                  "Nothing was changed." in json.dumps(got["result"]),
+              f"root, no record: refused before the configuration is read: {asked} {got['result']} {got['calls']}")
+        got = run(m, {**CASES["the loader refuses"], "load_refuses": False,
+                      "recorded_owner": ("", "root's registry entry for p452 cannot say whose project it is: X")})
+        check("root's registry entry for p452 cannot say whose project it is: X; run the command as the project's owner."
+              in json.dumps(got["result"]) and "load_project_config" not in [c[0] for c in got["calls"]],
+              f"root, a record that cannot say: refused the same way: {got['result']}")
+        got = run(m, {**CASES["the loader refuses"], "load_refuses": False})
+        check("load_project_config" in [c[0] for c in got["calls"]],
+              f"root, a record naming the owner: the configuration is read: {got['calls']}")
+    finally:
+        os.geteuid = saved
+    asked = []
+    run(m, {**CASES["the loader refuses"], "load_refuses": False, "owner_asked": asked})
+    check(asked == [], f"nobody but root is asked: {asked}")
 
 
 def test_every_launcher_seam_is_reached() -> None:

@@ -168,6 +168,12 @@ def new_project_command(
         include_audit = True
         audit_roles = ("audit",)
         board_service_traversal = True
+    # Where the owner is decided -- the artifact, --owner-user or the default -- and before anything is created: a
+    # uid-0 owner would send every root write for it down its by-path branch (SYRD-763).
+    refusal = owner_writes.uid0_owner_refusal(
+        effective_owner, str(from_artifact) if design_artifact is not None else "--owner-user")
+    if refusal:
+        raise SystemExit(refusal)
     # The project directory this command was handed is root's own choice of where the owner's project lives: root's
     # writes for the owner go there by descriptor, while it is a real directory the owner owns (SYRD-608).
     owner_writes.trust_project_root(effective_owner, effective_repository)

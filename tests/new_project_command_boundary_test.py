@@ -281,12 +281,14 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
     saved_assign, saved_geteuid = workflow_launcher.assign_projection_owner, os.geteuid
     saved_root_packet = (root_packet.stage_root_packet, root_packet.publish_packet_record, root_packet.trusted_launcher,
                          root_packet.root_controlled)
-    saved_owner_writes = (owner_writes.root_writes_in, owner_writes.root_alone_directory)
+    saved_owner_writes = (owner_writes.root_writes_in, owner_writes.root_alone_directory, owner_writes.uid0_owner_refusal)
     # SYRD-759's question, after the baseline: whether root may write the output directory by path. Answered here
     # without a record in `calls`, so every measured case is the baseline's unchanged; what the command does with a
     # refusal is asserted on its own below.
     owner_writes.root_writes_in = lambda owner, path: False
     owner_writes.root_alone_directory = lambda path: spec.get("root_alone", "")
+    # SYRD-763's question likewise: whether the owner decided here is uid 0.
+    owner_writes.uid0_owner_refusal = lambda owner, named_by: spec.get("uid0_refusal", "")
     try:
         for d in ("repo", "src", "home/p426"):
             (tmp / d).mkdir(parents=True)
@@ -444,7 +446,7 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
         workflow_launcher.assign_projection_owner = saved_assign
         (root_packet.stage_root_packet, root_packet.publish_packet_record, root_packet.trusted_launcher,
          root_packet.root_controlled) = saved_root_packet
-        owner_writes.root_writes_in, owner_writes.root_alone_directory = saved_owner_writes
+        owner_writes.root_writes_in, owner_writes.root_alone_directory, owner_writes.uid0_owner_refusal = saved_owner_writes
         for n, f in saved.items():
             setattr(t, n, f)
         shutil.rmtree(tmp)
@@ -725,6 +727,19 @@ def test_root_writes_by_path_only_into_a_directory_only_root_controls() -> None:
     names = [c[0] for c in got["calls"]]
     check("stage_root_packet" not in names and "write_new_project_launcher_artifacts" not in names and got["files"] == {},
           f"and nothing was staged, written or run: {names} {got['files']}")
+
+
+def test_a_uid0_owner_is_refused_before_anything() -> None:
+    """SYRD-763: the owner this decides is asked about once, and a uid-0 one ends the command before anything."""
+    for label in ("new: a dry run from an artifact", "new: execute as root, staged"):
+        spec = {**CASES[label], "uid0_refusal": "switchyard: X names 'root' as the project's owner. Nothing was created."}
+        got = run(m, spec)
+        names = [c[0] for c in got["calls"]]
+        check(got["result"] == {"raised": "SystemExit", "message": "switchyard: X names 'root' as the project's owner. "
+                                "Nothing was created."}
+              and "build_plan" not in names and "stage_root_packet" not in names
+              and not [path for path in got["files"] if "operator-commands" in path or "desktop-policy" in path],
+              f"{label}: refused before any plan, nothing written: {got['result']} {names} {got['files']}")
 
 
 def test_every_launcher_seam_is_reached() -> None:

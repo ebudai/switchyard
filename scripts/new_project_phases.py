@@ -196,6 +196,13 @@ def _resolve_new_project_choices(
         selected_audit_roles = ("audit",)
         selected_router = ()
         selected_documentation = ()
+    # Where the owner is decided -- the artifact or the agent user -- and before anything is recorded or created: a
+    # uid-0 owner would send every root write for it down its by-path branch (SYRD-763).
+    from scripts import owner_writes
+
+    refusal = owner_writes.uid0_owner_refusal(owner_user, str(from_artifact) if from_artifact else "the agent user")
+    if refusal:
+        raise SystemExit(refusal)
     artifact_agy_source = ""
     if from_artifact is not None:
         artifact_agy_source = str(

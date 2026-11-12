@@ -2163,6 +2163,16 @@ owns the project before reading its configuration, as `switchyard`'s commands
 do. A project root holds no record of is refused, and the refusal tells the
 operator to run the command as the project's owner.
 
+`new` never makes `root`, or any other account whose uid is 0, a project's
+owner (SYRD-763). Every write root makes for an owner relies on the owner not
+being root, so an owner of `root` would send each one down its by-path route
+as root. Each entry refuses such an owner where it decides it, from a `--from`
+artifact or otherwise, before anything is created:
+
+- `switchyard new`: the artifact's owner or the agent user;
+- `team-launcher <p> new`: the artifact's owner, `--owner-user`, or the
+  default.
+
 The generated director role receives onboarding paths in its environment;
 the director owns the unprivileged half after the board exists: seed the board,
 launch panes, onboard the team, and reshape stages or roles later if needed.

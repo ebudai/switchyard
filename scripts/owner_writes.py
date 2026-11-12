@@ -165,6 +165,24 @@ def owner_handoff_args(owner_user: str, path: Path, *, tree: bool = False, to: s
     return tenant_paths_argv(owner_root(owner_user, path), "attrs", "--owner", owner_user, "--group", owner_user, str(path))
 
 
+def uid0_owner_refusal(owner_user: str, named_by: str) -> str:
+    """Why `owner_user` may not own a new project, or "" (SYRD-763).
+
+    Every root branch that writes as or for a project's owner is chosen by `root_writes_for(owner)`, which is False
+    for an owner that is root -- so with root as the owner, each of them takes its by-path code as root. A project is
+    therefore never owned by `root` or by any other account whose uid is 0, whoever named it.
+    """
+    name = (owner_user or "").strip()
+    try:
+        uid = pwd.getpwnam(name).pw_uid if name else None
+    except KeyError:  # an account `new` is still to create
+        uid = None
+    if name == "root" or uid == 0:
+        return (f"switchyard: {named_by} names {name!r} as the project's owner, an account with uid 0; a project is "
+                "owned by an unprivileged account, never root. Nothing was created.")
+    return ""
+
+
 def root_writes_for(owner_user: str) -> bool:
     """Whether a file written now for `owner_user` is written by root on the owner's behalf."""
     from scripts import team_launcher as launcher

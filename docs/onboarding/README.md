@@ -16,7 +16,8 @@ any particular project.
    ticket, review discipline, merge versus kick back, working with audit, routing and
    holds, escalation. Directors read this one, including **After routing, yield**: silence
    after routing is expected, the board reports progress, and the few reasons that justify
-   one targeted pane or ticket check. It also includes **Host health the board depends
+   one targeted pane or ticket check, and **Pausing all work**: drain, or stop now, and the
+   one resume. It also includes **Host health the board depends
    on**: the journal, core-dump, SysRq and post-crash disk and repository checks the
    Director ensures and escalates.
 

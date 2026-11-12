@@ -222,7 +222,8 @@ switchyard restart-role <project> <role> [--while-holding <ticket>] [--dry-run]
   and `switchyard start <project>` is needed only when the board, its listener or the
   window must restart too. Reopening the presentation window (relaunching the project's
   window) restarts no pane. The panes' sessions survive it and keep running what they
-  started with.
+  started with. To stop the roles' work while the board stays up, pause it instead
+  ([Pausing all work](#pausing-all-work-drain-or-stop-now)).
 
 ## Merge, or kick back?
 

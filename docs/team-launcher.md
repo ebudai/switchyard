@@ -1409,7 +1409,10 @@ project's registration and configuration, worktrees, credentials, provider
 state, skills, onboarding, resumable session records, releases and the rollout
 journal are all exactly as they were. Every step runs even if an earlier one
 failed, and what could not be stopped is named rather than summarised; a
-partially stopped tenant exits non-zero and says so.
+partially stopped tenant exits non-zero and says so. To stop the roles' work
+while the board, listener and panes stay up, the Director pauses the project
+instead (`ticket-board-write pause-work`; see the Director guide's "Pausing all
+work").
 
 **`switchyard teardown <project>` removes provisioned state.** That is a
 different question, and it is not reversible by starting anything.
@@ -1442,7 +1445,10 @@ than restarted. `switchyard <project>` recovers a suspended tenant the same way.
 `presentation-closed`, `partially-stopped`, `suspended`, and an unregistered
 tenant. A probe that could not answer leaves the row's base state standing
 rather than inventing a suspension out of silence: "not proved down" and "down"
-are different answers.
+are different answers. A project whose Director (or User) has paused its work
+adds a `WORK PAUSED` line under the table -- mode, since when, by whom, why, and
+what is held for whom -- and `--json` carries it as `work_pauses`, keyed by
+project; a board that cannot answer adds nothing.
 
 Internal transactions that only need the workers quiescent -- the upgrade and
 cutover paths -- use the worker-only stop instead, and must keep doing so. Those

@@ -1,6 +1,6 @@
 """Write client calls kept beside write_client.py, so that file does not grow past its size limit.
 
-Provider account holds (SYRD-672) and the restore of a mistaken reopen (SYRD-746).
+Provider account holds (SYRD-672), the restore of a mistaken reopen (SYRD-746) and the pause switch (SYRD-756).
 """
 
 from __future__ import annotations
@@ -19,6 +19,18 @@ class ProviderAccountHoldWrites:
         """End a provider account's safety hold, once the operator confirms it is safe, with who confirmed it."""
         return self._post("/actions/clear_provider_account_hold", {"runtime": runtime, "reason": reason},
                           caller_role=caller_role)
+
+
+class WorkPauseWrites:
+    """Mixed into TicketBoardWriteClient: the Director's pause switch (SYRD-756)."""
+
+    def pause_work(self, mode: str, *, reason: str, caller_role: str | None = None) -> dict[str, Any]:
+        """Pause all work -- drain or stop -- or change the standing pause's mode, with why."""
+        return self._post("/actions/pause_work", {"mode": mode, "reason": reason}, caller_role=caller_role)
+
+    def resume_work(self, *, reason: str, caller_role: str | None = None) -> dict[str, Any]:
+        """End the pause, whichever mode, with why."""
+        return self._post("/actions/resume_work", {"reason": reason}, caller_role=caller_role)
 
 
 class TicketRepairWrites:

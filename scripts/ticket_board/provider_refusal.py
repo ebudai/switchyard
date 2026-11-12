@@ -194,11 +194,16 @@ def _held(conn: Any, role: str) -> bool:
     return _first(conn.execute("SELECT ticket_board.role_account_hold(%s)", (role,)).fetchone()) is not None
 
 
-def typing_held(listener: Any, conn: Any, role: str) -> bool:
+def typing_held(listener: Any, conn: Any, role: str, *, pause: bool = True) -> bool:
     """Whether the board may type nothing into this role's pane now -- a restore, a context note, a retry.
 
-    Fails closed, like the delivery check: a hold that cannot be checked holds.
+    Fails closed, like the delivery check: a hold that cannot be checked holds. A work pause holds too (SYRD-756),
+    except where `pause` is False: a notice's own delivery, which only the pause's own notices reach while it stands.
     """
+    from . import work_pause
+
+    if pause and work_pause.typing_held(listener, conn, role):
+        return True
     try:
         return _present(listener, conn) and _held(conn, role)
     except Exception as exc:

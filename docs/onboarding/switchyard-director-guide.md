@@ -222,7 +222,8 @@ switchyard restart-role <project> <role> [--while-holding <ticket>] [--dry-run]
   and `switchyard start <project>` is needed only when the board, its listener or the
   window must restart too. Reopening the presentation window (relaunching the project's
   window) restarts no pane. The panes' sessions survive it and keep running what they
-  started with.
+  started with. To stop the roles' work while the board stays up, pause it instead
+  ([Pausing all work](#pausing-all-work-drain-or-stop-now)).
 
 ## Merge, or kick back?
 
@@ -806,6 +807,47 @@ What you can do, in order of preference:
 When you suspect a refusal the board did not recognise (Hermes, agy and Copilot write none it can read), hold the
 account yourself: `ticket-board-write hold-provider-account <cli> --reason-file PATH`. The User can do both,
 which matters when your own account is held.
+
+## Pausing all work: drain, or stop now
+
+When the project must stop moving -- a bad release on main, a provider incident, the User asking for quiet -- pause
+it. The pause is this project's alone, on its own board. It is not `switchyard stop`, which shuts the project down:
+while paused the board, the listener, every pane and every conversation stay up, and board writes keep working.
+
+- **Drain** (`ticket-board-write pause-work --mode drain --reason-file PATH`). Nothing is typed into any role pane
+  but yours: no transition notice, nudge, reminder, stall or idle escalation to an owner, capacity retry, held-notice
+  release, context restore, claim, route or worker start. A pane already in a turn finishes it, then stays idle.
+  Panes are not interrupted, and a role mid-turn may still comment, submit or transition.
+- **Stop now** (`--mode stop`). Everything drain does, and each role pane busy with a turn that was running when you
+  set it has that turn interrupted with its runtime's own interrupt: Esc for Claude Code, Codex and agy, Esc Esc for
+  Copilot, and for Hermes the pause notice itself, typed into the running turn (Hermes's own interrupt is a message).
+  Never Ctrl-C, and no session or CLI is killed, so every conversation stays resumable. Once a pane's interrupted turn
+  is over it is told once that work is paused, to record where it is on its ticket, and to start nothing new until
+  told work has resumed. A pane waiting on its provider's own question is left alone, since an Esc would answer it.
+  Background commands under a pane are reported to you with pid and ticket, and nothing is killed: interrupt one
+  deliberately with `interrupt-lease` if you must.
+- **One resume ends either mode**: `ticket-board-write resume-work --reason-file PATH`. What waited is then checked
+  again and goes once if it is still current; a notice the pause made moot is dropped, and nothing goes twice. After
+  a stop, each role that was interrupted is told once that work resumed. You can change mode without resuming in
+  between.
+
+Every set, change and resume is recorded with who, when and why. Only you and the User may do them; the User has the
+same two switches and the resume on the board page. Your pane is exempt whoever set it, so you can still coordinate.
+A person typing into any pane still works, and so does an image the User pastes to a role (`switchyard paste-image`),
+which is the User's own message. The Publisher keeps publishing: audited work still lands on main.
+
+While paused, stall, idle-owner and lease clocks do not run: the time spent paused is not counted, so resuming fires
+no burst of escalations. The pause is in the board's database, so a restarted listener delivers nothing either.
+
+See it in `ticket-board-read pause` (mode, set by, reason, since, what each role has waiting, and what a stop did to
+each pane), at the top of `ticket-board-read director`, in a banner on the board page, and in `switchyard status`.
+
+Two things to know after a stop:
+- When Claude Code is interrupted before it has said anything, it puts the prompt back in its composer. The board
+  types nothing over it (`prompt_returned` in the read); that pane gets no pause notice, and its resume notice waits
+  behind the text. Attach and submit or clear it.
+- Hermes keeps the pause notice in the running conversation, but its saved conversation does not: after a restart
+  it resumes with the interrupted prompt and the reply, not the notice.
 
 ## Host health the board depends on
 

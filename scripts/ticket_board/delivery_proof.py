@@ -244,6 +244,10 @@ def _settle_unsubmitted(listener: Any, conn: Any, proof: dict, gate: Any, witnes
                  f"{proof['ticket_id']}: a notice to {proof['target_role']} is sitting unsubmitted in its composer and "
                  "the text has since been edited, so the board will not submit it. Check the pane.")
         return 0
+    from . import work_pause
+
+    if work_pause.typing_held(listener, conn, str(proof["target_role"])):
+        return 0  # SYRD-756: pressing submit starts a turn; it waits for the resume
     submit = _submitter(listener)
     if proof["submit_attempts"] >= SUBMIT_ATTEMPTS_MAX or not callable(submit):
         _resolve(conn, notification_id, "unsubmitted", "submit did not take the text",

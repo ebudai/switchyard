@@ -10,13 +10,14 @@ from typing import Any
 
 from . import (audit_return, blocker_explanation, blocker_review, cohort_ops, provider_hold_ops, context_continuation, director_notice, documentation_candidate, execution_lease_ops, pull_queue, reminder_snooze,
                reopen_restore, report_intake, router_role, size_review, uat_instructions, ui_delegation, user_events,
-               user_wait)
+               user_wait, work_pause_ops)
 
 OPERATIONS = (reminder_snooze.OPERATIONS | size_review.OPERATIONS | report_intake.OPERATIONS
               | router_role.OPERATIONS | ui_delegation.OPERATIONS | context_continuation.OPERATIONS
               | uat_instructions.OPERATIONS | execution_lease_ops.OPERATIONS | cohort_ops.OPERATIONS
               | provider_hold_ops.OPERATIONS | user_wait.OPERATIONS | audit_return.OPERATIONS | director_notice.OPERATIONS
-              | blocker_explanation.OPERATIONS | blocker_review.OPERATIONS | reopen_restore.OPERATIONS)
+              | blocker_explanation.OPERATIONS | blocker_review.OPERATIONS | reopen_restore.OPERATIONS
+              | work_pause_ops.OPERATIONS)
 
 
 def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: str,
@@ -52,6 +53,8 @@ def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: s
         return audit_return.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
     if operation in execution_lease_ops.OPERATIONS:  # SYRD-616
         return execution_lease_ops.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
+    if operation in work_pause_ops.OPERATIONS:  # SYRD-756
+        return work_pause_ops.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
     if operation in provider_hold_ops.OPERATIONS:  # SYRD-644
         return provider_hold_ops.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
     if operation in cohort_ops.OPERATIONS:  # SYRD-628
@@ -154,6 +157,7 @@ READ_ROUTES = {
     user_events.PATH: user_events.read,  # SYRD-714: the phone bridge's read; changes nothing
     "/api/report-ancestry": lambda app, _query: report_ancestry_status(app),  # SYRD-721
     "/api/director-capacity": lambda app, _query: director_capacity_status(app),  # SYRD-728
+    work_pause_ops.PATH: work_pause_ops.status,  # SYRD-756: the pause, read-only
 }
 
 

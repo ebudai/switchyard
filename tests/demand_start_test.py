@@ -167,8 +167,27 @@ def test_ready_work_after_launch_starts_and_claims_exactly_one_worker() -> None:
                 listener.listen_once(max_notifications=5)
                 check(asks == [] and started == [], f"no ready work: no worker is asked for: {asks}")
 
-                # One ticket admitted after the launch.
+                # SYRD-756: ready work while the Director has paused all work: no worker is asked for and nothing is
+                # claimed, however many passes run; the resume lets the very next pass start one, as it would have.
+                import psycopg
+
+                def as_director(statement: str) -> None:
+                    service = fixture.conninfo(cluster.socket_dir, cluster.port, "demand", fixture.SERVICE_ROLE)
+                    with psycopg.connect(service) as conn:
+                        conn.execute("SELECT set_config('ticket_board.caller_role', 'director', true)")
+                        conn.execute(statement)
+
+                as_director("SELECT ticket_board.pause_work('drain', 'a pool worker is due while paused')")
                 admit_ticket("PGU-1")
+                for _ in range(2):
+                    clock[0] += demand_start.MIN_INTERVAL_SECONDS
+                    listener.listen_once(max_notifications=5)
+                check(asks == [] and started == [] and where("PGU-1") == "ready/unassigned",
+                      f"paused: the worker due to start is not started, and nothing claims: {asks} {started}")
+                as_director("SELECT ticket_board.resume_work('pool case over')")
+                clock[0] += demand_start.MIN_INTERVAL_SECONDS
+
+                # One ticket admitted after the launch (here, while paused; asked for at the resume).
                 listener.listen_once(max_notifications=5)
                 check(len(asks) == 1 and asks[0][1].endswith("scripts/worker_admission.py")
                       and asks[0][2:] == ["admit", "--mode", "demand", "pgu", "--config", str(config_path), "--busy"],

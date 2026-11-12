@@ -96,6 +96,9 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
     # own account is held.
     "hold_provider_account": {"director", "user"},
     "clear_provider_account_hold": {"director", "user"},
+    # SYRD-756: the pause switch and its resume: the Director, or the User from the board page.
+    "pause_work": {"director", "user"},
+    "resume_work": {"director", "user"},
     "set_report_intake": {"director"},
     # SYRD-541: the integrator's bounded size decisions.
     "approve_size_exception": {"director"},
@@ -129,7 +132,8 @@ CONTROL_OVERRIDE_OPERATIONS = {"force_move", "override_move"}
 #: SYRD-672: a provider account's safety hold, by hand, and its clear. The Director's -- a role holding
 #: set_manually_controlled -- or the User's, the workflow's user-kind role, for when the Director's own account is the
 #: one held. No capability marks the User alone, so it is admitted by its kind; the database checks the same.
-OPERATOR_OR_CONTROL_OPERATIONS = frozenset({"hold_provider_account", "clear_provider_account_hold"})
+OPERATOR_OR_CONTROL_OPERATIONS = frozenset({"hold_provider_account", "clear_provider_account_hold",
+                                            "pause_work", "resume_work"})  # SYRD-756: the pause switch, the same two
 
 #: Operations that are COMPOSITIONS of declarable capabilities. A declared
 #: workflow cannot grant these by name: they are deliberately absent from

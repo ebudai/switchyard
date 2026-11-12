@@ -5,7 +5,7 @@ import json
 from datetime import datetime
 from typing import Any, Callable
 
-from . import background_episode, board_stall, reminder_snooze, stall_episode
+from . import background_episode, board_stall, reminder_snooze, stall_episode, work_pause
 
 TERMINAL_STATES = {"done", "cancelled"}
 NUDGE_ELIGIBLE_STATES = {"in_progress", "inspection", "audit", "dat", "director_review", "analysis", "backlog"}
@@ -445,6 +445,13 @@ WHERE id = %s
         if kind == "blocker_review":
             row = conn.execute("SELECT ticket_board.blocker_review_is_current(%s::jsonb) AS current", (payload,)).fetchone()
             return target_role == "director" and bool(row["current"] if isinstance(row, dict) else row[0])
+        # SYRD-756: the pause's queued notices, whatever the ticket they hang on does, while they still say something
+        # true: a resume notice while no pause stands, and the background report while its pause stands. Only the
+        # report is the Director's.
+        if kind in work_pause.NOTICE_KINDS:
+            row = conn.execute("SELECT ticket_board.work_pause_notice_is_current(%s::jsonb) AS current", (payload,)).fetchone()
+            return bool(row and (row["current"] if isinstance(row, dict) else row[0])) and (
+                (target_role == "director") == (kind == "work_pause_background"))
         # SYRD-616: a role is told its own command was interrupted, whatever its ticket has done since.
         if kind == "execution_lease_interrupted":
             return target_role != "director"

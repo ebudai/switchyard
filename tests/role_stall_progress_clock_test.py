@@ -328,6 +328,18 @@ def scenario(root: Path) -> dict:
         seen["unresolved_checkpoint"] = [unresolved(ticket, "main", 620), unresolved(ticket, "main", 890),
                                          unresolved(ticket, "main", 910)]
 
+        # -- SYRD-756: time the Director paused work is not time without progress ------------------------------------
+        if sql("SELECT to_regclass('ticket_board.work_pauses') IS NOT NULL;") == "t":
+            sql("INSERT INTO ticket_board.work_pauses (mode, began_at, began_by, reason, ended_at, ended_by, end_reason) "
+                f"VALUES ('drain', '{at(100)}', 'director', 'paused', '{at(1700)}', 'director', 'resumed');")
+            begin("app", "Busy through a pause")
+            seen["paused_stall"] = [tick("app", t) for t in (1830, 3390, 3430)]
+            ticket = begin("main", "Prompted, then paused")
+            prompted(ticket, "main")
+            seen["paused_unresolved"] = [unresolved(ticket, "main", 620), unresolved(ticket, "main", 2200),
+                                         unresolved(ticket, "main", 2230)]
+            sql("DELETE FROM ticket_board.work_pauses;")
+
         # -- the listener's pass hands delivery the owner's hook as it is then ----------------------------------------
         if has_clock:
             import logging
@@ -495,6 +507,11 @@ def candidate(s: dict) -> None:
           f"the unresolved-turn escalation, with no checkpoint: after the grace: {s['unresolved_control']}")
     check(s["unresolved_checkpoint"] == [0, 0, 1],
           f"and a full grace after the owner's checkpoint: {s['unresolved_checkpoint']}")
+    check(s.get("paused_stall") == [0, 0, 1],
+          f"SYRD-756: busy through a 1600 s pause, the stall alert comes 1600 s later than the control's: "
+          f"{s.get('paused_stall')}")
+    check(s.get("paused_unresolved") == [0, 0, 1],
+          f"SYRD-756: and the unresolved-turn escalation's grace does not run while paused: {s.get('paused_unresolved')}")
     check(s["schema_equal"] and s["functions"] == len(FUNCTIONS), "schema.sql's copies are the migration's")
 
 

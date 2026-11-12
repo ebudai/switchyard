@@ -514,6 +514,43 @@ def root_recorded_tenant_facts(
     return active, f"{described}: {detail}" if detail else described
 
 
+def read_work_pause(config: "ProjectConfig", *, connection_factory: Callable[[str, float], Any] | None = None) -> dict | None:
+    """The project's pause switch, as its board answers over its socket (SYRD-756); None when it cannot say."""
+    try:
+        from scripts.ticket_board.write_client import UnixHTTPConnection
+
+        factory = connection_factory or (lambda socket_path, timeout: UnixHTTPConnection(socket_path, timeout=timeout))
+        connection = factory(config.board_socket, 3)
+        try:
+            connection.request("GET", "/api/work-pause")
+            response = connection.getresponse()
+            body = response.read().decode("utf-8", errors="replace")
+        finally:
+            connection.close()
+        payload = json.loads(body) if response.status == 200 else None
+    except Exception:  # noqa: BLE001 - a board that cannot answer says nothing here
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+#: Who reads a project's pause; a test names its own.
+work_pause_reader: Callable[["ProjectConfig"], dict | None] = read_work_pause
+
+
+def work_pause_lines(slug: str, answer: dict | None) -> list[str]:
+    """`switchyard status`'s lines for a paused project; none when it is not paused or its board cannot say."""
+    pause = (answer or {}).get("pause") if (answer or {}).get("paused") else None
+    if not isinstance(pause, dict):
+        return []
+    mode = "stop now" if pause.get("mode") == "stop" else "drain"
+    held = pause.get("held") or {}
+    waiting = ", ".join(f"{role} ({count})" for role, count in sorted(held.items())) or "nothing yet"
+    return [f"switchyard: {slug} WORK PAUSED ({mode}) since {pause.get('began_at')} by {pause.get('began_by')}: "
+            f"{pause.get('reason')}",
+            f"switchyard:   held for: {waiting}; the Director's pane is exempt. Details: ticket-board-read pause; "
+            "resume: ticket-board-write resume-work --reason-file PATH (or the board page)"]
+
+
 def _switchyard_project_status_payload(status: SwitchyardProjectStatus) -> dict[str, Any]:
     return {
         "name": status.name,
@@ -597,6 +634,9 @@ def switchyard_status_command(
         # SYRD-674: from root-owned registry records only -- no root, no configuration, no token.
         payload["reports"] = upstream_report_sinks.report_status(
             [status.slug for status in statuses], registry_dir=registry_dir)
+        # SYRD-756: each project's pause switch, as its own board answers; absent where the board cannot say.
+        payload["work_pauses"] = {config.project: answer for config in configs
+                                  if (answer := work_pause_reader(config)) is not None}
         print_func(json.dumps(payload, indent=2))
         return 0
     rows = [("NAME", "SLUG", "STATE", "PANES", "VIEWER")]
@@ -657,6 +697,12 @@ def switchyard_status_command(
     if report_lines:
         print_func("")
         for line in report_lines:
+            print_func(line)
+    # SYRD-756: a paused project says so, with who, why, since when and how to resume.
+    pause_lines = [line for config in configs for line in work_pause_lines(config.project, work_pause_reader(config))]
+    if pause_lines:
+        print_func("")
+        for line in pause_lines:
             print_func(line)
     from scripts import hermes_local_profile
 

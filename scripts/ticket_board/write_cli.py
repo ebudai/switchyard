@@ -712,6 +712,16 @@ def _build_parser() -> argparse.ArgumentParser:
         account = subparsers.add_parser(name, help=f"{verb} (SYRD-672; the Director or the User)")
         account.add_argument("runtime", choices=("claude", "codex", "agy", "hermes", "copilot"), help="the account's CLI")
         add_free_text_argument(account, "--reason", required=True, help=why)
+    pause_help = ("pause all work in this project, or change the pause's mode (the Director or the User): drain -- "
+                  "nothing is typed into any role pane but the Director's, and a turn already running finishes; stop "
+                  "-- that, and each busy role's turn is interrupted with its runtime's own interrupt, then the role "
+                  "is told once to record where it is. Undo with resume-work")
+    pause = subparsers.add_parser("pause-work", help=pause_help, description=pause_help)  # SYRD-756
+    pause.add_argument("--mode", required=True, choices=("drain", "stop"), help="drain, or stop now")
+    add_free_text_argument(pause, "--reason", required=True, help="why work is paused")
+    resume_help = "end the pause, whichever mode; after a stop, each interrupted role is told once"
+    resume = subparsers.add_parser("resume-work", help=resume_help, description=resume_help)
+    add_free_text_argument(resume, "--reason", required=True, help="why work resumes now")
     subparsers.add_parser(
         "claim-next",
         help="under a pull policy, claim your own next ready ticket; held work is returned instead (SYRD-539)",
@@ -1113,6 +1123,10 @@ def main(argv: list[str] | None = None) -> int:
             response = client.clear_provider_hold(args.role, reason=args.reason)
         elif command in ("hold_provider_account", "clear_provider_account_hold"):
             response = getattr(client, command)(args.runtime, reason=args.reason)
+        elif command == "pause_work":
+            response = client.pause_work(args.mode, reason=args.reason)
+        elif command == "resume_work":
+            response = client.resume_work(reason=args.reason)
         elif command == "extend_lease":
             response = client.extend_lease(args.lease, minutes=args.minutes, reason=args.reason)
         elif command == "interrupt_lease":
@@ -1219,7 +1233,7 @@ def main(argv: list[str] | None = None) -> int:
                    "uat_instructions", "extend_lease", "interrupt_lease", "set_cohort_quota", "clear_cohort_quota",
                    "clear_provider_hold", "await_user", "set_audit_return", "report_follow_up", "notify_user",
                    "set_blocked_reason", "request_blocker_review", "hold_provider_account", "restore_reopened",
-                   "clear_provider_account_hold"}:
+                   "clear_provider_account_hold", "pause_work", "resume_work"}:
         print(json.dumps(response))
     else:
         print(json.dumps(_ticket_from_response(response)))

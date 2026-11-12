@@ -106,6 +106,7 @@ and dashes in CLI subcommands.
 | Work waits on another ticket or an operator | Ask the Director to record `blocked_by`; the Director later uses `release-external-blocker` |
 | Work waits on the User | Finish through the declared gates, or the Director uses `await-user` only where the workflow permits it |
 | A reminder should pause until a known time | Director uses the declared snooze operation; do not invent a blocker |
+| Work is paused (`ticket-board-read pause`; a `WORK PAUSED` notice after a stop) | Drain: finish the turn you are in, then stay idle. Stop: one comment on your ticket saying what is done, half-done and next, then start nothing new until `WORK RESUMED`. Only the Director or the User pauses or resumes |
 | A role is quiet after routing | Yield; the board reports work and stalls. Make one targeted check only with concrete evidence of failed delivery |
 
 A comment does not record a wait. A blocked ticket stays in its own stage with

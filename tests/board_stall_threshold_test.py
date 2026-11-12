@@ -784,11 +784,16 @@ def mirrored() -> None:
     schema = (ROOT / "scripts/ticket_board/schema.sql").read_text()
     body = MIGRATION.read_text().split("BEGIN;\n\n", 1)[1].rsplit("\nCOMMIT;", 1)[0]
     # The last definition of each function is the migration's, byte for byte; a later ticket's may follow (SYRD-725).
+    # SYRD-756 (pgu1038) changed note_board_stall since, so its last copy is that migration's.
     heads = [f"CREATE OR REPLACE FUNCTION ticket_board.{name}(" for name in (
-        "declared_board_stall_seconds", "note_board_stall", "board_stall_status", "provisioned_workflow")]
+        "declared_board_stall_seconds", "board_stall_status", "provisioned_workflow")]
     at = schema.rfind(body)
     check(at >= 0 and all(at <= schema.rfind(h) < at + len(body) for h in heads),
           "schema.sql's last copies are the migration's, byte for byte")
+    later = (ROOT / "scripts/ticket_board/migrations/pgu1038_syrd756_paused_stall_clocks.sql").read_text()
+    head = "CREATE OR REPLACE FUNCTION ticket_board.note_board_stall("
+    last = schema[schema.rfind(head):schema.index("$$;", schema.rfind(head)) + 3]
+    check(at < schema.rfind(head) and last in later, "and note_board_stall's last copy is SYRD-756's, byte for byte")
     readers = subprocess.run(["git", "-C", str(ROOT), "grep", "--untracked", "-l", "-e", "->'board_stall'", "--", "scripts"],
                              capture_output=True, text=True).stdout.split()
     check(sorted(readers) == [str(MIGRATION.relative_to(ROOT)), "scripts/ticket_board/schema.sql"],

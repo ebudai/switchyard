@@ -37,6 +37,10 @@ def run(listener: Any, conn: Any) -> int:
     stages = [s for s in ((listener.workflow or {}).get("stages") or []) if s.get("kind") == "review" and len(s.get("owners") or []) > 1]
     if gate is None or not hasattr(gate, "background_work_roles") or not stages or not _present(listener, conn):
         return 0
+    from . import work_pause
+
+    if work_pause.project_paused(listener, conn):
+        return 0  # SYRD-756: no review moves while work is paused
     moved = 0
     for stage in stages:
         for role in stage["owners"]:

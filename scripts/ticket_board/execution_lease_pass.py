@@ -281,6 +281,10 @@ def _decide(conn: Any, row: dict[str, Any], holder: background_child.Holder, rol
     if turn is not None and row.get("turn_started_at") is not None and abs(_epoch(row["turn_started_at"]) - turn) > 0.001:
         _one(conn, "SELECT ticket_board.note_execution_lease_turn(%s, to_timestamp(%s))", (lease_id, turn))
     deadline = _epoch(row["deadline"])
+    if not row.get("hard"):  # SYRD-756: an observation deadline does not run while work is paused; a hard one is the wrapper's
+        from . import work_pause
+
+        deadline += work_pause.paused_seconds(conn, holder.started_at)
     # Once per deadline: the database says whether this one was already told (note_execution_lease_alert).
     if now < deadline + (HARD_SLACK_SECONDS if row.get("hard") else 0.0) or _text(row.get("state")) == "stale":
         return 0

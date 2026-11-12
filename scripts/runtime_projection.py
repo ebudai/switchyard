@@ -122,6 +122,10 @@ def write_runtime_projection(
         config_path, role_name=role_name, runtime=runtime, document=document, model=model, effort=effort,
         owner_user=owner,
     )
+    # Before anything is written: the role as root will hold it, from the file as re-read above, whose identity must
+    # still be the one root's checked load held (SYRD-762).
+    projected = (_with_projected_role(config, config_path=config_path, role_name=role_name, text=files[config_path])
+                 if team_launcher.root_writes_for(owner) else None)
     if journal is not None:
         # Recorded before the first byte is written, so a crash between files
         # leaves a journal that names every one to put back.
@@ -131,9 +135,13 @@ def write_runtime_projection(
     apply_files(files, owner_user=owner)
     for path in files:
         team_launcher.ensure_owner_file(config, path, runner=runner)
-    if team_launcher.root_writes_for(owner):
-        return _with_projected_role(config, config_path=config_path, role_name=role_name, text=files[config_path])
+    if projected is not None:
+        return projected
     return team_launcher.load_project_config(config.project, config_path)
+
+
+#: A role's fields root acts on as or for an account, which a runtime projection must leave as root's load held them.
+PROJECTION_IDENTITY = ("role", "run_as_user", "workdir", "tmux_session", "target", "slot", "detached", "ephemeral")
 
 
 def _with_projected_role(config: Any, *, config_path: Path, role_name: str, text: str) -> Any:
@@ -150,6 +158,17 @@ def _with_projected_role(config: Any, *, config_path: Path, role_name: str, text
     entry = next(item for item in json.loads(text)["roles"] if isinstance(item, dict) and item.get("role") == role_name)
     held = team_launcher._role_by_name(config, role_name)
     role = team_launcher._role_from_json(config.project, entry, base=config_path.parent, default_workdir=Path(held.workdir))
+    # A runtime switch changes the runtime and nothing else. The tenant can rewrite its file between root's checked
+    # load and this re-read, and every field root acts on as or for an account -- whose account, which tree, which
+    # session -- would otherwise come from that rewrite, unchecked (SYRD-757's check is the load's). So each must be
+    # what the load held, or nothing is written (SYRD-762).
+    changed = [name for name in PROJECTION_IDENTITY if getattr(role, name) != getattr(held, name)]
+    if changed:
+        from scripts import role_runtime as rr
+
+        raise rr.RoleRuntimeRefusal(
+            f"switchyard: {config_path} now gives {role_name} another {', '.join(changed)} than root read for this "
+            "switch; a runtime switch changes only the runtime. Nothing was written.")
     role = team_launcher._with_project_board_env(config, [role])[0]
     return replace(config, roles=[role if item.role == role_name else item for item in config.roles])
 

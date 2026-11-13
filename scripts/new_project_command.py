@@ -169,8 +169,9 @@ def new_project_command(
         audit_roles = ("audit",)
         board_service_traversal = True
     # Where the owner is decided -- the artifact, --owner-user or the default -- and before anything is created: a
-    # uid-0 owner would send every root write for it down its by-path branch (SYRD-763).
-    refusal = owner_writes.uid0_owner_refusal(
+    # uid-0 owner would send every root write for it down its by-path branch (SYRD-763), and a name
+    # that is not a plain account name may be read as a uid further on (SYRD-765).
+    refusal = owner_writes.new_owner_refusal(
         effective_owner, str(from_artifact) if design_artifact is not None else "--owner-user")
     if refusal:
         raise SystemExit(refusal)

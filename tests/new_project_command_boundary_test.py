@@ -281,14 +281,14 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
     saved_assign, saved_geteuid = workflow_launcher.assign_projection_owner, os.geteuid
     saved_root_packet = (root_packet.stage_root_packet, root_packet.publish_packet_record, root_packet.trusted_launcher,
                          root_packet.root_controlled)
-    saved_owner_writes = (owner_writes.root_writes_in, owner_writes.root_alone_directory, owner_writes.uid0_owner_refusal)
+    saved_owner_writes = (owner_writes.root_writes_in, owner_writes.root_alone_directory, owner_writes.new_owner_refusal)
     # SYRD-759's question, after the baseline: whether root may write the output directory by path. Answered here
     # without a record in `calls`, so every measured case is the baseline's unchanged; what the command does with a
     # refusal is asserted on its own below.
     owner_writes.root_writes_in = lambda owner, path: False
     owner_writes.root_alone_directory = lambda path: spec.get("root_alone", "")
     # SYRD-763's question likewise: whether the owner decided here is uid 0.
-    owner_writes.uid0_owner_refusal = lambda owner, named_by: spec.get("uid0_refusal", "")
+    owner_writes.new_owner_refusal = lambda owner, named_by: spec.get("uid0_refusal", "")
     try:
         for d in ("repo", "src", "home/p426"):
             (tmp / d).mkdir(parents=True)
@@ -446,7 +446,7 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
         workflow_launcher.assign_projection_owner = saved_assign
         (root_packet.stage_root_packet, root_packet.publish_packet_record, root_packet.trusted_launcher,
          root_packet.root_controlled) = saved_root_packet
-        owner_writes.root_writes_in, owner_writes.root_alone_directory, owner_writes.uid0_owner_refusal = saved_owner_writes
+        owner_writes.root_writes_in, owner_writes.root_alone_directory, owner_writes.new_owner_refusal = saved_owner_writes
         for n, f in saved.items():
             setattr(t, n, f)
         shutil.rmtree(tmp)

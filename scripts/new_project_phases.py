@@ -197,10 +197,11 @@ def _resolve_new_project_choices(
         selected_router = ()
         selected_documentation = ()
     # Where the owner is decided -- the artifact or the agent user -- and before anything is recorded or created: a
-    # uid-0 owner would send every root write for it down its by-path branch (SYRD-763).
+    # uid-0 owner would send every root write for it down its by-path branch (SYRD-763), and a name
+    # that is not a plain account name may be read as a uid further on (SYRD-765).
     from scripts import owner_writes
 
-    refusal = owner_writes.uid0_owner_refusal(owner_user, str(from_artifact) if from_artifact else "the agent user")
+    refusal = owner_writes.new_owner_refusal(owner_user, str(from_artifact) if from_artifact else "the agent user")
     if refusal:
         raise SystemExit(refusal)
     artifact_agy_source = ""

@@ -174,6 +174,15 @@ def cases(tree: Path) -> dict:
         from team_launcher_test_helpers import FakeRunner
 
         said: list[str] = []
+        # This suite names each account by its uid ("1500"), so the helper processes' chown resolves it with no
+        # passwd entry. Since SYRD-765, `new` refuses an owner that is not a plain account name, as such a name is;
+        # that rule is new_owner_name_test's. Here `new` is asked about the fixture's owner as if plainly named, so
+        # what follows the owner decision is what is measured, as before.
+        from scripts import owner_writes as named
+
+        real_refusal = getattr(named, "new_owner_refusal", None)
+        if real_refusal is not None:
+            named.new_owner_refusal = lambda name, named_by: "" if name == owner else real_refusal(name, named_by)
         out["dry_run"] = outcome(lambda: launcher.new_project_command(
             "porter", owner_user=owner, source_repo=source, commit_git_dir="/srv/git/review-cache.git",
             repository=host.project, output_dir=host.provision, runner=FakeRunner(), port_in_use=lambda _port: False,
@@ -272,6 +281,8 @@ def cases(tree: Path) -> dict:
             pwd.getpwnam, pwd.getpwuid = by_name, by_uid
         out["other_written"] = sorted(os.listdir(other_project / ".switchyard" / "out")) \
             if (other_project / ".switchyard" / "out").exists() else []
+        if real_refusal is not None:
+            named.new_owner_refusal = real_refusal
     return out
 
 

@@ -331,7 +331,7 @@ def test_the_seams_and_nothing_bound_read_through_the_launcher() -> None:
     # SYRD-742 before the role questions, so ahead of Router's and the gate's summaries.
     report_choice = [i for i, s in enumerate(fn.body) if "upstream_report_sinks.choose_report_board(" in ast.unparse(s)]
     # SYRD-763: and the owner's uid-0 refusal, by its own module, imported right where it is asked.
-    owner_refusal = [i for i, s in enumerate(fn.body) if "owner_writes.uid0_owner_refusal(" in ast.unparse(s)]
+    owner_refusal = [i for i, s in enumerate(fn.body) if "owner_writes.new_owner_refusal(" in ast.unparse(s)]
     check(local == [(0, "from scripts import team_launcher as launcher"),
                     (owner_refusal[0] - 1, "from scripts import owner_writes"),
                     (decided[0] + 1, "from scripts.desktop_access import validate_policy"),

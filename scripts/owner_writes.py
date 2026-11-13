@@ -165,14 +165,22 @@ def owner_handoff_args(owner_user: str, path: Path, *, tree: bool = False, to: s
     return tenant_paths_argv(owner_root(owner_user, path), "attrs", "--owner", owner_user, "--group", owner_user, str(path))
 
 
-def uid0_owner_refusal(owner_user: str, named_by: str) -> str:
-    """Why `owner_user` may not own a new project, or "" (SYRD-763).
+def new_owner_refusal(owner_user: str, named_by: str) -> str:
+    """Why `owner_user` may not own a new project, or "" (SYRD-763, SYRD-765).
 
     Every root branch that writes as or for a project's owner is chosen by `root_writes_for(owner)`, which is False
     for an owner that is root -- so with root as the owner, each of them takes its by-path code as root. A project is
-    therefore never owned by `root` or by any other account whose uid is 0, whoever named it.
+    therefore never owned by `root` or by any other account whose uid is 0, whoever named it. And the owner must be a
+    plain account name (`OWNER_USER_NAME_RE`): `chown`, `install -o` and systemd's `User=` read an all-digit name as a
+    uid, which `pwd` would not find to refuse here.
     """
+    from scripts import team_launcher as launcher
+
     name = (owner_user or "").strip()
+    # An empty owner is refused where it is read (`_owner_user_verbatim`, the artifact loader's non-empty field).
+    if name and not launcher._is_valid_owner_user_name(name):
+        return (f"switchyard: {named_by} names {name!r} as the project's owner, which is not a plain account name "
+                "(a lowercase letter or _, then up to 31 lowercase letters, digits, _ or -). Nothing was created.")
     try:
         uid = pwd.getpwnam(name).pw_uid if name else None
     except KeyError:  # an account `new` is still to create

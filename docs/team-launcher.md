@@ -2173,6 +2173,12 @@ artifact or otherwise, before anything is created:
 - `team-launcher <p> new`: the artifact's owner, `--owner-user`, or the
   default.
 
+The same check also refuses an owner that is not a plain account name
+(SYRD-765): a lowercase letter or `_`, then up to 31 lowercase letters,
+digits, `_` or `-`. An all-digit name such as `0` names no account to find,
+yet `chown`, `install -o` and systemd's `User=` read it as a uid. The refusal
+names the value and where it came from.
+
 The generated director role receives onboarding paths in its environment;
 the director owns the unprivileged half after the board exists: seed the board,
 launch panes, onboard the team, and reshape stages or roles later if needed.

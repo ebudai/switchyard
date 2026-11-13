@@ -172,7 +172,11 @@ switchyard restart-role <project> <role> [--while-holding <ticket>] [--dry-run]
   configuration.
 - **What it does.** It ends the role's pane process and starts the replacement through the
   launcher's own path, with the current release's hooks, the role's prompt and the
-  environment the launcher gives it now. The role's recorded conversation resumes,
+  environment the launcher gives it now. The replacement starts only once the old pane's
+  process has left: the board refuses a new pane while the role's old process is alive, and
+  a CLI can take seconds to leave after tmux hangs it up. One still there after 15 seconds
+  is sent SIGTERM, then SIGKILL; one that outlives that stops the restart before anything
+  is started. The role's recorded conversation resumes,
   according to its ephemerality and context rules. The command then proves the restart:
   - every process of the old pane ended;
   - the board registered a new process, which stays up;
@@ -181,7 +185,8 @@ switchyard restart-role <project> <role> [--while-holding <ticket>] [--dry-run]
   If not, it says so and fails.
 - **The window shows it again.** Every display slot that showed the role is reconnected
   to the replacement, and each is checked the way `switchyard present <project> list`
-  reads it. There is no `present show` step left for anyone. If a slot still does not show
+  reads it. There is no `present show` step left for anyone, and another role being stopped
+  does not keep this one's slots from coming back. If a slot still does not show
   the role, the command fails and prints the exact
   `switchyard present <project> show --slot <n> <role>` that reconnects it.
 - **When it refuses,** nothing is changed:
@@ -203,6 +208,15 @@ switchyard restart-role <project> <role> [--while-holding <ticket>] [--dry-run]
   start. If that fails too, it does not say "nothing changed". It says the role is
   stopped, keeps its recorded conversation, and names the command that starts it again
   once the cause is fixed: `switchyard restart-role <project> <role>`.
+- **Why a start failed.** A role's pane registers with the board before its CLI starts, and
+  a start whose pane closes before that is over keeps what the pane printed, in the role's
+  session directory as `<session>.startup-exit`, readable by the project's account only.
+  When the board refused the new pane's registration, the start
+  says so, with the board's reason, and keeps the recorded conversation: the CLI never ran,
+  so the conversation is not set aside and no fresh one is started.
+- **Not `team-launcher ... --dry-run pane`.** A dry run of a `pane` mode is refused,
+  because each one starts, ends or attaches the real pane. `switchyard restart-role
+  <project> <role> --dry-run` says what a restart would do.
 - **A role whose pane is gone** while the board is up is started the same way. That is the
   recovery for a disconnected pane.
 - **Your own pane.** Run it from your pane as the last thing in your turn: the turn that

@@ -87,6 +87,51 @@ def _report_startup_exit(role: RoleConfig, capture: Path | None) -> None:
         print(line, file=sys.stderr)
 
 
+#: The longest a pane's registrar is waited for: its own board connection gives up after 10 seconds.
+REGISTRAR_HANDOVER_SECONDS = 12.0
+
+
+def _registration_refused(
+    role: RoleConfig,
+    capture: Path | None,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> str:
+    """Why the board refused the new pane's registration -- said once its pane has closed -- or "" (SYRD-767).
+
+    A pane on a process-authority board runs `ticket-board-register-runtime` first, which execs the CLI only once the
+    board has registered it. Until it has, the CLI's name is already on the pane's command line, so a start check
+    that looked for it passed at once, disarmed the capture, and the refusal that closed the pane a moment later went
+    unrecorded and was read as a failed resume. So a start waits here for the registrar to hand over -- or for its
+    pane to close, when the capture holds the registrar's own `runtime registration refused` line.
+    """
+    from scripts import startup_capture
+    from scripts import team_launcher as launcher
+    from scripts.role_command import role_registers_runtime
+
+    if not role_registers_runtime(role):
+        return ""
+    from scripts.tmux_session_argv import expected_live_commands
+
+    cli = expected_live_commands(role)
+    deadline = time.monotonic() + REGISTRAR_HANDOVER_SECONDS
+    while time.monotonic() < deadline:
+        if runner(launcher.tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+            reason = startup_capture.registration_refusal(capture)
+            return (f"team-launcher: the board refused {role.role}'s new pane ({reason}), so its CLI never started; "
+                    "its recorded conversation is kept") if reason else ""
+        pane = launcher.pane_pid_for_role(role, runner=runner)
+        # Handed over only once the CLI itself runs: a process whose program -- or the script its interpreter runs --
+        # is the CLI, which the registrar becomes only once the board has registered the pane. Never a name on a
+        # shell's `-c` line or after the registrar's `--`, and never the registrar merely not seen yet: a shell that
+        # forks (fish) has not always started it at the first look.
+        programs = [{Path(arg).name for arg in argv[:2]} for argv in launcher.process_tree_argvs(pane)] if pane > 0 else []
+        if any(names & cli for names in programs):
+            return ""
+        time.sleep(launcher.RESUME_STARTUP_POLL_SECONDS)
+    return ""
+
+
 def _decided(role: RoleConfig, session_dir: Path, entry: str, event: str, message: str = "", session_id: str = "") -> None:
     """Print what a start decided, if it says anything, and keep it in the pane's resume history (SYRD-569)."""
     from scripts.resume_history import record_resume_decision
@@ -183,9 +228,12 @@ def _start_role_session(
     if not prefer_resume:
         launcher.clear_session_record_for_role(role, session_dir)
     launcher.prepare_hermes_home_for_role(declared, session_dir=session_dir)
-    # SYRD-532: a command that exits during startup keeps its last lines.
-    # Asked for by the detached start `worker-pool start` runs; every other start is unchanged.
-    armed = startup_capture
+    # SYRD-532: a command that exits during startup keeps its last lines. Asked for by the detached start `worker-pool
+    # start` runs, and armed for every pane that registers with its board first (SYRD-767): the board can refuse it
+    # and close it before its CLI ever runs, which a restart's start did on syrd with nothing left to say why.
+    from scripts.role_command import role_registers_runtime
+
+    armed = startup_capture or role_registers_runtime(role)
     from scripts import startup_capture as capture_module
 
     capture_file = capture_module.capture_path(session_dir, launcher.session_file_name(role.target))
@@ -206,6 +254,13 @@ def _start_role_session(
         _decided(role, session_dir, seed_source, "start_failed",
                  session_id=session_id if prefer_resume else "")
         return int(start_proc.returncode)
+    refused = _registration_refused(role, capture, runner=runner)
+    if refused:
+        # The CLI never ran, so neither its conversation nor a fresh one is at fault: nothing is set aside.
+        _decided(role, session_dir, seed_source, "registration_refused", refused,
+                 session_id=session_id if prefer_resume else "")
+        _report_startup_exit(role, capture)
+        return 1
     if not prefer_resume:
         if post_start_verifier is not None and not post_start_verifier():
             launcher.clear_pane_idle_state_for_role(role, pane_state_dir=pane_state_dir)

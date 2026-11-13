@@ -659,7 +659,10 @@ def reconnect_role_slots(
     into the gap between kill and start attaches the proxy to nothing, which
     parks it again for the same reason.
     """
-    config = runtime_assignment_config(config)
+    # Only this role has to be live: a stopped one elsewhere left every restarted role's slots unshown (SYRD-767).
+    config, absent = assignment_config_with_absent(config)
+    if role_name in absent:
+        raise SystemExit(f"switchyard: no live runtime assignment for configured role(s): {role_name}")
     _validate_role_namespace(config)
     state_path = state_path or presentation_state_path(config, config_path=config_path)
     owner_runner = _tmux_runner(config, runner)

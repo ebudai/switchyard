@@ -186,6 +186,11 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit("pane mode requires <start|attach|attach-or-start|reload|attach-role|detach-role> and <role>")
         if args.pane_mode not in {"start", "attach", "attach-or-start", "reload", "attach-role", "detach-role"}:
             raise SystemExit(f"unknown pane mode: {args.pane_mode}")
+        if args.dry_run:
+            # Every pane mode starts, ends or attaches a real pane: a dry run of one started a real Audit (SYRD-767).
+            raise SystemExit(f"team-launcher: --dry-run is refused for `pane {args.pane_mode}`, which acts on the real "
+                             f"pane; nothing was changed. `switchyard restart-role {args.project} {args.role} --dry-run` "
+                             "says what a restart would do without doing it")
         if args.pane_mode not in {"attach", "detach-role"}:
             config = launcher.prepare_project_desktop(config)
         role = launcher._role_by_name(config, args.role)

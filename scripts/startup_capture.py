@@ -67,15 +67,39 @@ def arm_args(session: str, path: Path | None) -> list[str]:
         f"delete-buffer -b '{buffer}' ; "
         "kill-session"
     )
+    # Targets as `<session>:`, its current window and pane: a runner that makes every target exact (`=<session>`)
+    # leaves that a session, where a bare `=<session>` would be looked up as a window's name (SYRD-767).
     return [
-        ";", "set-window-option", "-t", session, "remain-on-exit", "on",
-        ";", "set-hook", "-t", session, "pane-died", hook,
+        ";", "set-window-option", "-t", f"{session}:", "remain-on-exit", "on",
+        ";", "set-hook", "-t", f"{session}:", "pane-died", hook,
     ]
 
 
 def disarm_args(session: str) -> list[str]:
-    return ["tmux", "set-hook", "-u", "-t", session, "pane-died",
-            ";", "set-window-option", "-u", "-t", session, "remain-on-exit"]
+    return ["tmux", "set-hook", "-u", "-t", f"{session}:", "pane-died",
+            ";", "set-window-option", "-u", "-t", f"{session}:", "remain-on-exit"]
+
+
+#: What `ticket-board-register-runtime` prints when the board refuses a pane, before the pane closes.
+_REFUSED = re.compile(r"switchyard: runtime registration refused: (.+)")
+
+
+def registration_refusal(path: Path | None) -> str:
+    """The board's refusal, as the pane's registrar printed it, from a capture -- or "" (SYRD-767).
+
+    Only that one line of Switchyard's own is read back out; the rest stays in the file, as below.
+    """
+    if path is None:
+        return ""
+    try:
+        with path.open("rb") as handle:
+            text = handle.read(CAPTURE_READ_LIMIT).decode("utf-8", "replace")
+    except OSError:
+        return ""
+    match = _REFUSED.search(text)
+    if not match:
+        return ""
+    return match.group(1).strip()[:300]  # the board's own words: it refuses in plain text
 
 
 def report(role_name: str, path: Path | None) -> str:

@@ -280,13 +280,15 @@ def test_reload_uses_recorded_resume_uuid_when_recreating_session() -> None:
         assert runner.calls[0] == ["tmux", "has-session", "-t", "pgu-ops"]
         assert runner.calls[1] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_pid}"]
         assert runner.calls[2] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_current_command}"]
-        assert runner.calls[3] == ["tmux", "kill-session", "-t", "pgu-ops"]
-        assert runner.calls[4][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
-        assert f"codex resume {session_id}" in runner.calls[4][-1]
-        assert "--continue" not in runner.calls[4][-1]
-        assert "--last" not in runner.calls[4][-1]
-        assert runner.calls[5] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_pid}"]
-        assert runner.calls[6] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_current_command}"]
+        # SYRD-767: the old pane's process is read before the kill, and waited for before the new session starts.
+        assert runner.calls[3] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_pid}"]
+        assert runner.calls[4] == ["tmux", "kill-session", "-t", "pgu-ops"]
+        assert runner.calls[5][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
+        assert f"codex resume {session_id}" in runner.calls[5][-1]
+        assert "--continue" not in runner.calls[5][-1]
+        assert "--last" not in runner.calls[5][-1]
+        assert runner.calls[6] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_pid}"]
+        assert runner.calls[7] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_current_command}"]
         assert ["tmux", "set-option", "-t", "pgu-ops", "mouse", "on"] in runner.calls
         assert ["tmux", "set-option", "-t", "pgu-ops", "history-limit", "200000"] in runner.calls
         assert ["tmux", "attach", "-t", "pgu-ops"] in runner.calls
@@ -442,9 +444,10 @@ def test_reload_without_recorded_resume_id_logs_fresh_start() -> None:
             )
 
     assert "team-launcher: no recorded session id for ops; starting fresh session" in stderr.getvalue()
-    assert runner.calls[4][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
-    assert " resume " not in f" {runner.calls[4][-1]} "
-    assert "--resume" not in runner.calls[4][-1]
+    # SYRD-767: after the old pane's process is read (3) and its session killed (4).
+    assert runner.calls[5][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
+    assert " resume " not in f" {runner.calls[5][-1]} "
+    assert "--resume" not in runner.calls[5][-1]
 
 def test_claude_reload_skips_missing_local_transcript_instead_of_exiting() -> None:
     config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
@@ -888,7 +891,9 @@ def test_reload_force_bypasses_live_command_guard() -> None:
         )
 
     assert runner.calls[0] == ["tmux", "has-session", "-t", "pgu-ops"]
-    assert runner.calls[1] == ["tmux", "kill-session", "-t", "pgu-ops"]
+    # SYRD-767: the old pane's process, read so the reload can wait for it, then the kill.
+    assert runner.calls[1] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_pid}"]
+    assert runner.calls[2] == ["tmux", "kill-session", "-t", "pgu-ops"]
 
 def test_reload_guard_matches_cli_child_under_shell_in_real_tmux() -> None:
     if shutil.which("tmux") is None:

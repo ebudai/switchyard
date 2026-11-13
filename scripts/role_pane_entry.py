@@ -128,6 +128,50 @@ def desktop_reload_is_safe(role: RoleConfig, pane_state_dir: Path) -> bool:
     return True
 
 
+def _end_for_reload(
+    role: RoleConfig,
+    *,
+    exists: bool,
+    pane_state_dir: Path,
+    force_reload: bool,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> int:
+    """End the role's live session for a reload, and return 0 only once its pane's process has gone (SYRD-767).
+
+    `tmux kill-session` returns when tmux has hung the pane up, not when its process has left, and the board refuses
+    a pane's registration while the role's registered process is still alive. A reload that started its replacement
+    at once raced that exit: on syrd every restart's first start was refused and its pane closed, and Audit's second
+    start too. So the old pane is waited for as a runtime switch waits for it (SYRD-559), and asked more firmly if it
+    will not go; one that outlives that refuses the reload, with nothing started.
+    """
+    from scripts import team_launcher as launcher
+    from scripts import runtime_handover
+
+    if not exists:
+        return 0
+    if not desktop_reload_is_safe(role, pane_state_dir):
+        return 1
+    if not force_reload and not launcher.live_command_matches_role(role, runner=runner):
+        print(
+            f"refusing to reload {role.tmux_session}: live pane command does not match configured CLI; "
+            "rerun with --force to override",
+            file=sys.stderr,
+        )
+        return 1
+    handover = runtime_handover.RuntimeHandover()
+    holders = runtime_handover.pane_holders(role, runner=runner, handover=handover)
+    kill_proc = runner(launcher.tmux_kill_session_args(role))
+    if kill_proc.returncode != 0:
+        return int(kill_proc.returncode)
+    try:
+        runtime_handover.await_holders_gone(holders, role=role, replacement="its reload", handover=handover,
+                                            print_func=lambda line: print(line, file=sys.stderr))
+    except RuntimeError as exc:
+        print(f"switchyard: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def run_role_pane(
     role: RoleConfig,
     *,
@@ -151,19 +195,10 @@ def run_role_pane(
         print(conflict, file=sys.stderr)
         return 1
     if mode == "reload":
-        if exists and not desktop_reload_is_safe(role, pane_state_dir):
-            return 1
-        if exists:
-            if not force_reload and not launcher.live_command_matches_role(role, runner=runner):
-                print(
-                    f"refusing to reload {role.tmux_session}: live pane command does not match configured CLI; "
-                    "rerun with --force to override",
-                    file=sys.stderr,
-                )
-                return 1
-            kill_proc = runner(launcher.tmux_kill_session_args(role))
-            if kill_proc.returncode != 0:
-                return int(kill_proc.returncode)
+        ended = _end_for_reload(role, exists=exists, pane_state_dir=pane_state_dir, force_reload=force_reload,
+                                runner=runner)
+        if ended != 0:
+            return ended
         start_result = launcher._start_role_session(
             role,
             session_dir=session_dir,
@@ -217,19 +252,10 @@ def run_detached_role(
         print(conflict, file=sys.stderr)
         return 1
     if mode == "reload":
-        if exists and not desktop_reload_is_safe(role, pane_state_dir):
-            return 1
-        if exists:
-            if not force_reload and not launcher.live_command_matches_role(role, runner=runner):
-                print(
-                    f"refusing to reload {role.tmux_session}: live pane command does not match configured CLI; "
-                    "rerun with --force to override",
-                    file=sys.stderr,
-                )
-                return 1
-            kill_proc = runner(launcher.tmux_kill_session_args(role))
-            if kill_proc.returncode != 0:
-                return int(kill_proc.returncode)
+        ended = _end_for_reload(role, exists=exists, pane_state_dir=pane_state_dir, force_reload=force_reload,
+                                runner=runner)
+        if ended != 0:
+            return ended
         return launcher._start_role_session(
             role,
             session_dir=session_dir,
@@ -281,19 +307,10 @@ def ensure_visible_role_session_for_viewer(
         print(conflict, file=sys.stderr)
         return 1
     if mode == "reload":
-        if exists and not desktop_reload_is_safe(role, pane_state_dir):
-            return 1
-        if exists:
-            if not force_reload and not launcher.live_command_matches_role(role, runner=runner):
-                print(
-                    f"refusing to reload {role.tmux_session}: live pane command does not match configured CLI; "
-                    "rerun with --force to override",
-                    file=sys.stderr,
-                )
-                return 1
-            kill_proc = runner(launcher.tmux_kill_session_args(role))
-            if kill_proc.returncode != 0:
-                return int(kill_proc.returncode)
+        ended = _end_for_reload(role, exists=exists, pane_state_dir=pane_state_dir, force_reload=force_reload,
+                                runner=runner)
+        if ended != 0:
+            return ended
         return launcher._start_role_session(
             role,
             session_dir=session_dir,

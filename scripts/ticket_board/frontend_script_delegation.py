@@ -15,15 +15,19 @@ SCRIPT_DELEGATION = r"""
       .board-ui-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: flex;
         align-items: center; justify-content: center; z-index: 2000; }
       .board-ui-dialog { background: var(--panel, #fff); color: inherit; max-width: 34rem; width: calc(100% - 2rem);
-        border-radius: 8px; padding: 1rem 1.25rem; box-shadow: 0 8px 32px rgba(0,0,0,0.3); }
+        border-radius: 8px; padding: 1rem 1.25rem; box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+        max-height: calc(100dvh - 2rem); overflow-y: auto; }
       .board-ui-dialog h3 { margin: 0 0 0.5rem; font-size: 1.05rem; }
       .board-ui-dialog label { display: block; margin: 0.5rem 0; }
       .board-ui-dialog input, .board-ui-dialog select, .board-ui-dialog textarea { width: 100%; box-sizing: border-box; }
       .board-ui-summary { margin: 0.5rem 0; padding: 0; list-style: none; }
-      .board-ui-summary li { margin: 0.2rem 0; }
+      .board-ui-summary li { margin: 0.2rem 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 12em;
+        overflow-y: auto; }
       .board-ui-authority { font-size: 0.9rem; opacity: 0.8; margin: 0.5rem 0; }
       .board-ui-error { color: #b00020; margin: 0.5rem 0; white-space: pre-wrap; }
       .board-ui-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.4rem 0; }
+      .board-ui-dialog > .board-ui-actions { position: sticky; bottom: -1rem; margin: 0 0 -1rem; padding: 0.6rem 0 1rem;
+        background: var(--panel, #fff); }
     `;
     (function installBoardUiStyle() {
       const style = document.createElement('style');
@@ -68,7 +72,19 @@ SCRIPT_DELEGATION = r"""
         dialog.setAttribute('aria-modal', 'true');
         dialog.setAttribute('data-board-ui-dialog', op.operation);
         overlay.appendChild(dialog);
-        const close = (result) => { overlay.remove(); resolve(result); };
+        // Escape is Cancel while the dialog is open, and closes nothing behind it (SYRD-741).
+        const onKey = (event) => {
+          if (event.key === 'Escape') {
+            event.stopImmediatePropagation();
+            close(null);
+          }
+        };
+        const close = (result) => {
+          document.removeEventListener('keydown', onKey, true);
+          overlay.remove();
+          resolve(result);
+        };
+        document.addEventListener('keydown', onKey, true);
         const error = document.createElement('div');
         error.className = 'board-ui-error';
         error.setAttribute('data-board-ui-error', '');

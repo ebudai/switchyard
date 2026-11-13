@@ -152,6 +152,9 @@ SCRIPT_UAT = r"""
       };
     }
 
+    // ticket_board.ask_director's own limit on a question (SYRD-629).
+    const UAT_QUESTION_MAX = 4000;
+
     const UAT_ASK = { operation: 'ask_director', label: 'Ask Director', mode: 'direct',
                       fields: [{ name: 'question', kind: 'text', label: 'Your question', required: true }],
                       question: 'Send your question to the Director?',
@@ -256,18 +259,37 @@ SCRIPT_UAT = r"""
       }
       label.appendChild(message);
       panel.appendChild(label);
+      // A question longer than the board takes says so as it is typed or pasted, before anything is sent.
+      const limit = document.createElement('div');
+      limit.className = 'uat-limit';
+      limit.setAttribute('data-uat-limit', '');
+      limit.setAttribute('aria-live', 'polite');
+      const text = () => message.value.trim();
+      const measure = () => {
+        const length = text().length;
+        limit.hidden = length <= UAT_QUESTION_MAX;
+        limit.textContent = limit.hidden ? '' : `This is ${length.toLocaleString('en-US')} characters. Ask Director `
+          + `takes ${UAT_QUESTION_MAX.toLocaleString('en-US')} at most; Send to Director takes all of it.`;
+      };
+      message.addEventListener('input', measure);
+      panel.appendChild(limit);
       const actions = document.createElement('div');
       actions.className = 'uat-actions';
       actions.setAttribute('data-uat-actions', '');
-      const text = () => message.value.trim();
       const presets = (name) => (text() ? { [name]: text() } : {});
       // Done: the message was sent, so the box is empty again.
       const sent = async (op, values) => {
         await performBoardUiAction(ticket, op, values);
         markDetailDraftFieldsSaved(ticket.id, { uatMessage: '' });
       };
-      actions.appendChild(uatButton('Ask Director', 'uat-ask', () => sent(UAT_ASK, presets('question'))));
+      actions.appendChild(uatButton('Ask Director', 'uat-ask', async () => {
+        if (limit.hidden) {
+          await sent(UAT_ASK, presets('question'));
+        }
+      }));
       panel.appendChild(actions);
+      // A draft restored after a redraw is measured too, once it is in the box.
+      queueMicrotask(measure);
       uatDecisions(ticket).then(({ accept, send }) => {
         if (accept) {
           const button = uatButton('Accept', 'primary uat-accept', () => performBoardUiAction(ticket, accept, {}));
@@ -312,7 +334,9 @@ STYLE_UAT = """
     .uat-thread { border-left: 3px solid var(--accent); padding-left: 8px; margin: 0 0 8px; }
     .uat-reply { margin: 6px 0 0; }
     .uat-message-label { display: block; font-weight: 600; margin: 4px 0; }
-    .uat-message-input { display: block; width: 100%; min-height: 3.2em; box-sizing: border-box; }
+    .uat-message-input { display: block; width: 100%; min-height: 3.2em; max-height: 50vh; box-sizing: border-box; }
+    .uat-message > .uat-part-text, .uat-thread .uat-part-text { max-height: 40vh; overflow-y: auto; }
+    .uat-limit { color: var(--warn); font-size: 0.85rem; margin: 4px 0; }
     .uat-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
     .board-ui-next { margin: 6px 0; font-weight: 600; }
 """

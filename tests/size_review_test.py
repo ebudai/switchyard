@@ -31,6 +31,7 @@ import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+MIGRATIONS = "scripts/ticket_board/migrations/"
 PANE_ENV_PREFIXES = ("TICKET_BOARD_", "PGU_TICKET_BOARD_", "DIRECTORCTL")
 CHECKS = 0
 NEW_FUNCTIONS = ("size_review_enabled", "size_ceilings", "record_size_scan", "approve_size_exception",
@@ -524,11 +525,14 @@ def mirror_cases(root: Path) -> dict:
         base = git(repo, "rev-parse", "HEAD")
         block = "".join(f"CREATE FUNCTION f_{i}() RETURNS int LANGUAGE sql AS 'SELECT {i}';\n" for i in range(10))
 
-        def case(label: str, schema_text: str, new_migration: str | None, touch_old: bool = False) -> None:
+        def case(label: str, schema_text: str, new_migration: str | None, touch_old: bool = False,
+                 more: dict[str, str] | None = None) -> None:
             git(repo, "checkout", "-q", "-B", label, base)
             (repo / schema).write_text(schema_text)
             if new_migration is not None:
                 (repo / migrations / "pgu999_new.sql").write_text(new_migration)
+            for name, text in (more or {}).items():
+                (repo / migrations / name).write_text(text)
             if touch_old:
                 (repo / migrations / "pgu001_old.sql").write_text(old_block + "-- touched\n")
             git(repo, "add", "-A")
@@ -549,6 +553,44 @@ def mirror_cases(root: Path) -> dict:
         case("annotated_differently", base_schema + "".join(noted[:5]) + "-- schema.sql's note\n" + "".join(noted[5:]),
              "BEGIN;\n" + "".join(noted[:5]) + "-- the migration's own note\n" + "".join(noted[5:]) + "COMMIT;\n")
         case("replaced", lines(1290, "s") + lines(10, "r"), None)
+
+        # One hunk folding several migrations, as schema.sql carries them: each body in the order the migrations run
+        # (by number: pgu999 before pgu1000 before pgu1001, which text order would reverse), without the BEGIN and
+        # COMMIT around each, or the grants rbac.sql holds.
+        def body(tag: str) -> str:
+            return "".join(f"CREATE FUNCTION {tag}_{i}() RETURNS int LANGUAGE sql AS 'SELECT {i}';\n" for i in range(8))
+
+        def migration(tag: str) -> str:
+            return f"BEGIN;\n{body(tag)}GRANT EXECUTE ON FUNCTION {tag}_0() TO ticket_board_service;\nCOMMIT;\n"
+
+        two = {"pgu1000_b.sql": migration("b")}
+        three = {**two, "pgu1001_c.sql": migration("c")}
+        note = "\n-- SYRD-X: identical to the migrations.\n"
+        case("two_migrations", base_schema + note + body("a") + body("b"), migration("a"), more=two)
+        case("three_migrations", base_schema + note + body("a") + body("b") + body("c"), migration("a"), more=three)
+        altered = (body("a") + body("b") + body("c")).replace("'SELECT 3';\n", "'SELECT 33';\n", 1)
+        case("altered_inside", base_schema + note + altered, migration("a"), more=three)
+        case("failed_then_proved", altered + base_schema + body("a") + body("b") + body("c"), migration("a"), more=three)
+        case("reordered_migrations", base_schema + note + body("b") + body("a") + body("c"), migration("a"), more=three)
+        case("text_order", base_schema + note + body("b") + body("c") + body("a"), migration("a"), more=three)
+        # An object the migration replaces is replaced in place in schema.sql (only its changed lines are added
+        # there), and the rest of the migration is appended without it.
+        replaced_fn = [f"    v_{i} := {i};\n" for i in range(6)]
+        in_place = ("BEGIN;\n" + body("x") + "CREATE OR REPLACE FUNCTION f_old() RETURNS void LANGUAGE plpgsql AS $$\n"
+                    "BEGIN\n" + "".join(replaced_fn) + "END;\n$$;\n" + body("y") + "COMMIT;\n")
+        schema_lines = base_schema.splitlines(keepends=True)
+        case("in_place", "".join(schema_lines[:100] + replaced_fn[2:4] + schema_lines[102:]) + body("x") + body("y"),
+             in_place)
+        case("in_place_twice", body("x") + body("y") + "".join(schema_lines[:100] + replaced_fn[2:4] + schema_lines[102:])
+             + body("x") + body("y"), in_place)
+        # A short in-place copy whose lines also occur, scattered, in an object appended after it: it must take its
+        # own run, or the appended object cannot be matched.
+        held, back = "    IF held THEN\n", "        RETURN NULL;\n"
+        appended = ("CREATE FUNCTION g() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n" + held
+                    + "".join(f"        x_{i} := {i};\n" for i in range(6)) + back + "    END IF;\n    RETURN NEW;\nEND;\n$$;\n")
+        scattered = ("BEGIN;\n" + appended + "CREATE OR REPLACE FUNCTION f_old() RETURNS trigger LANGUAGE plpgsql AS $$\n"
+                     "BEGIN\n" + held + back + "    END IF;\n    RETURN NEW;\nEND;\n$$;\nCOMMIT;\n")
+        case("in_place_scattered", "".join(schema_lines[:100] + [held, back] + schema_lines[102:]) + appended, scattered)
     return out
 
 
@@ -748,6 +790,31 @@ process.stdout.write(JSON.stringify(%s.map((review) => sizeReviewText(review))))
           f"the same SQL annotated differently is still the migration's copy: {mirror['annotated_differently']}")
     check(mirror["replaced"][:2] == (1300, 1300) and mirror["replaced"][4] is None,
           f"replacing lines without growing is never a finding: {mirror['replaced']}")
+    check(mirror["two_migrations"] == (1300, 1318, 18, 0, None, None),
+          f"one hunk folding two migrations, in their order, is excused whole: {mirror['two_migrations']}")
+    check(mirror["three_migrations"] == (1300, 1326, 26, 0, None, None),
+          f"one hunk folding three migrations, run in number order, is excused whole: {mirror['three_migrations']}")
+    check(mirror["altered_inside"] == (1300, 1326, 1, 25, "growth", None),
+          f"one altered line proves none of its hunk: every non-blank line counts, comment included, no partial credit: "
+          f"{mirror['altered_inside']}")
+    check(mirror["reordered_migrations"][2:5] == (1, 25, "growth") and mirror["text_order"][2:5] == (1, 25, "growth"),
+          f"the migrations folded out of their order, or in text order, prove nothing: "
+          f"{mirror['reordered_migrations']} {mirror['text_order']}")
+    check(mirror["failed_then_proved"][2:5] == (24, 24, "growth"),
+          f"a block that fails consumes nothing: the copy after it is still proved: {mirror['failed_then_proved']}")
+    check(mirror["in_place"] == (1300, 1316, 18, 0, None, None),
+          f"an object replaced in place and the rest appended without it: both excused: {mirror['in_place']}")
+    check(mirror["in_place_twice"][2:5] == (18, 16, "growth"),
+          f"the rest in two places: the migration's lines prove one copy, once: {mirror['in_place_twice']}")
+    check(mirror["in_place_scattered"] == (1300, 1314, 16, 0, None, None),
+          f"a short in-place copy takes its own run, leaving the appended object its lines: {mirror['in_place_scattered']}")
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from ticket_board import file_size_policy, migration_order
+    names = sorted(entry.name for entry in (ROOT / "scripts/ticket_board/migrations").iterdir() if entry.name.endswith(".sql"))
+    check(sorted(names, key=lambda n: file_size_policy.migration_key(MIGRATIONS + n)) == migration_order.ordered(names)
+          and sorted(["pgu1000_a.sql", "pgu999_b.sql", "pgu99_c.sql"], key=file_size_policy.migration_key)
+          == ["pgu99_c.sql", "pgu999_b.sql", "pgu1000_a.sql"],
+          "the size review folds migrations in the order the board runs them, by number, as migration_order decides")
 
     hooks = hook_cases(ROOT)
     check(hooks["staged_over"] == ["warning: a.py is 1302 lines (soft limit 1250) - consider splitting.",

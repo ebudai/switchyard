@@ -80,7 +80,7 @@ warning, so they cannot disagree.
 |---|---|
 | Source, scripts, JS, SQL, extensionless executables | in scope, gated on growth |
 | Tests | in scope, gated on growth |
-| `scripts/ticket_board/schema.sql` | **mirror, by proof.** It carries the newest copy of every migration's functions. A block it adds (a run of added lines) is excused only when its SQL lines occur contiguously, in order, among the lines the candidate's own migrations add, consuming that occurrence. The rest of its growth is judged like any file's, against its allowance and any Director ceiling. Its full before/after is always reported. See the Audit/Director correction below |
+| `scripts/ticket_board/schema.sql` | **mirror, by proof.** It carries the newest copy of every migration's functions. A block it adds (a run of added lines) is excused only when its SQL lines occur in order among the lines the candidate's own migrations add (taken in the order the migrations run), each migration line excusing one copy, once (SYRD-764). The rest of its growth is judged like any file's, against its allowance and any Director ceiling. Its full before/after is always reported. See the Audit/Director correction below |
 | An applied migration | history: never rewritten to meet a number, and never grows, because changing one is already refused. A **new** migration is measured like any file |
 | `docs/`, `*.md` | out of scope: prose |
 | `external/`, `third_party/` | out of scope: vendored |
@@ -118,8 +118,9 @@ hundred copies, and the mirror branch ignored Director ceilings, so an approved
 schema finding reopened forever. Now the proof is by block, with occurrence
 accounting:
 - **Blocks:** a run of lines the candidate adds to `schema.sql` is excused when
-  its SQL lines (comment-only and blank lines set aside) occur contiguously and
-  in order among one block of lines the candidate's own migrations add.
+  its SQL lines (comment-only and blank lines set aside) occur in order among
+  the lines the candidate's own migrations add. SYRD-764 widened this from one
+  contiguous run in one migration; see the note after this list.
 - **Occurrences:** each occurrence excuses one copy.
 - **What proves nothing:** reordered lines, partial blocks, and historical
   migrations, even ones the candidate touches.
@@ -129,6 +130,33 @@ accounting:
   against max(base, ceiling), as every file is. So a Director's exception at
   the measured size holds on every fresh rescan, growth past it is refused, and
   replacing lines without growing is never a finding.
+
+**The SYRD-764 widening.** One contiguous run inside one migration is not how
+`schema.sql` carries migrations:
+- one hunk folds several migrations in a row (SYRD-756: three migrations, one
+  1,989-line hunk);
+- it leaves out each migration's BEGIN and COMMIT, and the grants `rbac.sql`
+  holds;
+- an object a migration replaces is replaced in place, and the rest is
+  appended without it (SYRD-746, SYRD-672).
+
+So the migrations' added SQL lines are now one sequence, taken in the order the
+board runs them (by number, as `migration_order.py` decides). A block is proved
+when its SQL lines occur among that sequence's unused lines in the same order,
+not necessarily adjacent:
+- blocks with one contiguous occurrence are matched first, so a short in-place
+  copy takes its own run, not lines a longer appended block needs;
+- the rest are matched after, in file order.
+
+What still holds:
+- every line of a proved block is a distinct line of the candidate's own
+  migrations, consumed once, in their order;
+- a block is proved whole or not at all;
+- reordered or altered blocks, and historical migrations, prove nothing.
+
+Over the 232 commits in main's history that change `schema.sql`, no measurement
+grows. SYRD-756 (1,933 unmirrored lines), SYRD-746 (165) and SYRD-672 (366)
+fall to 0, and five older commits fall too.
 
 Checked against real history, the proof clears `schema.sql` completely for
 SYRD-537 (581 lines), SYRD-538 (60), SYRD-539 (473, including its header

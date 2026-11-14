@@ -12,6 +12,7 @@ Bands:
 
 from __future__ import annotations
 
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -31,13 +32,17 @@ EXCLUDED_SUFFIXES = (".md",)
 MIGRATION_PREFIX = "scripts/ticket_board/migrations/"
 #: Mirrors: by construction they carry the newest copy of what other files
 #: define, so they grow with every change to those. Growth is excused only where
-#: it is demonstrably that copy: a whole added block (a run of added lines) that
-#: appears, line for line and in order, among the lines the candidate's own
-#: migrations ADD -- never an unchanged historical migration -- and each such
-#: occurrence excuses one block, once. Anything not proved so is judged like any
-#: growth, against the file's allowance and any Director ceiling. The full
-#: before/after is always reported.
+#: it is demonstrably that copy: a whole added block (a run of added lines) whose
+#: every line is a line the candidate's own migrations ADD -- never an unchanged
+#: historical migration -- in the migrations' order, each migration line excusing
+#: one copy, once. Anything not proved so is judged like any growth, against the
+#: file's allowance and any Director ceiling. The full before/after is always
+#: reported. See `_with_mirror_proof`.
 MIRROR_PATHS = frozenset({"scripts/ticket_board/schema.sql"})
+#: A migration's number, as ticket_board/migration_order.py reads it. That module
+#: decides the order migrations run in; this file is installed alone as a hook,
+#: so it cannot import it, and a test holds the two to the same order.
+MIGRATION_NUMBER = re.compile(r"(?:pgu)?(0|[1-9][0-9]*)_[a-z0-9_]+\.sql", re.ASCII)
 
 
 class ScanError(RuntimeError):
@@ -149,11 +154,19 @@ def measure(repo: Path, base: str, candidate: str) -> Measurement:
         result.files.append(FileGrowth(path=new, previous_path=previous, before=before, after=after, status=label))
     result.files.sort(key=lambda f: f.path)
     if any(f.path in MIRROR_PATHS for f in result.files):
-        sources = [block for f in result.files if f.path.startswith(MIGRATION_PREFIX)
-                   for block in _added_blocks(repo, base, candidate, f.path)]
+        migrations = sorted((f.path for f in result.files if f.path.startswith(MIGRATION_PREFIX)), key=migration_key)
+        sources = [block for path in migrations for block in _added_blocks(repo, base, candidate, path)]
         result.files = [_with_mirror_proof(f, _added_blocks(repo, base, candidate, f.path), sources)
                         if f.path in MIRROR_PATHS else f for f in result.files]
     return result
+
+
+def migration_key(path: str) -> tuple[int, int, bytes]:
+    """The order migrations run in: by number, then (for the few historical shared numbers) by name. A name that is
+    not a migration's, which migration_order would refuse, sorts last."""
+    name = PurePosixPath(path).name
+    match = MIGRATION_NUMBER.fullmatch(name)
+    return (0, int(match.group(1)), name.encode()) if match else (1, 0, name.encode())
 
 
 def _added_blocks(repo: Path, base: str, candidate: str, path: str) -> list[list[str]]:
@@ -182,19 +195,35 @@ def _neutral(line: str) -> bool:
 def _with_mirror_proof(growth: FileGrowth, added: list[list[str]], sources: list[list[str]]) -> FileGrowth:
     """How much of a mirror's growth is proved to be its migrations' copy.
 
-    A block is proved when its SQL lines -- comment-only and blank lines set
-    aside -- occur contiguously and in order among one source block's SQL lines,
-    at positions no earlier proof used: occurrences are consumed, so one
-    migration line cannot excuse many copies, and reordered or partial blocks
-    prove nothing. A proved block is excused whole, its annotations with it; an
-    unproved block's every non-blank line counts, comments included.
+    `sources` are the lines the candidate's migrations add, in the order the
+    migrations run. Their SQL lines -- comment-only and blank lines set aside --
+    are one sequence, and each of its lines can prove one copy, once: an
+    occurrence used by one proof is consumed, so one migration line cannot
+    excuse many copies. An added block's SQL lines are proved when they occur
+    among the unused lines in the same order. They need not be adjacent there:
+    one hunk may fold several migrations, and a mirror does not carry every
+    migration line where the migration has it -- not BEGIN and COMMIT, not the
+    grants rbac.sql holds, and not an object it replaces in place instead of
+    appending. Every line of a proved block is still a distinct line of the
+    candidate's migrations, in their order: reordered or altered blocks prove
+    nothing, and a block is proved whole or not at all (no partial credit). A
+    proved block is excused whole, its annotations with it; an unproved block's
+    every non-blank line counts, comments included.
+
+    Blocks that occur as one contiguous run are matched first, each to its
+    first unused run: a short in-place copy then takes its own run, not lines
+    scattered through an object that a longer appended block needs. The rest
+    are matched after, in file order, each line to its earliest unused
+    occurrence, which finds an in-order match whenever one exists.
     """
-    filtered = [[line for line in block if not _neutral(line)] for block in sources]
-    used = [[False] * len(block) for block in filtered]
+    stream = [line for block in sources for line in block if not _neutral(line)]
+    used = [False] * len(stream)
+    cores = [[line for line in block if not _neutral(line)] for block in added]
+    proved = [bool(core) and _consume_run(core, stream, used) for core in cores]
+    proved = [done or (bool(core) and _consume_in_order(core, stream, used)) for done, core in zip(proved, cores)]
     excused = unproved = 0
-    for block in added:
-        core = [line for line in block if not _neutral(line)]
-        if core and _consume(core, filtered, used):
+    for block, done in zip(added, proved):
+        if done:
             excused += len(block)
             continue
         blanks = sum(1 for line in block if not line.strip())
@@ -204,15 +233,31 @@ def _with_mirror_proof(growth: FileGrowth, added: list[list[str]], sources: list
                       unmirrored=unproved, mirrored=excused)
 
 
-def _consume(core: list[str], sources: list[list[str]], used: list[list[bool]]) -> bool:
+def _consume_run(core: list[str], stream: list[str], used: list[bool]) -> bool:
+    """The first unused contiguous occurrence of `core` in `stream`, consumed; False if there is none."""
     size = len(core)
-    for index, source in enumerate(sources):
-        for at in range(len(source) - size + 1):
-            if source[at:at + size] == core and not any(used[index][at:at + size]):
-                for k in range(at, at + size):
-                    used[index][k] = True
-                return True
+    for at in range(len(stream) - size + 1):
+        if stream[at] == core[0] and stream[at:at + size] == core and not any(used[at:at + size]):
+            used[at:at + size] = [True] * size
+            return True
     return False
+
+
+def _consume_in_order(core: list[str], stream: list[str], used: list[bool]) -> bool:
+    """`core` as an in-order selection of unused `stream` lines, consumed; False, consuming nothing, if there is none.
+    Taking each line's earliest unused occurrence finds a selection whenever one exists."""
+    picked: list[int] = []
+    at = 0
+    for line in core:
+        while at < len(stream) and (used[at] or stream[at] != line):
+            at += 1
+        if at == len(stream):
+            return False
+        picked.append(at)
+        at += 1
+    for k in picked:
+        used[k] = True
+    return True
 
 
 def classify(growth: FileGrowth, ceiling: int | None) -> str | None:

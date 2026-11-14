@@ -18,6 +18,12 @@ show which roles registered:
   `RUNTIME_REGISTRATION_POLL_SECONDS`, and returns a
   `RuntimeRegistrationWait`.
 
+As root (`resume-provision`, `replace-window`), both readers ask the board
+root's own unit names, over a connection the kernel shows that board's process
+holds (`board_identity.board_connection_factory`), never the `board_socket` the
+tenant's configuration names; an exception's words are kept as plain text only
+(SYRD-769).
+
 The privilege drop these writes use is `scripts/account_drop.py`, imported
 here directly. Role session directories, CLI names, JSON helpers and
 provider-setup checks stay in `scripts/team_launcher.py`. This module reads
@@ -311,9 +317,10 @@ def read_runtime_assignments(
     an inference from what the launcher just did.
     """
     try:
+        from scripts.ticket_board.board_identity import board_connection_factory
         from scripts.ticket_board.write_client import UnixHTTPConnection
 
-        factory = connection_factory or (
+        factory = board_connection_factory(config, connection_factory) or (
             lambda socket_path, timeout: UnixHTTPConnection(socket_path, timeout=timeout)
         )
         connection = factory(config.board_socket, 3)
@@ -327,7 +334,9 @@ def read_runtime_assignments(
             return set(), f"the board answered HTTP {response.status} for its runtime assignments"
         payload = json.loads(body)
     except Exception as exc:  # noqa: BLE001 - any failure to read is "cannot say"
-        return set(), f"the board's runtime assignments could not be read: {exc}"
+        from scripts.ticket_board.phone_text import clean_text
+
+        return set(), f"the board's runtime assignments could not be read: {clean_text(exc, 300)}"
     if not isinstance(payload, dict) or payload.get("project") != config.project:
         return set(), "the runtime assignment response belongs to another project"
     assignments = payload.get("assignments")
@@ -426,9 +435,10 @@ def read_runtime_assignment_details(
     that process's start time, and the uid it ran as (SYRD-169).
     """
     try:
+        from scripts.ticket_board.board_identity import board_connection_factory
         from scripts.ticket_board.write_client import UnixHTTPConnection
 
-        factory = connection_factory or (
+        factory = board_connection_factory(config, connection_factory) or (
             lambda socket_path, timeout: UnixHTTPConnection(socket_path, timeout=timeout)
         )
         connection = factory(config.board_socket, 3)
@@ -442,7 +452,9 @@ def read_runtime_assignment_details(
             return {}, f"the board answered HTTP {response.status} for its runtime assignments"
         payload = json.loads(body)
     except Exception as exc:  # noqa: BLE001 - any failure to read is "cannot say"
-        return {}, f"the board's runtime assignments could not be read: {exc}"
+        from scripts.ticket_board.phone_text import clean_text
+
+        return {}, f"the board's runtime assignments could not be read: {clean_text(exc, 300)}"
     if not isinstance(payload, dict) or payload.get("project") != config.project:
         return {}, "the runtime assignment response belongs to another project"
     assignments = payload.get("assignments")

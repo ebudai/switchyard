@@ -15,6 +15,11 @@ not good enough, so this finds the board from root's side only:
   the tenant started is neither, whatever it listens on.
 - **What it says.** The board's answers are read over that one proven connection, as HTTP.
 
+Root's other readers of a tenant board (`start`, `resume-provision`, `replace-window`, `adopt-workflow`,
+`release-status`, `deploy-release`) ask through `board_connection_factory` and `board_opener`: as root, the socket the
+unit names, answered by its service account in its main process (`unit_connection`), and never the address the
+tenant's configuration names (SYRD-769).
+
 Deliberately dependency-free: the helper polkit runs as root imports this from its own staged copy.
 """
 
@@ -22,6 +27,7 @@ from __future__ import annotations
 
 import errno
 import http.client
+import io
 import json
 import os
 import pwd
@@ -375,6 +381,16 @@ def effective_unit(
     return EffectiveUnit(user, argv, pid, release_commit)
 
 
+def _check_peer(sock: socket.socket, path: str, project: str, user: str, expected_uid: int, expected_pid: int) -> None:
+    """The kernel's word on who answered `sock`: the board's service account, and its unit's main process."""
+    pid, uid, _gid = struct.unpack("3i", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+    if uid != expected_uid:
+        raise BoardIdentityError(f"{path} is answered by uid {uid}, not {project}'s board account {user}")
+    if not expected_pid or pid != expected_pid:
+        raise BoardIdentityError(f"{path} is answered by process {pid}, not {unit_name(project)}'s main process "
+                                 f"({expected_pid or 'not running'})")
+
+
 class _ProvenConnection(http.client.HTTPConnection):
     def __init__(self, sock: socket.socket) -> None:
         super().__init__("localhost", timeout=TIMEOUT_SECONDS)
@@ -426,7 +442,6 @@ def board_get_for(project: str, *, unit_dir: Path | None = None, owner_uid: int 
         expected_uid = service_uid(user)
     except KeyError:
         raise BoardIdentityError(f"{project}'s board account {user} does not exist") from None
-    unit = unit_name(project)
 
     def exchange(request_path: str, read: Callable[[http.client.HTTPResponse], Any]) -> Any:
         if not request_path.startswith("/api/"):
@@ -438,14 +453,7 @@ def board_get_for(project: str, *, unit_dir: Path | None = None, owner_uid: int 
                 sock.connect(path)
             except OSError as exc:
                 raise BoardIdentityError(f"{project}'s board socket {path} does not answer ({exc.strerror})") from None
-            pid, uid, _gid = struct.unpack("3i", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
-                                                                 struct.calcsize("3i")))
-            if uid != expected_uid:
-                raise BoardIdentityError(f"{path} is answered by uid {uid}, not {project}'s board account {user}")
-            running = expected_pid
-            if not running or pid != running:
-                raise BoardIdentityError(f"{path} is answered by process {pid}, not {unit}'s main process "
-                                         f"({running or 'not running'})")
+            _check_peer(sock, path, project, user, expected_uid, expected_pid)
             connection = _ProvenConnection(sock)
             connection.request("GET", request_path, headers={"Host": "localhost", "Connection": "close"})
             return read(connection.getresponse())
@@ -499,3 +507,98 @@ def board_get_for(project: str, *, unit_dir: Path | None = None, owner_uid: int 
         return request(request_path, min(limit, MAX_ANSWER_BYTES))
 
     return get
+
+
+# -- root's readers of a tenant board (SYRD-769) ----------------------------------------------------------------------
+def geteuid() -> int:
+    """This process's effective uid, asked when a reader chooses its board: 0 is root. A suite names its own."""
+    return os.geteuid()
+
+
+def unit_connection(project: str, timeout: float = TIMEOUT_SECONDS, *, unit_dir: Path | None = None,
+                    owner_uid: int | None = None, anchor: Path | None = None,
+                    main_pid: Callable[[str], int] | None = None,
+                    service_uid: Callable[[str], int] = lambda user: pwd.getpwnam(user).pw_uid,
+                    ) -> http.client.HTTPConnection:
+    """An HTTP connection to the board root's unit names for `project`, on the socket that unit names, answered (the
+    kernel says) by the unit's service account in the unit's own main process. Nothing the tenant configures chooses
+    it.
+
+    OSError when nothing answers on that socket, as for any socket; BoardIdentityError when the unit cannot be read as
+    root's, or something other than its board answers there."""
+    path, user = unit_endpoint(project, unit_dir=unit_dir, owner_uid=owner_uid, anchor=anchor)
+    try:
+        expected_uid = service_uid(user)
+    except KeyError:
+        raise BoardIdentityError(f"{project}'s board account {user} does not exist") from None
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(timeout)
+        try:
+            sock.connect(path)
+        except OSError as exc:
+            raise OSError(exc.errno, f"{project}'s board socket {path} does not answer ({exc.strerror})") from None
+        _check_peer(sock, path, project, user, expected_uid, (main_pid or unit_main_pid)(unit_name(project)))
+    except BaseException:
+        sock.close()
+        raise
+    connection = _ProvenConnection(sock)
+    connection.timeout = timeout
+    return connection
+
+
+def board_connection_factory(config: Any, given: Callable[[str, float], Any] | None = None,
+                             ) -> Callable[[str, float], Any] | None:
+    """The `connection_factory(socket_path, timeout)` a reader of `config.project`'s board uses: the caller's own,
+    when it names one; as root, `unit_connection` (the socket path the reader passes, the tenant configuration's, is
+    not used); otherwise None, and the reader connects to its configured socket as before."""
+    if given is not None:
+        return given
+    if geteuid() != 0:
+        return None
+    project = str(config.project)
+    return lambda _socket_path, timeout: unit_connection(project, timeout)
+
+
+#: The routes root's URL readers ask of a tenant board, and nothing else (SYRD-769). Each reader appends its own route
+#: to the tenant's `board_url`; root asks that route alone, so nothing the tenant wrote before it -- a path, a query --
+#: chooses what is asked. The board's answers are trusted only per route: `/api/image/...` serves the bytes of files
+#: the tenant owner writes, so root must choose the question as well as the board. No route is a suffix of another.
+ROOT_READ_ROUTES = ("/api/board", "/api/workflow", "/api/runtime-assignments")
+
+
+def board_opener(config: Any, given: Callable[[str], Any] | None = None) -> Callable[[str], Any] | None:
+    """The `opener(url)` a reader written against `urlopen` uses, chosen as `board_connection_factory` chooses: as
+    root, it GETs over `unit_connection` exactly the one of `ROOT_READ_ROUTES` the url ends with -- the route the
+    reader appended -- and refuses a url that ends with none; nothing else of the url, the tenant configuration's, is
+    used or asked. A non-200 answer is OSError naming the status alone, never the board's reason phrase, and so is
+    every refusal, as `urlopen`'s readers expect."""
+    if given is not None:
+        return given
+    if geteuid() != 0:
+        return None
+    project = str(config.project)
+
+    def open_url(url: str) -> io.BytesIO:
+        target = next((route for route in ROOT_READ_ROUTES if str(url).endswith(route)), "")
+        try:
+            if not target:
+                raise BoardIdentityError(f"refusing to ask {project}'s board anything but {', '.join(ROOT_READ_ROUTES)}")
+            connection = unit_connection(project)
+            try:
+                connection.request("GET", target, headers={"Connection": "close"})
+                response = connection.getresponse()
+                body = response.read(MAX_ANSWER_BYTES + 1)
+            finally:
+                connection.close()
+        except BoardIdentityError as exc:
+            raise OSError(str(exc)) from None
+        except http.client.HTTPException as exc:  # its words can be the board's raw status line: not repeated
+            raise OSError(f"{project}'s board answered {target} with no valid HTTP ({type(exc).__name__})") from None
+        if response.status != 200:
+            raise OSError(f"{project}'s board answered {target} with HTTP {response.status}")
+        if len(body) > MAX_ANSWER_BYTES:
+            raise OSError(f"{project}'s board answered {target} with more than {MAX_ANSWER_BYTES} bytes")
+        return io.BytesIO(body)
+
+    return open_url

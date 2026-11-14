@@ -83,6 +83,10 @@ ROOT_DRIVER = """
 import sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
+# Root's unit names this suite's board, at the configured socket: as root, a reader asks the board root's own unit
+# names (SYRD-769, its own suite root_board_readers_test), and this host's units are not this suite's.
+from scripts.ticket_board import board_identity
+board_identity.board_connection_factory = lambda config, given=None: given
 from scripts.team_launcher import switchyard_migrate_workflow_command
 raise SystemExit(switchyard_migrate_workflow_command(
     sys.argv[2], apply=sys.argv[3] == "apply", config_path=Path(sys.argv[4])

@@ -14,6 +14,11 @@ anything asks it for authority (SYRD-670).
 It reads nothing from `scripts/team_launcher.py`; its board connection is its
 own function-level import.
 
+As root, both ask the board root's own unit names, over a connection the kernel
+shows that board's process holds (`board_identity.board_connection_factory`),
+never the `board_socket` the tenant's configuration names; and an exception's
+words reach root's terminal as plain text only (SYRD-769).
+
 Moved out of `scripts/team_launcher.py` unchanged (SYRD-334). `team_launcher`
 imports this module at its top, still exports the function, and calls it by
 that name, so the suites' rebinding of it still reaches the launch. This module
@@ -42,10 +47,13 @@ def process_authority_board_compatibility(
     """
     if not config.role_state_isolation:
         return True, "legacy account authority"
+    from scripts.ticket_board.phone_text import clean_text
+
     try:
+        from scripts.ticket_board.board_identity import board_connection_factory
         from scripts.ticket_board.write_client import UnixHTTPConnection
 
-        factory = connection_factory or (
+        factory = board_connection_factory(config, connection_factory) or (
             lambda socket_path, timeout: UnixHTTPConnection(socket_path, timeout=timeout)
         )
         connection = factory(config.board_socket, 3)
@@ -56,8 +64,6 @@ def process_authority_board_compatibility(
         finally:
             connection.close()
         if response.status != 200:
-            from scripts.ticket_board.phone_text import clean_text
-
             # The board's body, shown to root at `start`: plain text only (SYRD-766).
             return False, f"runtime assignment probe returned HTTP {response.status}: {clean_text(body, 300)}"
         payload = json.loads(body)
@@ -68,7 +74,8 @@ def process_authority_board_compatibility(
         if not isinstance(payload.get("assignments"), dict):
             return False, "runtime assignment probe omitted its assignments object"
     except Exception as exc:  # noqa: BLE001 - refusal must preserve the exact boundary failure
-        return False, str(exc)
+        # A raw status line or reason phrase can ride in it: plain text only (SYRD-769).
+        return False, clean_text(exc, 300)
     return True, "process authority ready"
 
 
@@ -86,10 +93,16 @@ def board_socket_answer(
     is something else answering there -- an incompatible board, or not a board
     -- and no reason to wait (Audit of 4ae2184d).
     """
+    from scripts.ticket_board.board_identity import BoardIdentityError, board_connection_factory
+    from scripts.ticket_board.phone_text import clean_text
+
+    root = board_connection_factory(config, connection_factory)
+    where = (f"what answers on {config.board_socket}" if root is None or root is connection_factory
+             else f"what answers on the socket root's unit names for {config.project}")
     try:
         from scripts.ticket_board.write_client import UnixHTTPConnection
 
-        factory = connection_factory or (
+        factory = root or (
             lambda socket_path, timeout: UnixHTTPConnection(socket_path, timeout=timeout)
         )
         connection = factory(config.board_socket, 3)
@@ -99,9 +112,10 @@ def board_socket_answer(
             body = response.read().decode("utf-8", errors="replace")
         finally:
             connection.close()
+    except BoardIdentityError as exc:  # root's unit unreadable, or not its board answering: no reason to wait
+        return "refused", f"{where} is not {config.project}'s board: {clean_text(exc, 300)}"
     except Exception as exc:  # noqa: BLE001 - not answering, whatever the reason, is the answer
-        return "silent", str(exc)
-    where = f"what answers on {config.board_socket}"
+        return "silent", clean_text(exc, 300)
     if response.status != 200:
         return "refused", (f"{where} answered GET /api/runtime-assignments with HTTP {response.status}, which no board "
                            f"this release resumes does: {body[:120]!r}")

@@ -26,6 +26,7 @@ install, through `rollout_journal.Attempt`.
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import pwd
@@ -40,6 +41,7 @@ from typing import Callable
 from scripts import board_supervisor as supervisor_mod
 from scripts import board_supervisor_spec as spec_mod
 from scripts.ticket_board import rollout_journal
+from scripts.ticket_board.phone_text import clean_text
 
 INSTALLED_SCRIPT = "/opt/switchyard/current/scripts/board_supervisor.py"
 VERIFY_TIMEOUT_SECONDS = 60.0
@@ -106,8 +108,8 @@ def default_probe(port: int, timeout: float) -> tuple[bool, str]:
                 if response.status == 200:
                     return True, f"http://127.0.0.1:{port}/api/board answered 200"
                 last = f"HTTP {response.status}"
-        except (OSError, urllib.error.URLError) as exc:
-            last = str(exc)
+        except (OSError, urllib.error.URLError, http.client.HTTPException) as exc:
+            last = clean_text(exc, 300)  # a raw status line or reason phrase can ride in it (SYRD-769)
         time.sleep(0.5)
     return False, f"http://127.0.0.1:{port}/api/board did not answer within {timeout:g}s: {last}"
 

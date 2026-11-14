@@ -3,10 +3,15 @@
 The board's atomic assignment row is the routing authority for shared-account
 workers. This module reads that row, validates its runtime and target, waits
 boundedly for just-started workers, and diagnoses declared/live divergence.
+
+As root, the board is the one root's own unit names, never the `board_url` the
+tenant's configuration names, and an exception's words are shown as plain text
+only (SYRD-769).
 """
 
 from __future__ import annotations
 
+import http.client
 import json
 import subprocess
 import time
@@ -16,6 +21,15 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 from scripts import team_launcher
+from scripts.ticket_board import board_identity
+from scripts.ticket_board.phone_text import clean_text
+
+
+def _board_opener(config: team_launcher.ProjectConfig, opener: Callable[[str], Any] | None) -> Callable[[str], Any]:
+    """The caller's opener; as root, the board root's own unit names, proven by the kernel, whatever url the tenant's
+    configuration names (SYRD-769); otherwise `urlopen` of that url."""
+    return board_identity.board_opener(config, opener) or (lambda target: urllib_request.urlopen(target, timeout=3))
+
 
 def runtime_assignment_config(
     config: team_launcher.ProjectConfig,
@@ -79,13 +93,13 @@ def _resolved_runtime_assignments(
 ) -> tuple[list[team_launcher.RoleConfig], list[str]]:
     """One reading: the roles resolved from it, and the ones it does not name."""
     url = f"{config.board_url.rstrip('/')}/api/runtime-assignments"
-    open_url = opener or (lambda target: urllib_request.urlopen(target, timeout=3))
+    open_url = _board_opener(config, opener)
     try:
         with open_url(url) as response:
             payload = json.load(response)
-    except (OSError, ValueError, urllib_error.URLError) as exc:
+    except (OSError, ValueError, urllib_error.URLError, http.client.HTTPException) as exc:
         raise SystemExit(
-            f"switchyard: cannot resolve {config.project} runtime assignments from {url}: {exc}"
+            f"switchyard: cannot resolve {config.project} runtime assignments from {url}: {clean_text(exc, 300)}"
         ) from exc
     if not isinstance(payload, dict) or payload.get("project") != config.project:
         raise SystemExit("switchyard: runtime assignment response belongs to another project")
@@ -157,7 +171,7 @@ def runtime_divergence_refusal(
     if not missing:
         return ""
     url = f"{config.board_url.rstrip('/')}/api/workflow"
-    open_url = opener or (lambda target: urllib_request.urlopen(target, timeout=3))
+    open_url = _board_opener(config, opener)
     try:
         with open_url(url) as response:
             payload = json.load(response)
@@ -166,7 +180,7 @@ def runtime_divergence_refusal(
             for spec in (payload.get("document") or {}).get("roles") or []
             if isinstance(spec, dict)
         }
-    except (OSError, ValueError, AttributeError, urllib_error.URLError):
+    except (OSError, ValueError, AttributeError, urllib_error.URLError, http.client.HTTPException):
         return ""
     procs = proc_root or Path("/proc")
     divergent: list[str] = []

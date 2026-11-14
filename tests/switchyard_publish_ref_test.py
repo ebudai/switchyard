@@ -893,6 +893,48 @@ def test_the_forge_enforces_the_lease_even_if_the_reading_was_stale() -> None:
         assert landed == theirs, "the lease let a stale decision overwrite somebody else's push"
 
 
+def test_each_request_field_with_a_control_character_is_refused_and_shown_escaped() -> None:
+    """SYRD-769 (the Director's pin on SYRD-766): `requested_by`, `ref` and `bundle_path` each come from the board's
+    request, and a refusal prints them to root's control pane. Each is refused on its own, by name, before anything
+    else is asked, and shown escaped; so dropping any one field from the check is caught."""
+    import contextlib
+    import io
+
+    escape = "\x1b]0;owned\x07\x1b[2K\x9b31m\u202e"
+    clean = {"requested_by": "ops", "ref": "roles/ops/syrd-769", "bundle_path": "/tmp/syrd-769.bundle"}
+    dirty = {"requested_by": "ops" + escape, "ref": "roles/ops/x" + escape, "bundle_path": "/tmp/b" + escape + ".bundle"}
+    for field in ("requested_by", "ref", "bundle_path"):
+        module = load_module()
+        asked: list[str] = []
+        request = {**clean, field: dirty[field], "commit_hash": "a" * 40}
+        module.validate_project = lambda project: project
+        module.board_unit = lambda project: {"board_url": "http://127.0.0.1:1"}
+        module.require_control_caller = lambda url: "director"
+        module.fetch_request = lambda url, rid, request=request: dict(request)
+
+        def went_on(*_args: object, **_kwargs: object) -> None:
+            asked.append("went on")
+            raise RuntimeError("the request was not refused before the project was read")
+
+        module.load_project = module.publish_grant = went_on
+        err = io.StringIO()
+        said = ""
+        try:
+            with contextlib.redirect_stderr(err):
+                module.main(["switchyard-publish-ref", "--project", "syrd", "--request", "7"])
+            outcome = "returned"
+        except SystemExit as stop:  # `fail` exits with its message, which Python prints to stderr
+            outcome, said = "refused", str(stop.code)
+        except Exception as exc:  # noqa: BLE001 - what escaped is the finding
+            outcome = f"raised {type(exc).__name__}: {exc}"
+        said += err.getvalue()
+        assert outcome == "refused" and not asked, f"FAILED CHECK: {field}: refused, nothing else asked: {outcome} {asked}"
+        assert f"its {field} {dirty[field]!r} holds a control character" in said, \
+            f"FAILED CHECK: {field}: the refusal names the field and shows its value escaped: {said!r}"
+        assert not any(ch in said for ch in "\x1b\x07\x9b\u202e"), \
+            f"FAILED CHECK: {field}: nothing of the value reaches the pane raw: {said!r}"
+
+
 def main() -> int:
     tests = [value for name, value in sorted(globals().items())
              if name.startswith("test_") and callable(value)]

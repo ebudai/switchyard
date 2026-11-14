@@ -175,7 +175,10 @@ def test_the_seams_read_through_the_launcher_and_nothing_bound() -> None:
         if expected:
             first = 1 if ast.get_docstring(node) is not None else 0
             # SYRD-766: the board's build id, shown to root, goes through the plain-text filter, imported where used.
-            filtered = ["from scripts.ticket_board.phone_text import clean_text"] if name == "_live_board_build_id" else []
+            # SYRD-769: and, as root, the board is the one root's unit names (`board_opener`), imported where used.
+            filtered = (["from scripts.ticket_board.board_identity import board_opener",
+                         "from scripts.ticket_board.phone_text import clean_text"]
+                        if name == "_live_board_build_id" else [])
             check(imports == ["from scripts import team_launcher as launcher", *filtered]
                   and ast.unparse(node.body[first]) == imports[0],
                   f"{name}: the launcher imported once, first thing when it runs (after its docstring): {imports}")
@@ -199,7 +202,8 @@ def test_the_seams_read_through_the_launcher_and_nothing_bound() -> None:
     check([n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))] == list(MOVED), "the six in the launcher's order")
     check(HEADING + "\n\n@dataclass(frozen=True)\nclass ReleaseAlignment:" in source, "the section heading moved with the block it introduces")
     live = module_def("_live_board_build_id")
-    check("open_url = opener or launcher._open_board_url" in [ast.unparse(x) for x in live.body],
+    # SYRD-769: as root with none given, `board_opener` answers root's unit's board before the launcher's is taken.
+    check("open_url = board_opener(config, opener) or launcher._open_board_url" in [ast.unparse(x) for x in live.body],
           "the launcher's opener is taken only when none is given, when the probe runs")
 
 

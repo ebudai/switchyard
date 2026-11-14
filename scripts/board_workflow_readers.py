@@ -14,6 +14,12 @@ own call-time import of `UnixHTTPConnection` from
 `scripts.ticket_board.write_client`, exactly as before, and the config type is
 named only in annotations, imported under TYPE_CHECKING. This module never
 imports `team_launcher`.
+
+As root (`adopt-workflow`), both ask the board root's own unit names, over a
+connection the kernel shows that board's process holds
+(`board_identity.board_connection_factory`), never the `board_socket` the
+tenant's configuration names; and an exception's words are kept as plain text
+only (SYRD-769).
 """
 
 from __future__ import annotations
@@ -38,9 +44,10 @@ def read_board_declared_workflow(
     through the write API's own authority (SYRD-166).
     """
     try:
+        from scripts.ticket_board.board_identity import board_connection_factory
         from scripts.ticket_board.write_client import UnixHTTPConnection
 
-        factory = connection_factory or (
+        factory = board_connection_factory(config, connection_factory) or (
             lambda socket_path, timeout: UnixHTTPConnection(socket_path, timeout=timeout)
         )
         connection = factory(config.board_socket, 3)
@@ -54,7 +61,9 @@ def read_board_declared_workflow(
             return None, f"the board answered HTTP {response.status} for its workflow"
         payload = json.loads(body)
     except Exception as exc:  # noqa: BLE001 - any failure to read is "cannot say"
-        return None, f"the board's workflow could not be read: {exc}"
+        from scripts.ticket_board.phone_text import clean_text
+
+        return None, f"the board's workflow could not be read: {clean_text(exc, 300)}"
     if not isinstance(payload, dict):
         return None, "the board's workflow response is not a document"
     document = payload.get("document")
@@ -78,9 +87,10 @@ def read_board_workflow_state(
     a refused write rather than a lost one.
     """
     try:
+        from scripts.ticket_board.board_identity import board_connection_factory
         from scripts.ticket_board.write_client import UnixHTTPConnection
 
-        factory = connection_factory or (
+        factory = board_connection_factory(config, connection_factory) or (
             lambda socket_path, timeout: UnixHTTPConnection(socket_path, timeout=timeout)
         )
         connection = factory(config.board_socket, 3)
@@ -94,7 +104,9 @@ def read_board_workflow_state(
             return 0, None, f"the board answered HTTP {response.status} for its workflow"
         payload = json.loads(body)
     except Exception as exc:  # noqa: BLE001 - any failure to read is "cannot say"
-        return 0, None, f"the board's workflow could not be read: {exc}"
+        from scripts.ticket_board.phone_text import clean_text
+
+        return 0, None, f"the board's workflow could not be read: {clean_text(exc, 300)}"
     if not isinstance(payload, dict):
         return 0, None, "the board's workflow response is not a document"
     document = payload.get("document")

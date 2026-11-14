@@ -28,6 +28,7 @@ requested role to it:
 
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import subprocess
@@ -35,18 +36,17 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 from urllib import error as urllib_error
-from urllib import request as urllib_request
 
 from scripts import team_launcher
+from scripts.ticket_board.phone_text import clean_text
 from scripts.presentation_runtime_assignments import (
+    _board_opener,
     _exact_tmux_target,
     _resolved_runtime_assignments,
     runtime_divergence_refusal,
 )
 
 
-def _board_opener(opener: Callable[[str], Any] | None) -> Callable[[str], Any]:
-    return opener or (lambda target: urllib_request.urlopen(target, timeout=3))
 
 
 def assignment_config_with_absent(
@@ -83,10 +83,10 @@ def _declared_role(
     """
     url = f"{config.board_url.rstrip('/')}/api/workflow"
     try:
-        with _board_opener(opener)(url) as response:
+        with _board_opener(config, opener)(url) as response:
             payload = json.load(response)
-    except (OSError, ValueError, urllib_error.URLError) as exc:
-        return None, f"its declared workflow could not be read from {url}: {exc}"
+    except (OSError, ValueError, urllib_error.URLError, http.client.HTTPException) as exc:
+        return None, f"its declared workflow could not be read from {url}: {clean_text(exc, 300)}"
     if not isinstance(payload, dict):
         return None, f"its declared workflow from {url} is not a document"
     document = payload.get("document")
@@ -194,10 +194,10 @@ def await_recovered_registration(
 
     def read() -> tuple[set[str], str]:
         try:
-            with _board_opener(opener)(url) as response:
+            with _board_opener(config, opener)(url) as response:
                 raw = response.read()
-        except (OSError, ValueError, urllib_error.URLError) as exc:
-            return set(), f"the board's runtime assignments could not be read: {exc}"
+        except (OSError, ValueError, urllib_error.URLError, http.client.HTTPException) as exc:
+            return set(), f"the board's runtime assignments could not be read: {clean_text(exc, 300)}"
         # One reading, checked by the same code as every other consumer.
         resolved, missing = _resolved_runtime_assignments(single, opener=lambda _url: io.BytesIO(raw))
         if missing:

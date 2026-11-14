@@ -305,7 +305,11 @@ def test_the_seams_read_through_the_launcher_and_nothing_bound() -> None:
         node = next(n for n in tree.body if getattr(n, "name", None) == name)
         through = sorted({x.attr for x in ast.walk(node) if isinstance(x, ast.Attribute) and isinstance(x.value, ast.Name) and x.value.id == "launcher"})
         imports = [ast.unparse(x) for x in ast.walk(node) if isinstance(x, (ast.Import, ast.ImportFrom))]
-        check(SEAMS.get(name, {}) == {} and through == [] and imports == ["from scripts.ticket_board.write_client import UnixHTTPConnection"],
+        # SYRD-769: as root, the board root's unit names (`board_connection_factory`); exception words as plain text.
+        check(SEAMS.get(name, {}) == {} and through == [] and imports == [
+                  "from scripts.ticket_board.board_identity import board_connection_factory",
+                  "from scripts.ticket_board.write_client import UnixHTTPConnection",
+                  "from scripts.ticket_board.phone_text import clean_text"],
               f"{name}: reads nothing from the launcher, as before, and keeps its one call-time import of the socket connection: {through} {imports}")
     top = [ast.unparse(n) for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
     tc = [ast.unparse(n) for n in tree.body if isinstance(n, ast.If)]

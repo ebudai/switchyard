@@ -4,7 +4,8 @@
   tenant board's `current` link names -- its marker, else the resolved release,
   else the release's own name.
 - `_live_board_build_id` asks the running board for its build id, through an
-  injected opener or the launcher's `_open_board_url`.
+  injected opener or the launcher's `_open_board_url`; as root, through the
+  board root's own unit names, never the tenant's `board_url` (SYRD-769).
 - `release_alignment` reads the shared release, the deployed board, the live
   build, root's pinned release (only a full commit counts), root's journal when
   it is readable, the tenant's copy and its observation, and the board's
@@ -185,13 +186,17 @@ def _live_board_build_id(
     )
     if not board_root:
         return "", f"{config.project} declares no board url"
-    open_url = opener or launcher._open_board_url
+    from scripts.ticket_board.board_identity import board_opener
+    from scripts.ticket_board.phone_text import clean_text
+
+    # As root, the board root's own unit names, proven by the kernel: never the url the tenant's configuration names,
+    # since what it answers goes into root's journal and decides whether a release phase may close (SYRD-769).
+    open_url = board_opener(config, opener) or launcher._open_board_url
     try:
         with open_url(board_root + "/api/board") as response:
             payload = json.load(response)
     except Exception as exc:  # noqa: BLE001 - any failure to read is "not proven"
-        return "", f"the board at {board_root} could not be read ({exc})"
-    from scripts.ticket_board.phone_text import clean_text
+        return "", f"the board at {board_root} could not be read ({clean_text(exc, 300)})"
 
     # Shown to root (release-status, deploy-release) and kept in root's journal: plain text only (SYRD-766).
     build = clean_text(payload.get("build_id"), 128) if isinstance(payload, Mapping) else ""

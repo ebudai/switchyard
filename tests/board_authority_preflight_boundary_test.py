@@ -189,9 +189,11 @@ def test_the_call_site_and_the_functions_own_names() -> None:
     function = next(n for n in moved.body if isinstance(n, ast.FunctionDef) and n.name == NAME)
     local = [n for n in ast.walk(function) if isinstance(n, ast.ImportFrom)]
     # SYRD-766: and, where the board's non-200 body becomes the refusal root prints, the plain-text filter.
+    # SYRD-769: imported first, for every refusal's words; and, as root, the board root's unit names.
     check([(n.module, [a.name for a in n.names]) for n in local]
-          == [("scripts.ticket_board.write_client", ["UnixHTTPConnection"]),
-              ("scripts.ticket_board.phone_text", ["clean_text"])]
+          == [("scripts.ticket_board.phone_text", ["clean_text"]),
+              ("scripts.ticket_board.board_identity", ["board_connection_factory"]),
+              ("scripts.ticket_board.write_client", ["UnixHTTPConnection"])]
           and not any(isinstance(n, ast.ImportFrom) and n.module == "scripts.ticket_board.write_client"
                       for n in moved.body),
           "the board client stays the function's own import, never the module's")

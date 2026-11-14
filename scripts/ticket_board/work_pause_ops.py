@@ -1,7 +1,7 @@
 """The Director's pause switch, the board service's half (SYRD-756).
 
 * `pause_work` sets the pause -- `drain` or `stop` -- or changes its mode, with a reason; `resume_work` ends it,
-  with a reason. Either is the Director's or the User's: the database decides (`ticket_board.work_pause_actor`),
+  with a reason only if one is given (SYRD-768). Either is the Director's or the User's: the database decides (`ticket_board.work_pause_actor`),
   as the server's role policy asks first (`OPERATOR_OR_CONTROL_OPERATIONS`). The User reaches them from the board
   page's switches.
 * `status` is what `GET /api/work-pause` and `ticket-board-read pause` show: mode, who set it, why, since when, every
@@ -28,8 +28,10 @@ def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: s
     if set(payload) - allowed:
         raise ValueError(f"{operation} takes {' and '.join(sorted(allowed))}")
     reason = payload.get("reason")
-    if not isinstance(reason, str) or not reason.strip():
-        raise ValueError(f"{operation} needs a reason")
+    if operation == "resume_work" and reason is None:
+        reason = ""  # SYRD-768: a resume only puts things back; its reason is optional
+    if not isinstance(reason, str) or (operation == "pause_work" and not reason.strip()):
+        raise ValueError(f"{operation} needs a reason" if operation == "pause_work" else "a resume's reason is text")
     mode = payload.get("mode")
     if operation == "pause_work" and mode not in MODES:
         raise ValueError("pause_work needs a mode: drain (no notifications) or stop (interrupt running turns too)")

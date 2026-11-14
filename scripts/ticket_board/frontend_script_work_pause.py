@@ -77,13 +77,14 @@ SCRIPT_WORK_PAUSE = """    const WORK_PAUSE_MODES = {
       const panel = document.getElementById('workPausePanel');
       const status = panel.querySelector('.work-pause-status');
       const reason = panel.querySelector('[data-pause-reason]');
-      if (!reason.value.trim()) {
+      if (operation === 'pause_work' && !reason.value.trim()) {
         status.textContent = 'Say why first: the reason is recorded with the switch.';
         reason.focus();
         return;
       }
       status.textContent = 'Sending...';
       try {
+        // SYRD-768: a resume needs no reason; one typed is still recorded.
         await sendBoardWrite(`/api/tickets/actions/${operation}`, { ...payload, reason: reason.value.trim() });
         reason.value = '';
         status.textContent = operation === 'resume_work' ? 'Work resumed.' : 'Recorded.';
@@ -109,7 +110,7 @@ MARKUP_WORK_PAUSE = """        <div class="work-pause">
           <div id="workPauseBanner" class="alert alert-blocked" role="alert" hidden></div>
           <div id="workPausePanel" class="work-pause-panel" aria-label="Pause all work">
             <strong>Pause all work</strong>
-            <input data-pause-reason type="text" maxlength="500" placeholder="Why (recorded)" aria-label="Reason">
+            <input data-pause-reason type="text" maxlength="500" placeholder="Why (recorded; optional to resume)" aria-label="Reason">
             <button type="button" class="small" data-pause-mode="drain" title="No notifications go out; a turn already running finishes, then stays idle">Drain</button>
             <button type="button" class="small" data-pause-mode="stop" title="Interrupt every running turn now; each role is told once to record where it is">Stop now</button>
             <button type="button" class="small" data-pause-resume disabled title="End the pause, whichever mode">Resume work</button>

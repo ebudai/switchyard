@@ -564,7 +564,7 @@ def work_pause_lines(slug: str, answer: dict | None) -> list[str]:
     return [f"switchyard: {slug} WORK PAUSED ({mode}) since {clean_text(pause.get('began_at'), 64)} by "
             f"{clean_text(pause.get('began_by'), 64)}: {clean_text(pause.get('reason'), 500)}",
             f"switchyard:   held for: {waiting}; the Director's pane is exempt. Details: ticket-board-read pause; "
-            "resume: ticket-board-write resume-work --reason-file PATH (or the board page)"]
+            "resume: ticket-board-write resume-work (or the board page; a reason is optional)"]
 
 
 def _switchyard_project_status_payload(status: SwitchyardProjectStatus) -> dict[str, Any]:

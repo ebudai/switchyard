@@ -303,7 +303,8 @@ your queue: clear it (`clear-awaiting-role`) or have its owner finish the stage.
 ## Pausing all work
 
 `ticket-board-write pause-work --mode drain|stop --reason-file PATH` pauses this project, or changes the pause's mode;
-`ticket-board-write resume-work --reason-file PATH` ends either mode. Both are recorded with who, when and why, and
+`ticket-board-write resume-work` ends either mode; a resume needs no reason (`--reason-file PATH` records one if
+you want). Both are recorded with who and when, a pause also with why, and
 only you and the User may do them (the User from the board page).
 
 - **Drain**: nothing is typed into any role pane but yours. A turn already running finishes; board writes still work.

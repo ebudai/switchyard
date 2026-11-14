@@ -865,12 +865,14 @@ while paused the board, the listener, every pane and every conversation stay up,
   told work has resumed. A pane waiting on its provider's own question is left alone, since an Esc would answer it.
   Background commands under a pane are reported to you with pid and ticket, and nothing is killed: interrupt one
   deliberately with `interrupt-lease` if you must.
-- **One resume ends either mode**: `ticket-board-write resume-work --reason-file PATH`. What waited is then checked
+- **One resume ends either mode**: `ticket-board-write resume-work`, with `--reason-file PATH` only if you want a
+  reason recorded; a resume needs none. What waited is then checked
   again and goes once if it is still current; a notice the pause made moot is dropped, and nothing goes twice. After
   a stop, each role that was interrupted is told once that work resumed. You can change mode without resuming in
   between.
 
-Every set, change and resume is recorded with who, when and why. Only you and the User may do them; the User has the
+Every set, change and resume is recorded with who and when. A set or a change also needs a reason; a resume's reason
+is optional, and one left out reads "no reason given". Only you and the User may do them; the User has the
 same two switches and the resume on the board page. Your pane is exempt whoever set it, so you can still coordinate.
 A person typing into any pane still works, and so does an image the User pastes to a role (`switchyard paste-image`),
 which is the User's own message. The Publisher keeps publishing: audited work still lands on main.

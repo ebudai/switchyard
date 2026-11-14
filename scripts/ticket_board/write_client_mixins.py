@@ -28,7 +28,7 @@ class WorkPauseWrites:
         """Pause all work -- drain or stop -- or change the standing pause's mode, with why."""
         return self._post("/actions/pause_work", {"mode": mode, "reason": reason}, caller_role=caller_role)
 
-    def resume_work(self, *, reason: str, caller_role: str | None = None) -> dict[str, Any]:
+    def resume_work(self, *, reason: str = "", caller_role: str | None = None) -> dict[str, Any]:
         """End the pause, whichever mode, with why."""
         return self._post("/actions/resume_work", {"reason": reason}, caller_role=caller_role)
 

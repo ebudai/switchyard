@@ -294,6 +294,50 @@ def scenario(root: Path) -> dict:
         last = json.loads(sql("SELECT to_jsonb(p)::text FROM ticket_board.work_pauses p ORDER BY id DESC LIMIT 1;"))
         check(last["ended_by"] == "user" and last["end_reason"] == "authority case over",
               f"the resume is recorded with who and why: {last}")
+        # SYRD-768: a resume needs no reason -- in the database, from the board page and from the CLI. A pause does.
+        pause("drain", "empty resume case")
+        said = as_role("director", "SELECT ticket_board.resume_work('  ');")
+        bare = json.loads(said) if not said.startswith("ERROR") else {"refused": said}  # a refusal is data, not a crash
+        unreasoned = json.loads(sql("SELECT to_jsonb(p)::text FROM ticket_board.work_pauses p ORDER BY id DESC LIMIT 1;"))
+        notice = sql("SELECT ticket_board.work_pause_notice_text('work_resumed', p, 'PGU-9') FROM ticket_board.work_pauses p "
+                     f"WHERE id = {unreasoned['id']};")
+        check(bare.get("resumed") and unreasoned["ended_by"] == "director" and unreasoned["end_reason"] is None
+              and unreasoned["ended_at"] and "director resumed work (no reason given)." in notice and '""' not in notice,
+              f"a resume with no reason records who and when, keeps no empty reason, and its notice says so: "
+              f"{unreasoned} {notice}")
+        recent = work_pause.describe(json.loads(__import__("urllib.request").request.urlopen(
+            base + "/api/work-pause", timeout=5).read()))
+        check("-- no reason given" in recent and "-- None" not in recent,
+              f"ticket-board-read pause says so plainly: {recent}")
+        for payload in ({}, {"reason": ""}):
+            fixture.post_json(base, "/api/tickets/actions/pause_work", {"mode": "drain", "reason": "page case"},
+                              caller="user")
+            try:
+                page_resume = fixture.post_json(base, "/api/tickets/actions/resume_work", payload, caller="user")
+            except AssertionError as exc:  # the fixture's own refusal: this suite's failed check, never a crash
+                page_resume = {"pause": {}, "refused": str(exc)[:300]}
+                sql("UPDATE ticket_board.work_pauses SET ended_at = now(), ended_by = 'test' WHERE ended_at IS NULL;")
+            check(page_resume["pause"].get("resumed") and page_resume["pause"].get("by") == "user",
+                  f"the board page resumes with {payload or 'no reason field'}: {page_resume}")
+        page_blank = fixture.post_json(base, "/api/tickets/actions/pause_work", {"mode": "drain", "reason": " "},
+                                       caller="user", expect=400)
+        page_none = fixture.post_json(base, "/api/tickets/actions/pause_work", {"mode": "drain"}, caller="user",
+                                      expect=400)
+        check("pause_work needs a reason" in page_blank and "pause_work needs a reason" in page_none
+              and "not paused" in sql("SELECT CASE WHEN ticket_board.current_work_pause() IS NULL THEN 'not paused' "
+                                      "ELSE 'paused' END;"),
+              f"a pause with no reason is still refused, and nothing stands: {page_blank} {page_none}")
+        pause("stop", "cli case")
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("TICKET_BOARD_", "PGU_"))}
+        cli = subprocess.run([sys.executable, str(root / "scripts/ticket-board-write"), "--board-url", base,
+                              "--write-token", server.write_token, "--caller-role", "director", "resume-work"],
+                             capture_output=True, text=True, timeout=30, env=env)
+        check(cli.returncode == 0 and "not paused" in sql(
+                  "SELECT CASE WHEN ticket_board.current_work_pause() IS NULL THEN 'not paused' ELSE 'paused' END;"),
+              f"ticket-board-write resume-work needs no --reason: {cli.returncode} {cli.stdout[-200:]} {cli.stderr[-300:]}")
+        resume_help = subprocess.run([sys.executable, str(root / "scripts/ticket-board-write"), "resume-work", "--help"],
+                                     capture_output=True, text=True, timeout=30).stdout
+        check("A reason is optional" in resume_help, f"its help says the reason is optional: {resume_help[:300]}")
         help_text = subprocess.run([sys.executable, str(root / "scripts/ticket-board-write"), "pause-work", "--help"],
                                    capture_output=True, text=True, timeout=30).stdout
         check("--mode {drain,stop}" in help_text and "resume-work" in help_text,
@@ -833,6 +877,17 @@ global.sendBoardWrite = async (path, payload) => { sent.push([path, payload]); r
   await new Promise(r => setTimeout(r, 10));
   out.sentAfterResume = sent.length;
   out.hiddenAfterResume = banner.hidden;
+  status = { paused: true, pause: { ...status.pause, id: 4, mode: 'drain', reason: 'again', held: {} } };
+  await refreshWorkPause();
+  panel.querySelector('[data-pause-reason]').value = '';
+  panel.querySelector('[data-pause-mode="stop"]').listeners.click();
+  await new Promise(r => setTimeout(r, 10));
+  out.emptyPauseSent = sent.length;
+  status = { paused: false, pause: null };
+  panel.querySelector('[data-pause-resume]').listeners.click();
+  await new Promise(r => setTimeout(r, 10));
+  out.emptyResume = sent[sent.length - 1];
+  out.emptyResumeStatus = panel.querySelector('.work-pause-status').textContent;
   console.log(JSON.stringify(out));
 })();
 """
@@ -848,6 +903,9 @@ global.sendBoardWrite = async (path, payload) => { sent.push([path, payload]); r
           and page["stopDisabledAfter"], f"Stop now sends the User's recorded action: {page['sent']}")
     check(page["sentAfterResume"] == 2 and page["sent"][1] == ["/api/tickets/actions/resume_work", {"reason": "done"}]
           and page["hiddenAfterResume"], f"Resume sends its action and the banner goes: {page}")
+    check(page["emptyPauseSent"] == 2 and page["emptyResume"] == ["/api/tickets/actions/resume_work", {"reason": ""}]
+          and page["emptyResumeStatus"] == "Work resumed.",
+          f"with an empty Why box, Stop now still sends nothing, and Resume work resumes (SYRD-768): {page}")
 
 
 def main() -> int:

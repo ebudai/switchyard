@@ -719,9 +719,10 @@ def _build_parser() -> argparse.ArgumentParser:
     pause = subparsers.add_parser("pause-work", help=pause_help, description=pause_help)  # SYRD-756
     pause.add_argument("--mode", required=True, choices=("drain", "stop"), help="drain, or stop now")
     add_free_text_argument(pause, "--reason", required=True, help="why work is paused")
-    resume_help = "end the pause, whichever mode; after a stop, each interrupted role is told once"
+    resume_help = ("end the pause, whichever mode; after a stop, each interrupted role is told once. A reason is "
+                   "optional (SYRD-768)")
     resume = subparsers.add_parser("resume-work", help=resume_help, description=resume_help)
-    add_free_text_argument(resume, "--reason", required=True, help="why work resumes now")
+    add_free_text_argument(resume, "--reason", help="why work resumes now, if you want it recorded")
     subparsers.add_parser(
         "claim-next",
         help="under a pull policy, claim your own next ready ticket; held work is returned instead (SYRD-539)",
@@ -1126,7 +1127,7 @@ def main(argv: list[str] | None = None) -> int:
         elif command == "pause_work":
             response = client.pause_work(args.mode, reason=args.reason)
         elif command == "resume_work":
-            response = client.resume_work(reason=args.reason)
+            response = client.resume_work(reason=args.reason or "")
         elif command == "extend_lease":
             response = client.extend_lease(args.lease, minutes=args.minutes, reason=args.reason)
         elif command == "interrupt_lease":

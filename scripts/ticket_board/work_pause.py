@@ -383,7 +383,8 @@ def describe(payload: dict[str, Any]) -> str:
         lines = ["Work is not paused."]
         for p in (payload.get("recent") or [])[:1]:
             lines.append(f"Last pause {p['id']} ({p['mode']}): set by {p['began_by']} at {p['began_at']} -- {p['reason']}; "
-                         f"resumed by {p.get('ended_by')} at {p.get('ended_at')} -- {p.get('end_reason')}")
+                         f"resumed by {p.get('ended_by')} at {p.get('ended_at')} -- "
+                         f"{p.get('end_reason') or 'no reason given'}")
         return "\n".join(lines)
     mode = {"drain": "DRAIN (no notifications; a turn already running finishes)",
             "stop": "STOP NOW (running turns interrupted; nothing new starts)"}.get(pause["mode"], pause["mode"])
@@ -406,5 +407,5 @@ def describe(payload: dict[str, Any]) -> str:
             lines.append(f"  {r['role']}: " + "; ".join(bits))
     lines.append("  the Director's pane is exempt; the Publisher keeps publishing")
     lines.append("  change: ticket-board-write pause-work --mode drain|stop --reason-file PATH")
-    lines.append("  end:    ticket-board-write resume-work --reason-file PATH")
+    lines.append("  end:    ticket-board-write resume-work [--reason-file PATH]  (a reason is optional)")
     return "\n".join(lines)

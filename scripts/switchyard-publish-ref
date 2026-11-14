@@ -181,6 +181,11 @@ def main(argv: list[str]) -> int:
     ref = str(request.get("ref") or "")
     commit = str(request.get("commit_hash") or "").lower()
     bundle = Path(str(request.get("bundle_path") or ""))
+    # The request's words come from the board and are shown to the control pane by root, and the bundle path is
+    # printed by every refusal below: a control character in any of them is refused, shown escaped (SYRD-766).
+    for field, value in (("requested_by", role), ("ref", ref), ("bundle_path", str(bundle))):
+        if not value.isprintable():
+            fail(f"refusing publication request {args.request}: its {field} {value!r} holds a control character")
     problem = ref_problem(ref, role)
     if problem is not None:
         fail(f"refusing publication request {args.request}: {problem}")

@@ -91,6 +91,8 @@ def with_role_added(recorded: Mapping[str, Any], live: Mapping[str, Any], role: 
     nothing to do with adding a role. Whatever of the board's this leaves out
     is returned, so the operator sees it.
     """
+    from scripts.ticket_board.phone_text import clean_text  # the board's words, shown to root (SYRD-766)
+
     definition = next((r for r in live.get("roles") or [] if r.get("name") == role), None)
     if definition is None:
         raise ValueError(f"the board's declared workflow has no role {role!r}")
@@ -116,7 +118,7 @@ def with_role_added(recorded: Mapping[str, Any], live: Mapping[str, Any], role: 
             transition["actors"] = _insert_like(list(transition.get("actors") or []), role, list(other["actors"]))
     for name, target in (live.get("reassign") or {}).items():
         if target == role and (merged.get("reassign") or {}).get(name) != role:
-            left_out.append(f"reassign {name}: the board sends it to {role}; root's record keeps its own")
+            left_out.append(f"reassign {clean_text(name, 64)}: the board sends it to {role}; root's record keeps its own")
     if (live.get("queue") or {}).get("assignee") == role and (merged.get("queue") or {}).get("assignee") != role:
         left_out.append(f"queue: the board queues for {role}; root's record keeps its own")
     return merged, left_out
@@ -165,6 +167,7 @@ def reconcile_recorded_workflow(
     """
     from scripts.ticket_board.project_provision import workflow_document_digest
     from scripts.ticket_board.workflow_config import validate
+    from scripts.ticket_board.phone_text import clean_text  # the board's words, shown to root (SYRD-766)
 
     if board_reader is None:
         from scripts import team_launcher as launcher
@@ -239,7 +242,7 @@ def reconcile_recorded_workflow(
             # document, so that the digest root holds is the digest the board runs.
             validate(dict(live), project=slug)
         except Exception as exc:  # noqa: BLE001 - a document root would not accept is an answer
-            say(f"switchyard: the board's document is not one root will record for {slug}: {exc}. "
+            say(f"switchyard: the board's document is not one root will record for {slug}: {clean_text(exc, 500)}. "
                 f"{REFUSED_NOTHING_CHANGED}")
             tenant_advice()
             return 1, "refused: live document invalid"

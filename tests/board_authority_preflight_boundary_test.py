@@ -188,8 +188,10 @@ def test_the_call_site_and_the_functions_own_names() -> None:
         "the module never names or imports the launcher")
     function = next(n for n in moved.body if isinstance(n, ast.FunctionDef) and n.name == NAME)
     local = [n for n in ast.walk(function) if isinstance(n, ast.ImportFrom)]
+    # SYRD-766: and, where the board's non-200 body becomes the refusal root prints, the plain-text filter.
     check([(n.module, [a.name for a in n.names]) for n in local]
-          == [("scripts.ticket_board.write_client", ["UnixHTTPConnection"])]
+          == [("scripts.ticket_board.write_client", ["UnixHTTPConnection"]),
+              ("scripts.ticket_board.phone_text", ["clean_text"])]
           and not any(isinstance(n, ast.ImportFrom) and n.module == "scripts.ticket_board.write_client"
                       for n in moved.body),
           "the board client stays the function's own import, never the module's")

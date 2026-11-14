@@ -56,7 +56,10 @@ def process_authority_board_compatibility(
         finally:
             connection.close()
         if response.status != 200:
-            return False, f"runtime assignment probe returned HTTP {response.status}: {body}"
+            from scripts.ticket_board.phone_text import clean_text
+
+            # The board's body, shown to root at `start`: plain text only (SYRD-766).
+            return False, f"runtime assignment probe returned HTTP {response.status}: {clean_text(body, 300)}"
         payload = json.loads(body)
         if not isinstance(payload, dict) or payload.get("project") != config.project:
             return False, "runtime assignment probe returned another project's identity"

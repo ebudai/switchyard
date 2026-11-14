@@ -152,10 +152,13 @@ def pane_liveness(
     if not isinstance(assignment, dict):
         return launcher.PaneLiveness(role.role, True, f"tmux holds {role.target}; the board has no assignment yet")
     recorded_target = str(assignment.get("actual_target") or "").strip()
+    from scripts.ticket_board.phone_text import clean_text
+
     if recorded_target != role.target:
         return launcher.PaneLiveness(
             role.role, False,
-            f"the board assigns {role.role} to {recorded_target or 'nothing'}, not {role.target}",
+            # The board's word, shown to root at resume-provision: plain text only (SYRD-766).
+            f"the board assigns {role.role} to {clean_text(recorded_target, 64) or 'nothing'}, not {role.target}",
         )
     try:
         pid = int(assignment.get("process_pid") or 0)

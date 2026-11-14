@@ -174,7 +174,10 @@ def test_the_seams_read_through_the_launcher_and_nothing_bound() -> None:
         imports = [ast.unparse(x) for x in ast.walk(node) if isinstance(x, (ast.Import, ast.ImportFrom))]
         if expected:
             first = 1 if ast.get_docstring(node) is not None else 0
-            check(imports == ["from scripts import team_launcher as launcher"] and ast.unparse(node.body[first]) == imports[0],
+            # SYRD-766: the board's build id, shown to root, goes through the plain-text filter, imported where used.
+            filtered = ["from scripts.ticket_board.phone_text import clean_text"] if name == "_live_board_build_id" else []
+            check(imports == ["from scripts import team_launcher as launcher", *filtered]
+                  and ast.unparse(node.body[first]) == imports[0],
                   f"{name}: the launcher imported once, first thing when it runs (after its docstring): {imports}")
         else:
             check(imports == [], f"{name}: reads nothing of the launcher's, imports nothing: {imports}")

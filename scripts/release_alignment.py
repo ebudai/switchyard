@@ -191,7 +191,10 @@ def _live_board_build_id(
             payload = json.load(response)
     except Exception as exc:  # noqa: BLE001 - any failure to read is "not proven"
         return "", f"the board at {board_root} could not be read ({exc})"
-    build = str(payload.get("build_id") or "").strip() if isinstance(payload, Mapping) else ""
+    from scripts.ticket_board.phone_text import clean_text
+
+    # Shown to root (release-status, deploy-release) and kept in root's journal: plain text only (SYRD-766).
+    build = clean_text(payload.get("build_id"), 128) if isinstance(payload, Mapping) else ""
     return build, "" if build else f"the board at {board_root} reported no build id"
 
 

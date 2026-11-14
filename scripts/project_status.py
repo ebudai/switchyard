@@ -515,8 +515,17 @@ def root_recorded_tenant_facts(
 
 
 def read_work_pause(config: "ProjectConfig", *, connection_factory: Callable[[str, float], Any] | None = None) -> dict | None:
-    """The project's pause switch, as its board answers over its socket (SYRD-756); None when it cannot say."""
+    """The project's pause switch, as its board answers over its socket (SYRD-756); None when it cannot say.
+
+    As root, the board is the one root's own unit names, answering over a connection the kernel shows that board's
+    process holds (`board_identity.board_get_for`): the tenant's configuration names its `board_socket`, and root does
+    not talk to whatever the tenant points it at (SYRD-766). As anyone else, the configured socket."""
     try:
+        if os.geteuid() == 0:
+            from scripts.ticket_board import board_identity
+
+            payload = board_identity.board_get_for(config.project)("", "/api/work-pause")
+            return payload if isinstance(payload, dict) else None
         from scripts.ticket_board.write_client import UnixHTTPConnection
 
         factory = connection_factory or (lambda socket_path, timeout: UnixHTTPConnection(socket_path, timeout=timeout))
@@ -538,15 +547,22 @@ work_pause_reader: Callable[["ProjectConfig"], dict | None] = read_work_pause
 
 
 def work_pause_lines(slug: str, answer: dict | None) -> list[str]:
-    """`switchyard status`'s lines for a paused project; none when it is not paused or its board cannot say."""
+    """`switchyard status`'s lines for a paused project; none when it is not paused or its board cannot say.
+
+    Every word the board supplies is shown as plain text, one line, with no control, format or bidirectional
+    character: the board's answer is the tenant's, and these lines go to an operator's terminal, root's too (SYRD-766).
+    """
+    from scripts.ticket_board.phone_text import clean_text
+
     pause = (answer or {}).get("pause") if (answer or {}).get("paused") else None
     if not isinstance(pause, dict):
         return []
     mode = "stop now" if pause.get("mode") == "stop" else "drain"
-    held = pause.get("held") or {}
-    waiting = ", ".join(f"{role} ({count})" for role, count in sorted(held.items())) or "nothing yet"
-    return [f"switchyard: {slug} WORK PAUSED ({mode}) since {pause.get('began_at')} by {pause.get('began_by')}: "
-            f"{pause.get('reason')}",
+    held = pause.get("held") if isinstance(pause.get("held"), dict) else {}
+    waiting = ", ".join(f"{clean_text(role, 64)} ({clean_text(count, 12)})" for role, count in sorted(
+        held.items(), key=lambda item: str(item[0]))) or "nothing yet"
+    return [f"switchyard: {slug} WORK PAUSED ({mode}) since {clean_text(pause.get('began_at'), 64)} by "
+            f"{clean_text(pause.get('began_by'), 64)}: {clean_text(pause.get('reason'), 500)}",
             f"switchyard:   held for: {waiting}; the Director's pane is exempt. Details: ticket-board-read pause; "
             "resume: ticket-board-write resume-work --reason-file PATH (or the board page)"]
 

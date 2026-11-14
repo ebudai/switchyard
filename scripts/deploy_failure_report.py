@@ -26,6 +26,18 @@ LINE_CHARS = 16000
 FAILED_CHECK = re.compile(r"^\[ticket-board-service\] post-restart-check-failed: ([a-z][a-z0-9-]{0,63})$", re.M)
 #: How much of the deploy's own output the one-line problem quotes: its end, where the failure is.
 PROBLEM_TAIL_CHARS = 400
+#: The line deploy-restart writes when the rollback after a failed check could not run, or did not pass its own smoke
+#: check: the board may not be answering at all (SYRD-775).
+ROLLBACK_FAILED_LINE = re.compile(r"^\[ticket-board-service\] post-restart-rollback-failed: ([a-z][a-z0-9-]{0,63})$",
+                                  re.M)
+#: The problem's opening when that happened, as ROLLED_BACK ("rolled back: ") opens one whose rollback passed.
+ROLLBACK_FAILED = "rollback failed: "
+#: deploy-restart's own error lines, the last of which says why the rollback failed.
+ERROR_LINE = re.compile(r"^\[ticket-board-service\] ERROR: (.*)$", re.M)
+#: What deploy-restart logs when its rollback finished; without it, after a failed check, the rollback did not.
+ROLLBACK_PASSED = "[ticket-board-service] rollback-pass; "
+#: deploy-restart's own fixed lines, which say what happened but never why.
+MARKER_LINE = re.compile(r"^\[ticket-board-service\] (post-restart-check-failed|post-restart-rollback-failed): ")
 
 
 def deploy_failure(project: str, target_sha: str, result: subprocess.CompletedProcess[Any], *,
@@ -48,6 +60,26 @@ def deploy_failure(project: str, target_sha: str, result: subprocess.CompletedPr
             print_func(f"switchyard:   [{name}] {clean_text(line, LINE_CHARS)}")
     failed = FAILED_CHECK.findall(stderr)
     where = f"its full output is in root's rollout journal (switchyard rollout-log {project} --output)"
+    unfinished = bool(failed) and ROLLBACK_PASSED not in stderr and result.returncode != 3
+    if ROLLBACK_FAILED_LINE.search(stderr) or unfinished:
+        # SYRD-775: the one outcome where the board may not be answering at all, said plainly. A rollback that did
+        # not finish -- a check named, no rollback-pass, not the rolled-back exit -- failed, whatever stopped it: its
+        # own smoke check, nothing to roll back to, or a restart that failed under `set -e` (Audit of 17417a04).
+        check = (ROLLBACK_FAILED_LINE.findall(stderr) or failed)[-1]
+        # Only what the rollback itself said, never the failed check's own (earlier) error line.
+        after = stderr[stderr.rfind(f"post-restart-check-failed: {check}"):].splitlines()[1:]
+        said = [line for line in after if line.strip() and not MARKER_LINE.match(line)]
+        errors = [m.group(1) for m in map(ERROR_LINE.match, said) if m]
+        if errors:
+            last = clean_text(errors[-1], PROBLEM_TAIL_CHARS)
+            how = ("there was no previous release to roll back to" if "no previous release" in last
+                   else "the rollback did not pass its smoke check" if "did not pass its smoke check" in last
+                   else "the rollback did not finish")
+        else:
+            last = clean_text(said[-1] if said else "no output", PROBLEM_TAIL_CHARS)
+            how = "the rollback stopped before its smoke check"
+        return (f"{ROLLBACK_FAILED}deploying {target_sha} failed (exit {result.returncode}): the post-restart check "
+                f"{check} failed and {how}: the board may not be answering ({last}); {where}")
     if failed:
         said = f"the post-restart check {failed[-1]} failed; {where}"
     else:

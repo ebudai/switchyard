@@ -655,11 +655,18 @@ def switchyard_deploy_release_command(
         if now == before:
             # SYRD-113: deployed, failed its health gate and rolled back is its own outcome.
             rolled_back = any(problem.startswith(ROLLED_BACK) for problem in problems)
+            # SYRD-775: a rollback that did not pass its own smoke check put the link back, but the board on it may
+            # not be answering: say so, rather than a summary that reads as the board being back to normal.
+            from scripts.deploy_failure_report import ROLLBACK_FAILED
+
+            rollback_failed = any(problem.startswith(ROLLBACK_FAILED) for problem in problems)
             unit_leftovers = restore_units()
             listener_said = listener_back()
+            where = (f"the board's release link names {before or 'no release'} again, but the board did not pass its "
+                     "smoke check on it, so it may not be answering" if rollback_failed
+                     else f"the board still names {before or 'no release'}")
             return ended(
-                blocked("; ".join(problems), f"the board still names {before or 'no release'}; {listener_said}",
-                        ROLLED_BACK_EXIT if rolled_back else 1),
+                blocked("; ".join(problems), f"{where}; {listener_said}", ROLLED_BACK_EXIT if rolled_back else 1),
                 unit_leftovers + _listener_leftover(listener_said) + board_back(),
             )
         unit_leftovers = restore_units()

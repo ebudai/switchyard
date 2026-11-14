@@ -48,12 +48,23 @@ resolved_service_scope() { printf 'system\n'; }
 assert_user_manager_identity() { :; }
 assert_system_unit_reload_not_required_for_release() { :; }
 stop_listener_for_upgrade() { :; }
-start_listener_after_upgrade() { :; }
+start_listener_after_upgrade() {
+    # The listener failing to come back after a rollback that passed: exit 1, but the board is back (SYRD-775).
+    if [[ "${LISTENER_START:-pass}" == fail ]]; then die "could not restart the listener after deploy"; fi
+}
 apply_database_migrations_for_release() { :; }
 run_release_canary() { log "canary-pass for /opt/switchyard/releases/$SHA"; }
 activate_release() { :; }
 verify_current_release_sha() { :; }
-restart_live_service() { :; }
+RESTARTS=0
+restart_live_service() {
+    RESTARTS=$((RESTARTS + 1))
+    # SYRD-775: the rollback's own restart -- the second -- failing when asked to, as systemctl does, with no ERROR line.
+    if (( RESTARTS == 2 )) && [[ "${ROLLBACK_RESTART:-pass}" == fail ]]; then
+        printf 'Job for syrd-ticket-board.service failed because the control process exited with error code.\n' >&2
+        return 1
+    fi
+}
 # The chosen check fails, saying a long message whose end is its own; the rollback's own smoke check passes.
 say_and_fail() {
     local name="$1"
@@ -66,13 +77,19 @@ say_and_fail() {
 SMOKES=0
 smoke_check_http() {
     SMOKES=$((SMOKES + 1))
-    if (( SMOKES == 1 )); then say_and_fail http-smoke; else return 0; fi
+    if (( SMOKES == 1 )); then say_and_fail http-smoke; return $?; fi
+    # SYRD-775: the rollback's own smoke check, failing when asked to.
+    if [[ "${ROLLBACK_SMOKE:-pass}" == fail ]]; then
+        printf '[ticket-board-service] ERROR: smoke check: HTTP 502 from the restored board \033]0;owned\007\n' >&2
+        return 1
+    fi
+    return 0
 }
 verify_live_build_id() { say_and_fail live-build-id; }
 verify_live_commit_repositories() { say_and_fail commit-repositories; }
 verify_listener_pane_state_authority() { say_and_fail listener-pane-state-authority; }
 verify_post_deploy_system_runtime() { say_and_fail system-runtime; }
-mkdir -p "$BOARD_ROOT/releases/previous"
+[[ "${NO_PREVIOUS:-}" == 1 ]] || mkdir -p "$BOARD_ROOT/releases/previous"
 
 deploy_restart_service
 """
@@ -85,8 +102,8 @@ def check(condition: object, detail: str) -> None:
         raise AssertionError(f"FAILED CHECK: {detail}")
 
 
-def deploy(failing: str, tmp: Path) -> subprocess.CompletedProcess[str]:
-    env = {**{k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "LANG")},
+def deploy(failing: str, tmp: Path, **extra: str) -> subprocess.CompletedProcess[str]:
+    env = {**{k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "LANG")}, **extra,
            "SERVICE_SCRIPT": str(SERVICE_SCRIPT), "SHA": SHA, "FAILING": failing, "BOARD_ROOT": str(tmp / "live"),
            "TICKET_BOARD_PROJECT": "syrd", "TICKET_BOARD_COMMIT_GIT_DIR": str(tmp / "source.git"),
            "TICKET_BOARD_OWNER_HOME": str(tmp)}
@@ -130,6 +147,117 @@ def test_each_post_restart_check_is_named_and_kept_whole() -> None:
             captured = (record.get("capture") or {}).get("stdout") or {}
             check(captured.get("truncated") is False and "output truncated" not in log,
                   f"{name}: nothing of it was cut: {captured}")
+
+
+def test_a_rollback_that_failed_says_so() -> None:
+    """SYRD-775: the rollback's own smoke check failing, or nothing to roll back to, is said plainly."""
+    cases = [({"ROLLBACK_SMOKE": "fail"}, "the rollback did not pass its smoke check",
+              "rollback after {check} failed: {tmp}/live/releases/previous did not pass its smoke check"),
+             ({"NO_PREVIOUS": "1"}, "there was no previous release to roll back to",
+              "post-restart check {check} failed and no previous release is available for rollback")]
+    for extra, how, error in cases:
+        for name in ("http-smoke", "listener-pane-state-authority"):
+            with tempfile.TemporaryDirectory(prefix="syrd775.") as tmp:
+                result = deploy(name, Path(tmp), **extra)
+                check(result.returncode == 1 and f"post-restart-rollback-failed: {name}\n" in result.stderr
+                      and "rollback-pass" not in result.stderr,
+                      f"{name}, {how}: deploy-restart exits 1, naming the failed rollback: {result.returncode} "
+                      f"{result.stderr[-500:]}")
+                problem, log, _record = journalled(result, Path(tmp))
+                said = error.format(check=name, tmp=tmp)
+                check(problem == f"rollback failed: deploying {SHA} failed (exit 1): the post-restart check {name} failed "
+                                 f"and {how}: the board may not be answering ({said}); its full output is in root's "
+                                 "rollout journal (switchyard rollout-log syrd --output)",
+                      f"{name}, {how}: the problem says the rollback failed, with deploy-restart's last error: {problem!r}")
+                check("\x1b" not in problem and "\x07" not in problem and f"post-restart-rollback-failed: {name}" in log,
+                      f"{name}, {how}: plain text, and the journal has it all")
+
+
+def test_a_rollback_whose_restart_failed_says_so() -> None:
+    """Audit of 17417a04: the rollback's restart failing ends deploy-restart under `set -e`, with neither the
+    rollback-failed line nor rollback-pass. It is a rollback that failed, and the failed check's own error line is
+    never passed off as the reason."""
+    for name in ("live-build-id", "listener-pane-state-authority"):
+        with tempfile.TemporaryDirectory(prefix="syrd775-restart.") as tmp:
+            result = deploy(name, Path(tmp), ROLLBACK_RESTART="fail")
+            check(result.returncode == 1 and "rollback-pass" not in result.stderr
+                  and "post-restart-rollback-failed" not in result.stderr,
+                  f"{name}: deploy-restart stops at the rollback's restart, saying neither: {result.returncode} "
+                  f"{result.stderr[-400:]}")
+            problem, _log, _record = journalled(result, Path(tmp))
+            check(problem == f"rollback failed: deploying {SHA} failed (exit 1): the post-restart check {name} failed and "
+                             "the rollback stopped before its smoke check: the board may not be answering (Job for "
+                             "syrd-ticket-board.service failed because the control process exited with error code.); its "
+                             "full output is in root's rollout journal (switchyard rollout-log syrd --output)",
+                  f"{name}: the problem says the rollback failed, quoting the rollback's last line, not the check's: "
+                  f"{problem!r}")
+            check(f"END-OF-{name}" not in problem, f"{name}: the failed check's own error is not passed off as the reason")
+
+
+def test_a_rollback_that_passed_is_not_called_failed() -> None:
+    """A rollback that passed (rollback-pass) and a listener that then would not start exits 1 too: the board is back,
+    so the problem is an ordinary failed check, not a failed rollback."""
+    with tempfile.TemporaryDirectory(prefix="syrd775-listener.") as tmp:
+        result = deploy("http-smoke", Path(tmp), LISTENER_START="fail")
+        check(result.returncode == 1 and "rollback-pass" in result.stderr,
+              f"the rollback passed, then the listener did not start: {result.returncode} {result.stderr[-300:]}")
+        problem, _log, _record = journalled(result, Path(tmp))
+        check(problem == f"deploying {SHA} failed (exit 1): the post-restart check http-smoke failed; its full output is "
+                         "in root's rollout journal (switchyard rollout-log syrd --output)",
+              f"it is not said to be a failed rollback: {problem!r}")
+
+
+def test_the_last_error_line_is_quoted_as_plain_text() -> None:
+    stderr = ("[ticket-board-service] post-restart-check-failed: live-build-id\n"
+              "[ticket-board-service] post-restart-rollback-failed: live-build-id\n"
+              "[ticket-board-service] ERROR: the board said \x1b]0;owned\x07 nothing\n")
+    problem = deploy_failure_report.deploy_failure("syrd", SHA, SimpleNamespace(returncode=1, stderr=stderr, stdout=""),
+                                                   print_func=lambda _line: None)
+    check(problem.startswith("rollback failed: ") and "(the board said ]0;owned nothing)" in problem
+          and "\x1b" not in problem and "\x07" not in problem,
+          f"deploy-restart's last error line is quoted as plain text: {problem!r}")
+
+
+def test_the_deploy_summary_says_the_board_may_not_be_answering() -> None:
+    """SYRD-775: `deploy-release`'s summary, through the real tenant_release_deploy, for a deploy whose rollback failed."""
+    sys.path[:0] = [str(ROOT / "tests")]
+    import catalogued_deploy_release_test as host_test
+
+    host_test.install_test_dispatch()
+    original = host_test.Host.__call__
+    # One run of every deploy-release scenario (about 150 s), with Audit's case: the rollback's restart failing under
+    # `set -e`. The summary reads only the problem's `rollback failed:` opening, which every failed rollback's has.
+    for extra, how in (({"ROLLBACK_RESTART": "fail"}, "the rollback stopped before its smoke check"),):
+        with tempfile.TemporaryDirectory(prefix="syrd775-real.") as tmp:
+            real = deploy("live-build-id", Path(tmp), **extra)
+        check(real.returncode == 1, f"{how}: the real deploy-restart's failed rollback: {real.stderr[-300:]}")
+
+        def with_real_output(self, argv, real=real, **kwargs):
+            result = original(self, argv, **kwargs)
+            if "deploy-restart" in " ".join(str(part) for part in argv) and self.outcome["deploy"] == "fail":
+                result.returncode, result.stderr = 1, real.stderr  # what deploy-restart says when its rollback failed
+            return result
+
+        host_test.Host.__call__ = with_real_output
+        try:
+            seen = host_test.scenarios(ROOT)
+        finally:
+            host_test.Host.__call__ = original
+        summary_checks(host_test, seen, how)
+
+
+def summary_checks(host_test, seen: dict, how: str) -> None:
+    failed = seen["deploy fails, board unchanged"]
+    said = failed["said"]
+    check("switchyard: rollback failed: deploying" in said and f"{how}: the board may not be answering" in said,
+          f"{how}: the deploy's problem says the rollback failed: {said[-900:]}")
+    check(f"the board's release link names {host_test.OLD} again, but the board did not pass its smoke check on it, so "
+          "it may not be answering" in said and f"the board still names {host_test.OLD}" not in said,
+          f"and its summary does not read as the board being back to normal: {said[-900:]}")
+    check(failed["code"] == 1 and failed["release"] == "blocked",
+          f"it is a failure, not a rollback: exit {failed['code']}, phase {failed['release']}")
+    plain = seen["deploy fails, board moved"]["said"]
+    check("may not be answering" not in plain, "a deploy whose output says nothing of a failed rollback is not said so")
 
 
 def test_the_five_are_the_checks_deploy_restart_runs() -> None:

@@ -1125,12 +1125,15 @@ rollback_live_service() {
     # One fixed line naming the check that failed, which deploy_release_in_transaction reads (SYRD-773).
     log "post-restart-check-failed: $check"
     if [[ -z "$previous_release" || ! -d "$previous_release" ]]; then
+        # And one naming a rollback that could not run, or did not pass, which deploy_failure reads (SYRD-775).
+        log "post-restart-rollback-failed: $check"
         die "post-restart check $check failed and no previous release is available for rollback"
     fi
     log "post-restart check $check failed; rolling back current to $previous_release"
     activate_release "$previous_release"
     restart_live_service "$scope"
     if ! smoke_check_http; then
+        log "post-restart-rollback-failed: $check"
         die "rollback after $check failed: $previous_release did not pass its smoke check"
     fi
     log "rollback-pass; restored $previous_release after $check failed"

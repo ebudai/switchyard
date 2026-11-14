@@ -46,3 +46,31 @@ things:
 - **The list of checks:** every rollback in `deploy_restart_service` names one of the five, in order.
 - **No check named:** the output is quoted from its end.
 - **Plain text:** a board's escape characters are printed as plain text.
+
+## SYRD-775: a rollback that failed is said plainly
+When a check fails and the rollback cannot run, or does not pass its own smoke check, `rollback_live_service` exits
+with status 1. Before that it writes a second fixed line, `[ticket-board-service] post-restart-rollback-failed: <name>`.
+It is written in both cases: when there is no previous release to roll back to, and when the restored release does not
+pass its smoke check.
+
+A rollback can also stop without either line. Its restart (`systemctl restart`, `daemon-reload`, the unit's reload
+check) can fail, and `set -euo pipefail` then ends deploy-restart there, after the `current` link was already put back.
+So `deploy_failure` also treats as failed any rollback that did not finish: a check was named, there is no
+`rollback-pass`, and the exit is not the rolled-back 3. It quotes only what the rollback itself said, never the failed
+check's earlier error line. That is the rollback's last `ERROR:` line if it has one. Otherwise the problem says "the
+rollback stopped before its smoke check" and quotes the rollback's last line of output, such as systemctl's `Job for
+... failed`. A rollback that passed, followed by a listener that would not start, also exits 1, but has `rollback-pass`;
+the board is back, and that is not called a failed rollback (Audit of the first candidate).
+
+`deploy_failure` then returns a problem that opens `rollback failed:` (`ROLLBACK_FAILED`), much as a clean rollback's
+problem opens `rolled back:`. It reads: "the post-restart check <name> failed and the rollback did not pass its smoke
+check (or: there was no previous release to roll back to): the board may not be answering (<deploy-restart's last
+`ERROR:` line, as plain text>)", followed by the pointer to the journal.
+
+For such a problem, `tenant_release_deploy`'s summary no longer says "the board still names <before>", which read as the
+board being back to normal. It says that the board's release link names `<before>` again, but the board did not pass
+its smoke check on it, so it may not be answering.
+
+`tests/deploy_failed_check_report_test.py` covers both cases through the real `rollback_live_service`. It also runs the
+real `deploy-release` path (`catalogued_deploy_release_test`'s host), fed deploy-restart's real output for a failed
+rollback, and checks that its summary says so.

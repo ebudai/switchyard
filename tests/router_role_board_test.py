@@ -103,14 +103,16 @@ def build_board(cluster, dbname: str, *, before: Path | None = None) -> str:
 class Board:
     """One board: its HTTP server, its listener, and the questions the checks ask of it."""
 
-    def __init__(self, cluster, dbname: str, document: dict, *, before: Path | None = None):
+    def __init__(self, cluster, dbname: str, document: dict, *, before: Path | None = None,
+                 write_token: str | None = None):
         self.admin = build_board(cluster, dbname, before=before)
         if before:
             migrate(self.admin)  # the upgrade: this tree's migrations, then rbac.sql
         self.service = fixture.conninfo(cluster.socket_dir, cluster.port, dbname, fixture.SERVICE_ROLE)
         self.app = fixture.TicketBoardApp(cluster.root / f"{dbname}-frames", cluster.root / f"{dbname}-assets",
                                           project="pgu", ticket_prefix="PGU", database_url=self.service)
-        self.server = fixture.TicketBoardServer(("127.0.0.1", 0), self.app, director_notifier=fixture.QuietNotifier())
+        self.server = fixture.TicketBoardServer(("127.0.0.1", 0), self.app, director_notifier=fixture.QuietNotifier(),
+                                                write_token=write_token)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.base = f"http://127.0.0.1:{self.server.server_port}"
         self.app.apply_workflow(document, expected_revision=0, dry_run=False, caller_role="director")

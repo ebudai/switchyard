@@ -36,6 +36,7 @@ import contextlib
 import io
 import json
 import os
+import secrets
 import subprocess
 import sys
 import tarfile
@@ -53,7 +54,7 @@ CHECKS = 0
 
 def check(condition: object, detail: object) -> None:
     global CHECKS
-    assert condition, detail
+    assert condition, f"FAILED CHECK: {detail}"
     CHECKS += 1
 
 
@@ -259,7 +260,10 @@ def director_command(cluster) -> dict:
     from router_role_board_test import Board
     from scripts.ticket_board import ui_delegation
 
-    board = Board(cluster, "delta", example())
+    # SYRD-771: a write token that starts with "-" (secrets.token_urlsafe gives one about 1 time in 64), on every run.
+    # "-x", never "-" + a digit or ".": argparse reads "-<digit>..." as a negative number, a value, so a two-item
+    # --write-token would still parse (Audit of 7cd71266). With "-x" the two-item form fails every run.
+    board = Board(cluster, "delta", example(), write_token="-x" + secrets.token_urlsafe(32))
     panes = Panes(board, cluster, "delta")
     register, pane = panes.register, panes.command
 
@@ -329,7 +333,9 @@ def director_command(cluster) -> dict:
                 seen["service_roles"][role] = str(exc)
         ui_delegation.TRUST_HEADER_ROLES = False  # as the board runs: over HTTP a request acts as the User
         try:
-            seen["http"] = cli(["--board-url", board.base, "--write-token", board.server.write_token,
+            token = board.server.write_token
+            seen["token_starts_with_dash"] = token.startswith("-") and not token[1].isdigit() and token[1] != "."
+            seen["http"] = cli(["--board-url", board.base, f"--write-token={board.server.write_token}",
                                 "--caller-role", "director", "set-board-stall-threshold", "--seconds", "600",
                                 "--apply", "--expected-revision", str(now()[0])])
         finally:
@@ -652,6 +658,8 @@ def command_checks(got: dict) -> None:
               f"{role}'s own pane is refused, changing nothing: {answer}")
     check(all(v == "only director may configure workflow" for v in d["service_roles"].values()),
           f"the board refuses every other role: {d['service_roles']}")
+    check(d.get("token_starts_with_dash") is True,
+          "the board's write token starts with a dash argparse cannot read as a number (SYRD-771)")
     check(d["http"][0] == 1 and "over HTTP a request acts as the User, not director" in d["http"][2],
           f"over HTTP, write token and all, nobody is the Director: {d['http']}")
     check(d["final"] == d["default"][1], f"nothing they tried changed it: {d['final']}")

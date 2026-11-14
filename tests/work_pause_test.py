@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -137,7 +138,15 @@ def scenario(root: Path) -> dict:
         admin = build_board(fixture, cluster, root, "board")
         app = fixture.TicketBoardApp(cluster.root / "frames", cluster.root / "assets", project="pgu", ticket_prefix="PGU",
                                      database_url=fixture.conninfo(cluster.socket_dir, cluster.port, "board", fixture.SERVICE_ROLE))
-        server = fixture.TicketBoardServer(("127.0.0.1", 0), app, director_notifier=fixture.QuietNotifier())
+        # SYRD-771: a write token that starts with "-", as secrets.token_urlsafe gives about 1 time in 64, on every run:
+        # every CLI here passes it as --write-token=<token>, which argparse cannot read as another option.
+        server = fixture.TicketBoardServer(("127.0.0.1", 0), app, director_notifier=fixture.QuietNotifier(),
+                                           write_token="-x" + secrets.token_urlsafe(32))
+        # "-x", never "-" + a digit or ".": argparse reads "-<digit>..." as a negative number, a value, so a two-item
+        # --write-token would still parse (Audit of 7cd71266). With "-x" the two-item form fails every run.
+        check(server.write_token.startswith("-") and not server.write_token[1].isdigit()
+              and server.write_token[1] != ".",
+              f"the board's write token starts with a dash that argparse cannot read as a number: {server.write_token[:2]!r}")
         fixture.TEST_WRITE_TOKEN = server.write_token
         threading.Thread(target=server.serve_forever, daemon=True).start()
         base = f"http://127.0.0.1:{server.server_port}"
@@ -328,13 +337,32 @@ def scenario(root: Path) -> dict:
                                       "ELSE 'paused' END;"),
               f"a pause with no reason is still refused, and nothing stands: {page_blank} {page_none}")
         pause("stop", "cli case")
+        # SYRD-771: the board refuses a resume whose reason is not text, and the pause stands.
+        try:
+            not_text = fixture.post_json(base, "/api/tickets/actions/resume_work", {"reason": 5}, caller="director",
+                                         expect=400)
+        except AssertionError as exc:  # accepted instead: this suite's failed check, never a crash
+            not_text = f"accepted: {str(exc)[:300]}"
+        check("a resume's reason is text" in str(not_text) and "paused" == sql(
+                  "SELECT CASE WHEN ticket_board.current_work_pause() IS NULL THEN 'not paused' ELSE 'paused' END;"),
+              f"a resume whose reason is a number is refused, and the pause stands: {not_text}")
+        if "paused" != sql("SELECT CASE WHEN ticket_board.current_work_pause() IS NULL THEN 'not paused' ELSE 'paused' END;"):
+            pause("stop", "cli case")
         env = {k: v for k, v in os.environ.items() if not k.startswith(("TICKET_BOARD_", "PGU_"))}
         cli = subprocess.run([sys.executable, str(root / "scripts/ticket-board-write"), "--board-url", base,
-                              "--write-token", server.write_token, "--caller-role", "director", "resume-work"],
+                              f"--write-token={server.write_token}", "--caller-role", "director", "resume-work"],
                              capture_output=True, text=True, timeout=30, env=env)
         check(cli.returncode == 0 and "not paused" in sql(
                   "SELECT CASE WHEN ticket_board.current_work_pause() IS NULL THEN 'not paused' ELSE 'paused' END;"),
               f"ticket-board-write resume-work needs no --reason: {cli.returncode} {cli.stdout[-200:]} {cli.stderr[-300:]}")
+        last = sql("SELECT reason || '|' || coalesce(end_reason, '<NULL>') FROM ticket_board.work_pauses "
+                   "ORDER BY id DESC LIMIT 1;")
+        check(last == "cli case|<NULL>", f"and records no reason for it, not an invented one: {last!r}")
+        shown = subprocess.run([sys.executable, str(root / "scripts/ticket-board-read"), "--board-url", base, "pause"],
+                               capture_output=True, text=True, timeout=30, env=env)
+        last_line = next((line for line in shown.stdout.splitlines() if line.startswith("Last pause")), "")
+        check(shown.returncode == 0 and "-- cli case;" in last_line and last_line.endswith("-- no reason given"),
+              f"ticket-board-read pause says so: {shown.stdout[-400:]} {shown.stderr[-300:]}")
         resume_help = subprocess.run([sys.executable, str(root / "scripts/ticket-board-write"), "resume-work", "--help"],
                                      capture_output=True, text=True, timeout=30).stdout
         check("A reason is optional" in resume_help, f"its help says the reason is optional: {resume_help[:300]}")

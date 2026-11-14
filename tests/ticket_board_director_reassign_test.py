@@ -10,6 +10,7 @@ transition check in the database. A test that stubs any of them proves nothing.
 import copy
 import json
 import os
+import secrets
 import sys
 import threading
 from pathlib import Path
@@ -137,7 +138,14 @@ def main():
         document = validate(before_relaying())
         app.apply_workflow(document, expected_revision=0, dry_run=False, caller_role="director")
 
-        server = t.TicketBoardServer(("127.0.0.1", 0), app, director_notifier=t.QuietNotifier())
+        # SYRD-771: a write token that starts with "-" (secrets.token_urlsafe gives one about 1 time in 64), every run.
+        server = t.TicketBoardServer(("127.0.0.1", 0), app, director_notifier=t.QuietNotifier(),
+                                     write_token="-x" + secrets.token_urlsafe(32))
+        # "-x", never "-" + a digit or ".": argparse reads "-<digit>..." as a negative number, a value, so a two-item
+        # --write-token would still parse (Audit of 7cd71266). With "-x" the two-item form fails every run.
+        assert (server.write_token.startswith("-") and not server.write_token[1].isdigit()
+                and server.write_token[1] != "."), \
+            f"FAILED CHECK: the board's write token starts with a dash argparse cannot read as a number: {server.write_token[:2]!r}"
         t.TEST_WRITE_TOKEN = server.write_token
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -286,23 +294,25 @@ def run_checks(app, admin, base, write_token, document):
 
     # ACCEPTANCE -- the CLI publishes it too, over the same boundary.
     clear_queue(admin)
-    exit_code = write_client.main(
-        [
-            "--board-url",
-            base,
-            "--caller-role",
-            "director",
-            "--write-token",
-            write_token,
-            "reassign",
-            "PGU-2",
-            "--assignee",
-            "ops",
-            "--reason",
-            "Returning it to Ops.",
-        ]
-    )
-    assert exit_code == 0, exit_code
+    try:  # argparse exits rather than returns: a token it cannot read is this suite's failed check, not a crash
+        exit_code = write_client.main(
+            [
+                "--board-url",
+                base,
+                "--caller-role",
+                "director",
+                f"--write-token={write_token}",
+                "reassign",
+                "PGU-2",
+                "--assignee",
+                "ops",
+                "--reason",
+                "Returning it to Ops.",
+            ]
+        )
+    except SystemExit as stop:
+        exit_code = f"argparse exited {stop.code}"
+    assert exit_code == 0, f"FAILED CHECK: the CLI reassigns, with a write token that starts with a dash: {exit_code}"
     assert app.get_ticket("PGU-2")["assignee"] == "ops"
     assert reassignment_comments(app.get_ticket("PGU-2"))[-1]["text"].endswith("Reason: Returning it to Ops."), (
         app.get_ticket("PGU-2")["comments"]

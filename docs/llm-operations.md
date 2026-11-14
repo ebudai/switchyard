@@ -42,7 +42,7 @@ notifies the assignee; never comment merely to inspect.
 
 | Role | Normative instruction | Boundary |
 |---|---|---|
-| Router | Its launch prompt only | Read the named ticket once; `router-assign` or `router-return` |
+| Router | `switchyard-board`, then `switchyard-router` after the exact role check; its role prompt, read from the declared workflow at each ticket, for the project's ownership map | Read the named ticket once; `router-assign` or `router-return` |
 | Implementer, Audit, Inspector and ordinary roles | `switchyard-board` skill | Only actions published for the role and ticket |
 | Director | `switchyard-board`, then `switchyard-director` after the exact role check | Coordinates, routes and recovers; cannot grant itself approval |
 | Librarian | `switchyard-board`, then `switchyard-librarian` after the exact role check | One ticket; one of three documentation decisions; documents only |

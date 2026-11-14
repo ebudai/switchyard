@@ -179,6 +179,13 @@ you. It is a usability tool, not a delegate: everything else stays yours.
   back to you, not to Router, and is recorded as a misroute. Your `reassign`
   of Router's pick is recorded as a correction. Each ticket's `routing` field
   (`ticket-board-read ticket <id> --json`) carries the history.
+- Its generic remit is the `switchyard-router` skill. What each implementer
+  owns, and any rule of yours, belongs in its role prompt:
+  `switchyard role-prompt set router --project <project> --prompt-file F`.
+  The skill reads that prompt from the declared workflow at every ticket, so a
+  change reaches its next ticket, and a Router declared `ephemeral` (a fresh
+  conversation per ticket) loses nothing. A Router that cannot read its prompt
+  returns the ticket to you and says so.
 - `scripts/router_canary.py seed|report|finish` measures it on bounded
   fixtures, priced with your corrections and implementers' interruptions.
 

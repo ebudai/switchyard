@@ -4,9 +4,12 @@ Claude, Codex, agy and Hermes all read the same ``SKILL.md`` package shape, but
 each discovers it in a different directory.  One source file per skill is
 therefore installed into four locations rather than maintained as four bodies.
 
-Three skills ship: ``switchyard-board``, which every role needs,
-``switchyard-director``, a Director-only overlay on it, and
-``switchyard-librarian``, the optional Librarian's overlay (SYRD-624).  Role
+Four skills ship: ``switchyard-board``, which every role needs,
+``switchyard-director``, a Director-only overlay on it,
+``switchyard-librarian``, the optional Librarian's overlay (SYRD-624), and
+``switchyard-router``, the optional Router's (SYRD-770), which carries its
+remit through a fresh conversation per ticket and reads its project's ownership
+map from the board's declared workflow each time.  Role
 panes commonly share one Unix home, so every file lands in the same trees; which
 skill a session is *told* to load is the role-scoped part, and the board's own
 authorization is what actually stops one role acting like another.
@@ -51,7 +54,8 @@ class CanonicalSkill:
 BOARD_SKILL = CanonicalSkill("switchyard-board")
 DIRECTOR_SKILL = CanonicalSkill("switchyard-director", director_only=True)
 LIBRARIAN_SKILL = CanonicalSkill("switchyard-librarian", role_only="librarian")
-CANONICAL_SKILLS: tuple[CanonicalSkill, ...] = (BOARD_SKILL, DIRECTOR_SKILL, LIBRARIAN_SKILL)
+ROUTER_SKILL = CanonicalSkill("switchyard-router", role_only="router")
+CANONICAL_SKILLS: tuple[CanonicalSkill, ...] = (BOARD_SKILL, DIRECTOR_SKILL, LIBRARIAN_SKILL, ROUTER_SKILL)
 
 SKILL_NAME = BOARD_SKILL.name
 CANONICAL_RELATIVE_SOURCE = BOARD_SKILL.relative_source
@@ -61,7 +65,7 @@ def skills_for_role(role: str) -> tuple[CanonicalSkill, ...]:
     """The skills a session in ``role`` should be told to load, in order.
 
     Every role gets the shared body; only a Director is pointed at its overlay,
-    and only the Librarian at its own. This is a usability boundary, not a
+    and only the Librarian and the Router at their own. This is a usability boundary, not a
     security one -- an overlay is readable in a shared home either way, and the
     board refuses privileged operations from any other caller regardless of what
     a session has read.

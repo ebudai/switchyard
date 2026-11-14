@@ -17,10 +17,10 @@ Nothing in this skill names a project, a port, a role, a stage, or a database.
 All of that is per-project and is discovered at runtime. If you find yourself
 typing a literal prefix or address, you are guessing.
 
-**If `TICKET_BOARD_CALLER_ROLE` is `router`, stop here: this skill is not
-yours.** Router's whole remit is its onboarding prompt - one read of the ticket
-it was told about, then `router-assign` or `router-return` - and nothing below
-applies to it.
+**If `TICKET_BOARD_CALLER_ROLE` is `router`, load `switchyard-router` too,
+and let it narrow this one:** Router reads its project's Router prompt from the
+board, reads the one ticket it was told about, and makes one write -
+`router-assign` or `router-return` - and nothing below gives it more.
 
 **If `TICKET_BOARD_CALLER_ROLE` is `librarian`, load `switchyard-librarian`
 too, and let it narrow this one:** the Librarian reads only the ticket it was

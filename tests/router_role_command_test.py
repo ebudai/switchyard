@@ -182,8 +182,9 @@ def test_router_is_told_two_operations_and_nothing_else() -> None:
     check("not re-read tickets, poll the board, or watch panes" in ROUTER_PROMPT, "it reads once and yields")
     skill = (ROOT / "skills/switchyard-board/SKILL.md").read_text()
     head = skill[:skill.index("## What the environment already tells you")]
-    check("If `TICKET_BOARD_CALLER_ROLE` is `router`, stop here" in head,
-          "the shared skill turns Router away before it teaches anything")
+    # SYRD-770: and sends it to its own skill, which carries this remit through a fresh conversation per ticket.
+    check("If `TICKET_BOARD_CALLER_ROLE` is `router`, load `switchyard-router`" in " ".join(head.split()),
+          "the shared skill sends Router to its own skill before it teaches anything")
     for path in (ROOT / "skills/switchyard-board/SKILL.md", ROOT / "docs/onboarding/switchyard-board-guide.md"):
         text = " ".join(path.read_text().split())
         check("ticket-board-write implementer-kick-back <id> --reason" in text and "never" in text

@@ -5,13 +5,21 @@ from a different directory. Switchyard keeps **one** canonical body per skill an
 projects it into all five, so a pane's instructions do not depend on which
 runtime it happens to be.
 
-Three skills ship:
+Four skills ship:
 
 | Skill | Who is told to load it |
 |---|---|
 | `switchyard-board` | every role |
 | `switchyard-director` | the Director, in addition to the shared one |
 | `switchyard-librarian` | the optional Librarian, in addition to the shared one (SYRD-624) |
+| `switchyard-router` | the optional Router, in addition to the shared one (SYRD-770) |
+
+The Router's skill carries its generic remit. What it cannot know is per
+project: what each implementer owns, and any rule the Director adds. That stays
+in the Router's role prompt, and the skill reads it from the board's declared
+workflow (`/api/workflow`, `roles[].onboarding_prompt`) at every ticket. So a
+Router given a fresh conversation per ticket (`ephemeral`) still has both, and a
+`switchyard role-prompt set router` reaches its next ticket.
 
 ## The canonical sources
 

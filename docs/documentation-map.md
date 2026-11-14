@@ -83,6 +83,7 @@ changes.
 | [`skills/switchyard-board/SKILL.md`](../skills/switchyard-board/SKILL.md) | Shared role authority, board operations, evidence and wait handling |
 | [`skills/switchyard-director/SKILL.md`](../skills/switchyard-director/SKILL.md) | Director-only controls and recovery procedures |
 | [`skills/switchyard-librarian/SKILL.md`](../skills/switchyard-librarian/SKILL.md) | Librarian-only documentation decision contract |
+| [`skills/switchyard-router/SKILL.md`](../skills/switchyard-router/SKILL.md) | Router-only routing contract; reads the project's Router prompt from the board at each ticket |
 | [LLM operations reference](llm-operations.md) | Small retrieval index into the skills, live workflow and command help |
 | [Launcher guide](team-launcher.md) | Project lifecycle, roles, panes, provisioning and upgrades |
 | [Board service](ticket-board-service.md), [supervisor](board-supervisor.md), and [provisioning](ticket-board-project-provisioning.md) | Board installation, operation, migration and tenant artifacts |

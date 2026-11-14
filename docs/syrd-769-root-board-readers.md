@@ -12,6 +12,7 @@ a socket or URL it controls, and so choose the answer root acts on or records:
 | `provider_runtime_state.read_runtime_assignments`, `read_runtime_assignment_details` | `resume-provision` | `/api/runtime-assignments` |
 | `presentation_runtime_assignments`, `presentation_role_recovery` | `replace-window`, `present … recover` | `/api/runtime-assignments`, `/api/workflow` |
 | `release_alignment._live_board_build_id` | `release-status --close`, `deploy-release` | `/api/board` (its build id goes into root's journal) |
+| `project_onboarding.director_onboarding_state` (SYRD-774) | `upgrade` | `/api/workflow` (its answer is root's "director" phase) |
 
 ## As root, the board root's unit names
 

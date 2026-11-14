@@ -696,13 +696,19 @@ def director_onboarding_state(
         # The projection is one of the two things "done" rests on, so a config
         # that cannot be read is not a state this can report on.
         return "unknown", f"{config_path} could not be read ({exc})"
+    from scripts.ticket_board.board_identity import board_opener
+    from scripts.ticket_board.phone_text import clean_text
+
     board_root = config.board_url.rstrip("/").removesuffix("/api/tickets").removesuffix("/api")
-    open_url = opener or launcher._open_board_url
+    # SYRD-774: as root (`switchyard upgrade`), the board root's own unit names, asked its fixed route -- never the url
+    # the tenant's configuration names, since the answer decides the director phase root records (SYRD-769's rule).
+    open_url = board_opener(config, opener) or launcher._open_board_url
     try:
         with open_url(board_root + "/api/workflow") as response:
             payload = json.load(response)
     except Exception as exc:  # noqa: BLE001 - any failure to read is "not proven"
-        return "unknown", f"the board at {board_root} could not be read ({exc})"
+        # A raw status line or reason phrase can ride in it: plain text only (SYRD-769).
+        return "unknown", f"the board at {board_root} could not be read ({clean_text(exc, 300)})"
     document = payload.get("document") if isinstance(payload, Mapping) else None
     if document is None:
         return "pending", "the board carries no workflow document yet"

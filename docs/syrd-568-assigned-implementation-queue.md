@@ -31,7 +31,9 @@ stage, and the ordinary route puts them there. **One** of them holds the slot.
 **Which ticket holds it.** `ticket_current_reserved_ticket(role)`, the one
 function every reader already asks, answers. Only its declared branch changed:
 
-- A ticket with an unresolved blocker holds nothing.
+- A ticket with an unresolved blocker holds nothing. Since SYRD-772 this holds past implementation too: a ticket
+  blocked there is recorded in `blocked_slot_releases` and stays released, even once unblocked, until rework
+  re-enters implementation. See `docs/syrd-772-blocked-ticket-holds-no-slot.md`.
 - Work past implementation that holds its author comes first, as it always
   did. That means review, under the default policy, or lifecycle after a
   reopen. Under a lifecycle reopen this keeps the implementer off other work,

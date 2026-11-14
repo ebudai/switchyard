@@ -144,7 +144,11 @@ implementation work to an implementer who already holds some parks it in the
 holding stage, records who it is queued for and what it is queued behind, and
 tells you. The new owner is not notified, because nothing is theirs to do yet. If you need a specific ticket held for a specific role
 rather than queued, hold it deliberately (below) and say why; do not defeat
-serial focus by forcing state.
+serial focus by forcing state. A blocked ticket holds no slot in any stage: a
+blocker you record on a ticket in review or acceptance, whether a ticket, another
+board's ticket or `operator:`, hands its author the next queued ticket. Releasing
+the blocker does not take the slot back; sent back to implementation, the ticket
+queues behind the active one.
 
 ## Router, when the project runs one
 

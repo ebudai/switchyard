@@ -720,4 +720,10 @@ GRANT EXECUTE ON FUNCTION ticket_board.finish_break_glass(bigint, boolean, jsonb
 GRANT EXECUTE ON FUNCTION ticket_board.break_glass_notice_is_current(jsonb) TO ticket_board_service, ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.break_glass_status() TO ticket_board_service, ticket_board_listener;
 
+-- SYRD-772: the slot reader asks whether a ticket past implementation gave up its author's slot while blocked.
+GRANT SELECT ON ticket_board.blocked_slot_releases TO ticket_board_service, ticket_board_listener;
+REVOKE ALL ON FUNCTION ticket_board.record_blocked_slot_release(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.record_blocked_slot_release_for_ticket() FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.record_blocked_slot_release_for_blocker() FROM PUBLIC;
+
 COMMIT;

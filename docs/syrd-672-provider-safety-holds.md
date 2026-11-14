@@ -126,6 +126,10 @@ Commands:
 `ticket-board-read holds` and `GET /api/provider-holds` (`accounts`) show the current holds, with the roles each one
 holds, and the last five cleared.
 
+**The recovery packet (SYRD-737):** `GET /api/recovery-packet[?hold=N]` and `ticket-board-read recovery-packet`, a
+fixed-schema, bounded packet the board builds from its own records, with no model turn. See
+`docs/syrd-737-recovery-packet.md`.
+
 **For the children (SYRD-737 to 739):** `provider_account_hold_status()`, `role_account_hold(role)`,
 `role_account_runtime(role)`, the `provider_safety_hold` user event, and the notice payload
 `{kind, reason, id, runtime, hold, role}`.

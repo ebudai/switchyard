@@ -463,6 +463,11 @@ def _build_parser() -> argparse.ArgumentParser:
     pause.add_argument("--json", action="store_true", help="print JSON")
     holds = subparsers.add_parser("holds", help="show provider quota holds: who, until when, and how to clear (SYRD-644)")
     holds.add_argument("--json", action="store_true", help="print JSON")
+    packet = subparsers.add_parser("recovery-packet", help="show a provider safety hold's recovery packet, built by the "
+                                   "board from its own records; --check FILE verifies a saved one (SYRD-737)")
+    packet.add_argument("--hold", type=int, default=None, help="the hold's number; default: the one current hold")
+    packet.add_argument("--check", default="", metavar="FILE", help="verify this saved packet against the board now")
+    packet.add_argument("--json", action="store_true", help="print the packet, or the verdict, as JSON")
     cohorts = subparsers.add_parser("cohorts", help="show provider cohorts: ceilings, quota, holders, changes (SYRD-628)")
     cohorts.add_argument("--json", action="store_true", help="print JSON")
     stall = subparsers.add_parser("stall", help="show why the board stall alert has or has not fired (SYRD-637)")
@@ -498,6 +503,33 @@ def normalize_argv(argv: list[str] | None) -> list[str]:
 
 def command_wants_json(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "json", False))
+
+
+def _recovery_packet(client: TicketBoardReadClient, args: argparse.Namespace) -> int:
+    """SYRD-737: print the board's recovery packet, or verify a saved one against the board now."""
+    from . import recovery_packet as rp
+
+    get = lambda path: client._get_json(client.root_url + path)  # noqa: E731 - the one transport
+    if not args.check:
+        payload = get(rp.PATH + (f"?hold={args.hold}" if args.hold is not None else ""))
+        print_json(payload) if command_wants_json(args) else print(rp.render(payload))
+        return 0
+    with open(args.check, encoding="utf-8") as handle:
+        saved = json.load(handle)
+    project = os.environ.get("TICKET_BOARD_PROJECT", "").strip() or str(saved.get("provenance", {}).get("project", ""))
+    try:
+        verdict = rp.fetch_verified(get, project=project, packet=saved)
+    except rp.PacketError as exc:
+        print(f"ticket-board-read: {exc}", file=sys.stderr)
+        return 1
+    verdict.pop("packet")
+    if command_wants_json(args):
+        print_json(verdict)
+    else:
+        print(f"valid: hold {verdict['hold']} ({verdict['runtime']}), built {verdict['generated_at']}; "
+              + ("the board still reads as it did" if verdict["current"]
+                 else "the board has changed since: " + ", ".join(verdict["changed"] or ["provenance only"])))
+    return 0 if verdict["current"] else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -563,6 +595,8 @@ def main(argv: list[str] | None = None) -> int:
 
             payload = client._get_json(client.root_url + "/api/provider-holds")
             print_json(payload) if command_wants_json(args) else print(describe_holds(payload))
+        elif command == "recovery-packet":
+            return _recovery_packet(client, args)
         elif command == "cohorts":
             from .cohort_ops import describe as describe_cohorts
 

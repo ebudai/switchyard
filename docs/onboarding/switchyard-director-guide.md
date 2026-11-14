@@ -818,6 +818,20 @@ What you can do, in order of preference:
    who cleared it and why. Waiting notices then go, each checked again first. The refusal that began the hold can
    never begin another. A new refusal begins a new hold.
 
+**The recovery packet.** When the refused role is you, or someone must take over without the refused model, the board
+builds a fixed-schema recovery packet from its own records: `ticket-board-read recovery-packet` (`--json` for the
+packet itself, `--hold N` when more than one account is held), or `GET /api/recovery-packet[?hold=N]`.
+- **What it holds:** the hold, the roles and tickets it affects, and the choices above as fixed commands with the
+  unheld roles that may take them. It also holds every role's provider account, the active tickets (stage, owner,
+  blockers, waits), the pending notices, and a window of the board's recent events.
+- **What it never holds:** a ticket's text, a comment, a notice's message, a reason, a provider's words, pane text, or
+  any token.
+- **How it is built:** by the board service alone, with no model turn. Nothing is sent to any pane.
+
+`ticket-board-read recovery-packet --check FILE` verifies a saved packet: its schema and digests, that it is this
+board's, and that its hold still stands. It also says whether the board has changed since, naming what changed; if it
+has, it exits 1. For a ticket's own text, read the ticket from the board.
+
 When you suspect a refusal the board did not recognise (Hermes, agy and Copilot write none it can read), hold the
 account yourself: `ticket-board-write hold-provider-account <cli> --reason-file PATH`. The User can do both,
 which matters when your own account is held.

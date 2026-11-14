@@ -58,7 +58,9 @@ LOCAL_IMPORTS = {"tenant_release_deploy_command": ["from scripts.ticket_board.pr
                  "capture_release_pointer": ["from scripts import owner_writes"],
                  "restore_release_pointer": ["from scripts import owner_writes"],
                  # SYRD-706: root migrates the database itself, from its trusted release, before the tenant's deploy.
-                 "deploy_release_in_transaction": ["from scripts.ticket_board import database_admin, privileged_operations"],
+                 "deploy_release_in_transaction": ["from scripts.ticket_board import database_admin, privileged_operations",
+                                                   # SYRD-773: what a failed deploy prints and returns.
+                                                   "from scripts.deploy_failure_report import deploy_failure"],
                  # SYRD-605: and the no-follow helper's argv, for the listener unit in the owner's home.
                  "tenant_release_unit_install_command": ["from scripts.ticket_board.project_provision import system_unit_proof_chain",
                                                         "from scripts.ticket_board.provision_tenant_paths import tenant_paths_argv"]}
@@ -82,7 +84,7 @@ OLD, NEW = "a" * 40, "b" * 40
 
 def check(condition: bool, detail: str) -> None:
     global CHECKS
-    assert condition, detail
+    assert condition, f"FAILED CHECK: {detail}"
     CHECKS += 1
 
 
@@ -463,9 +465,12 @@ def test_the_release_is_switched_inside_the_transaction() -> None:
     check(run(status(), deploy="") == (["no deploy command could be built for this release"], False), "no command")
     # Exit 7: deploy-restart's 3 now means its rollback undid the deploy (SYRD-113).
     runner = lambda argv, **kw: calls.append((argv, kw)) or Result(returncode=7, stderr="x" * 500 + " \n", stdout="")  # noqa: E731
-    check(run(status(), runner=runner) == ([f"deploying {NEW} failed (exit 7): {'x' * 400}"], False)
-          and calls == [(["sh", "-c", "<deploy>"], dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))] and said == [],
-          f"a failed deploy: its exit and at most 400 characters of what it said: {calls}")
+    # SYRD-773: the whole output printed, for root's journal, and the problem quoting its end and saying where the rest is.
+    check(run(status(), runner=runner) == ([f"deploying {NEW} failed (exit 7): ...{'x' * 400} (its full output is in "
+                                             "root's rollout journal (switchyard rollout-log p379 --output))"], False)
+          and calls == [(["sh", "-c", "<deploy>"], dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))]
+          and said == [f"switchyard: deploying {NEW} failed (exit 7); its output, in full:", f"switchyard:   [stderr] {'x' * 500}"],
+          f"a failed deploy: its exit, the end of what it said, and all of it printed: {calls} {said}")
     check(run(status(), runner=lambda argv, **kw: Result(returncode=1, stderr="  ", stdout=""))[0] == [f"deploying {NEW} failed (exit 1): no output"],
           "a silent failure says so")
     check(run(status(), runner=lambda argv, **kw: Result(returncode=0, stderr="", stdout="")) == ([], True)

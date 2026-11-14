@@ -1072,29 +1072,31 @@ deploy_restart_service() {
     activate_release "$release_dir"
     verify_current_release_sha "$deployed_sha"
     restart_live_service "$scope"
+    # SYRD-773: each check after the restart that fails is named (post-restart-check-failed: NAME) before the
+    # rollback, and its own output is just above that line; the deploy's caller reads the name and keeps the rest.
     if ! smoke_check_http; then
-        rollback_live_service "$scope" "$previous_release"
+        rollback_live_service "$scope" "$previous_release" http-smoke
         start_listener_after_upgrade
         exit "$ROLLED_BACK_EXIT"
     fi
     if ! verify_live_build_id "$deployed_sha"; then
-        rollback_live_service "$scope" "$previous_release"
+        rollback_live_service "$scope" "$previous_release" live-build-id
         start_listener_after_upgrade
         exit "$ROLLED_BACK_EXIT"
     fi
     if ! verify_live_commit_repositories "$scope"; then
-        rollback_live_service "$scope" "$previous_release"
+        rollback_live_service "$scope" "$previous_release" commit-repositories
         start_listener_after_upgrade
         exit "$ROLLED_BACK_EXIT"
     fi
     start_listener_after_upgrade
     if ! verify_listener_pane_state_authority; then
-        rollback_live_service "$scope" "$previous_release"
+        rollback_live_service "$scope" "$previous_release" listener-pane-state-authority
         exit "$ROLLED_BACK_EXIT"
     fi
     if [[ "$scope" == "system" ]]; then
         if ! verify_post_deploy_system_runtime; then
-            rollback_live_service "$scope" "$previous_release"
+            rollback_live_service "$scope" "$previous_release" system-runtime
             exit "$ROLLED_BACK_EXIT"
         fi
     fi
@@ -1119,14 +1121,19 @@ restart_live_service() {
 rollback_live_service() {
     local scope="$1"
     local previous_release="$2"
+    local check="${3:-http-smoke}"
+    # One fixed line naming the check that failed, which deploy_release_in_transaction reads (SYRD-773).
+    log "post-restart-check-failed: $check"
     if [[ -z "$previous_release" || ! -d "$previous_release" ]]; then
-        die "post-restart smoke failed and no previous release is available for rollback"
+        die "post-restart check $check failed and no previous release is available for rollback"
     fi
-    log "post-restart smoke failed; rolling back current to $previous_release"
+    log "post-restart check $check failed; rolling back current to $previous_release"
     activate_release "$previous_release"
     restart_live_service "$scope"
-    smoke_check_http
-    log "rollback-pass; restored $previous_release"
+    if ! smoke_check_http; then
+        die "rollback after $check failed: $previous_release did not pass its smoke check"
+    fi
+    log "rollback-pass; restored $previous_release after $check failed"
 }
 
 show_logs() {

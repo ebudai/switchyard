@@ -681,3 +681,10 @@ def switchyard_rebind_director_command(argv: list[str]) -> int:
         return 1
     return command(args.project, cli=args.cli, hold=args.hold, reason=reason, model=args.model,
                    apply_it=args.apply, expect=args.expect)
+
+
+def switchyard_break_glass_command(argv: list[str]) -> int:
+    """`switchyard break-glass` (SYRD-739), reached through this module's launcher re-export."""
+    from scripts import break_glass_role
+
+    return break_glass_role.main(argv)

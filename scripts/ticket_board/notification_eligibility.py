@@ -441,6 +441,12 @@ WHERE id = %s
                                (payload,)).fetchone()
             return target_role == "director" and row is not None and bool(
                 row["current"] if isinstance(row, dict) else row[0])
+        # SYRD-739: a break-glass hand-back, while it was handed back and the Director's account is not held.
+        if kind == "break_glass_handback":
+            row = conn.execute("SELECT ticket_board.break_glass_notice_is_current(%s::jsonb) AS current",
+                               (payload,)).fetchone()
+            return target_role == "director" and row is not None and bool(
+                row["current"] if isinstance(row, dict) else row[0])
         # SYRD-725: the User's answer to an operator wait is the Director's, while a blocker it names stands.
         if kind == "operator_response":
             row = conn.execute("SELECT ticket_board.operator_response_is_current(%s::jsonb) AS current",

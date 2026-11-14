@@ -66,7 +66,7 @@ from .operation_role_policy import (
     TASK_ROLES,
 )
 from .peer_identity import SessionIdentity
-from . import extension_operations, pull_queue, report_confirmation, report_follow_up, ui_delegation
+from . import break_glass, extension_operations, pull_queue, report_confirmation, report_follow_up, ui_delegation
 from .workflow_config import DIRECTOR_IDENTIFYING_CAPABILITIES, LEGACY_ASSIGNEE_SCOPED_OPERATIONS
 
 LOGGER = logging.getLogger(__name__)
@@ -1119,6 +1119,9 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             body = self.rfile.read(length) if length > 0 else b""
             if parsed.path in ("/api/tickets/actions/file_report", "/api/tickets/actions/report_follow_up"):
                 report_follow_up.handle(self, parsed.path.rsplit("/", 1)[1], json.loads(body or b"{}"))  # SYRD-602/677
+                return
+            if parsed.path == break_glass.PATH:  # SYRD-739: the grant's token is the only authority, checked in the database
+                break_glass.handle(self, json.loads(body or b"{}"))
                 return
             self.require_http_write_token()
             if parsed.path == "/api/upload":

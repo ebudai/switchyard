@@ -841,6 +841,8 @@ opens with "Board: this is a fresh Director session", run the `ticket-board-read
 before anything else. The hold stays until it is cleared; send nothing to the held account. When no other runtime can
 take the Director, the command keeps work paused and tells the operator instead.
 
+**A break-glass role.** For one urgent board change while the Director is held -- isolating the refused ticket, say -- the operator can start `pkexec switchyard break-glass <project> --cli <runtime> --hold N --allow isolate,...`: a temporary role on another provider, with the packet and nothing else, that the board lets make exactly one operation. If a session opens with "Board: break-glass grant N ... ended", that is its hand-back: read the tickets it names before acting.
+
 When you suspect a refusal the board did not recognise (Hermes, agy and Copilot write none it can read), hold the
 account yourself: `ticket-board-write hold-provider-account <cli> --reason-file PATH`. The User can do both,
 which matters when your own account is held.

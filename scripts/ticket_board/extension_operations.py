@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import (audit_return, blocker_explanation, blocker_review, cohort_ops, provider_hold_ops, context_continuation, director_notice, documentation_candidate, execution_lease_ops, pull_queue, reminder_snooze,
+from . import (audit_return, break_glass, blocker_explanation, blocker_review, cohort_ops, provider_hold_ops, context_continuation, director_notice, documentation_candidate, execution_lease_ops, pull_queue, reminder_snooze,
                recovery_packet, reopen_restore, report_intake, router_role, size_review, uat_instructions, ui_delegation, user_events,
                user_wait, work_pause_ops)
 
@@ -159,6 +159,7 @@ READ_ROUTES = {
     "/api/director-capacity": lambda app, _query: director_capacity_status(app),  # SYRD-728
     work_pause_ops.PATH: work_pause_ops.status,  # SYRD-756: the pause, read-only
     recovery_packet.PATH: recovery_packet.serve,  # SYRD-737: a safety hold's recovery packet, read-only
+    break_glass.PATH: break_glass.status,  # SYRD-739: the newest break-glass grants, never a token
 }
 
 

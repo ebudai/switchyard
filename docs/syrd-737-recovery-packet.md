@@ -98,6 +98,7 @@ Each consumer brings its own transport:
   rebind-director` (SYRD-738) does this, then hands the validated packet to the fresh Director as a file it can
   `--check`
   (`board_identity.board_get_for`);
-- a break-glass role reads through `ticket-board-read`.
+- a break-glass role (SYRD-739) is handed the packet as a file by `switchyard break-glass`, which read and
+  verified it over root's proven connection.
 
 Authority stays with the transport and the board, never with the packet.

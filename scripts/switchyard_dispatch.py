@@ -186,6 +186,9 @@ def switchyard_main(argv: list[str] | None = None) -> int:
     if argv[0].casefold() == "rebind-director":
         # SYRD-738: the operator replaces a Director held by a provider safety hold; its own parser and journal.
         return launcher.switchyard_rebind_director_command(argv[1:])
+    if argv[0].casefold() == "break-glass":
+        # SYRD-739: the operator's one-operation role for a provider safety hold; its own parser and journal.
+        return launcher.switchyard_break_glass_command(argv[1:])
     if argv[0].casefold() == "migrate-workflow":
         args = launcher._build_switchyard_migrate_workflow_parser().parse_args(argv[1:])
         return launcher.switchyard_migrate_workflow_command(

@@ -134,6 +134,8 @@ fixed-schema, bounded packet the board builds from its own records, with no mode
 Director to another runtime without a turn from the held one, and keeps work paused when none can take it. See
 `docs/syrd-738-director-rebind.md`.
 
+**A one-operation break-glass role (SYRD-739):** `pkexec switchyard break-glass`, a temporary role on another provider whose one board operation the board enforces by token, deadline and count. See `docs/syrd-739-break-glass.md`.
+
 **For the children (SYRD-737 to 739):** `provider_account_hold_status()`, `role_account_hold(role)`,
 `role_account_runtime(role)`, the `provider_safety_hold` user event, and the notice payload
 `{kind, reason, id, runtime, hold, role}`.

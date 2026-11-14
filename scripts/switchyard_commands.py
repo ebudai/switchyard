@@ -51,6 +51,9 @@ SWITCHYARD_COMMANDS = (
     # Replaces a Director whose provider account is under a safety hold with a fresh one on another runtime, given
     # the board's recovery packet; an operator's decision, through pkexec (SYRD-738).
     "rebind-director",
+    # Starts a temporary role on another provider that may make one board operation, enforced by the board, for a
+    # provider safety hold, then ends it and hands back; an operator's decision, through pkexec (SYRD-739).
+    "break-glass",
     # Finishes a project whose `switchyard new` stopped before it was
     # registered, so the installation that already exists can be completed
     # instead of started again: root's artifacts first (SYRD-147), then the
@@ -227,6 +230,7 @@ Commands:
   replace-window   replace a root-owned presentation window without stopping any worker
   recover-display  reattach a project's disconnected Director display, as its desktop operator
   rebind-director  replace a Director held by a provider safety hold with a fresh one on another runtime
+  break-glass      start a temporary one-operation role on another provider for a provider safety hold
   set-vcs-close-role
                    set which existing project role can mark tickets done
   set-role-runtime change an existing role's agent runtime and reconnect its panes

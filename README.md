@@ -105,6 +105,7 @@ Commands:
   replace-window   replace a root-owned presentation window without stopping any worker
   recover-display  reattach a project's disconnected Director display, as its desktop operator
   rebind-director  replace a Director held by a provider safety hold with a fresh one on another runtime
+  break-glass      start a temporary one-operation role on another provider for a provider safety hold
   set-vcs-close-role
                    set which existing project role can mark tickets done
   set-role-runtime change an existing role's agent runtime and reconnect its panes
@@ -131,7 +132,7 @@ Commands:
                    let the control role resume one legacy conversation of its own
   local-model      preview, install and control the opt-in host-wide local model service
 
-Bare project names start or attach the project. Recognized commands: board-skill, new, register, upgrade, repair-boundary, approve-desktop, adopt-workflow, migrate-workflow, rebind-workflow-panes, rebind-director, resume-provision, finish-upgrade, cutover-roles, publication-status, rollout-log, recover-display, privileged-action, install-shared-release, release-status, deploy-release, database-auth, add-role, worker-pool, set-owner-identity, present, attach, replace-window, set-vcs-close-role, set-role-runtime, reconcile-role-models, restart-role, agy-credential, seed-role-credentials, role-prompt, design-stage, router-role, documentation-gate, publisher, onboarding-readiness, stop, start, teardown, status, validate-models, paste-image, adopt-conversation, local-model.
+Bare project names start or attach the project. Recognized commands: board-skill, new, register, upgrade, repair-boundary, approve-desktop, adopt-workflow, migrate-workflow, rebind-workflow-panes, rebind-director, break-glass, resume-provision, finish-upgrade, cutover-roles, publication-status, rollout-log, recover-display, privileged-action, install-shared-release, release-status, deploy-release, database-auth, add-role, worker-pool, set-owner-identity, present, attach, replace-window, set-vcs-close-role, set-role-runtime, reconcile-role-models, restart-role, agy-credential, seed-role-credentials, role-prompt, design-stage, router-role, documentation-gate, publisher, onboarding-readiness, stop, start, teardown, status, validate-models, paste-image, adopt-conversation, local-model.
 ```
 
 <!-- switchyard-help:end -->

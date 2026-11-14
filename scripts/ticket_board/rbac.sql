@@ -700,4 +700,24 @@ GRANT SELECT ON ticket_board.director_rebinds TO ticket_board_service, ticket_bo
 GRANT EXECUTE ON FUNCTION ticket_board.director_rebind_notice_is_current(jsonb) TO ticket_board_service, ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.director_rebind_status() TO ticket_board_service, ticket_board_listener;
 
+-- SYRD-739 (pgu1040): break-glass grants. Opening, ending and handing back are root's, granted to no role.
+REVOKE ALL ON ticket_board.break_glass_grants FROM PUBLIC;
+REVOKE ALL ON SEQUENCE ticket_board.break_glass_grants_id_seq FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.open_break_glass(bigint, text, text, text, text[], integer, text, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.claim_break_glass(text, text, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.finish_break_glass(bigint, boolean, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.end_break_glass(bigint, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.break_glass_notice_text(ticket_board.break_glass_grants) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.hand_back_break_glass(bigint) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.break_glass_notice_is_current(jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.break_glass_status() FROM PUBLIC;
+-- Every column but the token's hash, which only the claim compares.
+GRANT SELECT (id, hold_id, operator, reason, runtime, operations, packet, opened_at, expires_at, state, attempted,
+              completed, ended_at, ended_by, handback) ON ticket_board.break_glass_grants
+    TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.claim_break_glass(text, text, jsonb) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.finish_break_glass(bigint, boolean, jsonb) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.break_glass_notice_is_current(jsonb) TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.break_glass_status() TO ticket_board_service, ticket_board_listener;
+
 COMMIT;

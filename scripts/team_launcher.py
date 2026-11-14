@@ -542,10 +542,10 @@ from scripts.workflow_adoption import (
     WorkflowMigration,
     write_workflow_record,
 )
-# Rebinding panes to a migrated workflow (SYRD-304), moved out whole, and a held Director to another runtime
-# (SYRD-738). Named here because `switchyard_main` dispatches to the verbs and because `team_launcher.<name>` is how
-# tests reach them.
-from scripts.director_rebind import _build_switchyard_rebind_director_parser, switchyard_rebind_director_command
+# Rebinding panes to a migrated workflow (SYRD-304), and recovering from a held Director (SYRD-738, SYRD-739). Named
+# here because `switchyard_main` dispatches to the verbs and because `team_launcher.<name>` is how tests reach them.
+from scripts.director_rebind import (_build_switchyard_rebind_director_parser, switchyard_break_glass_command,
+                                     switchyard_rebind_director_command)
 from scripts.pane_rebind import (
     _build_switchyard_rebind_workflow_panes_parser,
     _reconciled_presentation_section,

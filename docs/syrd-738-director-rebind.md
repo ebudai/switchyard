@@ -130,4 +130,5 @@ runtime ready (install it, or sign the project account in), then run the rebind 
 - The hold stays until it is cleared. Replacing the Director says nothing about whether the old account is safe.
 - The phone bridge (`user_notify`) does not yet show `director_rebind` events, as it does not show
   `provider_safety_hold` events. That is a separate change to its kind tables.
-- The break-glass role (SYRD-739) is a separate path.
+- The break-glass role (SYRD-739) is a separate path: one bounded operation, then hand-back or this command. See
+  `docs/syrd-739-break-glass.md`.

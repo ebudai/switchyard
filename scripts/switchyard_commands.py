@@ -48,6 +48,9 @@ SWITCHYARD_COMMANDS = (
     # the declaration names runtimes or targets its panes do not register with
     # and so hides them, the Director's authority included (SYRD-262).
     "rebind-workflow-panes",
+    # Replaces a Director whose provider account is under a safety hold with a fresh one on another runtime, given
+    # the board's recovery packet; an operator's decision, through pkexec (SYRD-738).
+    "rebind-director",
     # Finishes a project whose `switchyard new` stopped before it was
     # registered, so the installation that already exists can be completed
     # instead of started again: root's artifacts first (SYRD-147), then the
@@ -223,6 +226,7 @@ Commands:
   attach           attach this terminal to a role's live worker by project and role name
   replace-window   replace a root-owned presentation window without stopping any worker
   recover-display  reattach a project's disconnected Director display, as its desktop operator
+  rebind-director  replace a Director held by a provider safety hold with a fresh one on another runtime
   set-vcs-close-role
                    set which existing project role can mark tickets done
   set-role-runtime change an existing role's agent runtime and reconnect its panes

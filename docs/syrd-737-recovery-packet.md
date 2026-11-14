@@ -56,12 +56,13 @@ Which rows a cap keeps:
 - **notifications:** those waiting on a held account first, then the oldest;
 - **events:** the newest.
 
-The whole packet is at most 192 KiB (196,608 bytes). The fullest possible packet is 194,257 bytes:
+The whole packet is at most 192 KiB (196,608 bytes). The fullest possible packet is 194,307 bytes:
 - every list is at its cap, and every value is at its pattern's longest;
 - every role is on the held account, so each is named three times (`hold`, `affected`, `move_work`) and every ticket
   is affected;
 - the events are `moved` events between 64-character stages, the longest grammar;
 - the held account has the longest runtime name, and every integer is a bigint's largest.
+- every notice goes to a name that is no role, so its `held` reads false, the longer word.
 
 `tests/recovery_packet_test.py` measures it for every event grammar and checks this number.
 
@@ -93,7 +94,9 @@ A consumer never trusts a packet it was handed on its own:
 - `fetch_verified(get, project=..., packet=None)` does the fetch through any GET transport.
 
 Each consumer brings its own transport:
-- a Director replacement, run with root's authority, reads over the board's proven Unix socket
+- a Director replacement, run with root's authority, reads over the board's proven Unix socket. `switchyard
+  rebind-director` (SYRD-738) does this, then hands the validated packet to the fresh Director as a file it can
+  `--check`
   (`board_identity.board_get_for`);
 - a break-glass role reads through `ticket-board-read`.
 

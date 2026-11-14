@@ -132,6 +132,16 @@ new CLI that cannot read it at the next launch.
 Steps 7 and 8 are therefore skipped: there is no session to replace, and nothing
 for a slot to reconnect to.
 
+## A Director held by a provider safety hold
+
+When a safety refusal holds the Director's own provider account, the Director cannot change its own runtime, and
+nothing may act as it. The operator replaces it instead: `pkexec switchyard rebind-director <project> --cli <runtime>
+--hold N --reason-file PATH`, previewed and then applied with `--apply --expect <digest>`. It stops the held session,
+rebinds the declared runtime through the database owner (as `rebind-workflow-panes` does), writes the projection,
+and starts a fresh Director that is handed the board's recovery packet. Unlike this command's rollback, its undo never
+restarts the previous runtime: that is the held account, so the Director is left stopped and work paused. See
+[SYRD-738](syrd-738-director-rebind.md).
+
 ## A model repair while the Director is down
 
 The launch gate stops every role while one is configured for a model its

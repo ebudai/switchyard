@@ -832,6 +832,15 @@ packet itself, `--hold N` when more than one account is held), or `GET /api/reco
 board's, and that its hold still stands. It also says whether the board has changed since, naming what changed; if it
 has, it exits 1. For a ticket's own text, read the ticket from the board.
 
+**A replacement Director.** When the held account is yours, the operator can replace you without asking you anything:
+`pkexec switchyard rebind-director <project> --cli <runtime> --hold N --reason-file PATH`, previewed first and then
+applied with `--apply --expect <digest>`. It stops your session (kept, unread, as held evidence), moves the Director's
+declared runtime, and starts a fresh Director on the new runtime. It never starts, types into or resumes the held
+account, not even to roll back. That fresh session is sent one notice naming the packet file to check. So if a session
+opens with "Board: this is a fresh Director session", run the `ticket-board-read recovery-packet --check` it gives
+before anything else. The hold stays until it is cleared; send nothing to the held account. When no other runtime can
+take the Director, the command keeps work paused and tells the operator instead.
+
 When you suspect a refusal the board did not recognise (Hermes, agy and Copilot write none it can read), hold the
 account yourself: `ticket-board-write hold-provider-account <cli> --reason-file PATH`. The User can do both,
 which matters when your own account is held.

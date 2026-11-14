@@ -50,7 +50,7 @@ MAX_EVENTS = 50
 MAX_ROLES = 64
 MAX_BLOCKERS = 8
 MAX_OTHER_HOLDS = 8
-#: The most the encoded packet can be. The caps above keep the fullest packet (194,257 bytes) within it.
+#: The most the encoded packet can be. The caps above keep the fullest packet (194,307 bytes) within it.
 MAX_BYTES = 196608
 RUNTIMES = ("agy", "claude", "codex", "copilot", "hermes")
 PATH = "/api/recovery-packet"

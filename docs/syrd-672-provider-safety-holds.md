@@ -130,6 +130,10 @@ holds, and the last five cleared.
 fixed-schema, bounded packet the board builds from its own records, with no model turn. See
 `docs/syrd-737-recovery-packet.md`.
 
+**Replacing a held Director (SYRD-738):** `pkexec switchyard rebind-director`, an operator's command that moves the
+Director to another runtime without a turn from the held one, and keeps work paused when none can take it. See
+`docs/syrd-738-director-rebind.md`.
+
 **For the children (SYRD-737 to 739):** `provider_account_hold_status()`, `role_account_hold(role)`,
 `role_account_runtime(role)`, the `provider_safety_hold` user event, and the notice payload
 `{kind, reason, id, runtime, hold, role}`.

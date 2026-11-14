@@ -542,14 +542,14 @@ from scripts.workflow_adoption import (
     WorkflowMigration,
     write_workflow_record,
 )
-# Rebinding panes to a migrated workflow (SYRD-304), moved out whole. Named
-# here because `switchyard_main` dispatches to the verb and because
-# `team_launcher.<name>` is how tests reach them.
+# Rebinding panes to a migrated workflow (SYRD-304), moved out whole, and a held Director to another runtime
+# (SYRD-738). Named here because `switchyard_main` dispatches to the verbs and because `team_launcher.<name>` is how
+# tests reach them.
+from scripts.director_rebind import _build_switchyard_rebind_director_parser, switchyard_rebind_director_command
 from scripts.pane_rebind import (
     _build_switchyard_rebind_workflow_panes_parser,
     _reconciled_presentation_section,
-    root_verified_tenant,
-    switchyard_rebind_workflow_panes_command,
+    root_verified_tenant, switchyard_rebind_workflow_panes_command,
 )
 # Role-account migration (SYRD-305), moved out whole. Named here because
 # `switchyard new`, `upgrade` and the identities cutover below publish,

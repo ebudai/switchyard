@@ -435,6 +435,12 @@ WHERE id = %s
             row = conn.execute("SELECT EXISTS (SELECT FROM ticket_board.provider_account_holds WHERE id = %s "
                                "AND cleared_at IS NULL) AS current", (int(parsed.get("hold") or 0),)).fetchone()
             return target_role == "director" and bool(row["current"] if isinstance(row, dict) else row[0])
+        # SYRD-738: the replacement Director's packet notice, while that rebind is the one the Director runs on.
+        if kind == "director_rebind":
+            row = conn.execute("SELECT ticket_board.director_rebind_notice_is_current(%s::jsonb) AS current",
+                               (payload,)).fetchone()
+            return target_role == "director" and row is not None and bool(
+                row["current"] if isinstance(row, dict) else row[0])
         # SYRD-725: the User's answer to an operator wait is the Director's, while a blocker it names stands.
         if kind == "operator_response":
             row = conn.execute("SELECT ticket_board.operator_response_is_current(%s::jsonb) AS current",

@@ -684,4 +684,20 @@ GRANT EXECUTE ON FUNCTION ticket_board.report_work_pause_background(bigint, text
 GRANT EXECUTE ON FUNCTION ticket_board.work_pause_notice_is_current(jsonb) TO ticket_board_service, ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.work_pause_status() TO ticket_board_service, ticket_board_listener;
 
+-- SYRD-738 (pgu1039): rebind a held Director. Root's functions are granted to no role.
+REVOKE ALL ON ticket_board.director_rebinds FROM PUBLIC;
+REVOKE ALL ON SEQUENCE ticket_board.director_rebinds_id_seq FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.director_rebind_hold(bigint) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.director_rebind_pause(text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.director_rebind_unavailable(bigint, text, text, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.begin_director_rebind(bigint, text, text, text, text, jsonb, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.note_director_rebind_step(bigint, text, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.director_rebind_notice_text(ticket_board.director_rebinds) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.finish_director_rebind(bigint, text, jsonb, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.director_rebind_notice_is_current(jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.director_rebind_status() FROM PUBLIC;
+GRANT SELECT ON ticket_board.director_rebinds TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.director_rebind_notice_is_current(jsonb) TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.director_rebind_status() TO ticket_board_service, ticket_board_listener;
+
 COMMIT;

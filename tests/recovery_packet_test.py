@@ -29,7 +29,7 @@ TOKEN = "sk-ant-api03-SECRETTOKENxyz"
 PANE = "╭─ pane text: $ cat ~/.claude/.credentials.json"
 SENSITIVE = (SECRET, TOKEN, "credentials", "pane text")
 #: The fullest packet's size, measured below; the design doc states it.
-FULLEST = 194_257
+FULLEST = 194_307
 DOC = ROOT / "docs" / "syrd-737-recovery-packet.md"
 
 
@@ -419,7 +419,9 @@ def test_the_largest_possible_packet_is_within_its_bound() -> None:
                        for i in range(rp.MAX_TICKETS)]
     rows["blockers"] = [{"ticket_id": big(i), "blocker_ticket_id": "a" * 32 + ":" + big(j), "resolved": False,
                          "position": j} for i in range(rp.MAX_TICKETS) for j in range(rp.MAX_BLOCKERS + 1)]
-    rows["notifications"] = [{"id": top - i, "ticket_id": big(i), "kind": "idle_reminder", "target_role": role(i % 64),
+    # Each notice to a 64-character name that is no role, so its `held` reads false, the longer word (Audit on a643e464).
+    rows["notifications"] = [{"id": top - i, "ticket_id": big(i), "kind": "idle_reminder",
+                              "target_role": ("z" + f"{i:02d}" * 32)[:64],
                               "payload_kind": "k" * 64, "attempts": top, "created_at": at(0), "next_attempt_at": at(0),
                               "claimed": False} for i in range(rp.MAX_NOTIFICATIONS)]
     sizes = {}

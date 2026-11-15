@@ -309,10 +309,10 @@ def exercise_command(cluster, board: Board) -> None:
         launched = json.loads(config_path.read_text())
         entry = next((r for r in launched["roles"] if r["role"] == "router"), None)
         check(entry is not None and entry.get("detached") is True and "slot" not in entry
-              and entry.get("cli") == ["codex"] and entry.get("model") == "the-template-model"
+              and entry.get("cli") == ["codex"] and "model" not in entry
               and "run_as_user" not in entry,
-              f"the launcher runs Router detached, on its own runtime, from its template's model, as the project "
-              f"account: {entry}")
+              f"the launcher runs Router detached, on its own runtime -- on codex with codex's own default model, "
+              f"never its template's (SYRD-779) -- as the project account: {entry}")
         env = (entry or {}).get("env") or {}
         check(env.get("TICKET_BOARD_ROLE_ONBOARDING_PROMPT") == ROUTER_PROMPT,
               f"Router's fresh session starts with its prompt: {sorted(env)}")

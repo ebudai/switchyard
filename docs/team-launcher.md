@@ -1877,8 +1877,8 @@ Router (optional) [off]:
 ```
 
 With one implementer the menu is not shown, and `new` says why: every ticket
-already has its owner. Choosing `on` asks Router's runtime, model and effort the
-way every role's are asked, with low effort offered first. Before anything is
+already has its owner. Choosing `on` asks Router's runtime, model and effort; on claude Enter takes Haiku 5.5 at
+high effort (SYRD-779), on another runtime its own default model at low effort. Before anything is
 created, `new` prints `switchyard: Router: on (...)` or `switchyard: Router: off`.
 The choice is recorded in the design artifact as
 `project.router = {"enabled": true, "runtime": ..., "model": ..., "effort": ...}`.

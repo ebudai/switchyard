@@ -153,12 +153,38 @@ def _document_with_router(current: dict, args: argparse.Namespace, parser: argpa
         parser.error("no workflow configuration is active for this board")
     try:
         if args.operation == "disable-router":
+            if args.model or args.effort:
+                parser.error("--model and --effort choose Router's when it is enabled")
             return without_router(current["document"])
         if not args.runtime:
             parser.error("enable-router requires --runtime")
         return with_router(current["document"], runtime=args.runtime, template_role=args.template_role)
     except ValueError as exc:
         parser.error(str(exc))
+
+
+def _with_router_settings(files: dict, args: argparse.Namespace, parser: argparse.ArgumentParser) -> dict:
+    """SYRD-779: Router's launcher entry with Router's own model and effort -- those named, else Haiku 5.5 at high on
+    claude, else none, so the runtime's own default applies -- never the template role's."""
+    from scripts.ticket_board.router_role import ROUTER_ROLE
+    from scripts.ticket_board.router_setup import router_launcher_settings
+    from scripts.ticket_board.runtime_catalog import runtime_takes_effort
+
+    if args.effort and not runtime_takes_effort(args.runtime):
+        parser.error(f"--effort: {args.runtime} takes no effort level")
+    try:
+        settings = router_launcher_settings(args.runtime, model=args.model or "", effort=args.effort or "")
+    except ValueError as exc:
+        parser.error(str(exc))
+    payload = json.loads(files[args.config])
+    entry = next((role for role in payload.get("roles", []) if role.get("role") == ROUTER_ROLE), None)
+    if entry is None:
+        parser.error(f"{args.config} has no projected {ROUTER_ROLE} role")
+    for key, value in settings.items():
+        entry.pop(key, None)
+        if value:
+            entry[key] = value
+    return {**files, args.config: json.dumps(payload, indent=2, sort_keys=True) + "\n"}
 
 
 def _document_with_designer_implementation(current: dict, args: argparse.Namespace,
@@ -461,8 +487,13 @@ def main(argv=None):
     parser.add_argument("--role")
     parser.add_argument("--runtime", help="enable-router: the agent CLI Router runs on; enable-documentation-gate: "
                                           "the agent CLI the Librarian runs on (without it the Director decides)")
-    parser.add_argument("--template-role", help="enable-router / enable-documentation-gate: the role whose launcher "
-                                                "model Router or the Librarian starts from")
+    parser.add_argument("--template-role", help="enable-router: the role whose launcher entry Router starts from "
+                                                "(never its model or effort); enable-documentation-gate: the role "
+                                                "whose launcher model the Librarian starts from")
+    parser.add_argument("--model", help="enable-router: Router's model; default claude-haiku-5-5 on claude, the "
+                                        "runtime's own default on any other")
+    parser.add_argument("--effort", help="enable-router: Router's effort; default high on claude, the runtime's "
+                                         "own default on any other")
     parser.add_argument("--routing-flag", help="enable-designer-implementation: a gate flag Router requires before it "
                                                "gives the designer a ticket (design work only)")
     parser.add_argument("--prompt", help="onboarding prompt text for set-role-prompt")
@@ -646,6 +677,8 @@ def main(argv=None):
         rollback_baseline = {**current, "document": baseline}
     cfg = _migrate_director_onboarding(args.config, cfg)
     files = projection_files(args.config, cfg)
+    if args.operation == "enable-router":
+        files = _with_router_settings(files, args, parser)
     expected = (
         args.expected_revision
         if args.expected_revision is not None

@@ -159,10 +159,13 @@ you. It is a usability tool, not a delegate: everything else stays yours.
 - `switchyard new` offers it, off by default, when a project has two or more
   implementers. For an existing project,
   `switchyard router-role <project> enable --runtime <cli>` declares it,
-  detached, with its own prompt and the model of `--template-role` (the first
-  Implementation owner by default). Choose a cheap model with
-  `switchyard set-role-runtime <project> router --model <model>`. `disable`
-  turns it off once it holds no work; the board refuses while it does.
+  detached, with its own prompt. On claude it runs Haiku 5.5 at high effort
+  unless you pass `--model` or `--effort`; on another runtime, that runtime's
+  own default. `--template-role` (the first Implementation owner by default)
+  is the launcher entry it starts from, never its model or effort. Change the
+  model later with `switchyard set-role-runtime <project> router --model
+  <model>`. `disable` turns it off once it holds no work; the board refuses
+  while it does.
 - It is the default: `route <id> --state <Implementation stage>` with no
   `--assignee` sends the ticket to Router, and the UI's normal button says
   "Route through Router". It holds no implementer slot, so any number can wait

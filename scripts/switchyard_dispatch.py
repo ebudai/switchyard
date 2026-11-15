@@ -399,7 +399,12 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         if router:
             parser.add_argument("action", choices=("enable", "disable"))
             parser.add_argument("--runtime", help="enable: the agent CLI Router runs on")
-            parser.add_argument("--template-role", help="enable: the role whose model Router starts from")
+            parser.add_argument("--template-role", help="enable: the role whose launcher entry Router starts from; "
+                                                        "never its model or effort")
+            parser.add_argument("--model", help="enable: Router's model; default claude-haiku-5-5 on claude, the "
+                                                "runtime's own default on any other")
+            parser.add_argument("--effort", help="enable: Router's effort; default high on claude, the runtime's own "
+                                                 "default on any other")
         if gate:
             parser.add_argument("action", choices=("enable", "disable"))
             parser.add_argument("--runtime", help="enable: the agent CLI a Librarian runs on; without it the "
@@ -452,6 +457,9 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             forwarded = [f"{args.action}-{'router' if router else 'documentation-gate'}", "--board-url", config.board_url, "--config", str(entry.config_path)]
             forwarded += ["--runtime", args.runtime] if args.runtime else []
             forwarded += ["--template-role", args.template_role] if args.template_role else []
+            # Router's own model and effort (SYRD-779).
+            forwarded += ["--model", args.model] if router and args.model else []
+            forwarded += ["--effort", args.effort] if router and args.effort else []
             return workflow_manage.main(forwarded + (["--dry-run"] if args.dry_run else []))
         forwarded = [
             f"{args.action}-role-prompt",

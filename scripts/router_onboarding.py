@@ -6,9 +6,11 @@ one plainly labelled menu choice, default **off**:
 * **Asked** after the implementers are chosen, and only when there are at
   least two of them. With one implementer every ticket already has its owner,
   so the menu is not shown; the operator is told why and Router stays off.
-  When turned on, Router's runtime, model and effort are chosen through the
-  same guided path as every other role's (`_prompt_role_runtime_plan`), read
-  as the owner account under the same guard.
+  When turned on, Router's runtime, model and effort are asked in that order,
+  with the same fields as every other role's, read as the owner account under
+  the same guard. On claude the defaults, which Enter takes, are Haiku 5.5 at
+  high effort (`router_setup.ROUTER_DEFAULT_MODEL`, SYRD-779); on another
+  runtime, that runtime's own default model, at low effort.
 * **Recorded** in the project design artifact as `project.router`:
   `{"enabled": true, "runtime": ..., "model": ..., "effort": ...}`. A design
   written by hand may say `{"enabled": false}`; an artifact without the field,
@@ -43,10 +45,14 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from scripts.ticket_board.router_role import ROUTER_ROLE
+from scripts.ticket_board.router_setup import (  # noqa: F401 - router_launcher_settings is the design command's
+    ROUTER_DEFAULT_RUNTIME, router_defaults, router_launcher_settings)
 
-#: The runtime the menu offers first. Router's work is short and narrow; the
-#: model list that follows is where a low-cost choice is made.
-ROUTER_DEFAULT_CLI = "claude"
+#: The runtime the menu offers first. Router's work is short and narrow: on it,
+#: Router starts on Haiku 5.5 at high effort (`router_setup.router_defaults`).
+ROUTER_DEFAULT_CLI = ROUTER_DEFAULT_RUNTIME
+#: Router's effort on a runtime other than claude, as before SYRD-779.
+OTHER_RUNTIME_EFFORT = "low"
 ROUTER_KEYS = ("runtime", "model", "effort")
 _RECORD_KEYS = frozenset({"enabled", *ROUTER_KEYS})
 
@@ -60,8 +66,9 @@ def router_field() -> Any:
         title="Router (optional)",
         description=(
             "Router assigns each ticket the Director admits to Implementation to one of your "
-            "implementers, or hands it back. It runs as one more model session, on a low-cost "
-            "model you choose next, and that session is an additional cost."
+            "implementers, or hands it back. It runs as one more model session, and that session is an "
+            "additional cost: on claude it starts on Haiku 5.5 at high effort, and on another runtime on "
+            "that runtime's own default model. You can choose others next."
         ),
         choices=(
             launcher.Choice("off", "off", "the Director assigns implementation work; no Router session, no extra cost"),
@@ -95,12 +102,43 @@ def prompt_router(
         raise SystemExit("switchyard: too many invalid answers for Router") from None
     if answer != "on":
         return None
-    # Low effort is offered first: Router reads one ticket and makes one choice.
-    return launcher._prompt_role_runtime_plan(
-        ROUTER_ROLE, default_cli=ROUTER_DEFAULT_CLI, configured=launcher.RoleSelection(ROUTER_ROLE, "", effort="low"),
-        runner=runner, owner_args=owner_args,
-        unverified_because=unverified_because, input_func=input_func, print_func=print_func,
-    )
+    return prompt_router_runtime(runner=runner, owner_args=owner_args, unverified_because=unverified_because,
+                                 input_func=input_func, print_func=print_func)
+
+
+def prompt_router_runtime(
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] | None,
+    owner_args: Sequence[str],
+    unverified_because: str,
+    input_func: Callable[[str], str],
+    print_func: Callable[[str], None],
+) -> Any:
+    """Router's runtime, then that runtime's model and effort, each default chosen once the runtime is known: on
+    claude, Haiku 5.5 at high effort (SYRD-779); on another runtime, its own first model at low effort, as before.
+    The same fields every role is asked with (`_prompt_role_runtime_plan`), only the defaults are Router's."""
+    from scripts import team_launcher as launcher
+
+    select = launcher.terminal_select.select_one
+    answers: dict[str, Any] = {}
+    try:
+        answers["runtime"] = select(launcher._runtime_field(ROUTER_ROLE, default=ROUTER_DEFAULT_CLI), answers,
+                                    input_func=input_func, print_func=print_func)
+        model_default, effort_default = router_defaults(answers["runtime"])
+        model_field = dataclasses.replace(
+            launcher._model_field(ROUTER_ROLE, runner=runner, owner_args=owner_args,
+                                  unverified_because=unverified_because, print_func=print_func),
+            default=model_default or None)
+        answers["model"] = select(model_field, answers, input_func=input_func, print_func=print_func) \
+            if model_field.choices_for(answers) or model_field.allow_custom else ""
+        answers["effort"] = select(
+            dataclasses.replace(launcher._effort_field(ROUTER_ROLE), default=effort_default or OTHER_RUNTIME_EFFORT),
+            answers, input_func=input_func, print_func=print_func,
+        ) if launcher.runtime_catalog.runtime_takes_effort(answers["runtime"]) else ""
+    except launcher.terminal_select.Cancelled:
+        raise SystemExit("switchyard: too many invalid answers for Router") from None
+    return launcher.RoleSelection(role=ROUTER_ROLE, cli=answers["runtime"], model=answers["model"],
+                                  effort=answers["effort"])
 
 
 def router_pairs(selection: Any) -> tuple[tuple[str, str], ...]:

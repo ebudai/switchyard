@@ -5,9 +5,12 @@
 * the `router` role, of kind `router`: active, holding `router_assign` and
   nothing else, owning no stage, detached (`slot: null`) with a pane target so
   the board can tell it about work, and Router's own onboarding prompt. Its
-  provider, model and effort are the launcher's, like any role's: copied from
-  `template_role` until `switchyard set-role-runtime` chooses a cheaper one,
-  under the same project account, so no credential moves between owners;
+  provider, model and effort are the launcher's, like any role's, under the
+  same project account, so no credential moves between owners. Its launcher
+  entry starts from `template_role`'s, but its model and effort are Router's
+  own (SYRD-779): on claude, `ROUTER_DEFAULT_MODEL` at `ROUTER_DEFAULT_EFFORT`
+  unless the operator names others (`router_defaults`); on any other runtime,
+  that runtime's own default;
 * `router_return`, its one move: Implementation to `analysis`, owner-scoped,
   with a reason, nothing else changed;
 * `implementer_kick_back`, unless the document already declares it: every
@@ -54,6 +57,37 @@ Its `routing` field gives the `revision` you are classifying and the `assignable
 Return it to the Director when you are not confident, the ownership signals conflict, the work spans projects, a role it asks for is missing or inactive, or its first deliverable is not implementation (a spec, a decision, an investigation). A justified return costs far less than a wrong assignment.
 
 Then stop and wait for the next notification. Do not re-read tickets, poll the board, or watch panes. Choosing an owner is your whole job: use no other board operation, and leave everything else about the ticket to the Director. If a write is refused, read the refusal: a stale revision means read the ticket once more; anything else means return the ticket to the Director with that refusal as the reason."""
+
+
+#: Router's default model and effort on claude: the User's decision of 2026-11-15, "default router model should
+#: be haiku 5.5 high, not opus 5" (SYRD-779). One place, so a later model is a one-line change; `router_defaults`
+#: checks it against the runtime catalog, so a model the catalog does not know fails loudly.
+ROUTER_DEFAULT_RUNTIME = "claude"
+ROUTER_DEFAULT_MODEL = "claude-haiku-5-5"
+ROUTER_DEFAULT_EFFORT = "high"
+
+
+def router_defaults(runtime: str) -> tuple[str, str]:
+    """Router's default (model, effort) on `runtime`: Haiku 5.5 at high on claude, and ("", "") -- the runtime's
+    own default -- on any other. Raises ValueError when the catalog does not offer the claude default."""
+    from scripts.ticket_board import runtime_catalog
+
+    if runtime != ROUTER_DEFAULT_RUNTIME:
+        return "", ""
+    models = {choice.value for choice in runtime_catalog.RECORDED_MODELS.get(runtime, ())}
+    efforts = {choice.value for choice in runtime_catalog.RECORDED_EFFORT.get(runtime, ())}
+    if ROUTER_DEFAULT_MODEL not in models or ROUTER_DEFAULT_EFFORT not in efforts:
+        raise ValueError(f"router: the default {ROUTER_DEFAULT_MODEL} at {ROUTER_DEFAULT_EFFORT} effort is not in "
+                         f"{runtime}'s runtime catalog ({', '.join(sorted(models))}; "
+                         f"{', '.join(sorted(efforts))}); fix ROUTER_DEFAULT_MODEL or the catalog")
+    return ROUTER_DEFAULT_MODEL, ROUTER_DEFAULT_EFFORT
+
+
+def router_launcher_settings(runtime: str, *, model: str = "", effort: str = "") -> dict[str, str]:
+    """The model and effort Router's launcher entry carries: those named, else `router_defaults(runtime)`. An
+    empty value means none is recorded, so the runtime's own default applies. Never the template role's."""
+    default_model, default_effort = router_defaults(runtime)
+    return {"model": model.strip() or default_model, "effort": effort.strip() or default_effort}
 
 
 def _transition(source: str, destination: str, action: str, label: str, actors: list[str]) -> dict[str, Any]:

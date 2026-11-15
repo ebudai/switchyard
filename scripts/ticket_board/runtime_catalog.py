@@ -43,7 +43,7 @@ from scripts.ticket_board.prompt_schema import Choice
 
 #: Bumped when the recorded tables below change, so a project can record which
 #: version of this data it was configured against.
-CATALOG_VERSION = 2
+CATALOG_VERSION = 3
 
 #: When the recorded tables were last checked against the repository. A date an
 #: operator can compare against, in the shape the launcher already uses for
@@ -106,6 +106,9 @@ RUNTIMES: tuple[Choice, ...] = (
 #:   claude -- claude-opus-5-5, first and so the default a Claude role is
 #:     offered: the User's decision on SYRD-778 (2026-11-15), the model the
 #:     installed claude (2.1.318) already runs for live Directors.
+#:   claude -- claude-haiku-5-5, Router's default (`router_setup.ROUTER_DEFAULT_MODEL`):
+#:     the User's decision on SYRD-779, and what syrd's own Router runs
+#:     (`.switchyard/provision/syrd.json`, effort high).
 #:   agy -- `tests/team_launcher_test_helpers.py`'s agy catalog, the shape
 #:     `agy models` returns: gemini-3.7-flash-high, gemini-3.7-pro.
 #:   hermes -- nothing. See the module docstring.
@@ -119,6 +122,7 @@ RECORDED_MODELS: dict[str, tuple[Choice, ...]] = {
     "claude": (
         Choice("claude-opus-5-5", "Opus 5.5", "the default for a Claude role"),
         Choice("claude-opus-5", "Opus 5", "configured for director, research and audit"),
+        Choice("claude-haiku-5-5", "Haiku 5.5", "Router's default"),
     ),
     "codex": (
         Choice("gpt-5.6-sol", "GPT-5.6 Sol", "configured for main"),

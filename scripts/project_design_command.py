@@ -152,8 +152,11 @@ def design_project_command(
         raise SystemExit("team-launcher: --router-model and --router-effort need --router-runtime")
     from scripts import router_onboarding
 
+    # Router's own defaults where none is named: Haiku 5.5 at high effort on claude (SYRD-779).
     router = router_onboarding.artifact_router(
-        {"enabled": True, "runtime": router_runtime, "model": router_model or "", "effort": router_effort or ""}
+        {"enabled": True, "runtime": router_runtime,
+         **router_onboarding.router_launcher_settings(router_runtime, model=router_model or "",
+                                                      effort=router_effort or "")}
         if router_runtime else None,
         path=target_artifact, implementer_roles=resolved_implementer_roles,
     )

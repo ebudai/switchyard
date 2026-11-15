@@ -402,7 +402,7 @@ def test_headless_or_unconsented_projects_are_left_alone_and_say_so() -> None:
         with raw:
             h.browse(DESK, "foxtest.desktop")
             before = h.tree(AGENT)
-            outcome, said = h.inherit(policy)
+            outcome, said = h.inherit(policy, created=False)  # a new account is given Firefox (SYRD-776's own test)
             check(outcome == "headless" and h.calls == [] and h.tree(AGENT) == before
                   and any("no approved desktop user" in s for s in said),
                   f"{label}: nothing asked, nothing written, and said: {outcome} {h.calls} {said}")

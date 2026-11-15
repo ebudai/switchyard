@@ -61,12 +61,30 @@ switchyard: browser: example-agent opens links with firefox.desktop, desktop-own
 - **Once, at creation.** Upgrade, launch and resume never copy a browser, and a
   later change of the owner's default is not followed. An existing project is
   never changed by installing or upgrading Switchyard.
+- **Firefox when nobody chose.** When the account is new and no owner's browser
+  is copied, it is given `firefox.desktop` the same way, as the account, with
+  its own settings saved first and put back if any step is refused. That
+  covers:
+  - a headless project, or one without an approved desktop owner;
+  - an owner whose handlers disagree, or name an application only that owner
+    can see;
+  - a refused write.
+
+  Without this, an account that names no browser of its own falls back to the
+  system's desktop-entry cache. That cache lists applications alphabetically,
+  so on a host with Chrome installed, Chrome comes first:
+
+  ```
+  switchyard: browser: example-agent opens links with firefox.desktop, the Firefox default, because nobody chose a browser for it. Change it deliberately with `sudo -u example-agent -H xdg-settings set default-web-browser NAME.desktop`.
+  ```
+
+  If Firefox is not installed where the account can open it, nothing is
+  written, and the line names the browser the account will open instead.
 - **Left alone, and said so:**
-  - a headless project;
   - an existing account reused by `switchyard new` that already names its own
     browser;
-  - an owner whose handlers disagree, or name an application only that owner
-    can see.
+  - an existing account that names none, when there is no owner's browser to
+    copy. The Firefox default is for new accounts only.
 
   In each case provisioning goes on.
 

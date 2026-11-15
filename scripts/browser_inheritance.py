@@ -11,9 +11,14 @@ identified and has consented to desktop access, and before the first provider si
 - **Written as the agent, by the agent:** `xdg-settings set default-web-browser`, run as the agent account with its own
   HOME and nothing else of anyone's environment -- the generic handlers, and KDE's `BrowserApplication` where KDE's
   config tool is installed. It is read back after.
-- **Left alone, and said so:** a headless project, or one without approved desktop access; an existing account that
-  already names its own browser; a desktop user whose handlers disagree or name an entry that is not installed; any
-  failure. None of these stops provisioning.
+- **Firefox when nobody chose (SYRD-776):** an account `switchyard new` has just created, whose desktop user's browser
+  is not copied -- a headless project, or one without approved desktop access; a desktop user whose handlers disagree
+  or name an entry the agent cannot use; a refused write -- is given `firefox.desktop` the same way, rather than the
+  system's desktop-entry cache, whose first entry is alphabetical (on this host, Chrome). Where Firefox is not an entry
+  the agent can use, nothing is written and the browser the account will open is named.
+- **Left alone, and said so:** an existing account, reused by `switchyard new`, that already names its own browser --
+  or that names none, where there is nothing to copy (the Firefox default is for new accounts only); any failure. None
+  of these stops provisioning.
 
 It runs only from `switchyard new`. Upgrade, launch and resume never call it, and nothing mirrors a later change of the
 desktop user's default. An operator changes an existing agent account deliberately, with the command each message
@@ -42,6 +47,11 @@ SHARED_ROOTS = (*SYSTEM_DATA_DIRS, Path("/usr"), Path("/opt"), Path("/var/lib/fl
                 Path("/snap"))
 #: Who must own a shared entry, and the directory it is in, for an agent to trust it: root.
 TRUSTED_UID = 0
+#: The browser a new agent account is given when no desktop user's choice is copied: the User's choice for every tenant
+#: (SYRD-776), instead of whatever the system's desktop-entry cache happens to list first.
+DEFAULT_BROWSER = "firefox.desktop"
+#: The outcomes in which no desktop user's browser was copied.
+NOT_COPIED = ("headless", "unknown", "uninstalled", "failed")
 
 Runner = Callable[..., subprocess.CompletedProcess[Any]]
 
@@ -252,60 +262,107 @@ def inherit_desktop_browser(
     trusted_uid: int = TRUSTED_UID,
     print_func: Callable[[str], None] = print,
 ) -> str:
-    """Copy the consenting desktop user's default browser into `owner_user`, once. Returns what became of it:
-    "set", "kept", "headless", "unknown", "uninstalled" or "failed". Never raises: a browser is not worth a provision.
+    """Copy the consenting desktop user's default browser into `owner_user`, once; failing that, give an account just
+    created the Firefox default. Returns what became of it: "set", "default" (Firefox, because nobody chose), "kept",
+    "headless", "unknown", "uninstalled" or "failed". Never raises: a browser is not worth a provision.
     """
     say = lambda line: print_func(f"switchyard: browser: {line}")  # noqa: E731
     change = change_command(owner_user)
+    # Only an account `switchyard new` created now gets the default: an existing one is never given a browser it did
+    # not choose (SYRD-751's `created` rule).
+    plain = f"Set it deliberately with `{change}`."
+    tail = "Trying the Firefox default instead." if created else plain
+    outcome, tried = _copy_desktop_browser(desktop_policy, owner_user=owner_user, created=created, runner=runner,
+                                           home_for_user=home_for_user, data_dirs=data_dirs,
+                                           shared_roots=shared_roots, trusted_uid=trusted_uid, say=say, change=change,
+                                           tail=tail, plain=plain)
+    if not created or outcome not in NOT_COPIED or tried == DEFAULT_BROWSER:
+        return outcome
+    kwargs = dict(runner=runner, home_for_user=home_for_user, data_dirs=data_dirs)
+    try:
+        unusable = _usable_entry(owner_user, DEFAULT_BROWSER, shared_roots=shared_roots, trusted_uid=trusted_uid,
+                                 **kwargs)
+        if unusable:
+            opens = _out(_as(owner_user, ["xdg-mime", "query", "default", HANDLERS[0]], **kwargs))
+            say(f"{owner_user} keeps this host's default browser, {opens or 'none'}: nobody chose one for it, and the "
+                f"Firefox default, {DEFAULT_BROWSER}, cannot be its: {unusable}. {plain}")
+            return outcome
+        set_line = (f"{owner_user} opens links with {DEFAULT_BROWSER}, the Firefox default, because nobody chose a "
+                    f"browser for it. Change it deliberately with `{change}`.")
+        return _set_browser(owner_user, DEFAULT_BROWSER, set_line=set_line, done="default", say=say, change=change,
+                            tail=plain, kwargs=kwargs)
+    except (OSError, KeyError, subprocess.SubprocessError) as exc:  # before anything was written: nothing to put back
+        say(f"{owner_user}'s browser was not set to the Firefox default ({exc}); it keeps this host's default. {plain}")
+        return "failed"
+
+
+def _copy_desktop_browser(desktop_policy: dict, *, owner_user: str, created: bool, runner: Runner,
+                          home_for_user: Callable[[str], str], data_dirs: Sequence[Path], shared_roots: Sequence[Path],
+                          trusted_uid: int, say: Callable[[str], None], change: str, tail: str,
+                          plain: str) -> tuple[str, str]:
+    """SYRD-751's copy of the desktop user's browser: (outcome, the browser a write was tried with, or ""). `tail` ends
+    each line that leaves the account without it; `plain` replaces it when the write that failed was the default's
+    own, which is not tried twice."""
     gui_user = str(desktop_policy.get("gui_user") or "") if isinstance(desktop_policy, dict) else ""
     if not isinstance(desktop_policy, dict) or desktop_policy.get("mode") != "wayland" or not gui_user:
-        say(f"{owner_user}'s browser is left as this host's default: the project has no approved desktop user to "
-            f"take it from. Set one deliberately with `{change}`.")
-        return "headless"
+        say(f"{owner_user}'s browser is not copied from a desktop user: the project has no approved desktop user to "
+            f"take it from. {tail}")
+        return "headless", ""
     if gui_user == owner_user:
         say(f"{owner_user} is the desktop user itself; its browser is its own.")
-        return "kept"
+        return "kept", ""
     try:
         kwargs = dict(runner=runner, home_for_user=home_for_user, data_dirs=data_dirs)
         if not created:
             own = _explicit_choice(owner_user, **kwargs)
             if own:
                 say(f"{owner_user} already names its own browser, {own}; it is kept, not replaced by {gui_user}'s.")
-                return "kept"
+                return "kept", ""
         seen = {handler: _out(_as(gui_user, ["xdg-mime", "query", "default", handler], **kwargs))
                 for handler in HANDLERS}
         names = {name for name in seen.values() if name}
         if len(names) != 1 or "" in seen.values():
             said = ", ".join(f"{handler.rsplit('/', 1)[-1]} {name or 'none'}" for handler, name in seen.items())
-            say(f"{gui_user}'s default browser could not be told ({said}), so {owner_user} keeps this host's default. "
-                f"Set it deliberately with `{change}`.")
-            return "unknown"
+            say(f"{gui_user}'s default browser could not be told ({said}), so it is not copied to {owner_user}. "
+                f"{tail}")
+            return "unknown", ""
         browser = names.pop()
         unusable = (f"{browser} is not a desktop entry name" if not browser.endswith(".desktop") or "/" in browser
                     else _usable_entry(owner_user, browser, shared_roots=shared_roots, trusted_uid=trusted_uid,
                                        **kwargs))
         if unusable:
-            say(f"{gui_user}'s default browser, {browser}, cannot be {owner_user}'s: {unusable}. So {owner_user} keeps "
-                f"this host's default, untouched. Set it deliberately with `{change}`.")
-            return "uninstalled"
-        # The account's own config directory, made by the account: xdg-mime cannot write into one that is missing.
-        made = _as(owner_user, ["mkdir", "-p", "--", f"{home_for_user(owner_user)}/.config"], **kwargs)
-        paths = [path.format(browser=browser) for path in WRITTEN]
-        snap = _snapshot(owner_user, paths, **kwargs) if getattr(made, "returncode", 1) == 0 else ""
-        if not snap:
-            say(f"{owner_user}'s browser was not set: its own settings could not be saved first, so nothing was "
-                f"changed. Set it deliberately with `{change}`.")
-            return "failed"
-        return _write_or_restore(owner_user, browser, gui_user=gui_user, snap=snap, paths=paths, say=say,
-                                 change=change, kwargs=kwargs)
+            say(f"{gui_user}'s default browser, {browser}, cannot be {owner_user}'s: {unusable}. So it is not copied, "
+                f"and nothing of {owner_user}'s was touched. {tail}")
+            return "uninstalled", ""
+        set_line = (f"{owner_user} opens links with {browser}, {gui_user}'s default browser, set once now: a later "
+                    f"change of {gui_user}'s default is not copied. Change it deliberately with `{change}`.")
+        return _set_browser(owner_user, browser, set_line=set_line, done="set", say=say, change=change,
+                            tail=plain if browser == DEFAULT_BROWSER else tail, kwargs=kwargs), browser
     except (OSError, KeyError, subprocess.SubprocessError) as exc:  # before anything was written: nothing to put back
-        say(f"{owner_user}'s browser was not set ({exc}); it keeps this host's default. Set it deliberately with "
-            f"`{change}`.")
+        say(f"{owner_user}'s browser was not copied ({exc}); nothing of its was changed. {tail}")
+        return "failed", ""
+
+
+def _set_browser(owner_user: str, browser: str, *, set_line: str, done: str, say: Callable[[str], None], change: str,
+                 tail: str, kwargs: dict) -> str:
+    """Set `browser` as the agent, all or nothing: its own settings saved first, put back on any failure. Returns
+    `done` when it holds, "failed" otherwise; `set_line` is said when it holds, `tail` ends every line when it does
+    not."""
+    home_for_user = kwargs["home_for_user"]
+    # The account's own config directory, made by the account: xdg-mime cannot write into one that is missing.
+    made = _as(owner_user, ["mkdir", "-p", "--", f"{home_for_user(owner_user)}/.config"], **kwargs)
+    paths = [path.format(browser=browser) for path in WRITTEN]
+    snap = _snapshot(owner_user, paths, **kwargs) if getattr(made, "returncode", 1) == 0 else ""
+    if not snap:
+        say(f"{owner_user}'s browser was not set to {browser}: its own settings could not be saved first, so nothing "
+            f"was changed. {tail}")
         return "failed"
+    return _write_or_restore(owner_user, browser, set_line=set_line, done=done, snap=snap, paths=paths, say=say,
+                             change=change, tail=tail, kwargs=kwargs)
 
 
-def _write_or_restore(owner_user: str, browser: str, *, gui_user: str, snap: str, paths: Sequence[str],
-                      say: Callable[[str], None], change: str, kwargs: dict) -> str:
+def _write_or_restore(owner_user: str, browser: str, *, set_line: str, done: str, snap: str, paths: Sequence[str],
+                      say: Callable[[str], None], change: str, tail: str, kwargs: dict) -> str:
     """Everything after the snapshot: the writes, all or nothing. A refusal, an unexpected answer and an exception all
     take the one way back -- every file restored, the handlers read again, what holds said, the snapshot gone (Audit of
     56ff2441 and 50dcbdc6: a refusal, then an exception, after the generic step had changed every handler, each left
@@ -339,9 +396,8 @@ def _write_or_restore(owner_user: str, browser: str, *, gui_user: str, snap: str
             _as(owner_user, ["rm", "-rf", "--", snap], **kwargs)
         except errors:
             pass  # set and read back: a snapshot left in the agent's own temporary directory changes nothing
-        say(f"{owner_user} opens links with {browser}, {gui_user}'s default browser, set once now: a later change of "
-            f"{gui_user}'s default is not copied. Change it deliberately with `{change}`.")
-        return "set"
+        say(set_line)
+        return done
     try:
         restored = _restore(owner_user, snap, paths, **kwargs)
     except errors:
@@ -357,12 +413,11 @@ def _write_or_restore(owner_user: str, browser: str, *, gui_user: str, snap: str
         after = None
     if restored and after is not None and (before is None or after == before):
         say(f"{owner_user}'s browser could not be set to {browser} ({why[:200]}); its own settings are put back as "
-            f"they were, so it opens links as before ({after['x-scheme-handler/https'] or 'no handler'}). "
-            f"Set it deliberately with `{change}`.")
+            f"they were, so it opens links as before ({after['x-scheme-handler/https'] or 'no handler'}). {tail}")
     elif after is not None:
         said = ", ".join(f"{h.rsplit('/', 1)[-1]} {n or 'none'}" for h, n in after.items())
         say(f"{owner_user}'s browser could not be set to {browser} ({why[:200]}), and its settings could not all be "
-            f"put back: it now opens {said}. Set it deliberately with `{change}`.")
+            f"put back: it now opens {said}. {tail}")
     else:
         say(f"{owner_user}'s browser could not be set to {browser} ({why[:200]}), and what it opens now could not be "
             f"read back{'' if restored else ' nor all of its settings put back'}. Check it, and set it deliberately "

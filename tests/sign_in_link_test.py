@@ -144,6 +144,20 @@ def test_nothing_the_agent_prints_reaches_the_terminal_as_a_control_sequence() -
         check(all(c not in watcher.url for c in "\x1b\x07\r\n \"<>"), f"{label}: {watcher.url!r}")
         check(not watcher.url or watcher.url == "https://x.example/a", f"{label}: only the URL itself: {watcher.url!r}")
         check("pwned" not in ours and "javascript" not in ours, f"{label}: nothing else is printed: {ours!r}")
+    # An OSC 8 target is taken whole up to its BEL or ST, so only the printable-URL rule stands between a CLI's target
+    # and Switchyard's own line vouching for it (Director's DAT of 2badbf2c): a look-alike host, a space, a CR or a C1
+    # control before the first `/` must give no link at all.
+    for label, host in (("a non-ASCII look-alike letter", "ex\u0430mple.com"), ("a space", "exa mple.com"),
+                        ("a CR", "example.com\r"), ("a C1 CSI (U+009B)", "exa\u009bmple.com")):
+        target = f"https://{host}/oauth/authorize?state=1"
+        output = f"Sign in: \x1b]8;;{target}\x07click\x1b]8;;\x07\nPaste code here > "
+        for step in (1, 9, len(output)):
+            watcher, pieces = fed(output, step)
+            ours = "".join(t for t, mine in pieces if mine)
+            check(watcher.url == "" and ours == "",
+                  f"an OSC 8 target whose host has {label} gives no Switchyard link ({step}): {watcher.url!r} {ours!r}")
+            check("".join(t for t, mine in pieces if not mine) == output, f"{label}: the CLI's own bytes pass unchanged")
+        check(sil.printable_url(target) == "", f"the printable-URL rule refuses a host with {label}: {target!r}")
     check(sil.printable_url(CLAUDE_URL) == CLAUDE_URL and not sil.printable_url("https://a.example/\x1b")
           and not sil.printable_url("ftp://a.example/") and not sil.printable_url(""), "the printable-URL rule")
 

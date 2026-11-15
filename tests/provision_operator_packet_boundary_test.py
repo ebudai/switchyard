@@ -61,7 +61,7 @@ MOVED = ('PACKET_PROVISION_DIR', 'packet_companion', 'postgres_sql_file_command'
 #: Measured on the baseline project_provision: each moved body's call-time reads of its globals, siblings included.
 SEAMS = {
     'packet_companion': {'PACKET_PROVISION_DIR': 1, 'shell_quote': 1},
-    'postgres_sql_file_command': {'packet_companion': 1, 'shell_quote': 2},
+    'postgres_sql_file_command': {'packet_companion': 1, 'shell_quote': 3},  # SYRD-784: the notice filter's pattern
     'service_user_command': {'shell_quote': 1},
     # SYRD-706: the tenant's own listener map, read through project_provision.
     'peer_auth_command': {'listener_ident_map': 1, 'DEFAULT_PG_IDENT_MAP': 1, 'shell_quote': 7},

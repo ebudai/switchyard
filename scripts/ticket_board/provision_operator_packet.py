@@ -63,6 +63,12 @@ def postgres_sql_file_command(sql_file: str, *, database_url: str = "", companio
     if database_url:
         command += " " + provision.shell_quote(database_url)
     command += " -f -"
+    # What PostgreSQL says when idempotent DDL finds its object already there, or a conditional drop finds nothing:
+    # schema.sql says it dozens of times on a fresh database. stderr goes through a filter of exactly those lines;
+    # every other notice, every warning and every error is shown, and the packet's pipefail keeps psql's status, so
+    # ON_ERROR_STOP still stops it (SYRD-784). scripts/ticket-board-migrate's IDEMPOTENT_NOTICE is the same pattern.
+    idempotent_notice = "NOTICE:  .*(already exists|does not exist), skipping$"
+    command += f" 2> >(grep -Ev {provision.shell_quote(idempotent_notice)} >&2 || true)"
     return command
 
 

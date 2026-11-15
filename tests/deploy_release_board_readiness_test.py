@@ -390,7 +390,7 @@ def candidate(out: dict) -> None:
           f"MEFP's sequence: the phase is closed against the board's live build: {seen}")
     start, stop = steps.index("board start"), steps.index("board stop")
     reads = reads_before_stop(seen)
-    check(start < stop and stop == len(steps) - 1 and "read /api/board" in reads
+    check(start < stop and stop == len(steps) - 1 and "read /api/build" in reads
           and all(not step.startswith("read") for step in steps[stop:]),
           f"in order: the board is started, read once it answers, and stopped last; nothing reads it after: {steps}")
     check(not seen["board_active"] and seen["listener"] == "inactive" and "listener start" not in steps
@@ -402,7 +402,7 @@ def candidate(out: dict) -> None:
           and "install exact units" in deployed["steps"]
           and "deploy-restart exact candidate" in deployed["steps"]
           and NEW in deployed["board_unit"]
-          and deployed["steps"].index("deploy-restart smoke ok") < deployed["steps"].index("read /api/board")
+          and deployed["steps"].index("deploy-restart smoke ok") < deployed["steps"].index("read /api/build")
           < deployed["steps"].index("board stop") == len(deployed["steps"]) - 1
           and not deployed["board_active"] and "listener start" not in deployed["steps"] and deployed["reached"] == [],
           f"deployed here: deploy and health, the close while the board is live, then the board stopped; the "

@@ -564,7 +564,9 @@ def board_connection_factory(config: Any, given: Callable[[str, float], Any] | N
 #: to the tenant's `board_url`; root asks that route alone, so nothing the tenant wrote before it -- a path, a query --
 #: chooses what is asked. The board's answers are trusted only per route: `/api/image/...` serves the bytes of files
 #: the tenant owner writes, so root must choose the question as well as the board. No route is a suffix of another.
-ROOT_READ_ROUTES = ("/api/board", "/api/workflow", "/api/runtime-assignments")
+#: Each answers in a size that does not grow with the board's tickets, so the cap below holds on any board: the build
+#: id is `BUILD_PATH`, and the whole `/api/board` -- 26.7 MB on syrd -- is not root's to ask (SYRD-777).
+ROOT_READ_ROUTES = (BUILD_PATH, "/api/workflow", "/api/runtime-assignments")
 
 
 def board_opener(config: Any, given: Callable[[str], Any] | None = None) -> Callable[[str], Any] | None:

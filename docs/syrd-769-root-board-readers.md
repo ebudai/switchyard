@@ -11,7 +11,7 @@ a socket or URL it controls, and so choose the answer root acts on or records:
 | `board_workflow_readers.read_board_declared_workflow`, `read_board_workflow_state` | `adopt-workflow`, `migrate-workflow` | `/api/workflow` |
 | `provider_runtime_state.read_runtime_assignments`, `read_runtime_assignment_details` | `resume-provision` | `/api/runtime-assignments` |
 | `presentation_runtime_assignments`, `presentation_role_recovery` | `replace-window`, `present … recover` | `/api/runtime-assignments`, `/api/workflow` |
-| `release_alignment._live_board_build_id` | `release-status --close`, `deploy-release` | `/api/board` (its build id goes into root's journal) |
+| `release_alignment._live_board_build_id` | `release-status --close`, `deploy-release` | `/api/build` since SYRD-777, `/api/board` before (its build id goes into root's journal) |
 | `project_onboarding.director_onboarding_state` (SYRD-774) | `upgrade` | `/api/workflow` (its answer is root's "director" phase) |
 
 ## As root, the board root's unit names
@@ -29,7 +29,8 @@ Each reader chooses through `board_connection_factory(config, given)` (socket re
   answer it already read, which opens nothing;
 - as root (effective uid 0), `unit_connection`. The configured `board_socket`, or the host and port of the
   configured `board_url`, are never connected to. The opener asks exactly one route from a fixed list,
-  `ROOT_READ_ROUTES` (`/api/board`, `/api/workflow`, `/api/runtime-assignments`): the one the reader appended to the
+  `ROOT_READ_ROUTES` (`/api/build`, `/api/workflow`, `/api/runtime-assignments`; `/api/board` until SYRD-777, see
+  `docs/syrd-777-release-close-build-route.md`): the one the reader appended to the
   URL. Nothing the tenant's `board_url` says before it, whether a path, a query or a fragment, is asked, and a URL
   ending with no listed route is refused;
 - otherwise, as before, the configured socket or URL.

@@ -75,7 +75,8 @@ def answers(name: str) -> dict[str, Any]:
     return {
         "/api/runtime-assignments": {"project": PROJECT, "authority_mode": "process", "assignments": {}},
         "/api/workflow": {"document": {"roles": [], "said_by": name}, "revision": 3},
-        "/api/board": {"build_id": f"{name}build"},
+        "/api/build": {"build_id": f"{name}build"},
+        "/api/board": {"build_id": f"{name}-whole-board-build"},  # never root's to ask (SYRD-777)
     }
 
 
@@ -201,7 +202,7 @@ READERS: list[tuple[str, Callable[[Any], Any], str, Any]] = [
      "/api/runtime-assignments", (set(), "")),
     ("the runtime assignment details", provider_runtime_state.read_runtime_assignment_details,
      "/api/runtime-assignments", ({}, "")),
-    ("release-status's live build", release_alignment._live_board_build_id, "/api/board", ("unitbuild", "")),
+    ("release-status's live build", release_alignment._live_board_build_id, "/api/build", ("unitbuild", "")),
     ("replace-window's assignments", presentation_runtime_assignments._resolved_runtime_assignments,
      "/api/runtime-assignments", ([], [])),
     ("recover's declared role", lambda config: presentation_role_recovery._declared_role(config, "main", opener=None),
@@ -310,11 +311,12 @@ def test_root_opener_asks_only_the_readers_own_route() -> None:
     with Rig() as rig:
         opener = board_identity.board_opener(rig.config())
         for url in ("http://example.invalid/etc/passwd", f"http://x/api/image/{rig.tree}/b.png",
-                    "http://example.invalid:9/api/board?x=1", "http://x/api/tickets", "http://x/api/board/"):
+                    "http://example.invalid:9/api/build?x=1", "http://x/api/tickets", "http://x/api/build/",
+                    "http://x/api/board"):
             answer = caught(lambda: opener(url))
             check("refusing to ask" in str(answer) and rig.unit.asked == [],
                   f"{url}: a url not ending with one of root's routes is refused, and nothing is asked: {answer!r}")
-        for url, route in ((f"http://x/api/image/{rig.tree}/b.png?/api/board", "/api/board"),
+        for url, route in ((f"http://x/api/image/{rig.tree}/b.png?/api/build", "/api/build"),
                            (f"http://x/api/image/{rig.tree}/b.png#/api/workflow", "/api/workflow"),
                            ("http://x:9/?q=/api/runtime-assignments", "/api/runtime-assignments")):
             rig.unit.asked.clear()
@@ -334,7 +336,7 @@ def divergence_read(config: SimpleNamespace) -> Any:
 
 #: Each URL reader, and exactly the routes it asks.
 URL_READERS: list[tuple[str, Callable[[Any], Any], list[str]]] = [
-    ("release-status's live build", release_alignment._live_board_build_id, ["/api/board"]),
+    ("release-status's live build", release_alignment._live_board_build_id, ["/api/build"]),
     ("replace-window's assignments", presentation_runtime_assignments._resolved_runtime_assignments,
      ["/api/runtime-assignments"]),
     ("replace-window's divergence read", divergence_read, ["/api/runtime-assignments", "/api/workflow"]),
@@ -408,12 +410,12 @@ def test_the_recovery_wait_asks_the_unit_board_as_root() -> None:
 
 def test_the_root_opener_says_a_malformed_answer_in_its_own_words() -> None:
     with Rig(unit_raw=BAD_STATUS) as rig:
-        answer = caught(lambda: board_identity.board_opener(rig.config())("http://x/api/board"))
-        check(answer == f"raised OSError: {PROJECT}'s board answered /api/board with no valid HTTP (BadStatusLine)",
+        answer = caught(lambda: board_identity.board_opener(rig.config())("http://x/api/build"))
+        check(answer == f"raised OSError: {PROJECT}'s board answered /api/build with no valid HTTP (BadStatusLine)",
               f"the class and our own words, nothing of the status line: {answer!r}")
     with Rig(unit_raw=BAD_REASON) as rig:
-        answer = caught(lambda: board_identity.board_opener(rig.config())("http://x/api/board"))
-        check(answer == f"raised OSError: {PROJECT}'s board answered /api/board with HTTP 500",
+        answer = caught(lambda: board_identity.board_opener(rig.config())("http://x/api/build"))
+        check(answer == f"raised OSError: {PROJECT}'s board answered /api/build with HTTP 500",
               f"a non-200 answer is its status alone, never its reason phrase: {answer!r}")
 
 

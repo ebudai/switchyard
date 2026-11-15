@@ -5,7 +5,8 @@
   else the release's own name.
 - `_live_board_build_id` asks the running board for its build id, through an
   injected opener or the launcher's `_open_board_url`; as root, through the
-  board root's own unit names, never the tenant's `board_url` (SYRD-769).
+  board root's own unit names, never the tenant's `board_url` (SYRD-769). It
+  asks `/api/build`, the build alone, whatever the board's size (SYRD-777).
 - `release_alignment` reads the shared release, the deployed board, the live
   build, root's pinned release (only a full commit counts), root's journal when
   it is readable, the tenant's copy and its observation, and the board's
@@ -193,13 +194,17 @@ def _live_board_build_id(
     # since what it answers goes into root's journal and decides whether a release phase may close (SYRD-769).
     open_url = board_opener(config, opener) or launcher._open_board_url
     try:
-        with open_url(board_root + "/api/board") as response:
+        # The build alone, at any board size (SYRD-703): the whole `/api/board` is over root's answer cap on a board
+        # with many tickets, and every close of one was refused (SYRD-777).
+        with open_url(board_root + "/api/build") as response:
             payload = json.load(response)
     except Exception as exc:  # noqa: BLE001 - any failure to read is "not proven"
         return "", f"the board at {board_root} could not be read ({clean_text(exc, 300)})"
 
     # Shown to root (release-status, deploy-release) and kept in root's journal: plain text only (SYRD-766).
-    build = clean_text(payload.get("build_id"), 128) if isinstance(payload, Mapping) else ""
+    # Only text is a build id: a number is never stringified into one (SYRD-777).
+    raw = payload.get("build_id") if isinstance(payload, Mapping) else None
+    build = clean_text(raw, 128) if isinstance(raw, str) else ""
     return build, "" if build else f"the board at {board_root} reported no build id"
 
 

@@ -250,7 +250,7 @@ def test_what_the_running_board_says() -> None:
     check(m._live_board_build_id(config(""), opener=refuse("the board")) == ("", "p377 declares no board url"), "no board to ask")
     asked: list = []
     check(m._live_board_build_id(config("http://127.0.0.1:9/api/tickets/"), opener=board({"build_id": f" {SHA} "}, asked=asked)) == (SHA, "")
-          and asked == ["http://127.0.0.1:9/api/board"], f"the board root, then its build id, trimmed: {asked}")
+          and asked == ["http://127.0.0.1:9/api/build"], f"the board root, then its build id, trimmed: {asked}")
     check(m._live_board_build_id(config("http://b/api"), opener=board({})) == ("", "the board at http://b reported no build id")
           and judged(m._live_board_build_id, config("http://b"), opener=board([SHA])) == ("", "the board at http://b reported no build id"),
           "no build id, or a payload that is not a mapping")

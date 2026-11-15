@@ -1202,7 +1202,7 @@ compares four things and changes nothing:
 | --- | --- |
 | shared release | the `.switchyard-release.json` marker under `/opt/switchyard/current` |
 | deployed release | the tenant board root's `current` link |
-| live board build | `build_id` from the running board's `/api/board` |
+| live board build | `build_id` from the running board's `/api/build` (SYRD-777) |
 | trusted / tenant journal | root's record, and the tenant's projection of it |
 
 `--close` records `release: done`, and only as root, and only when the running

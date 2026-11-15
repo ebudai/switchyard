@@ -33,6 +33,15 @@ default model". The answer is recorded in the design artifact (`project.router`)
 entry, as before. `team-launcher <project> design --router-runtime claude` with no `--router-model` or
 `--router-effort` records the same defaults.
 
+## `switchyard new --from` a hand-written artifact (SYRD-787)
+
+A design artifact written by hand with `project.router = {"enabled": true, "runtime": "claude"}` and no model or
+effort gets the same defaults: `router_onboarding.artifact_router` fills in what the artifact leaves out from
+`router_launcher_settings`, so Router's projected launcher entry carries Haiku 5.5 at high, not Claude's own default
+(Opus). A model or effort the artifact names is kept, and another runtime still gets nothing, so its own default
+applies. `switchyard new`'s summary marks each value that is Router's default: `Router: on (claude ->
+claude-haiku-5-5 (Router's default) -> effort high (Router's default))`. Tested by `tests/router_artifact_default_test.py`.
+
 ## `switchyard router-role <project> enable`
 
 - `--runtime claude`: Haiku 5.5 at high effort, unless `--model` or `--effort` names others.

@@ -311,9 +311,17 @@ def test_provisioning_from_the_record(state: dict) -> None:
     bare = json.loads((tmp_path / "out-bare" / "cerulean.json").read_text()) if code == 0 else {"roles": []}
     entry = next((r for r in bare["roles"] if r["role"] == "router"), {})
     template = next((r for r in bare["roles"] if r["role"] == "main"), {})
-    check(code == 0 and entry.get("cli") == ["claude"] and "model" not in entry and "effort" not in entry
-          and template.get("model") == "gpt-5.5",
-          f"Router with no model chosen runs its runtime's default, never its template's model: {entry}")
+    # SYRD-787: on claude, what the artifact leaves out is Router's default (SYRD-779), not Claude's own (Opus).
+    check(code == 0 and entry.get("cli") == ["claude"] and entry.get("model") == "claude-haiku-5-5"
+          and entry.get("effort") == "high" and template.get("model") == "gpt-5.5",
+          f"Router with no model chosen on claude runs Router's default, never its template's model: {entry}")
+    codex_artifact = tmp_path / "bare-codex" / ".switchyard" / "cerulean.project.json"
+    write_artifact(codex_artifact, tmp_path / "bare-codex", router=(("runtime", "codex"),), role_models={"main": "gpt-5.5"})
+    code, _ = provision(codex_artifact, tmp_path / "out-bare-codex")
+    bare = json.loads((tmp_path / "out-bare-codex" / "cerulean.json").read_text()) if code == 0 else {"roles": []}
+    entry = next((r for r in bare["roles"] if r["role"] == "router"), {})
+    check(code == 0 and entry.get("cli") == ["codex"] and "model" not in entry and "effort" not in entry,
+          f"on another runtime, nothing recorded: that runtime's own default, never its template's model: {entry}")
 
 
 def test_a_retry_and_roots_record_reuse_the_choice(state: dict) -> None:

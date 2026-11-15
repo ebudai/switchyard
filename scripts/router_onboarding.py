@@ -17,6 +17,8 @@ one plainly labelled menu choice, default **off**:
   which is every one written before it existed, means off. Preview, apply and
   a retry from the artifact (`switchyard new --from`) all read this one
   record, so none of them can ask differently or turn Router on by itself.
+  A hand-written record that turns Router on without a model or effort gets
+  Router's default for what it leaves out (SYRD-787).
 * **Applied** by `new_project_command`. A project with Router off is
   provisioned exactly as before: no Router role, no transition, no pane or
   session, no cost. A project with Router on starts with a declared
@@ -206,8 +208,14 @@ def summary_line(router: Sequence[tuple[str, str]], *, project: str = "<project>
     if not router:
         return "switchyard: Router: off -- the Director assigns implementation work; no Router session or cost"
     chosen = dict(router)
-    parts = [chosen["runtime"], *([chosen["model"]] if chosen.get("model") else []),
-             *([f"effort {chosen['effort']}"] if chosen.get("effort") else [])]
+    try:
+        default_model, default_effort = router_defaults(chosen["runtime"])
+    except ValueError:
+        default_model = default_effort = ""
+    # A value that is Router's default says so, whoever filled it in (SYRD-787).
+    marked = lambda value, default: f"{value} (Router's default)" if value and value == default else value  # noqa: E731
+    parts = [chosen["runtime"], *([marked(chosen["model"], default_model)] if chosen.get("model") else []),
+             *([marked(f"effort {chosen['effort']}", f"effort {default_effort}")] if chosen.get("effort") else [])]
     return (f"switchyard: Router: on ({' -> '.join(parts)}) -- assigns implementation work as one more "
             f"model session; it runs in the background with no pane (`switchyard attach {project} router` "
             "shows it)")
@@ -243,6 +251,13 @@ def artifact_router(raw: object, *, path: Path, implementer_roles: Sequence[str]
     values = {"runtime": runtime, "model": str(raw.get("model") or "").strip(), "effort": str(raw.get("effort") or "").strip()}
     if values["effort"] and not launcher.runtime_catalog.runtime_takes_effort(runtime):
         raise SystemExit(f"{path} gives Router an effort, which {runtime} does not take")
+    # What the artifact leaves out is Router's default, as on every other path that creates a Router: Haiku 5.5 at
+    # high on claude, nothing (that runtime's own default) on another. A hand-written `{"enabled": true, "runtime":
+    # "claude"}` otherwise started Router on Claude's own default, Opus (SYRD-787, after SYRD-779).
+    try:
+        values.update(router_launcher_settings(runtime, model=values["model"], effort=values["effort"]))
+    except ValueError as exc:
+        raise SystemExit(f"{path}: {exc}") from None
     return tuple((key, values[key]) for key in ROUTER_KEYS if values[key])
 
 

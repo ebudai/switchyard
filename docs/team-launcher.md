@@ -1882,8 +1882,8 @@ high effort (SYRD-779), on another runtime its own default model at low effort. 
 created, `new` prints `switchyard: Router: on (...)` or `switchyard: Router: off`.
 The choice is recorded in the design artifact as
 `project.router = {"enabled": true, "runtime": ..., "model": ..., "effort": ...}`.
-An artifact without the field, or with `{"enabled": false}`, means off. Noninteractively,
-`team-launcher <project> design --router-runtime <cli> [--router-model M] [--router-effort E]`
+An artifact without the field, or with `{"enabled": false}`, means off; one written by hand that leaves out the model or effort gets Router's default for it (SYRD-787).
+Noninteractively, `team-launcher <project> design --router-runtime <cli> [--router-model M] [--router-effort E]`
 records it; without those flags it is off.
 
 A project with Router on starts with a declared workflow. That is the one its

@@ -200,15 +200,17 @@ def record_router_choice(artifact_path: Path, router: Sequence[tuple[str, str]],
     _rewrite(artifact_path, artifact, owner_user=owner_user)
 
 
-def summary_line(router: Sequence[tuple[str, str]]) -> str:
-    """What `switchyard new` says about Router before it creates anything."""
+def summary_line(router: Sequence[tuple[str, str]], *, project: str = "<project>") -> str:
+    """What `switchyard new` says about Router before it creates anything. Router has no pane, ever: the User's
+    decision (SYRD-781), so the line says how to look at it."""
     if not router:
         return "switchyard: Router: off -- the Director assigns implementation work; no Router session or cost"
     chosen = dict(router)
     parts = [chosen["runtime"], *([chosen["model"]] if chosen.get("model") else []),
              *([f"effort {chosen['effort']}"] if chosen.get("effort") else [])]
     return (f"switchyard: Router: on ({' -> '.join(parts)}) -- assigns implementation work as one more "
-            "model session; it starts detached with the other roles")
+            f"model session; it runs in the background with no pane (`switchyard attach {project} router` "
+            "shows it)")
 
 
 def artifact_router(raw: object, *, path: Path, implementer_roles: Sequence[str]) -> tuple[tuple[str, str], ...]:

@@ -600,7 +600,7 @@ def test_the_guided_role_plan() -> None:
               f"but is no role to create and no implementer: {got.selected_implementer_roles} {got.selected_role_models}")
         check(got.selected_router == (("runtime", "claude"), ("model", "haiku"), ("effort", "low"))
               and "switchyard: Router: on (claude -> haiku -> effort low) -- assigns implementation work as one more model "
-                  "session; it starts detached with the other roles" in said,
+                  "session; it runs in the background with no pane (`switchyard attach s369 router` shows it)" in said,
               f"it is recorded on its own and summarised before anything is created: {got.selected_router}")
 
 

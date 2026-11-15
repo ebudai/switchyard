@@ -16,8 +16,10 @@ The gate is optional, and a Librarian to decide it costs a model session, so
   starts the project with a declared workflow -- its own `--workflow-config`, or
   the one its plan describes (`router_onboarding.plan_document`), after Router's
   if Router is on too -- with `documentation_gate.with_documentation_gate`
-  added. A Librarian's launcher entry is projected detached and given its own
-  model and effort rather than its template's.
+  added. A Librarian takes the window's next free display slot -- the User's
+  rule: shown whenever there is room (SYRD-781) -- and runs in the background
+  only when all six are taken. Its launcher entry is given its own model and
+  effort rather than its template's.
 
 An upgrade never reads the design artifact, so a release that ships the gate
 never turns it on for an existing project; `switchyard documentation-gate
@@ -167,8 +169,19 @@ def record_documentation_choice(artifact_path: Path, documentation: Sequence[tup
     _rewrite(artifact_path, artifact, owner_user=owner_user)
 
 
-def summary_line(documentation: Sequence[tuple[str, str]]) -> str:
-    """What `switchyard new` says about the gate before it creates anything."""
+def librarian_slot(role_clis: Sequence[tuple[str, str]]) -> int | None:
+    """The display slot a Librarian takes in a project of these roles, as `router_onboarding.plan_document` gives
+    them slots in order: the next one, or None when all six are taken (SYRD-781)."""
+    from scripts.ticket_board.documentation_gate import VISIBLE_SLOTS
+
+    roles = len(dict.fromkeys(role for role, _cli in role_clis))
+    return roles if roles < VISIBLE_SLOTS else None
+
+
+def summary_line(documentation: Sequence[tuple[str, str]], *, slot: int | None = None,
+                 project: str = "<project>") -> str:
+    """What `switchyard new` says about the gate before it creates anything, a Librarian's display slot included:
+    `slot`, or the background when None."""
     chosen = dict(documentation)
     if gate(documentation) == "off":
         return "switchyard: Documentation gate: off -- no documentation stage; no Librarian session or cost"
@@ -177,8 +190,12 @@ def summary_line(documentation: Sequence[tuple[str, str]]) -> str:
                 "documentation review before Audit; no Librarian session or cost")
     parts = [chosen["runtime"], *([chosen["model"]] if chosen.get("model") else []),
              *([f"effort {chosen['effort']}"] if chosen.get("effort") else [])]
+    where = (f"it has a pane of its own, display slot {slot}" if slot is not None else
+             f"all six display slots are taken, so it runs in the background (`switchyard attach {project} "
+             f"{LIBRARIAN_ROLE}` shows it, or `switchyard present {project} show {LIBRARIAN_ROLE} --slot <n>` "
+             "puts it in a slot)")
     return (f"switchyard: Documentation gate: on, decided by a Librarian ({' -> '.join(parts)}) -- one more model "
-            "session; it starts detached with the other roles")
+            f"session; {where}")
 
 
 def artifact_documentation(raw: object, *, path: Path, role_names: Sequence[str]) -> tuple[tuple[str, str], ...]:
@@ -225,14 +242,20 @@ def plan_with_documentation_gate(
 ) -> Any:
     """`plan` declaring the gate: its own workflow (Router's included), or the one its rows describe."""
     from scripts.router_onboarding import plan_document
-    from scripts.ticket_board.documentation_gate import with_documentation_gate
+    from scripts.ticket_board.documentation_gate import free_visible_slot, with_documentation_gate
     from scripts.ticket_board.workflow_config import validate
 
     chosen = dict(documentation)
     document = plan.workflow if plan.workflow is not None else plan_document(
         plan, role_clis=role_clis, repository=repository, label="Documentation gate", print_func=print_func)
-    librarian = ({"runtime": chosen["runtime"], "template_role": plan.implementer_roles[0]}
+    librarian = ({"runtime": chosen["runtime"], "template_role": plan.implementer_roles[0],
+                  # The window's next free display slot, or the background when it is full (SYRD-781).
+                  "slot": free_visible_slot(document)}
                  if gate(documentation) == "librarian" else None)
+    if librarian is not None and librarian["slot"] != librarian_slot(role_clis):
+        # Said again when the workflow's own slots put it elsewhere than the summary before the confirmation said.
+        print_func(f"switchyard: the Librarian takes display slot {librarian['slot']}" if librarian["slot"] is not None
+                   else "switchyard: all six display slots are taken, so the Librarian runs in the background")
     try:
         document = with_documentation_gate(document, librarian=librarian)
     except ValueError as exc:

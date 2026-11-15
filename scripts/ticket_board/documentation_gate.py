@@ -45,8 +45,10 @@ the stage: the board's ordinary gate walk skips it.
 Who decides depends on the project. With a Librarian (`librarian` given), a
 `librarian` role of kind `reviewer` owns the stage. It holds no capability but
 `add_comment`, is the actor of those three transitions and nothing else, and
-runs detached under the project account with its own onboarding prompt and a
-fresh conversation per ticket. Without one, the Director owns the stage, so the
+runs under the project account with its own onboarding prompt and a fresh
+conversation per ticket. It takes the window's next free display slot when it
+has one (`librarian["slot"]`, from `free_visible_slot`, SYRD-781), and runs in
+the background only when all six are taken. Without one, the Director owns the stage, so the
 project gets the same decision with no worker and no cost. The document never
 gives the Director an `approve` (workflow_config refuses one), so there the
 stage carries no sign-off and its three exits are the Director's moves.
@@ -85,6 +87,9 @@ AUDIT_KICK_BACK = "audit_kick_back"
 #: Everything a Librarian may hold. Its decisions are transitions, which need no
 #: capability; a comment is how it records findings it is not yet returning.
 LIBRARIAN_CAPABILITIES = ("add_comment",)
+#: How many display slots a project's window has: workflow_config's visible-slot rule (0 to 5), the launcher's
+#: `MAX_VISIBLE_PANES_PER_WINDOW` and switchyard-display-attach's `MAX_SLOTS` (SYRD-781).
+VISIBLE_SLOTS = 6
 #: The skill a Librarian session is told to load, beside the shared board skill.
 LIBRARIAN_SKILL = "switchyard-librarian"
 #: How much of the submitted candidate's SHA names its documentation candidate.
@@ -166,6 +171,15 @@ def _flag_kinds(cfg: dict[str, Any]) -> dict[str, str]:
     return {name: flag["kind"] for name, flag in cfg["flags"].items()}
 
 
+def free_visible_slot(cfg: dict[str, Any]) -> int | None:
+    """The lowest display slot no active role of `cfg` holds, or None when all `VISIBLE_SLOTS` are taken (SYRD-781).
+
+    The User's rule: a Librarian is shown whenever there is room, and runs in the background only when the window
+    is full."""
+    taken = {role.get("slot") for role in cfg.get("roles") or [] if role.get("active") and role.get("slot") is not None}
+    return next((slot for slot in range(VISIBLE_SLOTS) if slot not in taken), None)
+
+
 def implementation_stage(cfg: dict[str, Any]) -> dict[str, Any] | None:
     return next((s for s in cfg["stages"] if s["kind"] == "implementation"), None)
 
@@ -239,8 +253,8 @@ def audit_documentation_return(transition: dict[str, Any], stages: dict[str, Any
 def with_documentation_gate(document: dict[str, Any], *, librarian: dict[str, Any] | None = None) -> dict[str, Any]:
     """`document` with the documentation gate, owned by a Librarian when `librarian` is given, else the Director.
 
-    `librarian` is `{"runtime": <cli>, "template_role": <role or None>}`. Raises
-    ValueError, changing nothing, when the gate cannot be added safely.
+    `librarian` is `{"runtime": <cli>, "template_role": <role or None>, "slot": <display slot or None>}`, a missing
+    slot meaning the background. Raises ValueError, changing nothing, when the gate cannot be added safely.
     """
     from scripts.ticket_board.workflow_config import DIRECTOR_ROLE, RUNTIMES, parking_stage_names, validate
 
@@ -282,7 +296,8 @@ def with_documentation_gate(document: dict[str, Any], *, librarian: dict[str, An
         role = {
             "name": LIBRARIAN_ROLE, "label": "Librarian", "kind": LIBRARIAN_KIND, "active": True,
             "capabilities": list(LIBRARIAN_CAPABILITIES), "runtime": runtime,
-            "target": f"{project}-{LIBRARIAN_ROLE}:0.0", "slot": None, "serial": False, "ephemeral": True,
+            "target": f"{project}-{LIBRARIAN_ROLE}:0.0", "slot": librarian.get("slot"), "serial": False,
+            "ephemeral": True,
             "template_role": template, "onboarding_prompt": LIBRARIAN_PROMPT, "presentation_label": "Librarian",
         }
         if existing is not None:  # a Librarian turned off earlier: turn the same role back on

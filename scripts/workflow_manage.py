@@ -202,7 +202,8 @@ def _document_with_designer_implementation(current: dict, args: argparse.Namespa
 
 def _document_with_documentation_gate(current: dict, args: argparse.Namespace, parser: argparse.ArgumentParser) -> dict:
     """SYRD-624: the tenant's own document with the documentation gate on (Librarian or Director) or off."""
-    from scripts.ticket_board.documentation_gate import with_documentation_gate, without_documentation_gate
+    from scripts.ticket_board.documentation_gate import (
+        free_visible_slot, with_documentation_gate, without_documentation_gate)
 
     if not current.get("document"):
         parser.error("no workflow configuration is active for this board")
@@ -212,6 +213,14 @@ def _document_with_documentation_gate(current: dict, args: argparse.Namespace, p
         librarian = {"runtime": args.runtime, "template_role": args.template_role} if args.runtime else None
         if args.template_role and not args.runtime:
             parser.error("--template-role chooses the Librarian's model, so it needs --runtime for the Librarian")
+        if librarian is not None:
+            # The window's next free display slot, or the background when all six are taken (SYRD-781).
+            librarian["slot"] = free_visible_slot(current["document"])
+            print(f"workflow: the Librarian takes display slot {librarian['slot']}; it appears in the project "
+                  "window once the window is relaunched (as add-role --relayout's new slots do)"
+                  if librarian["slot"] is not None else
+                  "workflow: all six display slots are taken, so the Librarian runs in the background; "
+                  "`switchyard attach <project> librarian` shows it", file=sys.stderr)
         return with_documentation_gate(current["document"], librarian=librarian)
     except ValueError as exc:
         parser.error(str(exc))

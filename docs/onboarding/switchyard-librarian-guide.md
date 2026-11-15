@@ -56,7 +56,7 @@ it is created (`switchyard new` asks, default off) or later
 |---|---|---|
 | off | no gate, no stage, no role | the Director, as part of its ordinary review |
 | Director-owned gate | the gate and the stage | the Director, through the same three decisions; no worker, no extra cost |
-| Librarian | the gate, the stage and a `librarian` role | the Librarian, one more model session |
+| Librarian | the gate, the stage and a `librarian` role, in the window's next free display slot (in the background only when all six are taken) | the Librarian, one more model session |
 
 Enabling never starts a model session silently: the Director-owned gate creates
 no role at all, and the Librarian is a role the operator chose, with a runtime

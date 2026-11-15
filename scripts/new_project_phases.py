@@ -315,10 +315,12 @@ def _resolve_new_project_choices(
         selected_audit_roles = ("audit",) if include_audit else ()
     from scripts import router_onboarding
 
-    print_func(router_onboarding.summary_line(selected_router))
+    print_func(router_onboarding.summary_line(selected_router, project=resolved_slug))
     from scripts import documentation_onboarding
 
-    print_func(documentation_onboarding.summary_line(selected_documentation))
+    # Which roles have a pane: a Librarian takes the next free display slot (SYRD-781).
+    print_func(documentation_onboarding.summary_line(
+        selected_documentation, slot=documentation_onboarding.librarian_slot(selected_role_clis), project=resolved_slug))
     # Where its reports go, said before the confirmation (SYRD-674).
     print_func(upstream_report_sinks.choice_summary(resolved_slug, upstream_report, registry_dir=registry_dir))
     # The one confirmation, and it comes last: after every choice -- Router,

@@ -110,8 +110,9 @@ def test_turning_router_on_walks_its_runtime_model_and_effort() -> None:
     check([p.role for p in roles] == ["director", "main", "ops"] and record == (("runtime", "codex"),
           ("model", "gpt-5.5"), ("effort", "low")), f"Router is not a role to create, it is the record: {record}")
     from scripts import router_onboarding as ro
-    check(ro.summary_line(record) == "switchyard: Router: on (codex -> gpt-5.5 -> effort low) -- assigns implementation "
-          "work as one more model session; it starts detached with the other roles"
+    check(ro.summary_line(record, project="p599") == "switchyard: Router: on (codex -> gpt-5.5 -> effort low) -- assigns "
+          "implementation work as one more model session; it runs in the background with no pane "
+          "(`switchyard attach p599 router` shows it)"
           and ro.summary_line(()).startswith("switchyard: Router: off -- the Director assigns"),
           "the summary before anything is created names the choice either way")
     pairs = launcher._prompt_switchyard_role_choices(input_func=lambda p: "on" if p.startswith("Router") else "",

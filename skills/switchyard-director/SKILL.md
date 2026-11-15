@@ -207,7 +207,11 @@ whose `needs_documentation` gate you turned on. The full guide is
   session, no cost), or decided by a Librarian (one more model session). For an
   existing project, `switchyard documentation-gate <project> enable` gives the
   decision to you, `... enable --runtime <cli>` to a Librarian, and `disable`
-  removes it once the stage is empty; the board refuses while it is not.
+  removes it once the stage is empty; the board refuses while it is not. A
+  Librarian takes the window's next free display slot (after the window is
+  relaunched, for an existing project) and runs in the background only when all
+  six are taken; `switchyard attach <project> librarian` shows it then. Router
+  never has a pane.
 - Require it per ticket, for work that adds, changes or retires something a user
   or operator reads about: `ticket-board-write require-documentation <id>`
   (`--off` to undo), at triage or before the implementer submits. A ticket past

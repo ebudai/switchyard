@@ -1924,8 +1924,8 @@ or `{"gate": "off"}`, means off. Noninteractively, `team-launcher <project> desi
 [--librarian-effort E]` records it. A project with the gate starts with a declared
 workflow, as with Router (both, when both are chosen), with the gate added by the
 same `with_documentation_gate` that `switchyard documentation-gate <project>
-enable` uses; a Librarian starts detached with the other roles, and its runtime
-goes through the same agent CLI checks. Off is provisioned exactly as before, and
+enable` uses. A Librarian takes the window's next free display slot, and runs in the background only when all
+six are taken (SYRD-781); its runtime goes through the same agent CLI checks. Off is provisioned as before, and
 `switchyard upgrade` never turns it on. The current operating contract is the
 [Librarian guide](onboarding/switchyard-librarian-guide.md), this section and
 `switchyard documentation-gate --help`; [SYRD-624](syrd-624-documentation-gate.md)

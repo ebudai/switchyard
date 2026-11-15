@@ -639,6 +639,11 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             remove_owner_home=args.remove_owner_home,
             remove_owner_user=args.remove_owner_user,
             owner_user=args.owner_user,
+            # The whole tenant by default; these keep a part, and --yes skips the typed slug (SYRD-786).
+            keep_home=args.keep_home,
+            keep_user=args.keep_user,
+            keep_board_data=args.keep_board_data,
+            yes=args.yes,
         )
     if argv[0].casefold() == "status":
         args = launcher._build_switchyard_status_parser().parse_args(argv[1:])

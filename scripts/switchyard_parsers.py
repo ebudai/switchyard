@@ -523,32 +523,22 @@ def _build_switchyard_start_parser() -> argparse.ArgumentParser:
 def _build_switchyard_teardown_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="switchyard teardown",
-        description="Remove Switchyard-created provisioning artifacts for a project.",
+        description=(
+            "Remove a whole tenant: its board service and database, root's records, its configuration and worktrees, "
+            "its home and its account, after one preview and the slug typed to confirm. Flags only keep a part."
+        ),
     )
     parser.add_argument("project", help="project slug")
     parser.add_argument("--dry-run", action="store_true", help="list exactly what would be removed without changing anything")
-    parser.add_argument("--confirm", help="required project slug for the destructive run")
+    parser.add_argument("--yes", action="store_true", help="skip typing the slug to confirm, for scripts")
+    parser.add_argument("--confirm", help="the project slug, to skip typing it (for scripts)")
+    parser.add_argument("--keep-home", action="store_true", help="keep /home/<owner> and the project checkout in it")
+    parser.add_argument("--keep-user", action="store_true", help="keep the owner Unix account")
+    parser.add_argument("--keep-board-data", action="store_true", help="keep the board database and its tickets")
     parser.add_argument("--owner-user", help="owner user for an unregistered partial provision (default: <project>-agent)")
-    parser.add_argument(
-        "--drop-nonempty-board",
-        action="store_true",
-        help="allow dropping a board database that still contains tickets",
-    )
-    parser.add_argument(
-        "--destroy-registered-tenant",
-        action="store_true",
-        help="allow removing a registered launchable tenant; off by default",
-    )
-    parser.add_argument(
-        "--remove-owner-home",
-        action="store_true",
-        help="also remove /home/<owner>; off by default because it can contain user work",
-    )
-    parser.add_argument(
-        "--remove-owner-user",
-        action="store_true",
-        help="also remove the owner Unix account; off by default",
-    )
+    # The old opt-in flags: what they asked for is now the default, so they are accepted and change nothing (SYRD-786).
+    for flag in ("--drop-nonempty-board", "--destroy-registered-tenant", "--remove-owner-home", "--remove-owner-user"):
+        parser.add_argument(flag, action="store_true", help="accepted for old scripts; now the default")
     return parser
 
 

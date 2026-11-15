@@ -248,7 +248,7 @@ Commands:
                    report whether every registered tenant has migrated director onboarding
   stop             suspend a project: window, sessions, listener and board, reversibly
   start            resume a suspended project in dependency order
-  teardown         remove project board provisioning artifacts after a dry-run review
+  teardown         remove the whole tenant after one preview and its slug typed once
   release-status   compare the shared release, deployed board, live build and both journals
   status           list registered projects and pane liveness
   validate-models  check configured role models without starting panes

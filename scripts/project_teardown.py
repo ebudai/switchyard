@@ -261,12 +261,11 @@ def _owner_removal_actions(owner_user: str) -> list["SwitchyardTeardownAction"]:
     """
     from scripts import team_launcher as launcher
 
+    from scripts import teardown_tenant
+
     quoted = shlex.quote(owner_user)
-    linger = (
-        f"if id -u {quoted} >/dev/null 2>&1; then "
-        f"loginctl disable-linger {quoted} 2>/dev/null || true; "
-        "else echo 'account already absent; nothing to unlinger'; fi"
-    )
+    # Linger off, and its file gone: `disable-linger` left /var/lib/systemd/linger/<user> on test11 (SYRD-786).
+    linger = teardown_tenant.linger_script(owner_user)
     # The manager first by unit, then the session by user: stopping
     # user@UID.service takes the manager and everything under it, and
     # terminate-user catches a session that was started another way. Neither is
@@ -279,23 +278,17 @@ def _owner_removal_actions(owner_user: str) -> list["SwitchyardTeardownAction"]:
         'systemctl stop "user-runtime-dir@${owner_uid}.service" 2>/dev/null || true; '
         "else echo 'account already absent; no session to end'; fi"
     )
-    # Bounded, and it says what it is waiting for. A fixed sleep either wastes
-    # the time or does not wait long enough, and neither reports what was still
-    # running when it gave up.
-    settle = (
-        f"if ! id -u {quoted} >/dev/null 2>&1; then echo 'account already absent'; exit 0; fi; "
-        "for _ in $(seq 1 50); do "
-        f"pgrep -u {quoted} >/dev/null 2>&1 || exit 0; sleep 0.2; done; "
-        f"echo \"processes still running as {owner_user} after waiting:\" >&2; "
-        f"ps -o pid=,comm= -u {quoted} >&2; exit 1"
-    )
+    # Every process of the account, not only its manager's: the panes' tmux servers and agents run under neither the
+    # manager nor a session, so stopping those left 58 processes on test11 and test12 and userdel refused the account.
+    # SIGTERM, then SIGKILL, each bounded, and it fails naming what is left (SYRD-786).
+    settle = teardown_tenant.process_stop_script(owner_user)
     remove = (
         f"if id -u {quoted} >/dev/null 2>&1; then userdel {quoted}; "
         "else echo 'account already absent'; fi"
     )
     return [
         launcher.SwitchyardTeardownAction(
-            f"disable linger for owner {owner_user}",
+            f"disable linger for owner {owner_user} and remove its linger file",
             launcher._bash_action(linger),
         ),
         launcher.SwitchyardTeardownAction(
@@ -303,7 +296,8 @@ def _owner_removal_actions(owner_user: str) -> list["SwitchyardTeardownAction"]:
             launcher._bash_action(end_session),
         ),
         launcher.SwitchyardTeardownAction(
-            f"wait for {owner_user}'s remaining processes to exit",
+            f"stop every process of {owner_user} (its panes, agents and user manager): SIGTERM, then SIGKILL, "
+            "and check none remains",
             launcher._bash_action(settle),
         ),
         launcher.SwitchyardTeardownAction(
@@ -353,8 +347,10 @@ def _switchyard_teardown_actions(
     home_base: Path,
     remove_owner_home: bool,
     remove_owner_user: bool,
+    keep_board_data: bool = False,
 ) -> tuple[SwitchyardTeardownAction, ...]:
     from scripts import team_launcher as launcher
+    from scripts import teardown_tenant
 
     owner_home = home_base / plan.owner_user
     listener_unit_path = owner_home / ".config" / "systemd" / "user" / plan.listener_unit
@@ -381,6 +377,12 @@ def _switchyard_teardown_actions(
         launcher.SwitchyardTeardownAction(
             f"stop and disable owner notify-listener service {plan.listener_unit}",
             launcher._bash_action(owner_runtime_script),
+        ),
+        # While the account still exists, so its uid can be named: its desktop grant, as the desktop user recorded
+        # it, then every ACL entry naming the uid -- or a later account given that uid inherits the grant (SYRD-786).
+        launcher.SwitchyardTeardownAction(
+            f"withdraw {plan.owner_user}'s desktop grant (screenshots and clipboard) and its ACL entries",
+            teardown_tenant.step_command("withdraw-desktop", plan.owner_user),
         ),
         launcher.SwitchyardTeardownAction(
             f"remove owner notify-listener unit {listener_unit_path}",
@@ -416,10 +418,10 @@ def _switchyard_teardown_actions(
             "reload systemd manager configuration",
             ("systemctl", "daemon-reload"),
         ),
-        launcher.SwitchyardTeardownAction(
+        *(() if keep_board_data else (launcher.SwitchyardTeardownAction(
             f"drop PostgreSQL database {plan.database}",
             launcher._drop_database_command(plan.database),
-        ),
+        ),)),
         launcher.SwitchyardTeardownAction(
             f"remove board release root {board_root}",
             ("rm", "-rf", "--", str(board_root)),
@@ -428,7 +430,23 @@ def _switchyard_teardown_actions(
             f"remove switchyard registry entry {registry_path}",
             ("rm", "-f", str(registry_path)),
         ),
+        # Root's records of the tenant: its staged tooling, provisioning record and publication grant go, its rollout
+        # journal stays as root's own record, re-owned to root, and anything else its uid or gid owns is re-owned
+        # (SYRD-786).
+        launcher.SwitchyardTeardownAction(
+            f"remove root's staged tooling, provisioning record and publication grant for {plan.project}, keep its "
+            "rollout journal re-owned to root, and re-own anything else its uid or gid owns",
+            teardown_tenant.step_command(
+                "root-records", plan.project, plan.owner_user,
+                str(launcher.privileged_provision_dir(plan.project, root=launcher.switchyard_privileged_provision_root())),
+                os.environ.get("SWITCHYARD_ROLLOUT_JOURNAL_ROOT") or "/var/lib/switchyard/rollout"),
+        ),
     ]
+    # The account's processes stop before anything of it is removed, its panes included: removing the home under a
+    # running tenant left it "nearly empty" and still in use on test11 (SYRD-786).
+    removal = launcher._owner_removal_actions(plan.owner_user)
+    stops = removal[:3] if remove_owner_user else removal[1:3]
+    actions[3:3] = stops
     from scripts import board_services
 
     if board_services.board_is_supervised(plan.project):
@@ -443,11 +461,9 @@ def _switchyard_teardown_actions(
             )
         )
     if remove_owner_user:
-        # Four steps, in this order, rather than one `userdel`. The account this
-        # removes has linger enabled and a systemd --user manager running under
-        # it; userdel refuses a busy account, and the run that produced SYRD-209
-        # removed every other trace and left this one behind (SYRD-209).
-        actions.extend(launcher._owner_removal_actions(plan.owner_user))
+        # Last: linger, the session and every process were ended before the files went, so userdel finds the account
+        # idle; the run that produced SYRD-209 removed every other trace and left this one behind (SYRD-209, SYRD-786).
+        actions.append(removal[3])
     return tuple(actions)
 
 
@@ -455,38 +471,43 @@ def _print_teardown_plan(
     teardown: SwitchyardTeardownPlan,
     *,
     dry_run: bool,
-    drop_nonempty_board: bool,
-    destroy_registered_tenant: bool,
-    remove_owner_home: bool,
-    remove_owner_user: bool,
+    keep_home: bool = False,
+    keep_user: bool = False,
+    keep_board_data: bool = False,
+    facts: Mapping[str, Any] | None = None,
     print_func: Callable[[str], None],
 ) -> None:
-    print_func(f"switchyard: teardown plan for {teardown.project}")
-    print_func(f"switchyard: owner user: {teardown.owner_user}")
-    print_func(f"switchyard: owner home: {teardown.owner_home}")
+    """The one preview, before anything changes: what goes, what is kept and why, and what is running now (SYRD-786)."""
+    from scripts import teardown_tenant
+
+    facts = dict(facts or {})
+    print_func(f"switchyard: teardown of {teardown.project} removes the whole tenant")
+    size = f" ({facts['home_size']})" if facts.get("home_size") else ""
+    print_func(f"switchyard: owner user: {teardown.owner_user}" + ("" if facts.get("account_exists", True)
+                                                                  else " (already gone)"))
+    print_func(f"switchyard: owner home: {teardown.owner_home}{size}")
     print_func(f"switchyard: project checkout: {teardown.project_checkout}")
     ticket_count = "unknown" if teardown.ticket_count is None else str(teardown.ticket_count)
     print_func(f"switchyard: board ticket count: {ticket_count}")
-    registered_health = "yes" if teardown.registered_healthy else "no"
-    print_func(f"switchyard: registered and launchable: {registered_health}")
-    if teardown.registered_healthy and not destroy_registered_tenant:
-        print_func("switchyard: live-tenant guard: destructive run requires --destroy-registered-tenant")
-    if teardown.ticket_count is None and not drop_nonempty_board:
-        print_func("switchyard: board-count guard: destructive run requires --drop-nonempty-board")
-    elif teardown.ticket_count and not drop_nonempty_board:
-        print_func("switchyard: non-empty board guard: destructive run requires --drop-nonempty-board")
-    print_func("switchyard: preserved by default:")
-    if not remove_owner_user:
-        print_func(f"  - owner user account {teardown.owner_user}")
-    if not remove_owner_home:
-        print_func(f"  - owner home directory {teardown.owner_home}")
-        print_func(f"  - project checkout {teardown.project_checkout}")
+    print_func(f"switchyard: registered and launchable: {'yes' if teardown.registered_healthy else 'no'}")
+    running = facts.get("processes") or []
+    print_func(f"switchyard: running now as {teardown.owner_user}: {teardown_tenant.describe_processes(running)}"
+               + ("; its panes, agents and user manager are stopped first" if running else ""))
+    kept = []
+    if keep_user:
+        kept.append(f"  - owner user account {teardown.owner_user} (--keep-user)")
+    if keep_home:
+        kept.append(f"  - owner home directory {teardown.owner_home}{size} and the project checkout in it (--keep-home)")
         if teardown.control_repository is not None and teardown.worktree_base is not None:
-            print_func(
+            kept.append(
                 f"  - commit store {teardown.control_repository} and role worktrees under {teardown.worktree_base}: "
                 f"a later `switchyard new` for {teardown.project} names the same paths, and its launch refuses "
-                "this store while it fetches from another checkout -- move both aside before that"
-            )
+                "this store while it fetches from another checkout -- move both aside before that")
+    if keep_board_data:
+        kept.append(f"  - board database and its {ticket_count} ticket(s) (--keep-board-data)")
+    print_func("switchyard: kept:" if kept else "switchyard: kept: nothing of the tenant but root's rollout journal")
+    for line in kept:
+        print_func(line)
     print_func("switchyard: actions:")
     for index, action in enumerate(teardown.actions, start=1):
         print_func(f"  {index}. {action.label}")
@@ -500,15 +521,13 @@ def _confirm_teardown_project(
     *,
     confirmation: str | None,
     input_func: Callable[[str], str],
+    yes: bool = False,
 ) -> None:
-    from scripts import team_launcher as launcher
+    """The slug typed once -- the safety step in place of the old flags -- or `--yes` / `--confirm <slug>` for a
+    script; with nobody to type it, refused (SYRD-786)."""
+    from scripts import teardown_tenant
 
-    expected = project.strip()
-    answer = confirmation
-    if answer is None:
-        answer = launcher._read_prompt(f"Type {expected} to tear down this project: ", input_func=input_func).strip()
-    if answer != expected:
-        raise SystemExit(f"switchyard: teardown confirmation failed; expected {expected!r}")
+    teardown_tenant.confirm_by_typing(project, yes=yes, confirm=confirmation, input_func=input_func)
 
 
 def _run_teardown_actions(
@@ -523,6 +542,10 @@ def _run_teardown_actions(
         result = runner(list(action.command), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if result.returncode == 0:
             completed.append(action)
+            # What the step says it did and kept -- root's records, the processes it stopped (SYRD-786).
+            for line in str(getattr(result, "stdout", "") or "").splitlines():
+                if line.strip():
+                    print_func(f"    {line.strip()}")
             continue
         stderr = str(getattr(result, "stderr", "") or "").strip()
         stdout = str(getattr(result, "stdout", "") or "").strip()
@@ -545,6 +568,8 @@ def switchyard_teardown_command(
     *,
     dry_run: bool = False,
     confirm: str | None = None,
+    #: The old opt-in flags. Removing the whole tenant is now the default, so they are accepted and change nothing,
+    #: and old scripts and docs keep working (SYRD-786).
     drop_nonempty_board: bool = False,
     destroy_registered_tenant: bool = False,
     remove_owner_home: bool = False,
@@ -556,8 +581,15 @@ def switchyard_teardown_command(
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     input_func: Callable[[str], str] = input,
     print_func: Callable[[str], None] = print,
+    #: Deviations from the whole tenant, each keeping one part (SYRD-786).
+    keep_home: bool = False,
+    keep_user: bool = False,
+    keep_board_data: bool = False,
+    #: Skips the typed confirmation, for scripts.
+    yes: bool = False,
 ) -> int:
     from scripts import team_launcher as launcher
+    from scripts import teardown_tenant
 
     plan, project_checkout, registry_path, registered_healthy = launcher._teardown_project_context(
         project,
@@ -580,64 +612,57 @@ def switchyard_teardown_command(
             plan,
             registry_path=registry_path,
             home_base=home_base,
-            remove_owner_home=remove_owner_home,
-            remove_owner_user=remove_owner_user,
+            remove_owner_home=not keep_home,
+            remove_owner_user=not keep_user,
+            keep_board_data=keep_board_data,
         ),
         # The paths `switchyard new` gives this slug, under this owner's home.
         control_repository=owner_home / ".local" / "state" / "switchyard" / "projects" / plan.project / "control.git",
         worktree_base=owner_home / f"{plan.project}-worktrees",
     )
-    # Asked before the plan is printed and before anything runs, so a dry run
-    # shows the refusal and a real run costs nothing to refuse. One account is
-    # in scope -- the one this verified plan names -- and these are the checks
-    # that catch a plan aimed somewhere else (SYRD-209).
-    owner_refusal = launcher.owner_removal_refusal(plan.owner_user) if remove_owner_user else ""
+    # The guards that stay, as plain refusals rather than flags: never the tenant this runs from, and never anything
+    # but this tenant's own agent account (SYRD-209, SYRD-786). Asked before the plan is
+    # printed and before anything runs, so a dry run shows a refusal and a real run costs nothing to refuse.
+    try:
+        registry_name = str(launcher._load_json(registry_path).get("name") or "") if registry_path.is_file() else ""
+    except (OSError, ValueError, AttributeError, SystemExit):
+        registry_name = ""
+    # The account's processes are stopped and its home removed even with --keep-user, so the account is judged on
+    # every run: never a person's, an administrator's or another tenant's (SYRD-786 Audit).
+    refusals = [teardown_tenant.self_tenant_refusal(plan.project, registry_name=registry_name),
+                launcher.owner_removal_refusal(plan.owner_user), teardown_tenant.agent_account_refusal(plan.owner_user),
+                teardown_tenant.other_tenant_refusal(plan.project, plan.owner_user, registry_dir=registry_path.parent,
+                                                     owner_home=owner_home)]
+    refusals = [reason for reason in refusals if reason]
+    facts = teardown_tenant.preview_facts(plan.owner_user, owner_home, runner=runner)
     launcher._print_teardown_plan(
-        teardown,
-        dry_run=dry_run,
-        drop_nonempty_board=drop_nonempty_board,
-        destroy_registered_tenant=destroy_registered_tenant,
-        remove_owner_home=remove_owner_home,
-        remove_owner_user=remove_owner_user,
-        print_func=print_func,
+        teardown, dry_run=dry_run, keep_home=keep_home, keep_user=keep_user, keep_board_data=keep_board_data,
+        facts=facts, print_func=print_func,
     )
-    if owner_refusal:
-        print_func(f"switchyard: owner removal refused: {owner_refusal}")
+    for reason in refusals:
+        print_func(f"switchyard: refused: {reason}")
     if dry_run:
         return 0
-    if owner_refusal:
-        raise SystemExit(f"switchyard: refusing to remove the owner account: {owner_refusal}")
-    if registered_healthy and not destroy_registered_tenant:
-        raise SystemExit(
-            f"switchyard: refusing to tear down registered launchable tenant {plan.project!r}; "
-            "pass --destroy-registered-tenant to confirm removing its board unit, database, release root, and registry entry"
-        )
-    if ticket_count is None and not drop_nonempty_board:
-        raise SystemExit(
-            f"switchyard: cannot determine whether board database {plan.database} contains tickets; "
-            "pass --drop-nonempty-board to confirm dropping it anyway"
-        )
-    if ticket_count and not drop_nonempty_board:
-        raise SystemExit(
-            f"switchyard: refusing to drop non-empty board database {plan.database} "
-            f"with {ticket_count} ticket(s); pass --drop-nonempty-board to confirm that data loss"
-        )
-    launcher._confirm_teardown_project(plan.project, confirmation=confirm, input_func=input_func)
+    if refusals:
+        raise SystemExit(f"switchyard: refusing to tear down {plan.project}: {refusals[0]}. Nothing was changed.")
+    launcher._confirm_teardown_project(plan.project, confirmation=confirm, input_func=input_func, yes=yes)
     launcher._run_teardown_actions(teardown.actions, runner=runner, print_func=print_func)
-    # Read back from the machine before claiming this worked. Every action
-    # exiting zero is not the same fact as the account being gone, and the
-    # incident this fixes is a teardown that reported success over an owner
-    # that still existed, still lingered, and still had a user manager running
-    # (SYRD-209).
-    if remove_owner_user:
-        residue = launcher.owner_removal_residue(plan.owner_user, runner=runner)
-        if residue:
-            message = [
-                f"switchyard: teardown did NOT remove {plan.owner_user}; "
-                f"{plan.project} is not safe to recreate under the same slug.",
-            ]
-            message.extend(f"  - {item}" for item in residue)
-            raise SystemExit("\n".join(message))
+    # Read back from the machine before claiming this worked. Every action exiting zero is not the same fact as the
+    # tenant being gone: SYRD-209's teardown reported success over an owner that still existed, still lingered, and
+    # still had a user manager running, and test11's left its home and 58 processes (SYRD-786).
+    residue: list[str] = []
+    if not keep_user:
+        residue += launcher.owner_removal_residue(plan.owner_user, runner=runner)
+        if (teardown_tenant.LINGER_DIR / plan.owner_user).exists():
+            residue.append(f"the linger file {teardown_tenant.LINGER_DIR / plan.owner_user} is still there")
+    if not keep_home and owner_home.exists():
+        residue.append(f"the home {owner_home} is still there")
+    if residue:
+        message = [f"switchyard: teardown did NOT remove all of {plan.project}; it is not safe to recreate under the "
+                   "same slug."]
+        message.extend(f"  - {item}" for item in residue)
+        raise SystemExit("\n".join(message))
+    if not keep_user:
         print_func(f"switchyard: owner account {plan.owner_user} removed; no residue")
     print_func(f"switchyard: teardown complete for {plan.project}")
     return 0

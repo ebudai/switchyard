@@ -198,8 +198,7 @@ def aborted_message(progress: dict[str, Any] | None) -> str:
     if not slug:
         return "switchyard: new aborted (Ctrl-C) during its questions; nothing was created."
     teardown = (f"`sudo switchyard teardown {slug} --dry-run` lists what is there, and `sudo switchyard teardown "
-                f"{slug} --confirm {slug} --destroy-registered-tenant --remove-owner-home --remove-owner-user` "
-                "removes it")
+                f"{slug}` removes it")
     created = (stage in names and FIRST_CREATING_STAGE in names
                and names.index(stage) >= names.index(FIRST_CREATING_STAGE))
     if not created:

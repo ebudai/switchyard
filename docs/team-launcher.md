@@ -1414,23 +1414,23 @@ while the board, listener and panes stay up, the Director pauses the project
 instead (`ticket-board-write pause-work`; see the Director guide's "Pausing all
 work").
 
-**`switchyard teardown <project>` removes provisioned state.** That is a
-different question, and it is not reversible by starting anything.
-
-By default it keeps the owner's home, and with it the project's commit store
+**`switchyard teardown <project>` removes the whole tenant.** That is a
+different question, and it is not reversible by starting anything. It prints one
+preview (owner, home and its size, checkout, ticket count, what is running as the
+owner, what is kept), asks for the slug to be typed once (`--yes` or `--confirm
+<slug>` for a script; with no terminal it refuses), then withdraws the desktop
+grant and its ACL entries, stops every process of the owner (linger and its file,
+user manager, session, then SIGTERM and SIGKILL), and removes the board, its
+database, root's records, the home and last the account, reading back what is
+left. Root's rollout journal is kept, re-owned to root. `--keep-home`,
+`--keep-user` and `--keep-board-data` keep a part; the old flags are accepted
+and change nothing. A home kept with `--keep-home` keeps the commit store
 (`~/.local/state/switchyard/projects/<slug>/control.git`) and role worktrees
-(`~/<slug>-worktrees`); the plan lists both under "preserved by default". A
-later `switchyard new` for the slug names the same paths, so it warns about them
-before it creates anything, and the launch refuses a store whose remote is not
-the project's repository -- naming the store, both checkouts and the remedy --
-rather than fetching from the earlier project's checkout. A role worktree added
-from another store, or from a store since replaced, is refused the same way
-instead of being reset (SYRD-545). A store whose remote is the repository the
-checkout itself follows is not refused: the checkout's own remote of that name
-must be the same URL, or the same `owner/repository` on github.com in any form,
-and every role worktree already on disk must be the store's own. syrd's store
-fetches canonical public main while its config names the local checkout
-([SYRD-715](syrd-715-control-store-identity.md)).
+(`~/<slug>-worktrees`): a later `switchyard new` for the slug warns about them,
+and the launch refuses a store whose remote is not the project's repository
+rather than fetching from the earlier checkout (SYRD-545, [SYRD-715](syrd-715-control-store-identity.md)).
+The Switchyard project's own board, the project running the command, and an
+administrator's or another tenant's account are refused ([SYRD-786](syrd-786-whole-tenant-teardown.md)).
 
 `switchyard start <project>` is the other half of `stop`: it starts the board,
 then the listener, then restores the sessions and opens the presentation --

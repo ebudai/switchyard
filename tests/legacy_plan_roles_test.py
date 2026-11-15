@@ -194,13 +194,15 @@ def test_otto_shaped_teardown_dry_run_lists_its_actions() -> None:
     tenant.roll_back(*OTTO_MISSING)
     code, lines, calls = tenant.teardown_dry_run()
     actions = [line for line in lines if line.strip()[:1].isdigit() and ". " in line]
-    check(code == 0 and len(actions) == 13 and "switchyard: dry-run only; no changes made" in lines
+    # SYRD-786: the whole tenant by default -- twenty actions, its processes and its account among them.
+    check(code == 0 and len(actions) == 20 and "switchyard: dry-run only; no changes made" in lines
           and any("drop PostgreSQL database otto_ticket_board" in line for line in actions)
           and any(f"remove board release root {tenant.home_base / ME / 'otto-ticketboard-live'}" in line for line in actions),
           f"teardown --dry-run of the otto-shaped tenant lists its actions, with no plan-field refusal: {code} {lines}")
-    check(calls == [["psql", "-XAt", "postgresql:///postgres?host=/var/run/postgresql", "-c",
-                     "SELECT 1 FROM pg_database WHERE datname = 'otto_ticket_board'"]],
-          f"and only the read-only ticket-count probe runs: {calls}")
+    check(calls[:1] == [["psql", "-XAt", "postgresql:///postgres?host=/var/run/postgresql", "-c",
+                         "SELECT 1 FROM pg_database WHERE datname = 'otto_ticket_board'"]]
+          and all(call[:2] in (["du", "-sh"], ["ps", "-o"]) for call in calls[1:]),
+          f"and only the read-only probes run: the ticket count, and the preview's home size and processes: {calls}")
 
 
 def test_teardown_validates_what_it_removes_by() -> None:

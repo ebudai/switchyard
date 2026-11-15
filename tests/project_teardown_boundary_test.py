@@ -65,12 +65,16 @@ SEAMS = {
     "_drop_database_command": {"sql_identifier": 1},
     "owner_removal_refusal": {"TEARDOWN_PROTECTED_USERS": 1, "current_user_name": 1, "read_host_desktop_approval": 1, "TEARDOWN_MINIMUM_OWNER_UID": 2},
     "_owner_removal_actions": {"SwitchyardTeardownAction": 4, "_bash_action": 4},
-    "_switchyard_teardown_actions": {"SwitchyardTeardownAction": 14, "_bash_action": 2, "tenant_control_helper_path": 2, "_drop_database_command": 1,
-                                     "_owner_removal_actions": 1},
-    "_confirm_teardown_project": {"_read_prompt": 1},
+    # SYRD-786: the desktop grant's and root's records' steps, and root's provisioning record's path.
+    "_switchyard_teardown_actions": {"SwitchyardTeardownAction": 16, "_bash_action": 2, "tenant_control_helper_path": 2, "_drop_database_command": 1,
+                                     "_owner_removal_actions": 1, "privileged_provision_dir": 1, "switchyard_privileged_provision_root": 1},
+    # SYRD-786: the typed slug is teardown_tenant.confirm_by_typing's, which reads the prompt itself.
+    "_confirm_teardown_project": {},
+    # SYRD-786: the registry record's name, for the guard against tearing down the Switchyard project itself.
     "switchyard_teardown_command": {"_teardown_project_context": 1, "_ticket_board_existing_ticket_count": 1, "SwitchyardTeardownPlan": 1,
                                     "_switchyard_teardown_actions": 1, "owner_removal_refusal": 1, "_print_teardown_plan": 1,
-                                    "_confirm_teardown_project": 1, "_run_teardown_actions": 1, "owner_removal_residue": 1},
+                                    "_confirm_teardown_project": 1, "_run_teardown_actions": 1, "owner_removal_residue": 1,
+                                    "_load_json": 1},
 }
 SLUG = "p367"
 
@@ -384,16 +388,22 @@ def test_the_owner_removal_steps_and_the_read_back() -> None:
 
     actions = judged(t._owner_removal_actions, "o'wner")
     q = "'o'\"'\"'wner'"
-    check([a.label for a in actions] == ["disable linger for owner o'wner", "stop the systemd user manager and session for o'wner",
-                                         "wait for o'wner's remaining processes to exit", "remove owner user account o'wner"]
+    # SYRD-786: linger's file goes too, and the third step stops every process of the account, not only waits.
+    check([a.label for a in actions] == ["disable linger for owner o'wner and remove its linger file",
+                                         "stop the systemd user manager and session for o'wner",
+                                         "stop every process of o'wner (its panes, agents and user manager): SIGTERM, then SIGKILL, and check "
+                                         "none remains", "remove owner user account o'wner"]
           and all(a.command[:2] == ("bash", "-lc") and len(a.command) == 3 for a in actions), f"four bash steps, in order: {actions}")
-    check(actions[0].command[2] == f"if id -u {q} >/dev/null 2>&1; then loginctl disable-linger {q} 2>/dev/null || true; "
-                                   "else echo 'account already absent; nothing to unlinger'; fi", "linger, tolerating its absence")
+    check(actions[0].command[2] == (f"if id -u {q} >/dev/null 2>&1; then loginctl disable-linger {q} 2>/dev/null || true; "
+                                    f"else echo 'account already absent; nothing to unlinger'; fi; rm -f -- '/var/lib/systemd/linger/o'\"'\"'wner'"),
+          f"linger and its file, tolerating their absence: {actions[0].command[2]}")
     check(f'systemctl stop "user@${{owner_uid}}.service"' in actions[1].command[2] and f"loginctl terminate-user {q}" in actions[1].command[2]
           and actions[1].command[2].index("user@") < actions[1].command[2].index("terminate-user") < actions[1].command[2].index("user-runtime-dir@"),
           "the manager, then the session, then the runtime dir")
-    check("for _ in $(seq 1 50); do" in actions[2].command[2] and "sleep 0.2" in actions[2].command[2] and "exit 1" in actions[2].command[2],
-          "a bounded wait that fails loudly")
+    stop = actions[2].command[2]
+    check("for signal in TERM KILL; do" in stop and 'pkill "-$signal" -U "$owner_uid"' in stop and "sleep 0.2" in stop
+          and stop.rstrip().endswith("exit 1") and stop.index("refusing to stop") < stop.index("pkill"),
+          "every process, SIGTERM then SIGKILL, bounded, failing loudly -- and the account running it refused before any signal")
     check(actions[3].command[2] == f"if id -u {q} >/dev/null 2>&1; then userdel {q}; else echo 'account already absent'; fi", "then userdel")
     calls: list = []
     got = judged(t.owner_removal_residue, "o'wner", runner=recorder([done(0, "o'wner:x:1500:1500::/home/o:/bin/bash\nsecond\n"), done(0, " Yes \n"),
@@ -424,9 +434,15 @@ def test_every_teardown_action_in_order() -> None:
     from scripts import team_launcher as t
 
     base = actions_for(remove_owner_home=False, remove_owner_user=False)
-    check([a.label for a in base] == [
+    labels = [a.label for a in base]
+    # SYRD-786: the desktop grant withdrawn and every process stopped before anything of the tenant is removed, and
+    # root's records settled last; with the account kept, its linger and the account itself are left alone.
+    check(labels == [
         "stop and disable system board service p367-ticket-board.service",
         "stop and disable owner notify-listener service p367-notify.service",
+        "withdraw syrd367-owner's desktop grant (screenshots and clipboard) and its ACL entries",
+        "stop the systemd user manager and session for syrd367-owner",
+        "stop every process of syrd367-owner (its panes, agents and user manager): SIGTERM, then SIGKILL, and check none remains",
         "remove owner notify-listener unit /home/syrd367-owner/.config/systemd/user/p367-notify.service",
         "remove system board unit /etc/systemd/system/p367-ticket-board.service",
         "remove tmpfiles config /etc/tmpfiles.d/p367.conf",
@@ -437,26 +453,34 @@ def test_every_teardown_action_in_order() -> None:
         "reload systemd manager configuration",
         "drop PostgreSQL database p367_board",
         "remove board release root /srv/p367/live",
-        "remove switchyard registry entry /fixture/registry/p367.json"], f"thirteen actions, in order: {[a.label for a in base]}")
+        "remove switchyard registry entry /fixture/registry/p367.json",
+        "remove root's staged tooling, provisioning record and publication grant for p367, keep its rollout journal re-owned "
+        "to root, and re-own anything else its uid or gid owns"], f"seventeen actions, in order: {labels}")
     commands = [a.command for a in base]
-    check(commands[2:9] == [("rm", "-f", "/home/syrd367-owner/.config/systemd/user/p367-notify.service"), ("rm", "-f", "/etc/systemd/system/p367-ticket-board.service"),
-                           ("rm", "-f", "/etc/tmpfiles.d/p367.conf"), ("rm", "-f", "/etc/sudoers.d/47-p367-control"),
-                           ("rm", "-f", "/usr/local/lib/switchyard/p367/control-grant.json"), ("rm", "-f", "/usr/local/libexec/switchyard-control-p367"),
-                           ("rm", "-f", "/etc/polkit-1/rules.d/50-p367.rules")]
-          and commands[9] == ("systemctl", "daemon-reload") and commands[11] == ("rm", "-rf", "--", "/srv/p367/live")
-          and commands[12] == ("rm", "-f", "/fixture/registry/p367.json"), f"the exact removals: {commands}")
-    check(commands[10] == ("sudo", "-u", "postgres", "psql", "-X", "-v", "ON_ERROR_STOP=1", "postgresql:///postgres?host=/var/run/postgresql", "-c",
-                           'DROP DATABASE IF EXISTS "p367_board" WITH (FORCE);'), f"the database drop: {commands[10]}")
+    check(commands[5:12] == [("rm", "-f", "/home/syrd367-owner/.config/systemd/user/p367-notify.service"), ("rm", "-f", "/etc/systemd/system/p367-ticket-board.service"),
+                            ("rm", "-f", "/etc/tmpfiles.d/p367.conf"), ("rm", "-f", "/etc/sudoers.d/47-p367-control"),
+                            ("rm", "-f", "/usr/local/lib/switchyard/p367/control-grant.json"), ("rm", "-f", "/usr/local/libexec/switchyard-control-p367"),
+                            ("rm", "-f", "/etc/polkit-1/rules.d/50-p367.rules")]
+          and commands[12] == ("systemctl", "daemon-reload") and commands[14] == ("rm", "-rf", "--", "/srv/p367/live")
+          and commands[15] == ("rm", "-f", "/fixture/registry/p367.json"), f"the exact removals: {commands}")
+    check(commands[13] == ("sudo", "-u", "postgres", "psql", "-X", "-v", "ON_ERROR_STOP=1", "postgresql:///postgres?host=/var/run/postgresql", "-c",
+                           'DROP DATABASE IF EXISTS "p367_board" WITH (FORCE);'), f"the database drop: {commands[13]}")
+    check(commands[2][-2:] == ("withdraw-desktop", "syrd367-owner") and commands[2][1] == "-I" and commands[2][2].endswith("teardown_tenant.py")
+          and commands[16][3:6] == ("root-records", "p367", "syrd367-owner"), f"teardown_tenant's two steps, isolated: {commands[2]} {commands[16]}")
     check(commands[0] == ("bash", "-lc", "if systemctl list-unit-files --no-legend p367-ticket-board.service | grep -q .; then "
                                          "systemctl disable --now p367-ticket-board.service; fi")
           and "systemctl --user disable --now p367-notify.service || true" in commands[1][2] and "sudo -u syrd367-owner env" in commands[1][2],
           "the board service and the owner's listener, each only if present")
     full = actions_for(remove_owner_home=True, remove_owner_user=True)
-    check([a.label for a in full[13:]] == ["remove owner home directory /home/syrd367-owner", "disable linger for owner syrd367-owner",
-                                           "stop the systemd user manager and session for syrd367-owner", "wait for syrd367-owner's remaining processes to exit",
-                                           "remove owner user account syrd367-owner"]
-          and full[13].command == ("rm", "-rf", "--", "/home/syrd367-owner") and isinstance(full, tuple),
-          "the home, then the four owner steps, only when asked")
+    full_labels = [a.label for a in full]
+    check(full_labels[3:6] == ["disable linger for owner syrd367-owner and remove its linger file",
+                               "stop the systemd user manager and session for syrd367-owner",
+                               "stop every process of syrd367-owner (its panes, agents and user manager): SIGTERM, then SIGKILL, and check none remains"]
+          and full_labels[-2:] == ["remove owner home directory /home/syrd367-owner", "remove owner user account syrd367-owner"]
+          and full[-2].command == ("rm", "-rf", "--", "/home/syrd367-owner") and isinstance(full, tuple) and len(full) == 20,
+          f"linger, the session and every process first; the home and then the account last: {full_labels}")
+    kept = actions_for(remove_owner_home=False, remove_owner_user=False, keep_board_data=True)
+    check(len(kept) == len(base) - 1 and not any("drop PostgreSQL" in a.label for a in kept), "--keep-board-data keeps the database")
     check(base[0].command_display == "bash -lc 'if systemctl list-unit-files --no-legend p367-ticket-board.service | grep -q .; then "
                                      "systemctl disable --now p367-ticket-board.service; fi'", "the display is shlex.join")
     check(isinstance(judged(setattr, base[0], "label", "x"), dataclasses.FrozenInstanceError), "an action is frozen")
@@ -476,40 +500,54 @@ def printout(plan, **kw):
     from scripts import team_launcher as t
 
     said: list = []
-    args = dict(dry_run=False, drop_nonempty_board=False, destroy_registered_tenant=False, remove_owner_home=False, remove_owner_user=False)
+    args = dict(dry_run=False)
     args.update(kw)
     t._print_teardown_plan(plan, print_func=said.append, **args)
     return said
 
 
 def test_the_plan_printout_and_its_guards() -> None:
-    said = printout(plan_of())
-    check(said == ["switchyard: teardown plan for p367", "switchyard: owner user: o", "switchyard: owner home: /home/o",
-                   "switchyard: project checkout: /home/o/Projects/p367", "switchyard: board ticket count: 0", "switchyard: registered and launchable: no",
-                   "switchyard: preserved by default:", "  - owner user account o", "  - owner home directory /home/o", "  - project checkout /home/o/Projects/p367",
-                   "switchyard: actions:", "  1. stop it", "     command: systemctl stop 'x y'"], f"the whole plan: {said}")
-    said = printout(plan_of(registered_healthy=True, ticket_count=None), dry_run=True, remove_owner_home=True, remove_owner_user=True)
-    check("switchyard: live-tenant guard: destructive run requires --destroy-registered-tenant" in said
-          and "switchyard: board-count guard: destructive run requires --drop-nonempty-board" in said and said[-1] == "switchyard: dry-run only; no changes made"
-          and "  - owner user account o" not in said and "  - owner home directory /home/o" not in said and "switchyard: board ticket count: unknown" in said,
-          f"both guards, nothing preserved, dry run: {said}")
-    said = printout(plan_of(ticket_count=4))
-    check("switchyard: non-empty board guard: destructive run requires --drop-nonempty-board" in said, "a non-empty board")
-    said = printout(plan_of(ticket_count=4, registered_healthy=True), drop_nonempty_board=True, destroy_registered_tenant=True)
-    check(not any("guard" in line for line in said), "every guard answered: none shown")
+    # SYRD-786: one preview of the whole tenant -- what goes, what is kept and why, what is running -- and no flag
+    # guards: the typed slug is the safety step.
+    said = printout(plan_of(), facts={"home_size": "1.2G", "processes": ["tmux: server", "claude", "claude"],
+                                      "account_exists": True})
+    check(said == ["switchyard: teardown of p367 removes the whole tenant", "switchyard: owner user: o",
+                   "switchyard: owner home: /home/o (1.2G)", "switchyard: project checkout: /home/o/Projects/p367",
+                   "switchyard: board ticket count: 0", "switchyard: registered and launchable: no",
+                   "switchyard: running now as o: 3 (claude x2, tmux: server); its panes, agents and user manager are stopped first",
+                   "switchyard: kept: nothing of the tenant but root's rollout journal",
+                   "switchyard: actions:", "  1. stop it", "     command: systemctl stop 'x y'"], f"the whole preview: {said}")
+    said = printout(plan_of(registered_healthy=True, ticket_count=None), dry_run=True, keep_home=True, keep_user=True,
+                    keep_board_data=True, facts={"account_exists": False})
+    check("switchyard: owner user: o (already gone)" in said and "switchyard: registered and launchable: yes" in said
+          and "switchyard: board ticket count: unknown" in said and "switchyard: running now as o: none" in said
+          and "  - owner user account o (--keep-user)" in said and "switchyard: kept:" in said
+          and any(line.startswith("  - owner home directory /home/o") and "(--keep-home)" in line for line in said)
+          and any("(--keep-board-data)" in line for line in said) and said[-1] == "switchyard: dry-run only; no changes made"
+          and not any("guard" in line for line in said), f"each part kept says which flag kept it, and no guard: {said}")
 
 
 def test_confirmation_and_a_failing_action() -> None:
     from scripts import team_launcher as t
 
+    # SYRD-786: the slug typed once, or --yes / --confirm <slug>; with nobody to type it, refused.
+    import builtins
+
     with patched(t, **dict(LIVE, _read_prompt=refuse("the prompt"))):
-        check(judged(t._confirm_teardown_project, " p367 ", confirmation="p367", input_func=refuse("input")) is None, "a supplied confirmation")
+        check(judged(t._confirm_teardown_project, "p367", confirmation=" p367 ", input_func=refuse("input")) is None, "a supplied confirmation")
+        check(judged(t._confirm_teardown_project, "p367", confirmation=None, yes=True, input_func=refuse("input")) is None, "--yes")
         bad = judged(t._confirm_teardown_project, "p367", confirmation="yes", input_func=refuse("input"))
-    check(isinstance(bad, SystemExit) and str(bad) == "switchyard: teardown confirmation failed; expected 'p367'", f"a wrong confirmation: {bad!r}")
+        nobody = judged(t._confirm_teardown_project, "p367", confirmation=None, input_func=builtins.input)
+    check(isinstance(bad, SystemExit) and str(bad) == "switchyard: --confirm 'yes' does not name p367; nothing was changed", f"a wrong confirmation: {bad!r}")
+    check(isinstance(nobody, SystemExit) and "nobody can answer here; pass --yes (or --confirm <slug>)" in str(nobody)
+          and "Nothing was changed." in str(nobody), f"no terminal and no --yes: refused, naming the flag: {nobody!r}")
     typed: list = []
     with patched(t, **dict(LIVE, _read_prompt=lambda prompt, *, input_func: typed.append(prompt) or " p367 ")):
         check(judged(t._confirm_teardown_project, "p367", confirmation=None, input_func=refuse("input")) is None
-              and typed == ["Type p367 to tear down this project: "], f"asked, stripped: {typed}")
+              and typed == ["Type p367 to remove it: "], f"asked once, stripped: {typed}")
+    with patched(t, **dict(LIVE, _read_prompt=lambda prompt, *, input_func: "p368")):
+        wrong = judged(t._confirm_teardown_project, "p367", confirmation=None, input_func=refuse("input"))
+    check(isinstance(wrong, SystemExit) and str(wrong) == "switchyard: 'p368' is not p367; nothing was changed", f"a wrong slug typed: {wrong!r}")
     actions = [t.SwitchyardTeardownAction(f"step {i}", ("true", str(i))) for i in range(4)]
     calls: list = []
     said: list = []
@@ -544,7 +582,7 @@ class Teardown:
             _teardown_project_context=lambda project, **kw: log.append(("context", project, kw)) or (PLAN, Path("/checkout"), Path("/r/p367.json"), self.healthy),
             _ticket_board_existing_ticket_count=lambda database, *, runner: log.append(("count", database)) or self.count,
             owner_removal_refusal=lambda owner: log.append(("refusal", owner)) or self.refusal,
-            _confirm_teardown_project=lambda project, *, confirmation, input_func: log.append(("confirm", project, confirmation)),
+            _confirm_teardown_project=lambda project, *, confirmation, input_func, yes=False: log.append(("confirm", project, confirmation, yes)),
             _run_teardown_actions=lambda actions, *, runner, print_func: log.append(("run", len(actions))),
             owner_removal_residue=lambda owner, *, runner: log.append(("residue", owner)) or list(self.residue),
         )
@@ -563,37 +601,38 @@ class Teardown:
 
 def test_the_command_guards_dry_run_confirmation_and_residue() -> None:
     fx = Teardown()
-    check(fx.run(dry_run=True, remove_owner_user=True, owner_user="named") == 0 and fx.kinds() == ["context", "count", "refusal"]
+    check(fx.run(dry_run=True, owner_user="named") == 0 and fx.kinds() == ["context", "count", "refusal"]
           and fx.log[0][2] == {"owner_user": "named", "config_dir": None, "registry_dir": None, "home_base": Path("/home")}
           and fx.said[-1] == "switchyard: dry-run only; no changes made", f"a dry run renders and asks, and runs nothing: {fx.log}")
     fx = Teardown(); fx.refusal = "o is the account running this teardown"
-    got = fx.run(dry_run=True, remove_owner_user=True)
-    check(got == 0 and "switchyard: owner removal refused: o is the account running this teardown" in fx.said, "a dry run shows the refusal")
+    got = fx.run(dry_run=True)
+    check(got == 0 and "switchyard: refused: o is the account running this teardown" in fx.said, "a dry run shows the refusal")
     fx = Teardown(); fx.refusal = "nope"
-    got = fx.run(remove_owner_user=True, destroy_registered_tenant=True, drop_nonempty_board=True)
-    check(isinstance(got, SystemExit) and str(got) == "switchyard: refusing to remove the owner account: nope" and "run" not in fx.kinds(),
-          f"a real run refuses first: {got!r}")
-    fx = Teardown(); fx.healthy = True
-    got = fx.run()
-    check(isinstance(got, SystemExit) and str(got) == ("switchyard: refusing to tear down registered launchable tenant 'p367'; pass --destroy-registered-tenant "
-                                                       "to confirm removing its board unit, database, release root, and registry entry")
-          and "refusal" not in fx.kinds(), f"a live tenant needs its own flag, and the owner is not asked when not removed: {got!r}")
-    fx = Teardown(); fx.count = None
-    got = fx.run()
-    check(isinstance(got, SystemExit) and str(got) == ("switchyard: cannot determine whether board database p367_board contains tickets; "
-                                                       "pass --drop-nonempty-board to confirm dropping it anyway"), f"an unknown count: {got!r}")
-    fx = Teardown(); fx.count = 3
-    got = fx.run()
-    check(isinstance(got, SystemExit) and str(got) == ("switchyard: refusing to drop non-empty board database p367_board with 3 ticket(s); "
-                                                       "pass --drop-nonempty-board to confirm that data loss"), f"a non-empty board: {got!r}")
-    fx = Teardown(); fx.count = 3
-    check(fx.run(drop_nonempty_board=True, confirm="p367") == 0 and fx.kinds()[-2:] == ["confirm", "run"] and fx.log[-2] == ("confirm", SLUG, "p367")
-          and fx.log[-1] == ("run", 13) and fx.said[-1] == "switchyard: teardown complete for p367",
-          f"confirmed, then the thirteen actions run, and done: {fx.log}")
+    got = fx.run(confirm="p367")
+    check(isinstance(got, SystemExit) and str(got) == "switchyard: refusing to tear down p367: nope. Nothing was changed." and "run" not in fx.kinds()
+          and "confirm" not in fx.kinds(), f"a real run refuses first, before the slug is asked: {got!r}")
+    # SYRD-786: a registered tenant, a board of unknown size or with tickets: no flag needed, the typed slug confirms.
+    for healthy, count in ((True, 0), (False, None), (False, 3)):
+        fx = Teardown(); fx.healthy, fx.count = healthy, count
+        check(fx.run() == 0 and fx.log[-3] == ("confirm", SLUG, None, False) and fx.log[-2] == ("run", 20),
+              f"registered={healthy}, tickets={count}: asked once, then the whole tenant's twenty actions: {fx.log}")
+    fx = Teardown()
+    # SYRD-786 Audit: its processes are stopped even with --keep-user, so the account is judged on every run.
+    check(fx.run(keep_user=True, keep_home=True, yes=True) == 0 and "refusal" in fx.kinds() and fx.log[-1] == ("run", 17)
+          and ("confirm", SLUG, None, True) in fx.log,
+          f"--keep-user and --keep-home: the account is still judged, and seventeen actions run; --yes reaches the confirmation: {fx.log}")
+    fx = Teardown(); fx.refusal = "nope"
+    got = fx.run(keep_user=True, confirm="p367")
+    check(isinstance(got, SystemExit) and "nope" in str(got) and "run" not in fx.kinds(), f"--keep-user does not skip a refusal: {got!r}")
+    fx = Teardown()
+    check(fx.run(keep_board_data=True, confirm="p367") == 0 and fx.log[-2] == ("run", 19), "--keep-board-data keeps the database")
+    fx = Teardown()
+    legacy = fx.run(confirm="p367", destroy_registered_tenant=True, drop_nonempty_board=True, remove_owner_home=True, remove_owner_user=True)
+    check(legacy == 0 and fx.log[-2] == ("run", 20), "the old flags are accepted and change nothing")
     fx = Teardown(); fx.residue = ["the account still exists: o:x:1500"]
-    got = fx.run(remove_owner_user=True, remove_owner_home=True, confirm="p367")
-    check(isinstance(got, SystemExit) and str(got) == ("switchyard: teardown did NOT remove syrd367-owner; p367 is not safe to recreate under the same slug.\n"
-                                                       "  - the account still exists: o:x:1500") and fx.log[-2] == ("run", 18) and fx.kinds()[-1] == "residue",
+    got = fx.run(confirm="p367")
+    check(isinstance(got, SystemExit) and str(got) == ("switchyard: teardown did NOT remove all of p367; it is not safe to recreate under the same slug.\n"
+                                                       "  - the account still exists: o:x:1500") and fx.log[-2] == ("run", 20) and fx.kinds()[-1] == "residue",
           f"the account is read back after the actions: {got!r}")
     fx = Teardown()
     fx.run(dry_run=True, home_base=Path("/fixture/homes"))
@@ -601,8 +640,20 @@ def test_the_command_guards_dry_run_confirmation_and_residue() -> None:
           and any("/fixture/homes/syrd367-owner/.config/systemd/user/p367-notify.service" in line for line in fx.said),
           f"another home base is the one planned for: {fx.said[:4]}")
     fx = Teardown()
-    check(fx.run(remove_owner_user=True, confirm="p367") == 0 and fx.said[-2:] == ["switchyard: owner account syrd367-owner removed; no residue",
-                                                                                    "switchyard: teardown complete for p367"], f"no residue: {fx.said[-2:]}")
+    check(fx.run(confirm="p367") == 0 and fx.said[-2:] == ["switchyard: owner account syrd367-owner removed; no residue",
+                                                            "switchyard: teardown complete for p367"], f"no residue: {fx.said[-2:]}")
+    saved = os.environ.get("TICKET_BOARD_PROJECT")
+    os.environ["TICKET_BOARD_PROJECT"] = SLUG
+    try:
+        fx = Teardown()
+        got = fx.run(yes=True)
+    finally:
+        if saved is None:
+            os.environ.pop("TICKET_BOARD_PROJECT", None)
+        else:
+            os.environ["TICKET_BOARD_PROJECT"] = saved
+    check(isinstance(got, SystemExit) and "is the project this command runs from" in str(got) and "run" not in fx.kinds(),
+          f"never the tenant this command runs from: {got!r}")
 
 
 #: Run first: a seam taken past the launcher must be caught before any

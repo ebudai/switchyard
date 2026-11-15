@@ -275,20 +275,20 @@ def test_teardown_names_the_store_and_worktrees_it_keeps() -> None:
         registry = tmp / "registry"
         registry.mkdir()
 
-        def run(remove_owner_home: bool) -> list[str]:
+        def run(keep_home: bool) -> list[str]:
             said: list[str] = []
             team_launcher.switchyard_teardown_command(
                 "otto", dry_run=True, owner_user="otto-agent", config_dir=tmp / "configs", registry_dir=registry,
-                home_base=tmp / "home", remove_owner_home=remove_owner_home,
+                home_base=tmp / "home", keep_home=keep_home,
                 runner=lambda argv, **kw: subprocess.CompletedProcess(argv, 1, "", "no psql here"),
                 print_func=said.append,
             )
             return said
 
-        kept, removed = run(False), run(True)
+        kept, removed = run(True), run(False)  # SYRD-786: the home goes by default; --keep-home keeps it
     store = tmp / "home" / "otto-agent" / ".local" / "state" / "switchyard" / "projects" / "otto" / "control.git"
     worktrees = tmp / "home" / "otto-agent" / "otto-worktrees"
-    preserved = kept[kept.index("switchyard: preserved by default:") + 1:kept.index("switchyard: actions:")]
+    preserved = kept[kept.index("switchyard: kept:") + 1:kept.index("switchyard: actions:")]
     line = next((l for l in preserved if "commit store" in l), "")
     check(str(store) in line and str(worktrees) in line and "switchyard new" in line and "move both aside" in line,
           f"the dry run lists the store and worktrees it keeps, and what that means: {preserved}")

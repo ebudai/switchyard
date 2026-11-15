@@ -32,8 +32,8 @@ most that one step, and the phase went on to the next. A six-role project took a
   - before "project accounts and files": none of the project's accounts, files or board were created, with the
     teardown dry run to check if unsure;
   - from then on: the project is partly created and was not started. `sudo switchyard teardown <slug> --dry-run`
-    lists what is there, and `sudo switchyard teardown <slug> --confirm <slug> --destroy-registered-tenant
-    --remove-owner-home --remove-owner-user` removes it.
+    lists what is there, and `sudo switchyard teardown <slug>` removes it (SYRD-786: the whole tenant, after the slug
+    is typed once).
 - **Every other command** that runs first-run steps (`switchyard <project>`'s launch, `add-role`'s role preparation,
   a login) uses the same watched session, so one press ends it too. `scripts/switchyard` ends any command on a
   `KeyboardInterrupt` with 130 and one line, not a traceback.

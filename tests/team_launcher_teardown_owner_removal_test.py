@@ -70,13 +70,17 @@ def test_the_removal_is_four_ordered_steps_not_one_userdel() -> None:
     check("linger" in labels[0], f"linger goes first, or the manager restarts: {labels[0]}")
     check("user manager" in labels[1] or "session" in labels[1],
           f"then the manager and session: {labels[1]}")
-    check("wait" in labels[2], f"then the wait for its processes: {labels[2]}")
+    # SYRD-786: not only a wait -- every process of the account is stopped, its panes included.
+    check("stop every process" in labels[2], f"then every process of the account is stopped: {labels[2]}")
     check("remove owner user account" in labels[3], f"and only then the account: {labels[3]}")
     scripts = [_script_of(action) for action in actions]
     check("disable-linger" in scripts[0], f"the first step disables linger: {scripts[0]}")
     check("user@" in scripts[1] and "terminate-user" in scripts[1],
           f"the second stops the manager unit and the session: {scripts[1]}")
     check("userdel" in scripts[3], f"the last removes the account: {scripts[3]}")
+    check("/var/lib/systemd/linger/test-agent" in scripts[0], f"linger's file goes too (SYRD-786): {scripts[0]}")
+    check("pkill" in scripts[2] and "KILL" in scripts[2] and "TERM" in scripts[2],
+          f"the stop sends SIGTERM, then SIGKILL, to every process of the uid (SYRD-786): {scripts[2]}")
     check(all("test-agent" in script for script in scripts),
           "and every one of them names the owner from the plan")
 
@@ -143,26 +147,21 @@ def test_an_ordinary_tenant_owner_is_allowed() -> None:
     ) == "", "the tenant owner the plan names is not refused")
 
 
-def test_the_wait_step_returns_when_the_processes_are_gone() -> None:
-    """Run against this account's real processes, not a description of them."""
-    actions = team_launcher._owner_removal_actions(os.environ.get("USER") or "root")
-    settle = _script_of(actions[2])
-    # A process of our own that exits while the step waits: the loop must see it
-    # go rather than time out, and must not report residue that is not there.
-    with tempfile.TemporaryDirectory(prefix="syrd209-wait.") as tmp:
-        marker = Path(tmp) / "child.pid"
-        child = subprocess.Popen(["sleep", "1"])
-        marker.write_text(str(child.pid), encoding="utf-8")
+def test_the_stop_step_never_acts_on_the_account_running_it() -> None:
+    """SYRD-786: the step now stops every process of the account it names, so it must refuse the account running it
+    -- this suite's own -- and any system account, before it signals anything. (It used to only wait, and this case ran
+    it against this account; run unrefused, the step would now end this session.) That it ends a real tenant's
+    processes is measured as root in a disposable VM (docs/syrd-786-whole-tenant-teardown.md)."""
+    import pwd
+
+    me = pwd.getpwuid(os.getuid()).pw_name
+    for owner in (me, "root"):
+        settle = _script_of(team_launcher._owner_removal_actions(owner)[2])
         began = time.monotonic()
-        result = _run(settle)
-        elapsed = time.monotonic() - began
-        child.wait()
-    # This account always has processes (the suite itself), so the wait times
-    # out and reports them -- which is the failure path, and it must say what
-    # was still running rather than only failing.
-    check(result.returncode != 0, "a user with live processes does not pass the wait")
-    check("still running" in result.stderr, f"and the step says so: {result.stderr[:160]}")
-    check(elapsed < 30, f"bounded rather than hanging: {elapsed:.1f}s")
+        result = _run(settle, timeout=30)
+        check(result.returncode != 0 and "refusing to stop the processes" in result.stderr,
+              f"{owner}: refused before anything is signalled: {result.returncode} {result.stderr[:200]}")
+        check(time.monotonic() - began < 5, f"{owner}: at once, not after a wait")
 
 
 def test_every_step_tolerates_an_account_that_is_already_gone() -> None:
@@ -235,13 +234,18 @@ class _TeardownRunner:
         return subprocess.CompletedProcess(args, 0, stdout="")
 
 
+#: SYRD-786: teardown reads every other registry entry to refuse another tenant's account; these flows have no other
+#: tenant, and must not read this host's registry.
+EMPTY_REGISTRY = Path(tempfile.mkdtemp(prefix="syrd786-registry."))
+
+
 def test_the_dry_run_shows_the_removal_in_execution_order() -> None:
     """The ticket asks for the order, because the order is the fix."""
     runner = _TeardownRunner()
     lines: list[str] = []
     code = team_launcher.switchyard_teardown_command(
         "porter", dry_run=True, remove_owner_user=True, remove_owner_home=True,
-        runner=runner, print_func=lines.append,
+        runner=runner, print_func=lines.append, registry_dir=EMPTY_REGISTRY,
     )
     check(code == 0, "a dry run succeeds")
     numbered = [line for line in lines if line.strip()[:1].isdigit() and ". " in line]
@@ -250,10 +254,11 @@ def test_the_dry_run_shows_the_removal_in_execution_order() -> None:
         return next(index for index, label in enumerate(order) if fragment in label)
     check(position("disable linger") < position("user manager"),
           f"linger is disabled before the manager is stopped: {order[-5:]}")
-    check(position("user manager") < position("wait for"),
-          f"the manager is stopped before the wait: {order[-5:]}")
-    check(position("wait for") < position("remove owner user account"),
-          f"and the wait comes before the account is removed: {order[-5:]}")
+    check(position("user manager") < position("stop every process"),
+          f"the manager is stopped before every other process: {order}")
+    check(position("stop every process") < position("remove owner home directory")
+          < position("remove owner user account"),
+          f"and every process stops before the home and then the account are removed (SYRD-786): {order}")
     check(not [call for call in runner.calls if call[:2] != ["psql", "-XAt"]],
           f"and a dry run mutates nothing: {runner.calls}")
 
@@ -266,14 +271,14 @@ def test_a_surviving_account_fails_the_teardown_and_names_the_residue() -> None:
         team_launcher.switchyard_teardown_command(
             "porter", confirm="porter", destroy_registered_tenant=True,
             drop_nonempty_board=True, remove_owner_user=True, remove_owner_home=True,
-            runner=runner, print_func=lines.append,
+            runner=runner, print_func=lines.append, registry_dir=EMPTY_REGISTRY,
         )
     except SystemExit as exc:
         message = str(exc)
     else:
         raise AssertionError("a surviving owner account must fail the teardown")
     output = "\n".join(lines)
-    check("did NOT remove porter-agent" in message, f"the failure names the account: {message[:200]}")
+    check("did NOT remove all of porter" in message, f"the failure names the tenant: {message[:200]}")
     check("still exists" in message and "1001" in message, f"and the passwd entry: {message[:300]}")
     check("linger is still enabled" in message, f"and the linger: {message[:300]}")
     check("pipewire" in message, f"and what is still running: {message[:400]}")
@@ -287,7 +292,7 @@ def test_a_clean_removal_says_so_and_completes() -> None:
     code = team_launcher.switchyard_teardown_command(
         "porter", confirm="porter", destroy_registered_tenant=True,
         drop_nonempty_board=True, remove_owner_user=True, remove_owner_home=True,
-        runner=runner, print_func=lines.append,
+        runner=runner, print_func=lines.append, registry_dir=EMPTY_REGISTRY,
     )
     output = "\n".join(lines)
     check(code == 0, "a clean teardown succeeds")
@@ -308,7 +313,7 @@ def test_a_refused_owner_stops_the_teardown_before_anything_runs() -> None:
         team_launcher.switchyard_teardown_command(
             "porter", confirm="porter", destroy_registered_tenant=True,
             drop_nonempty_board=True, remove_owner_user=True,
-            runner=runner, print_func=lines.append,
+            runner=runner, print_func=lines.append, registry_dir=EMPTY_REGISTRY,
         )
     except SystemExit as exc:
         message = str(exc)
@@ -319,7 +324,7 @@ def test_a_refused_owner_stops_the_teardown_before_anything_runs() -> None:
             os.environ.pop("SUDO_USER", None)
         else:
             os.environ["SUDO_USER"] = saved
-    check("refusing to remove the owner account" in message, f"it refuses: {message[:160]}")
+    check("refusing to tear down porter" in message and "porter-agent" in message, f"it refuses: {message[:160]}")
     check(not [call for call in runner.calls if call[:2] != ["psql", "-XAt"]],
           f"and nothing destructive ran first: {runner.calls}")
 

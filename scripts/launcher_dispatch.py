@@ -172,6 +172,9 @@ def main(argv: list[str] | None = None) -> int:
             remove_owner_home=args.remove_owner_home,
             remove_owner_user=args.remove_owner_user,
             owner_user=args.owner_user,
+            # team-launcher keeps its documented opt-in: the home and the account go only when asked (SYRD-786).
+            keep_home=not args.remove_owner_home,
+            keep_user=not args.remove_owner_user,
         )
     if args.command == "deploy-launcher":
         return launcher.deploy_launcher_checkout(

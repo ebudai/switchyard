@@ -274,8 +274,7 @@ def test_switchyard_new_says_what_it_left() -> None:
         check(code == 130 and len(said) == 1 and f"new test13 aborted (Ctrl-C) during {stage}" in said[0]
               and "partly created and was not started" in said[0]
               and "`sudo switchyard teardown test13 --dry-run`" in said[0]
-              and ("`sudo switchyard teardown test13 --confirm test13 --destroy-registered-tenant --remove-owner-home "
-                   "--remove-owner-user`") in said[0],
+              and "and `sudo switchyard teardown test13` removes it" in said[0],  # SYRD-786: no flags needed
               f"{stage}: what it left, and the exact commands that list and remove it: {said}")
 
 

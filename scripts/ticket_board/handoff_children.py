@@ -22,7 +22,12 @@ running at the hand-over, except:
 * a session the provider started at its own start -- within the minute the
   board already counts as a start's own (`LAUNCHER_SEED_STARTUP_SECONDS`):
   Codex starts its app-server daemon in a session of its own (SYRD-589), and
-  no tool runs a command before a turn can begin.
+  no tool runs a command before a turn can begin;
+* a session whose parent chain reaches one of those that is the role's current
+  work (SYRD-794): PostgreSQL 18 starts each io worker of a test cluster in a
+  session of its own, so a sweep for the current ticket looked like one
+  leftover per worker. Each parent must have started no later than its child,
+  so a reused pid never counts; a child whose parents have ended reaches none.
 
 Its ticket is said when a worktree tells it, and "not known" otherwise. Only
 the Director is told, and nothing is stopped: the report carries a stop that
@@ -121,6 +126,34 @@ def _rows(listener: Any, conn: Any, terminal: set[str]) -> list[tuple[int, float
     return sorted(newest.values())
 
 
+def _parent_and_session(proc_root: Path, pid: int) -> tuple[int, int]:
+    """(parent pid, session) as /proc says now; (0, 0) when it cannot be read."""
+    try:
+        stat = (proc_root / str(pid) / "stat").read_text(encoding="utf-8", errors="replace")
+        fields = stat[stat.rfind(")") + 2:].split()
+        return int(fields[1]), int(fields[3])
+    except (OSError, IndexError, ValueError):
+        return 0, 0
+
+
+def descends_from(proc_root: Path, pid: int, sessions: set[int], stop: int) -> bool:
+    """Whether `pid`'s parent chain, up to `stop` (the pane) or init, reaches a process in one of `sessions`.
+
+    Each parent must have started no later than its child: a pid reused since cannot be mistaken for the parent."""
+    child, child_ticks = pid, background_child.start_ticks(proc_root, pid)
+    for _ in range(64):
+        parent, _session = _parent_and_session(proc_root, child)
+        if parent <= 1 or parent == stop or not child_ticks:
+            return False
+        parent_ticks = background_child.start_ticks(proc_root, parent)
+        if not parent_ticks or parent_ticks > child_ticks:
+            return False
+        if _parent_and_session(proc_root, parent)[1] in sessions:
+            return True
+        child, child_ticks = parent, parent_ticks
+    return False
+
+
 def _text(value: Any) -> str:
     return value.decode("utf-8") if isinstance(value, bytes) else str(value or "")
 
@@ -155,9 +188,13 @@ def leftovers(gate: Any, conn: Any, role: str, sent_at: float, terminal: set[str
                # A group that cannot be read any more has ended since the sample: nothing survives to report.
                if holder.detached and holder.pgid > 0 and furniture_until < holder.started_at <= cutoff]
     origins = background_child.origins(conn, holders)
+    # The role's current work, by its worktree or its lease; what descends from it is that work too (SYRD-794).
+    current = {holder.session for holder in holders
+               if origins.get(holder.key) is not None and not background_child.lapsed(origins[holder.key], role, terminal)}
     return [(holder, origins.get(holder.key)) for holder in holders
             if (origins.get(holder.key) is None or background_child.lapsed(origins[holder.key], role, terminal))
-            and not _bounded(sample, holder, proc_root, now)]
+            and not _bounded(sample, holder, proc_root, now)
+            and not (current and descends_from(proc_root, holder.pid, current, pane_pid))]
 
 
 def run(listener: Any, conn: Any) -> int:

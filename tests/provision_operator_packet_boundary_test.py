@@ -25,6 +25,11 @@ helpers they read and its own imports. This pins what makes that safe:
   not typed; it is byte-identical under `env -i`, in a normal role pane, with
   another HOME, USER, COLUMNS and TMPDIR and a leaked board Python, shared
   Python and tenant-control root, under umask 077 and under several hash seeds.
+  SYRD-792: it had stayed SYRD-474's while SYRD-541, -551, -113C, -605, -654,
+  -616, -677, -694, -700, -706, -753 and -784 each changed the packet, so the
+  suite was red from SYRD-541 on. Each change was read and the entries
+  re-recorded by this suite's own `run` over these cases; the packets now also
+  count SYRD-784's notice filter on every psql line.
 - **The direct script answers what the package answers** and looks at no host
   path (a recorder with a positive control), and the default, shaped, lean and
   roles packets are byte-identical through both.
@@ -75,51 +80,51 @@ DISPATCH = {'write_artifacts': {'render_operator_commands': 1}, 'main': {'render
 READERS = {}
 #: The BASELINE's own behaviour for the cases below (`gold474.py`, run on the baseline project_provision under the guard).
 GOLDEN = {
-    'packet: default': {'result': {'type': 'str', 'value': {'chars': 23808, 'lines': 345, 'sha256': 'ad855ddfa75a1a21', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 19, 'boundary begin': 1}}}, 'calls': {'owned_directory_command': 3, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
-    'packet: shaped': {'result': {'type': 'str', 'value': {'chars': 23808, 'lines': 345, 'sha256': 'ad855ddfa75a1a21', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 19, 'boundary begin': 1}}}, 'calls': {'owned_directory_command': 3, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
-    'packet: lean': {'result': {'type': 'str', 'value': {'chars': 23808, 'lines': 345, 'sha256': 'ad855ddfa75a1a21', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 19, 'boundary begin': 1}}}, 'calls': {'owned_directory_command': 3, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
-    'packet: no traversal': {'result': {'type': 'str', 'value': {'chars': 23095, 'lines': 335, 'sha256': '727f1d3a58737221', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 19, 'boundary begin': 1}}}, 'calls': {'owned_directory_command': 3, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
-    'packet: control user': {'result': {'type': 'str', 'value': {'chars': 24227, 'lines': 349, 'sha256': 'd7f80e51b1690c8a', 'marked': {'companion': 7, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 20, 'boundary begin': 1}}}, 'calls': {'owned_directory_command': 3, 'packet_companion': 7, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
-    'packet: named key': {'result': {'type': 'str', 'value': {'chars': 23906, 'lines': 351, 'sha256': '597e856008c8fe84', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 19, 'boundary begin': 1}}}, 'calls': {'owned_directory_command': 3, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
-    'packet: project repository': {'result': {'type': 'str', 'value': {'chars': 23689, 'lines': 345, 'sha256': '5b5bdfaa06bce82c', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 19, 'boundary begin': 1}}}, 'calls': {'owned_directory_command': 3, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
-    'packet: two commit stores': {'result': {'type': 'str', 'value': {'chars': 22621, 'lines': 331, 'sha256': 'abc4926fe881d810', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 13, 'boundary begin': 1}}}, 'calls': {'owned_directory_command': 3, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
-    'packet: stores under the home': {'result': {'type': 'str', 'value': {'chars': 23099, 'lines': 339, 'sha256': '97cf3ccf1e8a43ab', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 15, 'boundary begin': 1}}}, 'calls': {'owned_directory_command': 3, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
-    'packet: pgu': {'result': {'type': 'str', 'value': {'chars': 22301, 'lines': 332, 'sha256': '2c7a51c919eff79f', 'marked': {'companion': 4, 'psql': 3, 'service user': 1, 'peer auth': 1, 'owned dirs': 14, 'boundary begin': 1}}}, 'calls': {'owned_directory_command': 3, 'packet_companion': 4, 'peer_auth_command': 1, 'postgres_sql_file_command': 3, 'service_user_command': 1}},
-    'packet: roles': {'result': {'type': 'str', 'value': {'chars': 30328, 'lines': 428, 'sha256': '34a8648ed8e68d3c', 'marked': {'companion': 6, 'psql': 4, 'service user': 7, 'peer auth': 1, 'owned dirs': 34, 'boundary begin': 1}}}, 'calls': {'owned_directory_command': 3, 'packet_companion': 6, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
-    'packet: roles and worktrees': {'result': {'type': 'str', 'value': {'chars': 30380, 'lines': 426, 'sha256': '056170d8a81c99d6', 'marked': {'companion': 8, 'psql': 4, 'service user': 7, 'peer auth': 1, 'owned dirs': 34, 'boundary begin': 1}}}, 'calls': {'owned_directory_command': 3, 'packet_companion': 8, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
-    'packet: no linger': {'result': {'type': 'str', 'value': {'chars': 23998, 'lines': 345, 'sha256': '0dd46381b904c2bf', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 19, 'boundary begin': 1}}}, 'calls': {'owned_directory_command': 3, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
-    'packet: roles, no linger': {'result': {'type': 'str', 'value': {'chars': 30570, 'lines': 426, 'sha256': 'ea83d2a4fa79e2e8', 'marked': {'companion': 8, 'psql': 4, 'service user': 7, 'peer auth': 1, 'owned dirs': 34, 'boundary begin': 1}}}, 'calls': {'owned_directory_command': 3, 'packet_companion': 8, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
+    'packet: default': {'result': {'type': 'str', 'value': {'chars': 32640, 'lines': 425, 'sha256': '34ee44a589c1a50f', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 5, 'boundary begin': 1, 'notice filter': 4}}}, 'calls': {'owned_directory_command': 4, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
+    'packet: shaped': {'result': {'type': 'str', 'value': {'chars': 32640, 'lines': 425, 'sha256': '34ee44a589c1a50f', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 5, 'boundary begin': 1, 'notice filter': 4}}}, 'calls': {'owned_directory_command': 4, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
+    'packet: lean': {'result': {'type': 'str', 'value': {'chars': 32640, 'lines': 425, 'sha256': '34ee44a589c1a50f', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 5, 'boundary begin': 1, 'notice filter': 4}}}, 'calls': {'owned_directory_command': 4, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
+    'packet: no traversal': {'result': {'type': 'str', 'value': {'chars': 30871, 'lines': 415, 'sha256': '58620e199dc2f113', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 5, 'boundary begin': 1, 'notice filter': 4}}}, 'calls': {'owned_directory_command': 4, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
+    'packet: control user': {'result': {'type': 'str', 'value': {'chars': 33059, 'lines': 429, 'sha256': 'effc75fe921a1d0d', 'marked': {'companion': 7, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 6, 'boundary begin': 1, 'notice filter': 4}}}, 'calls': {'owned_directory_command': 4, 'packet_companion': 7, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
+    'packet: named key': {'result': {'type': 'str', 'value': {'chars': 32738, 'lines': 431, 'sha256': '154088dbb5386f02', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 5, 'boundary begin': 1, 'notice filter': 4}}}, 'calls': {'owned_directory_command': 4, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
+    'packet: project repository': {'result': {'type': 'str', 'value': {'chars': 32521, 'lines': 425, 'sha256': '6496f9d2ac2a402d', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 5, 'boundary begin': 1, 'notice filter': 4}}}, 'calls': {'owned_directory_command': 4, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
+    'packet: two commit stores': {'result': {'type': 'str', 'value': {'chars': 30299, 'lines': 411, 'sha256': '18eaef1b3d661598', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 5, 'boundary begin': 1, 'notice filter': 4}}}, 'calls': {'owned_directory_command': 4, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
+    'packet: stores under the home': {'result': {'type': 'str', 'value': {'chars': 31455, 'lines': 419, 'sha256': '30de087afda0d428', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 5, 'boundary begin': 1, 'notice filter': 4}}}, 'calls': {'owned_directory_command': 4, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
+    'packet: pgu': {'result': {'type': 'str', 'value': {'chars': 29889, 'lines': 412, 'sha256': 'cdba144b5aeb8ed0', 'marked': {'companion': 4, 'psql': 3, 'service user': 1, 'peer auth': 1, 'owned dirs': 6, 'boundary begin': 1, 'notice filter': 3}}}, 'calls': {'owned_directory_command': 4, 'packet_companion': 4, 'peer_auth_command': 1, 'postgres_sql_file_command': 3, 'service_user_command': 1}},
+    'packet: roles': {'result': {'type': 'str', 'value': {'chars': 41564, 'lines': 508, 'sha256': 'f1586dd191267efc', 'marked': {'companion': 6, 'psql': 4, 'service user': 7, 'peer auth': 1, 'owned dirs': 5, 'boundary begin': 1, 'notice filter': 4}}}, 'calls': {'owned_directory_command': 4, 'packet_companion': 6, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
+    'packet: roles and worktrees': {'result': {'type': 'str', 'value': {'chars': 41305, 'lines': 508, 'sha256': '6eda18ca53549acc', 'marked': {'companion': 8, 'psql': 4, 'service user': 7, 'peer auth': 1, 'owned dirs': 6, 'boundary begin': 1, 'notice filter': 4}}}, 'calls': {'owned_directory_command': 4, 'packet_companion': 8, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
+    'packet: no linger': {'result': {'type': 'str', 'value': {'chars': 32830, 'lines': 425, 'sha256': 'aa2cacfae0e2c205', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 5, 'boundary begin': 1, 'notice filter': 4}}}, 'calls': {'owned_directory_command': 4, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
+    'packet: roles, no linger': {'result': {'type': 'str', 'value': {'chars': 41495, 'lines': 508, 'sha256': '9160b68647f5ca08', 'marked': {'companion': 8, 'psql': 4, 'service user': 7, 'peer auth': 1, 'owned dirs': 6, 'boundary begin': 1, 'notice filter': 4}}}, 'calls': {'owned_directory_command': 4, 'packet_companion': 8, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
     'constant': {'result': {'type': 'str', 'value': '"$provision_dir"'}, 'calls': {}},
     "companion: 'a.conf'": {'result': {'type': 'str', 'value': '"$provision_dir"/\'a.conf\''}, 'calls': {}},
     'companion: "it\'s.sql"': {'result': {'type': 'str', 'value': '"$provision_dir"/\'it\'"\'"\'s.sql\''}, 'calls': {}},
     "companion: 'sub/dir.sql'": {'result': {'type': 'str', 'value': '"$provision_dir"/\'sub/dir.sql\''}, 'calls': {}},
     "companion: '/abs.sql'": {'result': {'raised': 'SystemExit', 'message': 'a packet companion is a file name beside the packet, not a path: /abs.sql'}, 'calls': {}},
     "companion: ''": {'result': {'type': 'str', 'value': '"$provision_dir"/\'\''}, 'calls': {}},
-    'psql: plain': {'result': {'type': 'str', 'value': "sudo cat '/p474/x.sql' | sudo -u postgres psql -X -v ON_ERROR_STOP=1 -f -"}, 'calls': {}},
-    'psql: url': {'result': {'type': 'str', 'value': "sudo cat '/p474/x.sql' | sudo -u postgres psql -X -v ON_ERROR_STOP=1 'postgresql:///p474?host=/run/x' -f -"}, 'calls': {}},
-    'psql: companion': {'result': {'type': 'str', 'value': 'sudo cat "$provision_dir"/\'x.sql\' | sudo -u postgres psql -X -v ON_ERROR_STOP=1 -f -'}, 'calls': {'packet_companion': 1}},
+    'psql: plain': {'result': {'type': 'str', 'value': "sudo cat '/p474/x.sql' | sudo -u postgres psql -X -v ON_ERROR_STOP=1 -f - 2> >(grep -Ev 'NOTICE:  .*(already exists|does not exist), skipping$' >&2 || true)"}, 'calls': {}},
+    'psql: url': {'result': {'type': 'str', 'value': "sudo cat '/p474/x.sql' | sudo -u postgres psql -X -v ON_ERROR_STOP=1 'postgresql:///p474?host=/run/x' -f - 2> >(grep -Ev 'NOTICE:  .*(already exists|does not exist), skipping$' >&2 || true)"}, 'calls': {}},
+    'psql: companion': {'result': {'type': 'str', 'value': 'sudo cat "$provision_dir"/\'x.sql\' | sudo -u postgres psql -X -v ON_ERROR_STOP=1 -f - 2> >(grep -Ev \'NOTICE:  .*(already exists|does not exist), skipping$\' >&2 || true)'}, 'calls': {'packet_companion': 1}},
     'psql: companion path refused': {'result': {'raised': 'SystemExit', 'message': 'a packet companion is a file name beside the packet, not a path: /p474/x.sql'}, 'calls': {'packet_companion': 1}},
-    "service user: 'ticket_board_service'": {'result': {'type': 'str', 'value': {'chars': 534, 'lines': 10, 'sha256': '0ce6bf1075f43ce2', 'marked': {'companion': 0, 'psql': 0, 'service user': 1, 'peer auth': 0, 'owned dirs': 0, 'boundary begin': 0}}}, 'calls': {}},
-    'service user: "o\'brien"': {'result': {'type': 'str', 'value': {'chars': 516, 'lines': 10, 'sha256': 'ea7edd6631c013a8', 'marked': {'companion': 0, 'psql': 0, 'service user': 1, 'peer auth': 0, 'owned dirs': 0, 'boundary begin': 0}}}, 'calls': {}},
-    "service user: ''": {'result': {'type': 'str', 'value': {'chars': 494, 'lines': 10, 'sha256': '7a56f6bb8b9d1038', 'marked': {'companion': 0, 'psql': 0, 'service user': 1, 'peer auth': 0, 'owned dirs': 0, 'boundary begin': 0}}}, 'calls': {}},
-    'peer auth': {'result': {'type': 'str', 'value': "sudo env PG_DATABASE='p474_ticket_board' PG_IDENT_MAP='pgu_ticket_board_service' SERVICE_USER='boardsvc' SERVICE_ROLE='ticket_board_service' '/p474/source/scripts/ticket-board-boardsvc-setup.sh' --apply-peer-auth"}, 'calls': {}},
-    'peer auth: pgu': {'result': {'type': 'str', 'value': "sudo env PG_DATABASE='pgu' PG_IDENT_MAP='pgu_ticket_board_service' SERVICE_USER='boardsvc' SERVICE_ROLE='ticket_board_service' '/p474/source/scripts/ticket-board-boardsvc-setup.sh' --apply-peer-auth"}, 'calls': {}},
+    "service user: 'ticket_board_service'": {'result': {'type': 'str', 'value': {'chars': 534, 'lines': 10, 'sha256': '0ce6bf1075f43ce2', 'marked': {'companion': 0, 'psql': 0, 'service user': 1, 'peer auth': 0, 'owned dirs': 0, 'boundary begin': 0, 'notice filter': 0}}}, 'calls': {}},
+    'service user: "o\'brien"': {'result': {'type': 'str', 'value': {'chars': 516, 'lines': 10, 'sha256': 'ea7edd6631c013a8', 'marked': {'companion': 0, 'psql': 0, 'service user': 1, 'peer auth': 0, 'owned dirs': 0, 'boundary begin': 0, 'notice filter': 0}}}, 'calls': {}},
+    "service user: ''": {'result': {'type': 'str', 'value': {'chars': 494, 'lines': 10, 'sha256': '7a56f6bb8b9d1038', 'marked': {'companion': 0, 'psql': 0, 'service user': 1, 'peer auth': 0, 'owned dirs': 0, 'boundary begin': 0, 'notice filter': 0}}}, 'calls': {}},
+    'peer auth': {'result': {'type': 'str', 'value': "sudo env PG_DATABASE='p474_ticket_board' PG_IDENT_MAP='pgu_ticket_board_service' SERVICE_USER='boardsvc' SERVICE_ROLE='ticket_board_service' LISTENER_USER='p474-owner' LISTENER_IDENT_MAP='p474_ticket_board_listener' '/p474/source/scripts/ticket-board-boardsvc-setup.sh' --apply-peer-auth"}, 'calls': {}},
+    'peer auth: pgu': {'result': {'type': 'str', 'value': "sudo env PG_DATABASE='pgu' PG_IDENT_MAP='pgu_ticket_board_service' SERVICE_USER='boardsvc' SERVICE_ROLE='ticket_board_service' LISTENER_USER='p474-owner' LISTENER_IDENT_MAP='pgu_ticket_board_listener' '/p474/source/scripts/ticket-board-boardsvc-setup.sh' --apply-peer-auth"}, 'calls': {}},
     'owned dirs: none': {'result': {'type': 'str', 'value': ''}, 'calls': {}},
     'owned dirs: duplicates': {'result': {'type': 'str', 'value': "sudo install -d -m 0755 -o 'p474-owner' -g 'p474-owner' '/p474/a' '/p474/b'"}, 'calls': {}},
     'owned dirs: mode': {'result': {'type': 'str', 'value': 'sudo install -d -m 0700 -o \'p474-owner\' -g \'p474-owner\' \'/p474/it\'"\'"\'s\''}, 'calls': {}},
-    'rebound on project_provision: shell_quote': {'result': {'type': 'str', 'value': {'chars': 30304, 'lines': 428, 'sha256': 'a4a2a37ef2c21c88', 'marked': {'companion': 6, 'psql': 4, 'service user': 7, 'peer auth': 1, 'owned dirs': 34, 'boundary begin': 1}}}, 'calls': {'owned_directory_command': 3, 'packet_companion': 6, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1, 'shell_quote rebound': 246}},
-    'rebound on project_provision: owned_directory_command': {'result': {'type': 'str', 'value': {'chars': 23542, 'lines': 345, 'sha256': '95ae30a177969772', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 16, 'boundary begin': 1}}}, 'calls': {'owned_directory_command rebound': 3, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
-    'rebound on project_provision: packet_companion': {'result': {'type': 'str', 'value': {'chars': 23768, 'lines': 345, 'sha256': 'f09ba3e20addc98e', 'marked': {'companion': 0, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 19, 'boundary begin': 1}}}, 'calls': {'owned_directory_command': 3, 'packet_companion rebound': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
-    'rebound on project_provision: postgres_sql_file_command': {'result': {'type': 'str', 'value': {'chars': 23416, 'lines': 345, 'sha256': 'd0924cb3f4030592', 'marked': {'companion': 3, 'psql': 0, 'service user': 1, 'peer auth': 1, 'owned dirs': 19, 'boundary begin': 1}}}, 'calls': {'owned_directory_command': 3, 'packet_companion': 3, 'peer_auth_command': 1, 'postgres_sql_file_command rebound': 4, 'service_user_command': 1}},
-    'rebound on project_provision: service_user_command': {'result': {'type': 'str', 'value': {'chars': 23320, 'lines': 336, 'sha256': 'cbdc10ea12087b43', 'marked': {'companion': 5, 'psql': 4, 'service user': 0, 'peer auth': 1, 'owned dirs': 19, 'boundary begin': 1}}}, 'calls': {'owned_directory_command': 3, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command rebound': 1}},
-    'rebound on project_provision: peer_auth_command': {'result': {'type': 'str', 'value': {'chars': 23605, 'lines': 345, 'sha256': '76288a748014991e', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 0, 'owned dirs': 19, 'boundary begin': 1}}}, 'calls': {'owned_directory_command': 3, 'packet_companion': 5, 'peer_auth_command rebound': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
-    'rebound on project_provision: role_accounts_command': {'result': {'type': 'str', 'value': {'chars': 28880, 'lines': 399, 'sha256': '5ac4463f6c98d38f', 'marked': {'companion': 6, 'psql': 4, 'service user': 4, 'peer auth': 1, 'owned dirs': 31, 'boundary begin': 1}}}, 'calls': {'owned_directory_command': 3, 'packet_companion': 6, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'role_accounts_command rebound': 1, 'service_user_command': 1}},
-    'rebound on project_provision: REPOSITORY_BOUNDARY_BEGIN': {'result': {'type': 'str', 'value': {'chars': 23782, 'lines': 345, 'sha256': '1b2a0783dc613bc0', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 19, 'boundary begin': 0}}}, 'calls': {'owned_directory_command': 3, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
-    'rebound on project_provision: TENANT_CONTROL_ROOT': {'result': {'type': 'str', 'value': {'chars': 23567, 'lines': 349, 'sha256': '001137cdef727dfc', 'marked': {'companion': 7, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 20, 'boundary begin': 1}}}, 'calls': {'owned_directory_command': 3, 'packet_companion': 7, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
-    'rebound on project_provision: tenant_worktree_base': {'result': {'type': 'str', 'value': {'chars': 23379, 'lines': 338, 'sha256': 'da98ea152806f5ef', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 18, 'boundary begin': 1}}}, 'calls': {'owned_directory_command': 3, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1, 'tenant_worktree_base rebound': 1}},
-    'rebound on project_provision: PACKET_PROVISION_DIR': {'result': {'type': 'str', 'value': {'chars': 23783, 'lines': 345, 'sha256': '5cf006f89dd5b078', 'marked': {'companion': 0, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 19, 'boundary begin': 1}}}, 'calls': {'owned_directory_command': 3, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
-    'rebound on project_provision: DEFAULT_PG_IDENT_MAP': {'result': {'type': 'str', 'value': {'chars': 23792, 'lines': 345, 'sha256': '6a5b42fbc057a3c6', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 19, 'boundary begin': 1}}}, 'calls': {'owned_directory_command': 3, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
-    'rebound on project_provision: _dedupe': {'result': {'type': 'str', 'value': {'chars': 23829, 'lines': 345, 'sha256': 'a332ef75ea34f336', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 19, 'boundary begin': 1}}}, 'calls': {'_dedupe rebound': 3, 'owned_directory_command': 3, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
+    'rebound on project_provision: shell_quote': {'result': {'type': 'str', 'value': {'chars': 41540, 'lines': 508, 'sha256': 'bd260a8652fb14a2', 'marked': {'companion': 6, 'psql': 4, 'service user': 7, 'peer auth': 1, 'owned dirs': 5, 'boundary begin': 1, 'notice filter': 0}}}, 'calls': {'owned_directory_command': 4, 'packet_companion': 6, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1, 'shell_quote rebound': 207}},
+    'rebound on project_provision: owned_directory_command': {'result': {'type': 'str', 'value': {'chars': 31907, 'lines': 425, 'sha256': '42ead60db6b42046', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 5, 'boundary begin': 1, 'notice filter': 4}}}, 'calls': {'owned_directory_command rebound': 4, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
+    'rebound on project_provision: packet_companion': {'result': {'type': 'str', 'value': {'chars': 32600, 'lines': 425, 'sha256': '10284bcbccbb8392', 'marked': {'companion': 0, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 5, 'boundary begin': 1, 'notice filter': 4}}}, 'calls': {'owned_directory_command': 4, 'packet_companion rebound': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
+    'rebound on project_provision: postgres_sql_file_command': {'result': {'type': 'str', 'value': {'chars': 31916, 'lines': 425, 'sha256': 'b39bb2d5c528be8a', 'marked': {'companion': 3, 'psql': 0, 'service user': 1, 'peer auth': 1, 'owned dirs': 5, 'boundary begin': 1, 'notice filter': 0}}}, 'calls': {'owned_directory_command': 4, 'packet_companion': 3, 'peer_auth_command': 1, 'postgres_sql_file_command rebound': 4, 'service_user_command': 1}},
+    'rebound on project_provision: service_user_command': {'result': {'type': 'str', 'value': {'chars': 32152, 'lines': 416, 'sha256': '9570e98b44ac7d40', 'marked': {'companion': 5, 'psql': 4, 'service user': 0, 'peer auth': 1, 'owned dirs': 5, 'boundary begin': 1, 'notice filter': 4}}}, 'calls': {'owned_directory_command': 4, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command rebound': 1}},
+    'rebound on project_provision: peer_auth_command': {'result': {'type': 'str', 'value': {'chars': 32362, 'lines': 425, 'sha256': 'b19581dd888c00d3', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 0, 'owned dirs': 5, 'boundary begin': 1, 'notice filter': 4}}}, 'calls': {'owned_directory_command': 4, 'packet_companion': 5, 'peer_auth_command rebound': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
+    'rebound on project_provision: role_accounts_command': {'result': {'type': 'str', 'value': {'chars': 39838, 'lines': 479, 'sha256': '9c62fca0bd6972bc', 'marked': {'companion': 6, 'psql': 4, 'service user': 4, 'peer auth': 1, 'owned dirs': 5, 'boundary begin': 1, 'notice filter': 4}}}, 'calls': {'owned_directory_command': 4, 'packet_companion': 6, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'role_accounts_command rebound': 1, 'service_user_command': 1}},
+    'rebound on project_provision: REPOSITORY_BOUNDARY_BEGIN': {'result': {'type': 'str', 'value': {'chars': 32614, 'lines': 425, 'sha256': '5a18737bf87ba9fd', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 5, 'boundary begin': 0, 'notice filter': 4}}}, 'calls': {'owned_directory_command': 4, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
+    'rebound on project_provision: TENANT_CONTROL_ROOT': {'result': {'type': 'str', 'value': {'chars': 32339, 'lines': 429, 'sha256': '8f0e37169e7aabde', 'marked': {'companion': 7, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 6, 'boundary begin': 1, 'notice filter': 4}}}, 'calls': {'owned_directory_command': 4, 'packet_companion': 7, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
+    'rebound on project_provision: tenant_worktree_base': {'result': {'type': 'str', 'value': {'chars': 31839, 'lines': 420, 'sha256': '0738d8e9b37f8598', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 5, 'boundary begin': 1, 'notice filter': 4}}}, 'calls': {'owned_directory_command': 4, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1, 'tenant_worktree_base rebound': 1}},
+    'rebound on project_provision: PACKET_PROVISION_DIR': {'result': {'type': 'str', 'value': {'chars': 32615, 'lines': 425, 'sha256': '81965d09520b071d', 'marked': {'companion': 0, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 5, 'boundary begin': 1, 'notice filter': 4}}}, 'calls': {'owned_directory_command': 4, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
+    'rebound on project_provision: DEFAULT_PG_IDENT_MAP': {'result': {'type': 'str', 'value': {'chars': 32624, 'lines': 425, 'sha256': '1adb7edf1bfc0884', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 5, 'boundary begin': 1, 'notice filter': 4}}}, 'calls': {'owned_directory_command': 4, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
+    'rebound on project_provision: _dedupe': {'result': {'type': 'str', 'value': {'chars': 32661, 'lines': 425, 'sha256': 'ca2b0cd5d9799590', 'marked': {'companion': 5, 'psql': 4, 'service user': 1, 'peer auth': 1, 'owned dirs': 5, 'boundary begin': 1, 'notice filter': 4}}}, 'calls': {'_dedupe rebound': 4, 'owned_directory_command': 4, 'packet_companion': 5, 'peer_auth_command': 1, 'postgres_sql_file_command': 4, 'service_user_command': 1}},
 }
 REACHED: set[str] = set()
 #: Measured on the candidate: what importing the module alone loads -- its package, nothing else.
@@ -183,7 +188,11 @@ CASES = {
 FUNCTIONS = ("packet_companion", "postgres_sql_file_command", "service_user_command", "peer_auth_command", "owned_directory_command", "render_operator_commands")
 PASSED = ("packet_companion", "postgres_sql_file_command", "service_user_command", "peer_auth_command", "owned_directory_command")
 MARKERS = {"companion": '"$provision_dir"/', "psql": "| sudo -u postgres psql -X -v ON_ERROR_STOP=1", "service user": "if ! getent passwd ",
-           "peer auth": " --apply-peer-auth", "owned dirs": "sudo install -d -m ", "boundary begin": "# >>> switchyard repository boundary"}
+           "peer auth": " --apply-peer-auth", "owned dirs": "sudo install -d -m ", "boundary begin": "# >>> switchyard repository boundary",
+           # SYRD-784: every psql line drops PostgreSQL's "already exists, skipping" notices, and nothing else.
+           "notice filter": "-f - 2> >(grep -Ev 'NOTICE:  .*(already exists|does not exist), skipping$' >&2 || true)"}
+#: SYRD-784's suffix on every SQL file the packet feeds to psql (SYRD-792 checks the golden shows it).
+NOTICE_FILTER = " 2> >(grep -Ev 'NOTICE:  .*(already exists|does not exist), skipping$' >&2 || true)"
 
 
 def run_case(t, holder, spec, reached):
@@ -260,7 +269,8 @@ def run_case(t, holder, spec, reached):
 
 def check(condition: bool, detail: str) -> None:
     global CHECKS
-    assert condition, detail
+    if not condition:  # SYRD-792: a failure says it is a check, and no -O strips it
+        raise AssertionError(f"FAILED CHECK: {detail}")
     CHECKS += 1
 
 
@@ -355,14 +365,21 @@ PACKET_VARIANTS = {
 }
 #: Refuses and records any stat/lstat/open/access under the host's switchyard, /etc, /var and /opt paths, after proving it
 #: catches one (a positive control).
+#: SYRD-792: the tree's own files, and the directories above it, are the tree and not the host. Run from a checkout under
+#: /var/tmp or /opt, resolving the module's own path counted 54 (60 as a script) "host paths": the same tree went red
+#: by where it was checked out, the same packets rendered either way.
 HOST_RECORDER = (
     "import builtins, os, pathlib\n"
     "PREFIXES = ('/usr/local/lib/switchyard', '/etc', '/var', '/opt')\n"
+    f"TREE = {os.path.realpath(ROOT)!r}\n"
+    "def of_tree(s):\n"
+    "    s = os.path.normpath(s)\n"
+    "    return s == TREE or s.startswith(TREE + '/') or TREE.startswith(s.rstrip('/') + '/')\n"
     "hits = []\n"
     "def guarded(real, name):\n"
     "    def f(p, *a, **k):\n"
     "        s = os.fsdecode(p) if isinstance(p, (str, bytes, os.PathLike)) else ''\n"
-    "        if s.startswith(PREFIXES):\n"
+    "        if s.startswith(PREFIXES) and not of_tree(s):\n"
     "            hits.append((name, s)); raise FileNotFoundError(2, 'refused', s)\n"
     "        return real(p, *a, **k)\n"
     "    return f\n"
@@ -468,6 +485,16 @@ def test_the_packet_writers_render_through_project_provision() -> None:
               f"{result.stdout}{result.stderr[-600:]}")
     finally:
         shutil.rmtree(work)
+
+
+def test_the_recorder_tells_the_tree_from_the_host() -> None:
+    # SYRD-792: the recorder's own rule, wherever the tree is checked out -- here, as if under /var/tmp.
+    scope: dict = {}
+    exec(HOST_RECORDER.split("hits = []")[0].replace(f"TREE = {os.path.realpath(ROOT)!r}", "TREE = '/var/tmp/s792tree'"), scope)
+    of_tree = scope["of_tree"]
+    check(all(of_tree(s) for s in ("/var", "/var/tmp", "/var/tmp/", "/var/tmp/s792tree", "/var/tmp/s792tree/scripts/ticket_board/project_provision.py"))
+          and not any(of_tree(s) for s in ("/var/lib/switchyard", "/var/tmp/s792tree2", "/var/tmp/other", "/etc/passwd", "/opt/switchyard/current")),
+          "the tree's own path, and each directory above it, are the tree's; every other host path is still the host's")
 
 
 def test_the_direct_script_answers_what_the_package_answers_and_looks_at_no_host_path() -> None:
@@ -611,9 +638,10 @@ def test_the_rules_hold_in_the_measured_record() -> None:
     packets = {label[len("packet: "):]: value(label) for label in GOLDEN if label.startswith("packet: ")}
     check(all(p["marked"]["companion"] == calls(f"packet: {k}")["packet_companion"] and p["marked"]["psql"] == calls(f"packet: {k}")["postgres_sql_file_command"]
               and p["marked"]["peer auth"] == calls(f"packet: {k}")["peer_auth_command"] == 1 and calls(f"packet: {k}")["service_user_command"] == 1
-              and calls(f"packet: {k}")["owned_directory_command"] == 3 and p["marked"]["boundary begin"] == 1 for k, p in packets.items()),
+              and calls(f"packet: {k}")["owned_directory_command"] == 4 and p["marked"]["boundary begin"] == 1 for k, p in packets.items()),
           "every packet names its companions through packet_companion, runs its SQL through postgres_sql_file_command, applies peer auth once, "
-          "creates the service user once, writes three owned-directory steps and one boundary fence -- each helper read on project_provision")
+          "creates the service user once, writes four owned-directory steps (SYRD-605: the asset and frame directories through it too) "
+          "and one boundary fence -- each helper read on project_provision")
     check(packets["shaped"] == packets["lean"] == packets["default"] and packets["no linger"] != packets["default"]
           and packets["roles, no linger"] != packets["roles and worktrees"],
           "the workflow's roles and stages do not reach the packet; the owner's linger does")
@@ -626,10 +654,15 @@ def test_the_rules_hold_in_the_measured_record() -> None:
           and GOLDEN["companion: '/abs.sql'"]["result"]["raised"] == "SystemExit" and "not a path" in GOLDEN["companion: '/abs.sql'"]["result"]["message"]
           and GOLDEN["psql: companion path refused"]["result"]["raised"] == "SystemExit",
           "a companion is a quoted file name beside the packet, addressed from its own directory; a path is refused")
-    check(value("psql: plain").startswith("sudo cat '/p474/x.sql' | sudo -u postgres psql") and value("psql: plain").endswith(" -f -")
-          and "'postgresql:///p474?host=/run/x' -f -" in value("psql: url") and value("psql: companion").startswith('sudo cat "$provision_dir"/')
+    check(value("psql: plain") == "sudo cat '/p474/x.sql' | sudo -u postgres psql -X -v ON_ERROR_STOP=1 -f -" + NOTICE_FILTER
+          and value("psql: url").endswith("'postgresql:///p474?host=/run/x' -f -" + NOTICE_FILTER)
+          and value("psql: companion").startswith('sudo cat "$provision_dir"/') and value("psql: companion").endswith(" -f -" + NOTICE_FILTER)
           and calls("psql: companion") == {"packet_companion": 1},
-          "the SQL is fed to psql as postgres on stdin, the database URL quoted before -f -, a companion addressed through packet_companion")
+          "the SQL is fed to psql as postgres on stdin, the database URL quoted before -f -, a companion addressed through packet_companion, "
+          "and PostgreSQL's 'already exists, skipping' notices filtered out of its stderr (SYRD-784)")
+    check(all(p["marked"]["notice filter"] == p["marked"]["psql"] == calls(f"packet: {k}")["postgres_sql_file_command"] > 0
+              for k, p in packets.items()),
+          "every psql line of every packet carries SYRD-784's notice filter")
     check(all(value(f"service user: {u!r}")["marked"]["service user"] == 1 and value(f"service user: {u!r}")["lines"] == 10 for u in ("ticket_board_service", "o'brien", "")),
           "the service user is created only if missing, with a non-login shell, whatever its name")
     check(value("peer auth").startswith("sudo env PG_DATABASE='p474_ticket_board' ") and value("peer auth").endswith(" --apply-peer-auth")

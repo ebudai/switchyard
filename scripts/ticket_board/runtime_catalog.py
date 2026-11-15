@@ -51,6 +51,10 @@ CATALOG_VERSION = 3
 CATALOG_RECORDED = "2026-11-15"
 
 PROVENANCE_RECORDED = "recorded"
+#: The `unverified_because` of a caller that has already said, once, why its recorded lists are not checked against
+#: the account: each list is then marked "recorded" and no more, instead of repeating the sentence for every role's
+#: model question (SYRD-783). It is never shown as a reason.
+SAID_ONCE = "said once for this run"
 PROVENANCE_LIVE = "live"
 PROVENANCE_EMPTY = "none recorded"
 
@@ -80,6 +84,9 @@ class Catalog:
             return f"listed by {self.detail} in this account"
         if self.provenance == PROVENANCE_EMPTY:
             return self.detail
+        if self.detail == SAID_ONCE:
+            # Still marked: a recorded choice is never presented as the account's own (SYRD-250).
+            return PROVENANCE_RECORDED
         return (
             f"UNVERIFIED: recorded {CATALOG_RECORDED} (catalog v{CATALOG_VERSION}) and not "
             f"checked against this account; {self.detail}"
@@ -205,6 +212,13 @@ def parse_model_ids(stdout: str) -> tuple[str, ...]:
         if token:
             seen.setdefault(token[0], None)
     return tuple(seen)
+
+
+def recorded_catalog_note(account: str) -> str:
+    """The one line `switchyard new` says before its first model question while `account` does not exist yet: where
+    its lists come from, and that each choice is checked against the account once it exists (SYRD-783)."""
+    return (f"switchyard: model lists come from Switchyard's recorded catalog (v{CATALOG_VERSION}, {CATALOG_RECORDED}); "
+            f"{account} does not exist yet, so each choice is confirmed against it after the account is created")
 
 
 def model_catalog(

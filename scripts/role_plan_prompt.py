@@ -168,12 +168,9 @@ def _prompt_switchyard_role_plan(
     # into the code meant to fix it. Withholding the runner is what makes that
     # impossible; withholding the prefix as well would only look careful.
     catalog_runner = runner if owner_exists else None
-    unverified_because = (
-        f"the {owner_user} account does not exist yet, so its own list could not be read; "
-        f"this choice is confirmed against it after the account is created"
-        if owner_user and not owner_exists
-        else ""
-    )
+    # Why the lists are only recorded ones is said once, before the first model question, and each list is then
+    # just marked "recorded" -- not the whole sentence again for every role (SYRD-783).
+    unverified_because = launcher.runtime_catalog.SAID_ONCE if owner_user and not owner_exists else ""
     include_designer = launcher._prompt_bool("Include designer role", default=True, input_func=input_func)
     include_audit = launcher._prompt_bool("Include audit role", default=True, input_func=input_func)
     fixed: list[str] = []
@@ -192,6 +189,8 @@ def _prompt_switchyard_role_plan(
     if not implementers:
         raise SystemExit("switchyard: at least one implementer role is required")
 
+    if unverified_because:
+        print_func(launcher.runtime_catalog.recorded_catalog_note(owner_user))
     plan: list[RoleSelection] = []
     for role in fixed:
         plan.append(

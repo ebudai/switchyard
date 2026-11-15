@@ -38,7 +38,15 @@ if __name__ == "__main__":
         and not any(value in {"-h", "--help", "--no-git-init"} for value in arguments[1:])
     )
     registry_before = registry_snapshot(arguments) if new_project else frozenset()
-    result = switchyard_main(arguments)
+    try:
+        result = switchyard_main(arguments)
+    except KeyboardInterrupt as interrupt:
+        # One Ctrl-C ends any command, a setup step's provider included, with no traceback; `new` says how far it got
+        # and how to remove what it left (SYRD-785).
+        from scripts.setup_abort import interrupted
+
+        message, result = interrupted(arguments, interrupt)
+        print(message, file=sys.stderr)
     if result == 0 and new_project:
         for installed_hook in install_new_registry_entries(arguments, registry_before, source_root=ROOT):
             print(f"switchyard: installed repository policy {installed_hook}")

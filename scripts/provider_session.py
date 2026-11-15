@@ -450,6 +450,14 @@ class PtyForegroundSession:
 
         import codecs
 
+        # Ctrl-C's scanner, made here -- before the provider is started and before the watch loop runs -- so the loop's
+        # first pass does no import or setup: a pause there let a provider that draws its question and records its
+        # first run at once be sent `/exit` before the person's answer (SYRD-221's test9; Audit of 720f1ffa).
+        from scripts import setup_abort
+
+        self._interrupted_by = setup_abort.SetupInterrupted
+        self._interrupt_scanner = setup_abort.InterruptScanner()
+
         #: Holds a character that arrives split across two reads.
         self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self._master, slave = pty.openpty()
@@ -563,21 +571,42 @@ class PtyForegroundSession:
         never advanced, and a session at its ordinary prompt was never closed --
         the very failure the loop exists to end (SYRD-211 Audit kick-back).
         """
+        # Ctrl-C ends the whole setup run, not just this provider's step: what came before it is passed on, and it
+        # is not -- Claude would take it as "press again to exit". It is found in each encoding a terminal may send
+        # once the provider has switched a keyboard protocol on, and a key a read cut short is held until the rest
+        # arrives (SYRD-785). The scanner was made with the session, so the watch loop imports and builds nothing
+        # here; only a session made without its constructor -- as suites make one -- gets one on first use.
+        scanner = getattr(self, "_interrupt_scanner", None)
+        if scanner is None:
+            from scripts import setup_abort
+
+            self._interrupted_by = setup_abort.SetupInterrupted
+            scanner = self._interrupt_scanner = setup_abort.InterruptScanner()
         try:
             ready, _, _ = select.select([source_fd], [], [], 0)
         except (OSError, ValueError):
             return
         if not ready:
+            # Nothing more came: whatever was held -- a lone Escape, a cut-off sequence -- goes on as it is.
+            held = scanner.release()
+            if held:
+                try:
+                    os.write(self._master, held)
+                except OSError:
+                    pass
             return
         try:
             data = os.read(source_fd, 65536)
         except (BlockingIOError, InterruptedError, OSError):
             return
+        data, interrupted = scanner.feed(data)
         if data:
             try:
                 os.write(self._master, data)
             except OSError:
                 pass
+        if interrupted:
+            raise self._interrupted_by("Ctrl-C during a provider's setup")
 
     def poll(self) -> int | None:
         return self._process.poll()
@@ -585,6 +614,12 @@ class PtyForegroundSession:
     def terminate(self) -> None:
         if self._process.poll() is None:
             self._process.terminate()
+
+    def stop_group(self) -> None:
+        """End the provider and everything in its process group, bounded (SYRD-785)."""
+        from scripts import setup_abort
+
+        setup_abort.stop_process_group(self._process)
 
     def wait(self, timeout: float | None = None) -> int:
         return self._process.wait(timeout=timeout)
@@ -864,6 +899,9 @@ def run_provider_first_run_session(
     # event in between reached a cooked, echoing terminal as `^[[...`, which is
     # what test8 showed (SYRD-221 UAT).
     terminal = _RawTerminal(input_fd)
+    #: Ctrl-C, as a byte relayed from a raw terminal or as SIGINT: the whole run ends, so the provider's process group
+    #: is stopped and nothing is said about this step (SYRD-785).
+    interrupted = False
     try:
         with terminal:
             try:
@@ -1012,13 +1050,20 @@ def run_provider_first_run_session(
                         if chunk:
                             show(chunk)
                         sleep(FOREGROUND_COMPLETION_POLL_SECONDS)
+            except KeyboardInterrupt:
+                interrupted = True
+                raise
             finally:
                 if session is not None and session.poll() is None:
-                    session.terminate()
-                    try:
-                        session.wait(timeout=10)
-                    except Exception:
-                        pass
+                    stop_group = getattr(session, "stop_group", None) if interrupted else None
+                    if stop_group is not None:
+                        stop_group()
+                    else:
+                        session.terminate()
+                        try:
+                            session.wait(timeout=10)
+                        except Exception:
+                            pass
                 # Whatever it left switched on, switched off, through the same
                 # channel it was switched on through. A provider that exited
                 # cleanly has left nothing and this writes nothing. The sign-in
@@ -1071,7 +1116,7 @@ def run_provider_first_run_session(
                 close()
         # A sign-in link that had nowhere safe to go while a full-screen provider held the screen is said now, with
         # the terminal the person's own again -- unless the sign-in is already done (SYRD-782).
-        if sign_in_link is not None and sign_in_link.leftover() and not is_complete():
+        if sign_in_link is not None and not interrupted and sign_in_link.leftover() and not is_complete():
             print_func(sign_in_link.leftover())
         if window is not None:
             window.closed()

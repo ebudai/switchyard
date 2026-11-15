@@ -459,6 +459,8 @@ class PtyForegroundSession:
         # the theme menu: the wrong width wraps the option list into the
         # preview below it (SYRD-221).
         self._size = self._outer_size()
+        #: Rows at the bottom of the person's terminal kept from the provider, for Switchyard's sign-in link (SYRD-782).
+        self._reserved = 0
         if self._size is not None:
             _set_terminal_window_size(slave, self._size)
         try:
@@ -486,12 +488,25 @@ class PtyForegroundSession:
         return None
 
     def sync_window_size(self) -> None:
-        """Follow the window if somebody resizes it mid-setup."""
+        """Follow the window if somebody resizes it mid-setup, less any rows kept for the sign-in link."""
         size = self._outer_size()
         if size is None or size == self._size:
             return
         self._size = size
-        _set_terminal_window_size(self._master, size)
+        _set_terminal_window_size(self._master, (max(1, size[0] - self._reserved), size[1]))
+
+    def outer_size(self) -> tuple[int, int] | None:
+        """The person's terminal, as (rows, columns), or None when it is not a terminal."""
+        return self._size
+
+    def reserve_rows(self, count: int) -> bool:
+        """Keep the bottom `count` rows of the person's terminal from the provider: its own terminal becomes that
+        much shorter, so a full-screen provider redraws above them and never there."""
+        if self._size is None or count >= self._size[0]:
+            return False
+        self._reserved = count
+        _set_terminal_window_size(self._master, (self._size[0] - count, self._size[1]))
+        return True
 
     def wait_for_activity(self, timeout: float, input_fd: int | None = None) -> None:
         """Sleep until there is something to do, rather than for a fixed time.
@@ -776,6 +791,9 @@ def run_provider_first_run_session(
     timeout_seconds: float = FOREGROUND_COMPLETION_TIMEOUT_SECONDS,
     purpose: str = SETUP_PURPOSE_FIRST_RUN,
     print_func: Callable[[str], None] = print,
+    #: A sign-in step's link watcher (`scripts.sign_in_link.SignInLink`): the URL the provider prints is printed again
+    #: by Switchyard as one line the person clicks (SYRD-782). None for every other step.
+    sign_in_link: Any = None,
 ) -> bool:
     """Run a provider's own first run and end it as soon as it is finished.
 
@@ -814,13 +832,24 @@ def run_provider_first_run_session(
     #: a split sequence itself -- only what is judged.
     judged = _TerminalStream()
 
-    def show(chunk: str) -> None:
-        modes.feed(chunk)
+    def show(chunk: str, *, ours: bool = False) -> None:
+        if not ours:
+            modes.feed(chunk)
         if output_write is not None:
             output_write(chunk)
         else:
             sys.stdout.write(chunk)
             sys.stdout.flush()
+
+    def show_provider(chunk: str) -> None:
+        """The provider's output, with the sign-in link -- Switchyard's own text -- put in where it belongs."""
+        if sign_in_link is None:
+            show(chunk)
+            return
+        size = getattr(session, "outer_size", lambda: None)()
+        for text, ours in sign_in_link.feed(chunk, size=size, reserve=getattr(session, "reserve_rows", None)):
+            if text:
+                show(text, ours=ours)
 
     # The terminal is taken BEFORE the provider is started, not after. A CLI
     # asks its questions in the first milliseconds it is alive, and a reply
@@ -878,7 +907,7 @@ def run_provider_first_run_session(
                         return is_complete()
                     chunk = session.read()
                     if chunk:
-                        show(chunk)
+                        show_provider(chunk)
                         chunk = judged.feed(chunk)
                         now = monotonic()
                         replaced_at = _replaced_frame_starts_at(chunk)
@@ -992,8 +1021,9 @@ def run_provider_first_run_session(
                         pass
                 # Whatever it left switched on, switched off, through the same
                 # channel it was switched on through. A provider that exited
-                # cleanly has left nothing and this writes nothing.
-                handback = modes.handback()
+                # cleanly has left nothing and this writes nothing. The sign-in
+                # link's scroll region is Switchyard's own, and goes too (SYRD-782).
+                handback = (sign_in_link.release() if sign_in_link is not None else "") + modes.handback()
                 if handback:
                     if output_write is not None:
                         output_write(handback)
@@ -1039,5 +1069,9 @@ def run_provider_first_run_session(
             close = getattr(session, "close", None)
             if close is not None:
                 close()
+        # A sign-in link that had nowhere safe to go while a full-screen provider held the screen is said now, with
+        # the terminal the person's own again -- unless the sign-in is already done (SYRD-782).
+        if sign_in_link is not None and sign_in_link.leftover() and not is_complete():
+            print_func(sign_in_link.leftover())
         if window is not None:
             window.closed()

@@ -14,9 +14,11 @@ Two separate faults.
 The repeated sign-in: logins ran before each provider's own first run, and
 Claude's welcome flow signs in as part of itself. Whoever answered the first
 `claude login` was asked for the same credential again a minute later. Setup
-now runs first and the account is re-read immediately before each login, so a
-provider the welcome flow already settled is not asked twice -- and an account
-it does not settle still gets its login.
+then ran first and the account was re-read immediately before each login, so a
+provider the welcome flow already settled was not asked twice. Claude Code
+2.1.318's welcome flow no longer signs in an account that holds a credential,
+so the logins now run first again, where Switchyard prints a clickable link,
+and each still re-reads the account before asking (SYRD-782).
 
 The session that never ended: the step watches for the key the account writes
 when its first run completes, and that key is written when the CLI EXITS. After
@@ -200,16 +202,23 @@ def test_an_account_the_welcome_flow_does_not_settle_still_gets_its_login() -> N
     )
 
 
-def test_setup_runs_before_the_logins_it_can_make_unnecessary() -> None:
-    """Order is the fix; re-reading is what makes the order pay."""
+def test_logins_run_before_the_first_run_and_each_rereads_the_account() -> None:
+    """Re-reading is what keeps anyone from being asked twice.
+
+    SYRD-211 ran setup first because Claude's welcome flow then signed in again
+    even with a valid credential. Claude Code 2.1.318 no longer does (measured,
+    SYRD-782), and the welcome flow draws its sign-in URL broken over rows that
+    cannot be clicked. So the line-by-line sign-in comes first, where Switchyard
+    can print the link, and the first run after it asks only its own questions.
+    """
     # The phase lives in its own module since SYRD-300.
     source = (ROOT / "scripts" / "first_run_auth.py").read_text(encoding="utf-8")
     phase = source[source.index("def run_first_run_auth_phase("):]
     phase = phase[: phase.index("\ndef ", 1)]
     setup_at = phase.index("for step in manifest.provider_setup_steps:")
     login_at = phase.index("for step in manifest.login_steps:")
-    check(setup_at < login_at,
-          "the provider's own first run is attempted before any login step")
+    check(login_at < setup_at,
+          "every login step is attempted before the provider's own first run")
     # Anchored on the credential itself rather than a character count: what has
     # to hold is that nothing between entering the loop and building the login
     # command asks for a credential without re-reading the account first.

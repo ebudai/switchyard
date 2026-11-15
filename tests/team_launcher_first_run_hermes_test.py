@@ -69,8 +69,10 @@ def test_first_run_auth_phase_reports_hermes_without_resolved_api_key_as_unauthe
         "1 login step(s), 0 provider setup step(s), 0 folder trust step(s), 0 codex hook approval(s), 0 missing CLI(s)",
         "switchyard: login hermes: roles bulk; interactive account setup running hermes model as otto-agent",
         "switchyard: hermes will now run in this terminal as otto-agent to sign in. "
-        "Complete what it asks -- a browser sign-in for some providers, a choice in the "
-        "terminal for others; the terminal comes back on its own once the account is set up.",
+        "Complete what it asks. When it shows a sign-in page, Switchyard prints the link on one "
+        "line below it: click it to open the page in your own browser, then paste back here any "
+        "code the page shows. No browser opens by itself. The terminal comes back on its own once "
+        "the account is set up.",
     ]
 
 def test_first_run_trust_handles_detached_roles_and_persists_for_later_launches() -> None:
@@ -238,9 +240,9 @@ def test_first_run_setup_manifest_prints_every_step_before_first_interactive_com
         "switchyard: login codex: roles ops; interactive account setup running codex login as otto-agent",
         "switchyard: login agy: roles inspector; interactive account setup running agy as otto-agent",
         "switchyard: provider setup claude: roles director, research; this account has not "
-        "completed Claude's own first run (theme, then sign-in); measured on this host, that "
-        "flow asks to sign in again even when the account already holds valid credentials, and "
-        "it is what every pane opens until it is done; interactive first run of claude as "
+        "completed Claude's own first run (theme, security notes, folder trust); it runs after the "
+        "sign-in, so it does not ask to sign in again -- measured on Claude Code 2.1.318 (SYRD-782) "
+        "-- and it is what every pane opens until it is done; interactive first run of claude as "
         "otto-agent, once for every role that uses it",
         f"switchyard: folder trust claude: role director at {tmp_path / 'worktrees' / 'director'}; "
         "recurs per project/workdir even when the owner user is reused; "

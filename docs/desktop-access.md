@@ -104,6 +104,46 @@ sudo -u example-agent -H xdg-settings set default-web-browser firefox.desktop
 sudo -u example-agent -H env XDG_CURRENT_DESKTOP=KDE KDE_SESSION_VERSION=6 xdg-settings set default-web-browser firefox.desktop
 ```
 
+## Signing in during `switchyard new`
+
+The agent account's own browser is not used for the provider sign-in. A browser
+the agent opens cannot come to the front of the owner's desktop: KWin raises a
+window only for a client the owner has just used, so it opens behind the
+terminal and closes with the sign-in step. That is what happened on test11.
+
+So each sign-in step runs with the agent's browser launch turned off.
+`BROWSER=true` covers claude, codex and copilot, and a no-op `xdg-open` placed
+first on the step's `PATH` covers agy, which calls `xdg-open` directly. The
+no-op lives in a directory created for that run by the account running
+Switchyard, root for a tenant, and removed when the run ends. Switchyard then
+prints the URL the CLI shows, as one line you click in your own terminal:
+
+```
+switchyard: To sign in example-agent to claude, open this link in your own browser (click it, or Ctrl+click), then paste back here any code the page shows:
+https://claude.com/cai/oauth/authorize?code=true&client_id=…
+```
+
+- **One unbroken line.** Your terminal's own link detection sees the whole URL,
+  and the line is also an OSC 8 hyperlink for terminals that honour those.
+  Konsole leaves OSC 8 off by default, under "Allow escape sequences for
+  links". A URL a CLI draws itself, broken over several rows, opens only its
+  first row when clicked.
+- **Line by line, or below a full screen.** After the line that holds the URL
+  for claude (`claude auth login`), codex and copilot. Below agy's full-screen
+  sign-in, in rows kept from it.
+- **Sign-in comes first.** Claude's own first run, with its theme and folder
+  questions, comes after its sign-in. Claude Code 2.1.318 does not ask an
+  account that already holds a credential to sign in again.
+- **Paste back any code the page shows.** Claude and agy finish with a code to
+  paste into the terminal. Codex and copilot return to a local address on this
+  host, which any browser here reaches.
+
+**Trust.** The sign-in page opens in **your own** browser and profile only
+because you clicked the link, which is your own act. Nothing the agent account
+runs touches your browser, your profile or your session bus. Only `https://`
+URLs made of URL characters are printed, so the agent's output cannot put a
+control sequence on that line.
+
 ## Headless, and explicit policies
 
 For a project without desktop clipboard access, on a host with or without a

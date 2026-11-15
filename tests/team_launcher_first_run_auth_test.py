@@ -541,8 +541,10 @@ def test_first_run_auth_invokes_owner_home_cli_with_same_path_as_presence_check(
         "switchyard: login codex: roles ops; interactive account setup running codex login as otto-agent",
         # SYRD-221 UAT (test9): the sign-in step says what it is as it starts.
         "switchyard: codex will now run in this terminal as otto-agent to sign in. "
-        "Complete what it asks -- a browser sign-in for some providers, a choice in the "
-        "terminal for others; the terminal comes back on its own once the account is set up.",
+        "Complete what it asks. When it shows a sign-in page, Switchyard prints the link on one "
+        "line below it: click it to open the page in your own browser, then paste back here any "
+        "code the page shows. No browser opens by itself. The terminal comes back on its own once "
+        "the account is set up.",
     ]
     assert 127 not in runner.returncodes
     assert all(

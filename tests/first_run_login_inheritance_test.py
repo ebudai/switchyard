@@ -325,18 +325,16 @@ def test_roles_that_share_a_worktree_share_one_trust_action() -> None:
 
 
 @contained
-def test_the_setup_step_says_it_will_ask_for_a_sign_in() -> None:
-    """Measured on this host, not assumed: completing Claude's first run signs in again.
+def test_the_setup_step_says_what_it_will_ask() -> None:
+    """Measured on this host, not assumed: what completing Claude's first run asks.
 
-    With a valid `.claude/.credentials.json` and a `.claude.json` carrying an
-    `oauthAccount` but no onboarding marker -- the live testing tenant's exact
-    shape -- `claude auth status --json` reports `loggedIn: true`, and an
-    interactive `claude` runs its welcome flow: theme, then an OAuth sign-in it
-    asks for anyway. That is the vendor's flow and Switchyard cannot suppress
-    it without writing the marker itself, which it will not do.
-
-    So the manifest must not promise a run with no login in it. It says what
-    the step costs, before the step takes the terminal.
+    SYRD-191 measured the welcome flow asking for an OAuth sign-in even with a
+    valid credential. Claude Code 2.1.318 no longer does: with a valid
+    `.claude/.credentials.json` its welcome flow asks a theme, the security
+    notes and folder trust, and no sign-in (SYRD-782, measured with a real
+    credential and with a fake one). The sign-in step now runs first, so the
+    manifest says the first run will not ask to sign in again -- before the step
+    takes the terminal.
     """
     with tempfile.TemporaryDirectory(prefix="syrd191-honest.") as tmp:
         tmp_path = Path(tmp)
@@ -360,8 +358,8 @@ def test_the_setup_step_says_it_will_ask_for_a_sign_in() -> None:
     advertised = [line for line in messages if "provider setup claude" in line]
     check(advertised, f"the step is advertised: {messages}")
     check(
-        "sign in again even when the account already holds valid credentials" in advertised[0],
-        f"and says a sign-in is part of it: {advertised[0]}",
+        "it runs after the sign-in, so it does not ask to sign in again" in advertised[0],
+        f"and says no sign-in is part of it: {advertised[0]}",
     )
     instruction = [line for line in messages if "will now run in this terminal" in line]
     check(instruction, f"the operator is told before it takes the terminal: {messages}")
@@ -392,10 +390,10 @@ class MeasuredClaudeRunner(FirstRunAuthRunner):
 
     `claude auth status --json` answers from the credential file. An
     interactive `claude` answers from `.claude.json`: with no onboarding marker
-    it runs the welcome flow -- theme, then a sign-in it asks for even though
-    the credential is valid -- and with the marker it goes straight to the
-    per-directory trust prompt. Both halves were measured on this host against
-    the real CLI before this was written (SYRD-191).
+    it runs the welcome flow, and with the marker it goes straight to the
+    per-directory trust prompt (SYRD-191). The welcome flow asks for a sign-in
+    only when the account holds no credential: SYRD-191 measured it asking
+    anyway, and Claude Code 2.1.318 no longer does (SYRD-782).
     """
 
     def __init__(self, owner_home: Path, *, completes_setup: bool) -> None:
@@ -412,9 +410,10 @@ class MeasuredClaudeRunner(FirstRunAuthRunner):
             marked = json.loads((self.owner_home / ".claude.json").read_text()) \
                 if (self.owner_home / ".claude.json").is_file() else {}
             if not marked.get("hasCompletedOnboarding"):
-                # The welcome flow. It signs in again regardless of the
+                # The welcome flow. It signs in only an account without a
                 # credential, and only then records anything.
-                self.signed_in_again += 1
+                if not (self.owner_home / ".claude" / ".credentials.json").is_file():
+                    self.signed_in_again += 1
                 if self.completes_setup:
                     marked["hasCompletedOnboarding"] = True
                     marked["theme"] = "dark"
@@ -431,12 +430,12 @@ class MeasuredClaudeRunner(FirstRunAuthRunner):
 
 @contained
 def test_the_measured_vendor_flow_is_reported_rather_than_promised_away() -> None:
-    """The live failure, in the shape it really has.
+    """The live failure, in the shape it has now.
 
-    The rollout plan claimed the preserved credential would make the run
-    login-free. It did not: the welcome flow asks anyway. This asserts the
-    product says so, and that once the account has been through it once,
-    nothing asks again.
+    SYRD-191's welcome flow asked for a sign-in despite a preserved credential;
+    on Claude Code 2.1.318 it does not (SYRD-782). This asserts the product says
+    so, that no sign-in is asked, and that once the account has been through it
+    once, nothing asks again.
     """
     with tempfile.TemporaryDirectory(prefix="syrd191-measured.") as tmp:
         tmp_path = Path(tmp)
@@ -470,10 +469,9 @@ def test_the_measured_vendor_flow_is_reported_rather_than_promised_away() -> Non
         first.authenticated_now == {},
         f"no login step is offered -- the credential is valid: {first.authenticated_now}",
     )
-    check(runner.signed_in_again == 1, f"and the welcome flow signs in anyway, once: {runner.signed_in_again}")
+    check(runner.signed_in_again == 0, f"and the welcome flow asks for no sign-in: {runner.signed_in_again}")
     check(
-        any("asks to sign in again even when the account already holds valid credentials" in line
-            for line in messages),
+        any("it runs after the sign-in, so it does not ask to sign in again" in line for line in messages),
         f"which the manifest said in advance: {messages}",
     )
     check(first.incomplete_provider_setup == [], "the account finished it, so nothing is outstanding")
@@ -487,7 +485,7 @@ def test_the_measured_vendor_flow_is_reported_rather_than_promised_away() -> Non
     )
     check(not second_messages or "0 login step(s), 0 provider setup step(s), 0 folder trust step(s)"
           in second_messages[0], f"the manifest is empty: {second_messages[:1]}")
-    check(runner.signed_in_again == 1, "no second sign-in")
+    check(runner.signed_in_again == 0, "no sign-in on the second run either")
     check(
         sorted(runner.trusted) == sorted(str(Path(role.workdir)) for role in config.roles
                                          if role.cli[:1] == ["claude"]),

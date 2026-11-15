@@ -306,8 +306,10 @@ def test_first_run_auth_phase_skips_model_validation_for_unauthenticated_or_miss
         "switchyard: login codex: roles ops; interactive account setup running codex login as otto-agent",
         # SYRD-221 UAT (test9): the sign-in step says what it is as it starts.
         "switchyard: codex will now run in this terminal as otto-agent to sign in. "
-        "Complete what it asks -- a browser sign-in for some providers, a choice in the "
-        "terminal for others; the terminal comes back on its own once the account is set up.",
+        "Complete what it asks. When it shows a sign-in page, Switchyard prints the link on one "
+        "line below it: click it to open the page in your own browser, then paste back here any "
+        "code the page shows. No browser opens by itself. The terminal comes back on its own once "
+        "the account is set up.",
         # SYRD-245: the one role still probed says so before it is probed. The
         # two skipped above say nothing, which is what keeps this list short.
         "switchyard: checking bulk's model (openrouter/missing) with hermes; this asks it "
@@ -315,16 +317,15 @@ def test_first_run_auth_phase_skips_model_validation_for_unauthenticated_or_miss
         "for the answer",
     ]
 
-def test_first_run_auth_phase_sequences_setup_then_logins_then_trust_for_every_role() -> None:
-    """Setup FIRST, then a login only if the account still needs one.
+def test_first_run_auth_phase_sequences_logins_then_setup_then_trust_for_every_role() -> None:
+    """Logins FIRST, each only if the account still needs one; then setup; then trust.
 
-    Logins used to run first, and live Zorin UAT showed what that costs: the
-    operator signed into Claude, signed into Codex, and was then asked to sign
-    into Claude a second time inside its own welcome flow, which does its own
-    sign-in. Running the account-wide first run before the logins, and
-    re-reading the account before each one, is what makes the second question
-    unnecessary -- and the login is still there for an account the welcome flow
-    does not settle (SYRD-211 live UAT).
+    SYRD-211 put setup first because Claude's welcome flow then signed in again
+    even with a valid credential. Claude Code 2.1.318 no longer does (measured,
+    SYRD-782), and its welcome flow draws a sign-in URL broken over rows nobody
+    can click. So the line-by-line `claude auth login` comes first, with the link
+    Switchyard prints, and the welcome flow after it asks only its own questions.
+    Each login still re-reads the account first, so nobody is asked twice.
     """
     """One login and one first run per provider, one trust action per worktree.
 
@@ -374,17 +375,12 @@ def test_first_run_auth_phase_sequences_setup_then_logins_then_trust_for_every_r
         ("codex", "main", str(tmp_path / "worktrees" / "main")),
         ("codex", "ops", str(tmp_path / "worktrees" / "ops")),
     ]
-    # The manifest probes, then Claude's own first run once for both of its
-    # roles, then -- for each provider still unauthenticated -- one login,
-    # each preceded by the re-read that would have skipped it, then one trust
-    # action per distinct worktree, in role order: five, for two Claude roles,
-    # two Codex roles and one agy role. Codex asks "Trust this folder?" too --
-    # measured on 0.156.1; this said it took no directory trust (SYRD-279).
-    #
-    # `claude auth login` survives here only because this fake records nothing:
-    # its welcome flow does not mark the account authenticated, so the re-read
-    # still says no. On a real host that flow signs in and the login is skipped,
-    # which is the duplicate live UAT was asked to sit through.
+    # The manifest probes, then -- for each provider still unauthenticated --
+    # one login, each preceded by the re-read that would have skipped it, then
+    # Claude's own first run once for both of its roles (SYRD-782), then one
+    # trust action per distinct worktree, in role order: five, for two Claude
+    # roles, two Codex roles and one agy role. Codex asks "Trust this folder?"
+    # too -- measured on 0.156.1; this said it took no directory trust (SYRD-279).
     assert runner.calls == [
         ["sudo", "-u", "otto-agent", "claude", "auth", "status", "--json"],
         ["sudo", "-u", "otto-agent", "sh", "-c", "command -v claude"],
@@ -392,7 +388,6 @@ def test_first_run_auth_phase_sequences_setup_then_logins_then_trust_for_every_r
         ["sudo", "-u", "otto-agent", "sh", "-c", "command -v codex"],
         ["sudo", "-u", "otto-agent", "agy", "models"],
         ["sudo", "-u", "otto-agent", "sh", "-c", "command -v agy"],
-        ["sudo", "-u", "otto-agent", "claude"],
         ["sudo", "-u", "otto-agent", "claude", "auth", "status", "--json"],
         ["sudo", "-u", "otto-agent", "sh", "-c", "command -v claude"],
         ["sudo", "-u", "otto-agent", "claude", "auth", "login"],
@@ -405,6 +400,8 @@ def test_first_run_auth_phase_sequences_setup_then_logins_then_trust_for_every_r
         ["sudo", "-u", "otto-agent", "sh", "-c", "command -v agy"],
         ["sudo", "-u", "otto-agent", "agy"],
         ["sudo", "-u", "otto-agent", "agy", "models"],
+        # Claude's own first run, after every sign-in (SYRD-782).
+        ["sudo", "-u", "otto-agent", "claude"],
         ["sudo", "-u", "otto-agent", "claude"],
         ["sudo", "-u", "otto-agent", "claude"],
         ["sudo", "-u", "otto-agent", "codex"],
@@ -434,9 +431,9 @@ def test_first_run_auth_phase_sequences_setup_then_logins_then_trust_for_every_r
         "interactive account setup running codex login as otto-agent",
         "switchyard: login agy: roles inspector; interactive account setup running agy as otto-agent",
         "switchyard: provider setup claude: roles designer, director; this account has not "
-        "completed Claude's own first run (theme, then sign-in); measured on this host, that "
-        "flow asks to sign in again even when the account already holds valid credentials, and "
-        "it is what every pane opens until it is done; interactive first run of claude as "
+        "completed Claude's own first run (theme, security notes, folder trust); it runs after the "
+        "sign-in, so it does not ask to sign in again -- measured on Claude Code 2.1.318 (SYRD-782) "
+        "-- and it is what every pane opens until it is done; interactive first run of claude as "
         "otto-agent, once for every role that uses it",
         "switchyard: folder trust claude: role designer at "
         f"{tmp_path / 'worktrees' / 'designer'}; recurs per project/workdir even when the owner "
@@ -453,22 +450,24 @@ def test_first_run_auth_phase_sequences_setup_then_logins_then_trust_for_every_r
         "switchyard: folder trust codex: role main at "
         f"{tmp_path / 'worktrees' / 'main'}; recurs per project/workdir even when the owner "
         "user is reused; interactive repository trust today, not account login",
-        # Each foreground step says what it is about to do with the terminal,
-        # and how to hand it back, before it takes it (SYRD-191).
-        "switchyard: claude will now run in this terminal as otto-agent. Answer its own "
-        "prompts to the end -- a theme, the sign-in it asks for even though credentials "
-        "exist, because that flow does not consult them, and whether to trust this folder. "
-        "The terminal comes back on its own once nothing is left to answer; you do not have "
-        "to exit anything. It is asked once for the account, not once per role, and no pane "
-        "will ask again.",
         # And each sign-in says what it is as it starts, as the steps either side
         # of it do (SYRD-221 UAT, test9).
         *(
             f"switchyard: {cli} will now run in this terminal as otto-agent to sign in. "
-            "Complete what it asks -- a browser sign-in for some providers, a choice in the "
-            "terminal for others; the terminal comes back on its own once the account is set up."
+            "Complete what it asks. When it shows a sign-in page, Switchyard prints the link on one "
+            "line below it: click it to open the page in your own browser, then paste back here any "
+            "code the page shows. No browser opens by itself. The terminal comes back on its own once "
+            "the account is set up."
             for cli in ("claude", "codex", "agy")
         ),
+        # Each foreground step says what it is about to do with the terminal,
+        # and how to hand it back, before it takes it (SYRD-191).
+        "switchyard: claude will now run in this terminal as otto-agent. Answer its own "
+        "prompts to the end -- a theme, and whether to trust this folder; it is already "
+        "signed in, so it does not ask for that. "
+        "The terminal comes back on its own once nothing is left to answer; you do not have "
+        "to exit anything. It is asked once for the account, not once per role, and no pane "
+        "will ask again.",
         f"switchyard: claude will now run in {tmp_path / 'worktrees' / 'designer'} as this "
         "project's owner so it can be trusted once for designer. Answer the trust "
         "prompt; the terminal comes back on its own once the answer is recorded.",
@@ -530,8 +529,10 @@ def test_first_run_auth_phase_handles_hermes_model_setup() -> None:
         "1 login step(s), 0 provider setup step(s), 0 folder trust step(s), 0 codex hook approval(s), 0 missing CLI(s)",
         "switchyard: login hermes: roles bulk; interactive account setup running hermes model as otto-agent",
         "switchyard: hermes will now run in this terminal as otto-agent to sign in. "
-        "Complete what it asks -- a browser sign-in for some providers, a choice in the "
-        "terminal for others; the terminal comes back on its own once the account is set up.",
+        "Complete what it asks. When it shows a sign-in page, Switchyard prints the link on one "
+        "line below it: click it to open the page in your own browser, then paste back here any "
+        "code the page shows. No browser opens by itself. The terminal comes back on its own once "
+        "the account is set up.",
     ]
 
 def test_first_run_auth_phase_accepts_hermes_resolved_api_key_without_model_setup() -> None:

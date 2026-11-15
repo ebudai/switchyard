@@ -159,6 +159,8 @@ def _run_owner_cli_until(
     #: to read back what the window claimed.
     output_write: Callable[[str], Any] | None = None,
     print_func: Callable[[str], None] = print,
+    #: A sign-in step's link watcher, handed to the watched session (SYRD-782).
+    sign_in_link: Any = None,
 ) -> bool:
     """Run one interactive step and take the terminal back when it is done.
 
@@ -215,17 +217,19 @@ def _run_owner_cli_until(
         timeout_seconds=timeout_seconds,
         purpose=purpose,
         print_func=print_func,
+        **({"sign_in_link": sign_in_link} if sign_in_link is not None else {}),
     )
 
 
 #: What an operator is told before a foreground step takes their terminal. Said
 #: before it starts, because afterwards the CLI owns the screen (SYRD-191).
-def _provider_setup_instruction(cli: str, owner_user: str) -> str:
+def _provider_setup_instruction(cli: str, owner_user: str, *, signed_in: bool = True) -> str:
     if cli == "claude":
+        asked = ("a theme, and whether to trust this folder; it is already signed in, so it does not ask for that"
+                 if signed_in else "a theme, a sign-in, and whether to trust this folder")
         return (
             f"switchyard: {cli} will now run in this terminal as {owner_user}. Answer its own "
-            "prompts to the end -- a theme, the sign-in it asks for even though credentials "
-            "exist, because that flow does not consult them, and whether to trust this folder. "
+            f"prompts to the end -- {asked}. "
             "The terminal comes back on its own once nothing is left to answer; you do not have "
             "to exit anything. It is asked once for the account, not once per role, and no pane "
             "will ask again."
@@ -245,8 +249,10 @@ def _provider_sign_in_instruction(cli: str, owner_user: str) -> str:
     """
     return (
         f"switchyard: {cli} will now run in this terminal as {owner_user} to sign in. "
-        "Complete what it asks -- a browser sign-in for some providers, a choice in the "
-        "terminal for others; the terminal comes back on its own once the account is set up."
+        "Complete what it asks. When it shows a sign-in page, Switchyard prints the link on one "
+        "line below it: click it to open the page in your own browser, then paste back here any "
+        "code the page shows. No browser opens by itself. The terminal comes back on its own once "
+        "the account is set up."
     )
 
 
@@ -344,6 +350,18 @@ def run_first_run_auth_phase(
         def runner(args, **kwargs):
             args, kwargs = desktop_transform(args, kwargs)
             return base_runner(args, **kwargs)
+    # The agent opens no browser of its own in any step that takes the User's
+    # terminal: on the User's desktop it would open behind that terminal, never
+    # seen, and close with the step (SYRD-782, test11). The User opens the
+    # sign-in link Switchyard prints instead.
+    from scripts.sign_in_link import SignInLink, no_browser_transform
+
+    def _no_browser_foreground(args, kwargs, _desktop=foreground_transform):
+        if _desktop is not None:
+            args, kwargs = _desktop(args, kwargs)
+        return no_browser_transform(args, kwargs)
+
+    foreground_transform = _no_browser_foreground
     effective_owner = (owner_user or config.run_as_user or launcher.current_user_name()).strip()
     if not effective_owner:
         return FirstRunAuthReport({}, [])
@@ -360,44 +378,6 @@ def run_first_run_auth_phase(
     launcher.print_first_run_setup_manifest(manifest, print_func=print_func)
     missing_cli_roles.update(manifest.missing_cli_roles)
 
-    # The provider's own first run, once per provider, before any role is
-    # launched or presented. Switchyard asks the CLI to run its setup and then
-    # looks at the account state again; it never writes that state itself and
-    # never answers a security prompt on the owner's behalf (SYRD-191).
-    incomplete_setup: list[tuple[str, list[str]]] = []
-    for step in manifest.provider_setup_steps:
-        print_func(_provider_setup_instruction(step.cli, effective_owner))
-        completed = launcher._run_provider_first_run(
-            cli=step.cli,
-            owner_user=effective_owner,
-            owner_home=effective_home,
-            command=list(step.command),
-            is_complete=lambda cli=step.cli: launcher._provider_account_setup_complete(
-                cli, owner_home=effective_home
-            ),
-            watching=f"{step.cli} to record its own first run for {effective_owner}",
-            runner=injected_runner,
-            transform=foreground_transform,
-            print_func=print_func,
-        )
-        if not completed:
-            incomplete_setup.append((step.cli, list(step.roles)))
-    #: Providers whose own first run did not finish in this pass. A model probe
-    #: for such a provider starts the CLI itself, which shows that unfinished
-    #: first run rather than answering the probe -- so it asks the operator the
-    #: same sign-in again and then reports the role's MODEL as broken, which is
-    #: a problem the account does not have. Live on sbs one owner account was
-    #: asked to authenticate Claude three times -- login prompts, confirmed by
-    #: the User as not per-worktree trust prompts -- and the run still ended
-    #: saying its first-run setup had not completed (SYRD-221).
-    #:
-    #: Two steps are deliberately NOT gated on this. The provider's own login
-    #: is a different command with its own flow, and an account whose welcome
-    #: flow signs nobody in would be stranded without it (SYRD-191). Folder
-    #: trust is a separate question per worktree, and the User confirmed those
-    #: prompts were not what repeated.
-    unfinished_first_run = {cli for cli, _roles in incomplete_setup}
-
     authenticated_now: dict[str, list[str]] = {}
     access_denied: dict[str, str] = {}
     #: What the completion check last read, so the phase does not ask twice for
@@ -412,12 +392,10 @@ def run_first_run_auth_phase(
         return observed_auth[cli] == "authenticated"
 
     for step in manifest.login_steps:
-        # Asked again first. That provider's own first run may have signed in
-        # as part of itself, and live Zorin UAT showed the cost of not
-        # checking: `claude login`, `codex login`, and then Claude asking to
-        # sign in a second time inside its welcome flow (SYRD-211 live UAT).
-        # Running setup before this is what makes the second question
-        # avoidable; re-reading here is what makes it actually avoided.
+        # Asked again first: an account signed in since the manifest was read,
+        # by hand or by an earlier run, is not asked twice (SYRD-211 live UAT).
+        # The sign-in now comes before the provider's own first run, so that run
+        # finds the account signed in and does not ask again (SYRD-782).
         if launcher._cli_auth_status(
             step.cli,
             owner_user=effective_owner,
@@ -450,6 +428,9 @@ def run_first_run_auth_phase(
             runner=injected_runner,
             transform=foreground_transform,
             print_func=print_func,
+            # The URL the CLI prints, printed again by Switchyard as one line the
+            # User clicks in their own terminal (SYRD-782).
+            sign_in_link=SignInLink(cli=step.cli, owner_user=effective_owner),
         )
         # What the completion check already read, rather than asking again.
         # `is None` rather than a falsy test: every status this returns is a
@@ -470,6 +451,51 @@ def run_first_run_auth_phase(
             # This run is what made that provider usable. Every role configured
             # for it that is already running started before it (SYRD-191).
             authenticated_now[step.cli] = list(step.roles)
+
+    # The provider's own first run, once per provider, before any role is
+    # launched or presented. Switchyard asks the CLI to run its setup and then
+    # looks at the account state again; it never writes that state itself and
+    # never answers a security prompt on the owner's behalf (SYRD-191).
+    #
+    # After the sign-in, not before it (SYRD-782). Claude's welcome flow signs
+    # in only an account without credentials -- measured on 2.1.318 -- and when
+    # it does, it draws the URL broken over several rows of a full-screen
+    # frame, where neither a click nor a line of Switchyard's can reach it.
+    # Signed in first, by `claude auth login`, which prints line by line, the
+    # welcome flow asks only its theme and folder questions.
+    incomplete_setup: list[tuple[str, list[str]]] = []
+    for step in manifest.provider_setup_steps:
+        print_func(_provider_setup_instruction(step.cli, effective_owner, signed_in=step.cli not in unauthenticated))
+        completed = launcher._run_provider_first_run(
+            cli=step.cli,
+            owner_user=effective_owner,
+            owner_home=effective_home,
+            command=list(step.command),
+            is_complete=lambda cli=step.cli: launcher._provider_account_setup_complete(
+                cli, owner_home=effective_home
+            ),
+            watching=f"{step.cli} to record its own first run for {effective_owner}",
+            runner=injected_runner,
+            transform=foreground_transform,
+            print_func=print_func,
+        )
+        if not completed:
+            incomplete_setup.append((step.cli, list(step.roles)))
+    #: Providers whose own first run did not finish in this pass. A model probe
+    #: for such a provider starts the CLI itself, which shows that unfinished
+    #: first run rather than answering the probe -- so it asks the operator the
+    #: same sign-in again and then reports the role's MODEL as broken, which is
+    #: a problem the account does not have. Live on sbs one owner account was
+    #: asked to authenticate Claude three times -- login prompts, confirmed by
+    #: the User as not per-worktree trust prompts -- and the run still ended
+    #: saying its first-run setup had not completed (SYRD-221).
+    #:
+    #: Two steps are deliberately NOT gated on this. The provider's own login
+    #: is a different command with its own flow, and an account whose welcome
+    #: flow signs nobody in would be stranded without it (SYRD-191). Folder
+    #: trust is a separate question per worktree, and the User confirmed those
+    #: prompts were not what repeated.
+    unfinished_first_run = {cli for cli, _roles in incomplete_setup}
 
     untrusted: list[tuple[str, str, str]] = []
     for step in manifest.folder_trust_steps:

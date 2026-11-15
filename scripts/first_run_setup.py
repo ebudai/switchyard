@@ -136,9 +136,10 @@ def _role_names(roles: Sequence[RoleConfig]) -> list[str]:
 def _provider_setup_reason(cli: str) -> str:
     if cli == "claude":
         return (
-            "this account has not completed Claude's own first run (theme, then sign-in); "
-            "measured on this host, that flow asks to sign in again even when the account "
-            "already holds valid credentials, and it is what every pane opens until it is done"
+            "this account has not completed Claude's own first run (theme, security notes, "
+            "folder trust); it runs after the sign-in, so it does not ask to sign in again -- "
+            "measured on Claude Code 2.1.318 (SYRD-782) -- and it is what every pane opens "
+            "until it is done"
         )
     return f"{cli} has not completed its first run for this account"
 

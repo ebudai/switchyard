@@ -250,8 +250,12 @@ def test_a_host_with_no_valid_receiver_refuses_before_the_role_questions() -> No
                 h.add_board(slug, declared=bool(how), token=how != "no-token")
             world = p0.World(h.tmp)
             before = h.tree()
-            got = p0.run(world, p0.inputs(h.tmp, project_name="N", slug="s742", agent_name=p0.OWNER,
-                                          project_path=h.tmp / "p", registry_dir=h.registry))
+            # With nobody to answer: a run that can be asked is asked instead (SYRD-778, new_project_questions_test).
+            from scripts import new_project_questions
+
+            with patch.object(new_project_questions, "can_ask", lambda _input_func: False):
+                got = p0.run(world, p0.inputs(h.tmp, project_name="N", slug="s742", agent_name=p0.OWNER,
+                                              project_path=h.tmp / "p", registry_dir=h.registry))
             check(isinstance(got, SystemExit) and "needs a decision about Switchyard reports" in str(got)
                   and "Nothing was created." in str(got) and repair in str(got)
                   and not {"auth-home", "plan", "review", "confirm"} & set(world.names()) and h.tree() == before,

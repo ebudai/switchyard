@@ -43,12 +43,12 @@ from scripts.ticket_board.prompt_schema import Choice
 
 #: Bumped when the recorded tables below change, so a project can record which
 #: version of this data it was configured against.
-CATALOG_VERSION = 1
+CATALOG_VERSION = 2
 
 #: When the recorded tables were last checked against the repository. A date an
 #: operator can compare against, in the shape the launcher already uses for
 #: vendor strings it knows will drift.
-CATALOG_RECORDED = "2026-09-23"
+CATALOG_RECORDED = "2026-11-15"
 
 PROVENANCE_RECORDED = "recorded"
 PROVENANCE_LIVE = "live"
@@ -103,6 +103,9 @@ RUNTIMES: tuple[Choice, ...] = (
 #:   claude/codex/agy -- `config/team-launcher/pgu.json`, the live launcher
 #:     configuration: claude-opus-5 (director, research, audit), gpt-5.6-sol
 #:     (main), gpt-5.5 (app, ops), gemini-3.7-flash-high (inspector).
+#:   claude -- claude-opus-5-5, first and so the default a Claude role is
+#:     offered: the User's decision on SYRD-778 (2026-11-15), the model the
+#:     installed claude (2.1.318) already runs for live Directors.
 #:   agy -- `tests/team_launcher_test_helpers.py`'s agy catalog, the shape
 #:     `agy models` returns: gemini-3.7-flash-high, gemini-3.7-pro.
 #:   hermes -- nothing. See the module docstring.
@@ -114,6 +117,7 @@ RUNTIMES: tuple[Choice, ...] = (
 #: asked first and this is what answers when it cannot be reached.
 RECORDED_MODELS: dict[str, tuple[Choice, ...]] = {
     "claude": (
+        Choice("claude-opus-5-5", "Opus 5.5", "the default for a Claude role"),
         Choice("claude-opus-5", "Opus 5", "configured for director, research and audit"),
     ),
     "codex": (

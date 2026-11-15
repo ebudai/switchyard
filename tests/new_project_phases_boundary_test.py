@@ -328,14 +328,15 @@ def test_the_seams_and_nothing_bound_read_through_the_launcher() -> None:
     # SYRD-624: and the documentation gate's, by its own module, imported right where it is used.
     gate_summary = [i for i, s in enumerate(fn.body) if "documentation_onboarding.summary_line(" in ast.unparse(s)]
     # SYRD-674: and where its reports go, decided by its own module, imported right where it is used -- since
-    # SYRD-742 before the role questions, so ahead of Router's and the gate's summaries.
+    # SYRD-742 before the role questions, so ahead of Router's and the gate's summaries. SYRD-778: with the module
+    # that asks it, when no single declared board decides it.
     report_choice = [i for i, s in enumerate(fn.body) if "upstream_report_sinks.choose_report_board(" in ast.unparse(s)]
     # SYRD-763: and the owner's uid-0 refusal, by its own module, imported right where it is asked.
     owner_refusal = [i for i, s in enumerate(fn.body) if "owner_writes.new_owner_refusal(" in ast.unparse(s)]
     check(local == [(0, "from scripts import team_launcher as launcher"),
                     (owner_refusal[0] - 1, "from scripts import owner_writes"),
                     (decided[0] + 1, "from scripts.desktop_access import validate_policy"),
-                    (report_choice[0] - 1, "from scripts import upstream_report_sinks"),
+                    (report_choice[0] - 1, "from scripts import new_project_questions, upstream_report_sinks"),
                     (summary[0] - 1, "from scripts import router_onboarding"),
                     (gate_summary[0] - 1, "from scripts import documentation_onboarding")]
           and "validate_policy(" in ast.unparse(fn.body[decided[0] + 2]),

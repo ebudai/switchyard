@@ -657,13 +657,22 @@ and the board it connects becomes the project's report parent.
   `switchyard new` names the one command that finishes it, and `resume-provision` tries
   again.
 - **No single declared board.** On a host that has boards but no single declared,
-  working receiver, `switchyard new` refuses right after its root check, before the role
-  questions and before creating anything, and names the repair:
-  - with none declared, the `--only accept-reports` to run, naming a board only when
-    root's own registry records show this host's tenants connected to that one board;
-  - with several declared, the ones to choose between.
+  working receiver, `switchyard new` asks which board takes the tenant's reports. It
+  asks right after its root check, with its other questions, before the role questions
+  and before creating anything (SYRD-778):
+  - The choices are the declared boards that can take reports, by slug and name, and
+    `none` (the tenant cannot file reports).
+  - The default, shown in brackets, is the Switchyard project's own board (registered as
+    `Switchyard`, `syrd` on the Switchyard host) when it is one of them. `--yes` takes
+    that default.
+  - With no Switchyard board among them there is no default: the question must be
+    answered, and a `--yes` run is refused, naming the flag.
+  - With no board declared, only `none` is offered, and the `--only accept-reports` the
+    host lacks is named. That command names a board only when root's own registry
+    records show this host's tenants connected to that one board.
 
-  An undeclared board is never offered as a receiver (SYRD-686).
+  A run nobody can answer (no terminal and no `--yes`) is refused with the repair, as
+  before. An undeclared board is never offered as a receiver (SYRD-686).
 - **Choosing explicitly.** `--upstream-report-board <slug>` names the parent;
   `--no-upstream-report` creates the tenant unable to file, with a warning naming the
   repair.

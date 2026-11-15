@@ -57,6 +57,8 @@ DECISION_SCHEMA = "switchyard.upstream-report-decision.v1"
 REGISTRY_SCHEMA = "switchyard.project-registry.v1"
 
 CONNECT = "connect"
+#: The reports question's answer that connects no board (SYRD-778).
+NO_REPORT_BOARD = "none"
 CONNECTED = "connected"
 FAILED = "failed"
 OPTED_OUT = "opted-out"
@@ -66,6 +68,9 @@ RECEIVER = "receiver"
 FIRST_BOARD = "the first board on this host"
 
 PROBE_SECONDS = 3.0
+#: The Switchyard project's own board, by the name root's registry records for it: the default answer when `new`
+#: asks which of several declared boards takes a tenant's reports (SYRD-778, the User's decision of 2026-11-15).
+SWITCHYARD_BOARD_NAME = "Switchyard"
 
 
 @dataclass(frozen=True)
@@ -256,15 +261,21 @@ def choose_report_board(
     no_upstream_report: bool = False,
     registry_dir: Path | None = None,
     home_for_user: Callable[[str], Path | None] | None = None,
+    yes: bool = False,
+    ask: Callable[[str, Sequence[tuple[str, str]], str], str] | None = None,
 ) -> ReportChoice:
     """Where `slug` will file reports, decided before anything of it exists. A refusal raises SystemExit.
 
     Named (`--upstream-report-url`, `--upstream-report-board`): it must be a registered board other than
     `slug`. `--no-upstream-report`: an explicit opt-out. Otherwise the one board root declared; with no
     other board registered, `slug` is the host's first board and is declared its receiver once it answers
-    (SYRD-742). Anything else is refused, asked or not, with the repair: every tenant's board mints a report
-    token and answers at its URL, so offering each as a choice presented ordinary tenant boards as report
-    receivers (SYRD-686).
+    (SYRD-742). A board root has not declared is never offered: every tenant's board mints a report token and
+    answers at its URL, so offering each presented ordinary tenant boards as report receivers (SYRD-686).
+
+    With no single declared board, the operator decides (SYRD-778): `ask(why, options, default)` -- the declared
+    boards that can take reports, by slug and name, and "none" -- answers it, with the Switchyard project's own
+    board the default when it is one of them; `yes` takes that default. With no default under `yes`, or nobody
+    to `ask`, it is refused with the repair, as before.
     """
     url = upstream_report_url.strip().rstrip("/")
     named = upstream_report_board.strip()
@@ -298,6 +309,25 @@ def choose_report_board(
         # The host's first board: nothing registered could take its reports, and it is the board that takes the
         # host's. Said before the confirmation, and declared by root once it answers (SYRD-742).
         return ReportChoice(RECEIVER, board=slug, source=FIRST_BOARD)
+    # The operator's decision, among the declared boards that can take reports, or none (SYRD-778).
+    usable = [board for board in boards if board.declared
+              and not board_problem(board, registry_dir=registry_dir, home_for_user=home_for_user)]
+    own = next((board for board in usable if board.name == SWITCHYARD_BOARD_NAME), None)
+    if yes and own is not None:
+        return ReportChoice(CONNECT, board=own.slug, url=own.url,
+                            source="the Switchyard board, the default of the declared report boards")
+    if ask is not None and not yes:
+        options = [(board.slug, f"{board.name} at {board.url}") for board in usable]
+        options.append((NO_REPORT_BOARD, f"{slug} cannot file Switchyard reports"))
+        # Without a declared board that can take them, what the host is missing is said too: only root's
+        # declaration adds a board to what is offered.
+        missing = "" if usable else f". {undecided_repair(boards, registry_dir=registry_dir)}"
+        answer = ask(f"{why}{missing}", options, own.slug if own is not None else "")
+        board = next((board for board in usable if board.slug == answer), None)
+        if board is None:
+            return ReportChoice(OPTED_OUT, source="the operator chose none")
+        return ReportChoice(CONNECT, board=board.slug, url=board.url,
+                            source="the operator's answer" + (", the default" if board is own else ""))
     raise SystemExit(
         f"switchyard: {slug} needs a decision about Switchyard reports before it is created: {why}, and a board "
         f"root has not declared is not offered as one. {undecided_repair(boards, registry_dir=registry_dir)}, then run this again; or re-run "

@@ -558,7 +558,7 @@ def require_agent_clis_for_new_tenant(
                     f"choose one of {', '.join(AGENT_CLI_POLICIES)}"
                 )
             hint = (
-                "switchyard: choose CLIs that are already host-wide with --role-cli, or re-run "
+                "switchyard: choose CLIs that are already host-wide in the role questions, or re-run "
                 "with --agent-cli-policy promote-local and --agent-cli-source <cli>=<path> for "
                 "each one. Switchyard never fetches a vendor installer (PGU-904)"
             )

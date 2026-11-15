@@ -67,15 +67,22 @@ GENERIC_HINT = f"{GENERIC} once, then `sudo switchyard upgrade test6 --only upst
 
 
 def new_choices(d, h, **overrides):
-    """`switchyard new test6`'s real choice phase: (what it returned or raised, what it said, its steps)."""
+    """`switchyard new test6`'s real choice phase: (what it returned or raised, what it said, its steps).
+
+    With nobody to answer (`new_project_questions.can_ask` false): since SYRD-778 a run that can be asked is asked
+    which declared board takes its reports (`new_project_questions_test`); one that cannot is refused, as here."""
+    from unittest.mock import patch
+
     import new_project_phases_boundary_test as p0
+    from scripts import new_project_questions
 
     world = p0.World(h.tmp)
     said: list[str] = []
     values = p0.inputs(h.tmp, role_clis=(("director", "claude"), ("main", "codex")), registry_dir=h.registry,
                        slug="test6", print_func=said.append)
     values.update(overrides)
-    return p0.run(world, values), said, world.names()
+    with patch.object(new_project_questions, "can_ask", lambda _input_func: False):
+        return p0.run(world, values), said, world.names()
 
 
 def test_the_observed_host_is_refused_with_the_declaration_it_lacks() -> None:

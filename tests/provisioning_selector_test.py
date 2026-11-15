@@ -414,7 +414,7 @@ def test_replacing_a_stale_value_takes_a_deliberate_choice() -> None:
     chosen = select.select_one(
         field, {"runtime": "claude"}, input_func=terminal.input, print_func=terminal.print
     )
-    check(chosen == "claude-opus-5", f"choosing the listed one replaces it: {chosen}")
+    check(chosen == "claude-opus-5-5", f"choosing the first listed one, Opus 5.5 (SYRD-778), replaces it: {chosen}")
 
 
 # --- cancellation -----------------------------------------------------------

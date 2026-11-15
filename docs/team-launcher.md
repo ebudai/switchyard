@@ -119,9 +119,9 @@ Wayland session and offers screenshots-and-clipboard (the default) or headless.
 Choosing the desktop records that owner's approval once, root-owned, and later
 projects on the host are provisioned from it without asking. Use
 `switchyard new --headless` for a project with no clipboard, on a host with or
-without a compositor, and `--desktop-gui-user USER` when more than one desktop
-is signed in. `--desktop-policy FILE` remains the advanced import path for an
-explicit policy. Existing projects use `switchyard upgrade <project>
+without a compositor. With more than one desktop signed in, new asks which, with
+no default (`--desktop-gui-user USER` answers it). `--desktop-policy FILE` is the
+advanced import of an explicit policy. Existing projects use `switchyard upgrade <project>
 --desktop-policy ...` before starting new role processes. The same pre-launch
 path installs persistent scoped access and verifies tenant-safe environment;
 see [desktop access](desktop-access.md). Upgrading the policy does not restart

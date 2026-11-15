@@ -32,13 +32,21 @@ matches nobody and grants nothing; provisioning asks the human instead. `--yes`
 still never grants desktop access that no approval covers.
 
 The GUI owner comes from logind, not from who ran the command. A host with no
-active Wayland session is headless and is told so; a host with several active
-desktops stops and names them, because choosing between somebody's desktops is
-not a decision provisioning may make quietly:
+active Wayland session is headless and is told so. Interactively, `switchyard new`
+offers to install headless (the default, which `--yes` takes).
+
+A host with several active desktops is asked which one, with the other questions
+and with no default (SYRD-778). Choosing between somebody's desktops is not a
+decision provisioning may make quietly, so Enter alone answers nothing. The flag
+answers the question instead:
 
 ```sh
 switchyard new --desktop-gui-user desktop-owner
 ```
+
+A named account that is not signed in is refused. So is a run nobody can answer
+(no terminal and no `--yes`), and a `--yes` run, because there is no default to
+take.
 
 ## The agent account's browser
 

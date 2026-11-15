@@ -257,14 +257,15 @@ def _resolve_new_project_choices(
     if euid_getter() != 0:
         raise SystemExit("switchyard: new requires sudo; re-run as `sudo ./switchyard new`")
     # Where its reports go, decided before anything exists (SYRD-674) and before the role questions: a host with no
-    # single declared report board is refused with the repair, never guessed for or offered every board as a choice
-    # (SYRD-686), and refused before the long questionnaire, not after it. The first board on a host is its
-    # receiver (SYRD-742).
-    from scripts import upstream_report_sinks
+    # single declared report board is never guessed for, nor offered a board root has not declared (SYRD-686); the
+    # operator is asked which declared board, or none, with the other questions (SYRD-778). The first board on a
+    # host is its receiver (SYRD-742).
+    from scripts import new_project_questions, upstream_report_sinks
 
     upstream_report = upstream_report_sinks.choose_report_board(
         resolved_slug, upstream_report_url=upstream_report_url, upstream_report_board=upstream_report_board,
-        no_upstream_report=no_upstream_report, registry_dir=registry_dir,
+        no_upstream_report=no_upstream_report, registry_dir=registry_dir, yes=yes,
+        ask=new_project_questions.report_board_asker(resolved_slug, input_func=input_func, print_func=print_func),
     )
     selected_role_models: dict[str, str] = {}
     selected_role_efforts: dict[str, str] = {}

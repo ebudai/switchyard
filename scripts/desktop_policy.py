@@ -129,19 +129,26 @@ def _resolve_desktop_policy(
         # No desktop to grant, or more than one and no way to tell which. The
         # first is an ordinary headless host and the person can say so; the
         # second is an ambiguity that must not be resolved by guessing, so it
-        # stops either way rather than being offered as a default.
-        if yes or not _desktop_host_is_headless(list_owners):
-            raise SystemExit(f"switchyard: {exc}") from exc
-        print_func(f"switchyard: {exc}")
-        if launcher._prompt_bool(
-            "Install this project headless (no screenshots or clipboard)",
-            default=True,
-            input_func=input_func,
-        ):
+        # is asked with no default, never offered as one (SYRD-778).
+        if not _desktop_host_is_headless(list_owners):
+            owner = _ask_desktop_owner(exc, list_owners, gui_user=gui_user, yes=yes, input_func=input_func,
+                                       print_func=print_func)
+        elif yes:
+            # `--yes` takes the question's default, headless, which grants nothing (SYRD-778).
+            print_func(f"switchyard: {exc}")
+            print_func("switchyard: --yes takes the default: this project is installed headless")
             return {"mode": "headless"}, DESKTOP_FROM_CHOSEN_HEADLESS
-        raise SystemExit(
-            "switchyard: no desktop was selected and headless was declined; nothing was provisioned"
-        ) from exc
+        else:
+            print_func(f"switchyard: {exc}")
+            if launcher._prompt_bool(
+                "Install this project headless (no screenshots or clipboard)",
+                default=True,
+                input_func=input_func,
+            ):
+                return {"mode": "headless"}, DESKTOP_FROM_CHOSEN_HEADLESS
+            raise SystemExit(
+                "switchyard: no desktop was selected and headless was declined; nothing was provisioned"
+            ) from exc
 
     recorded = launcher.read_host_desktop_approval(settings_path)
     if recorded.get("gui_user") == owner:
@@ -204,6 +211,39 @@ def _resolve_desktop_policy(
             reference=recorded.get("reference"),
         ),
         DESKTOP_FROM_NEW_APPROVAL,
+    )
+
+
+def _ask_desktop_owner(
+    exc: Exception,
+    list_owners: Callable[[], Sequence[str]],
+    *,
+    gui_user: str,
+    yes: bool,
+    input_func: Callable[[str], str],
+    print_func: Callable[[str], None],
+) -> str:
+    """Which of several signed-in desktops this project may use, asked with `new`'s other questions (SYRD-778).
+
+    There is no default: guessing one person's session for another is what the refusal existed to prevent, so Enter
+    alone answers nothing. A `--desktop-gui-user` that is not one of them was a wrong answer, not a missing one;
+    under `--yes`, or with nobody to answer, there is no default to take -- each is refused as before, naming the
+    flag that answers it."""
+    from scripts import new_project_questions
+
+    try:
+        owners = sorted(dict.fromkeys(str(owner) for owner in list_owners()))
+    except Exception:  # noqa: BLE001 - nothing listed is nothing to offer
+        owners = []
+    if gui_user or yes or len(owners) < 2 or not new_project_questions.can_ask(input_func):
+        raise SystemExit(f"switchyard: {exc}") from exc
+    print_func(f"switchyard: {len(owners)} accounts are signed into this host's desktop ({', '.join(owners)}); "
+               "say which one this project may use. Its screenshots and clipboard go through that session")
+    return new_project_questions.ask_choice(
+        "Desktop user",
+        options=[(owner, f"{owner}'s desktop session") for owner in owners],
+        input_func=input_func,
+        print_func=print_func,
     )
 
 

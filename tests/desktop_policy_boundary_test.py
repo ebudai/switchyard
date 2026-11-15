@@ -186,7 +186,16 @@ def test_the_new_project_decision_in_its_order() -> None:
     def ambiguous(preferred: str) -> str:
         raise DesktopAccessError("syrd326: two desktops")
 
-    ambiguity = resolve(owner_resolver=ambiguous, owners_lister=lambda: [ME, "syrd326-other"])
+    two = lambda: [ME, "syrd326-other"]  # noqa: E731
+    # SYRD-778: several desktops are asked about, with no default; refused under --yes or for a wrong name.
+    ambiguity = resolve(owner_resolver=ambiguous, owners_lister=two, yes=True)
+    ambiguity_named = resolve(owner_resolver=ambiguous, owners_lister=two, gui_user="syrd326-absent")
+    asked: list[str] = []
+    with patched(team_launcher, read_host_desktop_approval=lambda path=None: {}):
+        reply = answers("", "syrd326-other", "2")
+        ambiguity_asked = resolve(owner_resolver=ambiguous, owners_lister=two,
+                                  input_func=lambda prompt: asked.append(prompt) or reply(prompt))
+    # SYRD-778: --yes on a host with no desktop takes the question's default, headless.
     ambiguity_yes = resolve(owner_resolver=ambiguous, owners_lister=lambda: [], yes=True)
     chose_headless = resolve(owner_resolver=ambiguous, owners_lister=lambda: [], input_func=answers("y"))
     declined = resolve(owner_resolver=ambiguous, owners_lister=lambda: [], input_func=answers("n"))
@@ -210,10 +219,18 @@ def test_the_new_project_decision_in_its_order() -> None:
     check(both[0] is None and "not both" in both[1], f"--headless with --desktop-policy is refused: {both}")
     check(headless_option[:2] == ({"mode": "headless"}, "headless_option") and headless_flag[1] == "headless_option",
           f"then --headless: {headless_option} {headless_flag}")
-    check(ambiguity[0] is None and ambiguity[1] == "switchyard: syrd326: two desktops",
-          f"an ambiguous host stops, even interactively, and is never guessed: {ambiguity}")
-    check(ambiguity_yes[0] is None and ambiguity_yes[1] == "switchyard: syrd326: two desktops",
-          f"and --yes stops on a headless host rather than choose for anyone: {ambiguity_yes}")
+    check(ambiguity[0] is None and ambiguity[1] == "switchyard: syrd326: two desktops"
+          and ambiguity_named[0] is None and ambiguity_named[1] == "switchyard: syrd326: two desktops",
+          f"an ambiguous host is never guessed: --yes, or a named desktop not signed in, stops: {ambiguity} "
+          f"{ambiguity_named}")
+    check(ambiguity_asked[:2] == ({"mode": "headless"}, "chosen_headless")
+          and asked == ["Desktop user: ", "Desktop user: ", "Desktop access [desktop]: "]
+          and any("syrd326-other's desktop session" in line for line in ambiguity_asked[2])
+          and any("syrd326-other's session" in line for line in ambiguity_asked[2]),
+          f"interactively, which desktop is asked, with no default (Enter answers nothing), and the chosen one's "
+          f"access is then asked as for any desktop (SYRD-778): {ambiguity_asked} {asked}")
+    check(ambiguity_yes[:2] == ({"mode": "headless"}, "chosen_headless"),
+          f"and --yes on a host with no desktop takes the default, headless, which grants nothing: {ambiguity_yes}")
     check(chose_headless[:2] == ({"mode": "headless"}, "chosen_headless")
           and declined[0] is None and "headless was declined" in declined[1],
           f"a host with no desktop offers headless, and declining it provisions nothing: {chose_headless} {declined}")

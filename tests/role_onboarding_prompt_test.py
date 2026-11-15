@@ -216,7 +216,9 @@ def test_every_runtime_start_shape_receives_the_prompt() -> None:
         assert result is not None, payload
         assert "Never touch prod on Friday." in _context_text(result), payload
 
-    for continued in sorted(hook.SESSION_START_ACTIVE_WORK_SOURCES):
+    # SYRD-788: a cleared session has no context at all, so it is told its remit too; resumed and compacted ones
+    # keep what they had.
+    for continued in sorted(hook.SESSION_START_ACTIVE_WORK_SOURCES - {"clear"}):
         result = hook._session_start_additional_context_output(
             target=f"{PROJECT}-ops:0.0",
             payload={"source": continued},
@@ -224,6 +226,9 @@ def test_every_runtime_start_shape_receives_the_prompt() -> None:
         )
         text = _context_text(result) if result else ""
         assert "Never touch prod on Friday." not in text, continued
+    cleared = hook._session_start_additional_context_output(
+        target=f"{PROJECT}-ops:0.0", payload={"source": "clear"}, environ={"TICKET_BOARD_PROJECT": PROJECT, **environ})
+    assert cleared is not None and "Never touch prod on Friday." in _context_text(cleared), cleared
 
 
 def test_a_stored_prompt_is_delivered_without_a_skill_sentence() -> None:

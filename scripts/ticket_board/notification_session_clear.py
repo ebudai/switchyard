@@ -50,6 +50,22 @@ TERMINAL_WITHOUT_CONVERSATION = "terminal_notice_without_conversation"
 #: into it. Short, because the clear is a local composer action; non-zero,
 #: because the message that follows is the whole point of the clear.
 DEFAULT_SESSION_CLEAR_SETTLE_SECONDS = 0.5
+#: The roles whose job is not to build what a notice names, each with the skill that carries its remit (SYRD-788).
+ROLE_SKILLS = {"router": "switchyard-router", "librarian": "switchyard-librarian"}
+#: What such a role's cleared session reads first, before the ticket's notice. A cleared conversation knows nothing,
+#: and a bare "<ticket> entered Implementation" reads as an assignment to build: Router's first cleared session
+#: implemented SYRD-785 instead of routing it (SYRD-788). Claude and Codex also hear the role's onboarding from the
+#: SessionStart hook at the clear; agy and Hermes run none there, so this line is what every runtime is told. An
+#: implementer's notice is its assignment, so it still arrives verbatim (SYRD-106).
+CLEARED_PREFACE = ("You are the {role} role, and your session was just cleared for this ticket. Before anything else, "
+                   "load the {skill} skill and follow it, and your role's onboarding: act on this ticket only as {role}.")
+
+
+def cleared_preface(role: str) -> str:
+    """The line a cleared `role` reads before its notice, or "" for a role whose notice is its assignment."""
+    skill = ROLE_SKILLS.get(role)
+    return CLEARED_PREFACE.format(role=role, skill=skill) if skill else ""
+
 
 class NotificationSessionClear:
     def __init__(
@@ -80,6 +96,8 @@ class NotificationSessionClear:
         self.boundary = boundary or (lambda target: hermes_ticket_boundary.open_reason(target))
         #: Whether a ticket is in a terminal stage now (SYRD-734).
         self.terminal = terminal
+        #: (ticket, role) cleared and not yet told its role: the next notice delivered to it is (SYRD-788).
+        self.cleared: set[tuple[str, str]] = set()
 
     def _session_clear_is_due(self, conn: Any, ticket_id: str, target_role: str, kind: str, payload: str) -> bool:
         """Whether this delivery is the first handoff of this ticket to an ephemeral role.
@@ -136,7 +154,12 @@ class NotificationSessionClear:
                                                role=target_role, now=time.time(), handoff=handoff)
 
     def announced(self, conn: Any, ticket_id: str, target_role: str, kind: str, message: str) -> str:
-        """The notice as it is delivered: a continued ticket's hand-off says so first (SYRD-626)."""
+        """The notice as it is delivered: a cleared session is told its role first (SYRD-788), and a continued
+        ticket's hand-off says so first (SYRD-626)."""
+        if (ticket_id, target_role) in self.cleared:
+            self.cleared.discard((ticket_id, target_role))
+            if cleared_preface(target_role):
+                return f"{cleared_preface(target_role)}\n\n{message}"
         if kind not in SESSION_CLEAR_KINDS or target_role not in self.ephemeral_roles():
             return message
         return context_continuation.announced(conn, ticket_id, target_role, message)
@@ -275,6 +298,7 @@ class NotificationSessionClear:
                 )
             return False
         recorded = self._record_session_clear(conn, ticket_id, target_role)
+        self.cleared.add((ticket_id, target_role))
         self.ledger.trace(
             conn,
             notification_id=notification_id,

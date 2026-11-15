@@ -964,25 +964,26 @@ def _session_start_additional_context_output(
     # session-start event an absent label means a plain start, not an unknown
     # one. Resumption is still detected: it comes from the launcher's tracked
     # id, not from the payload.
-    fresh_start = (
-        session_start_source in {"", SESSION_START_FRESH_SOURCE}
-        and not resume_session_id.strip()
-    )
+    # A cleared session knows nothing either, whatever its launch resumed: an ephemeral role cleared into its next
+    # ticket hears its onboarding first, then any active work (SYRD-788; Router routed nothing without it).
+    cleared = session_start_source == "clear"
+    fresh_start = cleared or (session_start_source in {"", SESSION_START_FRESH_SOURCE} and not resume_session_id.strip())
     # A stored prompt is the director's own words for this role, so it wins over the
     # packaged remit file. Both are gated on fresh_start: a prompt changed mid-session is
     # picked up by the next fresh conversation or an explicit restart, never by
     # interrupting or silently rewriting the one that is running.
     onboarding_prompt = environ.get("TICKET_BOARD_ROLE_ONBOARDING_PROMPT", "").strip()
+    onboarding, remit = environ.get("TICKET_BOARD_ROLE_ONBOARDING", "").strip(), ""
+    opening = f"Your {role} session was cleared for its next ticket." if cleared else f"Your {role} session started."
     if onboarding_prompt and fresh_start:
-        return _session_start_context(f"Your {role} session started.\n\n{onboarding_prompt}")
-    onboarding = environ.get("TICKET_BOARD_ROLE_ONBOARDING", "").strip()
-    if onboarding and fresh_start:
+        remit = f"{opening}\n\n{onboarding_prompt}"
+    elif onboarding and fresh_start:
         path = Path(onboarding)
         if not path.is_absolute() or not path.is_file():
             raise ValueError(f"configured role onboarding is unavailable: {path}")
-        return _session_start_context(
-            f"Your {role} session started. Read your role remit at {path}.\n\n" + path.read_text()
-        )
+        remit = f"{opening} Read your role remit at {path}.\n\n" + path.read_text()
+    if remit and not cleared:
+        return _session_start_context(remit)
     if session_start_source not in SESSION_START_ACTIVE_WORK_SOURCES:
         # A fresh role session with nothing of its own to say now says nothing.
         # It used to emit the skill pointer alone, which is the repetition this
@@ -995,10 +996,9 @@ def _session_start_additional_context_output(
     ticket = _active_in_progress_ticket_for_role(role, board_url=board_url,
                                                  unless_pull=session_start_source == "resume")
     if ticket is None:
-        return None
-    return _session_start_context(
-        _resume_context_for_ticket(ticket, board_url=board_url, source=session_start_source)
-    )
+        return _session_start_context(remit) if remit else None
+    work = _resume_context_for_ticket(ticket, board_url=board_url, source=session_start_source)
+    return _session_start_context(f"{remit}\n\n{work}" if remit else work)
 
 
 def _hermes_pre_llm_context_output(

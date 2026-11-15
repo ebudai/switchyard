@@ -437,6 +437,138 @@ def test_install_never_grants_the_runtime_and_takes_earlier_grants_back() -> Non
         h.compositor.close()
 
 
+def _payload(p):
+    return {'policy': p, 'helper': (ROOT / 'scripts/desktop_access.py').read_text(), 'python': sys.executable}
+
+
+def _old_install(h, name, p, helper_text):
+    """A tenant's install as SYRD-791's interim revocation left it: files in place, its service stopped."""
+    home = Path(h.gui.pw_dir)
+    for path, text in ((home / '.config/switchyard/desktop-access' / f'{name}.json', json.dumps(p)),
+                       (home / '.local/lib/switchyard/desktop-access' / f'{name}.py', helper_text),
+                       (home / '.config/systemd/user' / f'{name}.service', '[Service]\nExecStart=old\n')):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    return home / '.local/lib/switchyard/desktop-access' / f'{name}.py'
+
+
+def test_installing_tenants_in_turn_leaves_every_grant_effective() -> None:
+    """SYRD-796: root's ensure_grant_dir ran before each install and chmod-ed the directory, which set its ACL mask to
+    ---: mefp's and pie's grants were in place and did nothing, and the next grant was refused."""
+    raw, h = host()
+    third = SimpleNamespace(pw_name='violet-worker', pw_uid=62003, pw_dir=str(h.root / 'third-home'))
+    h.accounts[third.pw_name] = third
+    h.uids.add(third.pw_uid)
+    with raw, h.fixtures():
+        refused = []
+        for who, project in ((h.tenant, 'cerulean'), (h.second, 'amber'), (third, 'violet')):
+            p = policy(who.pw_name, project)
+            desktop.ensure_grant_dir(h.gui)  # root's step, on every install
+            h.on_enable = lambda p=p: desktop.apply(p)
+            try:
+                desktop.install_owner(_payload(p))
+            except desktop.DesktopAccessError as exc:  # what the live second install met
+                refused.append(f'{project}: {exc}')
+        effective = {who.pw_name: desktop.effective_acl(h.grant, who.pw_uid) for who in (h.tenant, h.second, third)}
+        check(not refused and effective == {'cerulean-worker': 1, 'amber-worker': 1, 'violet-worker': 1},
+              f'after three installs in turn every tenant can still traverse the grant directory: {effective} {refused}')
+        desktop.ensure_grant_dir(h.gui)
+        entries = desktop.acl_map(desktop.read_acl(h.grant))
+        check(entries.get('mask:') == '--x' and all(desktop.effective_acl(h.grant, w.pw_uid) == 1 for w in (h.tenant, h.second, third))
+              and stat.S_IMODE(h.grant.stat().st_mode) & 0o007 == 0 and entries.get('group:') == '---',
+              f'and another of root\'s passes keeps them so, the owner\'s own and nobody else\'s: {entries}')
+        h.compositor.close()
+
+
+def test_a_failed_upgrade_never_restarts_a_helper_from_before_syrd_791() -> None:
+    """SYRD-796: sapi's upgrade failed, the failure path put its pre-791 helper back and restarted it, and that helper
+    granted --x on the desktop user's runtime again."""
+    raw, h = host()
+    with raw, h.fixtures():
+        p = policy()
+        name = desktop.names(p)[2]
+        helper = _old_install(h, name, p, '# a desktop access helper from before SYRD-791\n')
+        desktop.grant(h.runtime, h.tenant.pw_uid, '--x')  # what that helper granted while it ran
+        h.systemctl.clear()
+        with patch.object(desktop, 'wait_for_service_grant',
+                          side_effect=desktop.DesktopAccessError('fixture: the service granted nothing within 20s')):
+            try:
+                desktop.install_owner(_payload(p))
+                outcome = 'installed'
+            except desktop.DesktopAccessError as exc:
+                outcome = str(exc)
+        unit = f'{name}.service'
+        after_failure = h.systemctl[max(i for i, c in enumerate(h.systemctl) if 'disable' in c and unit in c):] \
+            if any('disable' in c and unit in c for c in h.systemctl) else h.systemctl
+        check('granted nothing' in outcome and not any('restart' in c and unit in c for c in after_failure)
+              and any(c[:4] == ['systemctl', '--user', 'disable', '--now'] and unit in c for c in h.systemctl),
+              f'the failed upgrade stops the service and never restarts the old helper: {h.systemctl}')
+        check(desktop.SECURITY_CONTEXT_INTERFACE in helper.read_text() and h.acl(h.runtime) is None,
+              "the old helper is not put back, and the runtime keeps no entry of the tenant's")
+        # The same failure over this release's helper still puts the working install back.
+        helper.write_text(_payload(p)['helper'])
+        h.systemctl.clear()
+        with patch.object(desktop, 'wait_for_service_grant',
+                          side_effect=desktop.DesktopAccessError('fixture: the service granted nothing within 20s')):
+            try:
+                desktop.install_owner(_payload(p))
+            except desktop.DesktopAccessError:
+                pass
+        check(['systemctl', '--user', 'restart', unit] in h.systemctl and h.acl(h.runtime) is None,
+              f'a failure over the same helper restarts it, as before: {h.systemctl}')
+        h.compositor.close()
+
+
+def test_a_refused_upgrade_still_stops_the_tenants_own_service_from_before_syrd_791() -> None:
+    """Audit of 7b4f604b: an upgrade refused before install_owner's `try` (no security-context manager, or no one
+    socket to choose) left the tenant's own pre-791 service enabled, re-granting the runtime within 5 s."""
+    for label, make in (('a compositor without the security-context manager',
+                         lambda root: Host(root, security_context=False)),
+                        ('two compositor sockets and none chosen', lambda root: Host(root))):
+        raw = tempfile.TemporaryDirectory(prefix='syrd796.')
+        with raw:
+            h = make(Path(raw.name))
+            second = FakeCompositor(h.runtime / 'wayland-8') if label.startswith('two') else None
+            with h.fixtures():
+                p = policy()
+                name = desktop.names(p)[2]
+                helper = _old_install(h, name, p, '# a desktop access helper from before SYRD-791\n')
+                desktop.grant(h.runtime, h.tenant.pw_uid, '--x')  # what that helper grants every pass
+                h.systemctl.clear()
+                try:
+                    desktop.install_owner(_payload(p))
+                    outcome = 'installed'
+                except desktop.DesktopAccessError as exc:
+                    outcome = str(exc)
+                check(outcome != 'installed', f'{label}: the upgrade is refused: {outcome}')
+                check(['systemctl', '--user', 'disable', '--now', f'{name}.service'] in h.systemctl
+                      and h.acl(h.runtime) is None,
+                      f"{label}: and still the tenant's own pre-791 service is stopped and the runtime keeps no entry "
+                      f'of its: {h.systemctl} {h.acl(h.runtime)}')
+                check(helper.read_text().startswith('# a desktop access helper from before'),
+                      f'{label}: its files stay for the next upgrade to replace')
+            if second:
+                second.close()
+            h.compositor.close()
+
+
+def test_install_stops_this_owners_services_from_before_syrd_791() -> None:
+    raw, h = host()
+    with raw, h.fixtures():
+        p = policy()
+        old_name = desktop.names(policy(h.second.pw_name, 'amber'))[2]
+        new_name = desktop.names(policy(h.second.pw_name, 'amber-two'))[2]
+        _old_install(h, old_name, policy(h.second.pw_name, 'amber'), '# from before SYRD-791\n')
+        _old_install(h, new_name, policy(h.second.pw_name, 'amber-two'), _payload(p)['helper'])
+        h.on_enable = lambda: desktop.apply(p)
+        h.systemctl.clear()
+        desktop.install_owner(_payload(p))
+        check(['systemctl', '--user', 'disable', '--now', f'{old_name}.service'] in h.systemctl
+              and not any(f'{new_name}.service' in c for c in h.systemctl),
+              f"another tenant's service from before SYRD-791 is stopped; one on this release is left alone: {h.systemctl}")
+        h.compositor.close()
+
+
 def test_a_launch_with_no_desktop_socket_says_so_plainly() -> None:
     raw, h = host()
     with raw, h.fixtures():

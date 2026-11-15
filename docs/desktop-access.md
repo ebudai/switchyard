@@ -235,7 +235,16 @@ project/tenant-specific systemd user unit:
 The helper is copied from the reviewed release, so a private source checkout or
 temporary exported release is not a runtime dependency. Existing unmanaged units
 are refused. Setup verifies systemd activation before reporting success. An
-installation failure rolls back its new ACLs and managed files.
+installation failure rolls back its new ACLs and managed files. It puts the
+previous install back and restarts it only when that install ran the same
+helper. A helper from an earlier release may grant the runtime (as before
+SYRD-791), so such a service stays stopped and the tenant has no desktop access
+until the next upgrade (SYRD-796). First of all, before any check that could
+refuse it, install stops every one of the owner's grant services still running a
+helper from before SYRD-791, the tenant's own included, and removes every
+tenant's entries from the runtime. So even a refused upgrade leaves no old helper
+re-granting the runtime. A successful install starts the tenant's new service
+itself; the others are replaced by their own upgrades.
 
 The GUI-owned service starts with the user manager and checks every five seconds
 for the approved session/socket. It reapplies after socket recreation or a later
@@ -302,7 +311,12 @@ directory under it (0700) when it installs desktop access, and writes
 `/etc/tmpfiles.d/switchyard-desktop*.conf` so both are made again at boot. No
 account can claim the name first, because the parent is root's. Every reader
 checks the parent is root's and the directory the owner's, neither writable by
-anyone else. With that layout the tenant matches the table's "no grant" column
+anyone else. Root's pass at each install never changes the mode of an existing
+grant directory with `chmod`: on a directory with ACL entries that would set the
+mask to `---` and make every earlier tenant's grant ineffective. It sets the
+owner, group and other classes with `setfacl`, which recomputes the mask from the
+grants' entries, so N tenants installed in turn all keep their grants
+(SYRD-796). With that layout the tenant matches the table's "no grant" column
 for the runtime: no PipeWire, no PulseAudio, no bus, nothing else of the
 owner's.
 

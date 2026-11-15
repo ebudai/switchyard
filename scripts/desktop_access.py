@@ -513,13 +513,21 @@ def ensure_grant_dir(gui) -> Path:
     if os.geteuid() != BASE_OWNER_UID:
         return grant_dir_for(gui)
     directory = grant_dir(gui)
-    for path, owner, mode in ((DESKTOP_BASE, BASE_OWNER_UID, 0o755), (directory, gui.pw_uid, 0o700)):
-        if not os.path.lexists(path):
-            os.mkdir(path, mode)
-            os.chown(path, owner, -1)
-        os.chmod(path, mode, follow_symlinks=False)
-    grant_dir_for(gui)
     group = getattr(gui, 'pw_gid', gui.pw_uid)
+    if not os.path.lexists(DESKTOP_BASE):
+        os.mkdir(DESKTOP_BASE, 0o755)
+        os.chown(DESKTOP_BASE, BASE_OWNER_UID, BASE_OWNER_UID)
+    if os.path.isdir(DESKTOP_BASE) and not os.path.islink(DESKTOP_BASE):
+        os.chmod(DESKTOP_BASE, 0o755)  # root's own; no grant is ever made on it
+    if not os.path.lexists(directory):
+        os.mkdir(directory, 0o700)
+        os.chown(directory, gui.pw_uid, group)
+    elif os.path.isdir(directory) and not os.path.islink(directory):
+        # Never chmod it: its tenants' grants are ACL entries, and a chmod sets the ACL mask from the group bits, ---,
+        # which makes every earlier grant ineffective and has the next one refused as broadening them (SYRD-796).
+        # setfacl sets the owner, group and other classes and recomputes the mask from the entries the grants made.
+        run(['setfacl', '-m', 'u::rwx,g::---,o::---', str(directory)])
+    grant_dir_for(gui)
     TMPFILES_DIR.mkdir(parents=True, exist_ok=True)
     for name, line in (('switchyard-desktop.conf', f'd {DESKTOP_BASE} 0755 {BASE_OWNER_UID} {BASE_OWNER_UID} -\n'),
                        (f'switchyard-desktop-{gui.pw_uid}.conf', f'd {directory} 0700 {gui.pw_uid} {group} -\n')):
@@ -923,7 +931,19 @@ def install_owner(payload):
     gui,tenant,name = names(policy)
     if os.geteuid() != gui.pw_uid:
         raise DesktopAccessError('Policy installation must run as GUI owner')
-    runtime = runtime_for(gui)
+    # First, before anything that can refuse this install: every one of this owner's services still running a helper
+    # from before SYRD-791 -- this tenant's own included -- is stopped, and no tenant of the owner keeps an entry on
+    # the runtime or its Wayland sockets. An old helper re-grants the runtime every pass, so an install refused below
+    # must not leave it running (SYRD-796, Audit). On success the install's own `enable --now` starts the new helper.
+    stop_pre_791_services(gui)
+    try:
+        runtime = runtime_for(gui)
+    except (DesktopAccessError, OSError):
+        runtime = None
+    if runtime is not None:
+        revoke_runtime_entries(runtime, owner_tenant_uids(gui) | {tenant.pw_uid})
+    else:
+        runtime = runtime_for(gui)  # the refusal, as before, now that nothing old is left running
     policy_path = Path(gui.pw_dir)/'.config/switchyard/desktop-access'/(name+'.json')
     helper_path = Path(gui.pw_dir)/'.local/lib/switchyard/desktop-access'/(name+'.py')
     unit_path = Path(gui.pw_dir)/'.config/systemd/user'/(name+'.service')
@@ -949,8 +969,6 @@ WantedBy=default.target
     directory = grant_dir_for(gui)
     # Installs left by tenants whose account is gone: their service, files and receipt (SYRD-791).
     remove_orphan_installs(gui, directory, runtime)
-    # Grants from before SYRD-791 put this owner's tenants on the runtime and its Wayland sockets: none stays.
-    revoke_runtime_entries(runtime, owner_tenant_uids(gui))
     # Refused before anything is written: a compositor that cannot sandbox the tenant gets no grant at all.
     compositor = selected_socket(policy, gui, runtime)
     if not offers_security_context(compositor):
@@ -974,17 +992,26 @@ WantedBy=default.target
         # The service holds the tenant's security context, so the grant is ready when its receipt says so.
         wait_for_service_grant(policy, gui, directory, name)
     except Exception:
-        if not was_installed:
+        # The previous install is put back and restarted only when it ran this release's helper. An older helper may
+        # be from before SYRD-791 and grant the desktop user's runtime and Wayland socket: restarting it after a failed
+        # upgrade is how sapi-agent regained --x on /run/user/1000 (SYRD-796). Such a service stays stopped, with the
+        # new files in place for the next upgrade, and the tenant has no desktop access until then.
+        same_helper = was_installed and previous[helper_path] == payload['helper'].encode()
+        if not same_helper:
             subprocess.run(['systemctl','--user','disable','--now',name+'.service'],capture_output=True)
-            rollback(policy)
-        for path,content in previous.items():
-            if content is None:
-                path.unlink(missing_ok=True)
-            else:
-                path.write_bytes(content)
+            with contextlib.suppress(DesktopAccessError, OSError):
+                rollback(policy)
+        if same_helper or not was_installed:
+            for path,content in previous.items():
+                if content is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.write_bytes(content)
         subprocess.run(['systemctl','--user','daemon-reload'],capture_output=True)
-        if was_installed:
+        if same_helper:
             subprocess.run(['systemctl','--user','restart',name+'.service'],capture_output=True)
+        with contextlib.suppress(DesktopAccessError, OSError):
+            revoke_runtime_entries(runtime, owner_tenant_uids(gui))
         raise
 
 
@@ -1013,6 +1040,26 @@ def wait_for_service_grant(policy, gui, directory, name, *, timeout=SERVICE_GRAN
 
 
 GRANT_FILE = re.compile(r'switchyard-desktop-(\d+)-(\d+)-([a-z0-9][a-z0-9_-]*)')
+
+
+def stop_pre_791_services(gui) -> list[str]:
+    """Stop and disable this owner's grant services whose helper predates SYRD-791, the one being upgraded included:
+    that helper grants the desktop user's runtime and Wayland socket. Their files stay for an upgrade to replace.
+    A service on a current helper is left alone. Returns the names stopped."""
+    stopped = []
+    for unit in sorted((Path(gui.pw_dir) / '.config/systemd/user').glob(f'switchyard-desktop-{gui.pw_uid}-*.service')):
+        name = unit.name[:-len('.service')]
+        helper = Path(gui.pw_dir) / '.local/lib/switchyard/desktop-access' / (name + '.py')
+        if not GRANT_FILE.fullmatch(name):
+            continue
+        try:
+            current_code = SECURITY_CONTEXT_INTERFACE in helper.read_text(errors='replace')
+        except OSError:
+            current_code = False
+        if not current_code:
+            subprocess.run(['systemctl', '--user', 'disable', '--now', unit.name], capture_output=True)
+            stopped.append(name)
+    return stopped
 
 
 def owner_tenant_uids(gui) -> set[int]:

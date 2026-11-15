@@ -266,7 +266,8 @@ def from_environment(
         project=project,
         owner=owner.pw_name,
         owner_uid=owner.pw_uid,
-        locate=lambda: desktop.runtime_for(owner),
+        # The owner's grant directory, outside its runtime, where its handoffs are (SYRD-791).
+        locate=lambda: desktop.grant_dir_for(owner),
         ledger_path=Path(runtime) / f"switchyard-image-handoffs-{project}.json" if runtime else None,
     )
 

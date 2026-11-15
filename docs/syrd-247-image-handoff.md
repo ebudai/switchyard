@@ -78,7 +78,9 @@ echoed.
 
 ### Where it lands
 
-The image goes in `<gui runtime>/switchyard-paste/<project>/`:
+The image goes in `<grant directory>/switchyard-paste/<project>/`. Since SYRD-791 the grant directory is
+`/run/switchyard-desktop/<gui-uid>/`, which root makes, and not the GUI runtime: `--x` on a runtime reaches
+its PipeWire and PulseAudio sockets (see desktop-access.md).
 
 | path | owner | mode and ACL | tenant may |
 |---|---|---|---|

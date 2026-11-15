@@ -25,6 +25,7 @@ import pwd
 import subprocess
 import sys
 import tempfile
+from unittest.mock import patch
 import time
 from pathlib import Path
 
@@ -216,7 +217,7 @@ def test_a_deposit_writes_the_image_then_its_manifest_and_grants_each() -> None:
             return desktop_access.grant(path, uid, perms)
 
         result = paste_image.deposit("imgproj", "app", clipboard=Board(), uid=ME.pw_uid, home=home,
-                                     runtime_for=lambda _user: runtime, grant=grant, clock=lambda: 1000.0,
+                                     grant_dir_for=lambda _user: runtime, grant=grant, clock=lambda: 1000.0,
                                      token=lambda: "ab" * 16)
         leaf = runtime / "switchyard-paste" / "imgproj"
         stem = "paste-" + "ab" * 16
@@ -233,6 +234,24 @@ def test_a_deposit_writes_the_image_then_its_manifest_and_grants_each() -> None:
         assert desktop_access.effective_acl(leaf, 0) == 5 and desktop_access.effective_acl(leaf.parent, 0) == 1
 
 
+def test_a_deposit_lands_in_the_grant_directory_never_the_runtime() -> None:
+    """SYRD-791: a tenant's `--x` on the owner's runtime reaches its PipeWire and PulseAudio, so handoffs live in the
+    grant directory. Even with a runtime the tenant could traverse, nothing is written there."""
+    with tempfile.TemporaryDirectory() as tmp:
+        home, grant_dir, _grants = _deposit_fixture(Path(tmp))
+        runtime = Path(tmp) / "owner-runtime"
+        runtime.mkdir(mode=0o700)
+        desktop_access.grant(runtime, 0, "--x")
+        with patch.object(desktop_access, "runtime_for", lambda _user: runtime):
+            paste_image.deposit("imgproj", "app", clipboard=Board(), uid=ME.pw_uid, home=home,
+                                grant_dir_for=lambda _user: grant_dir, token=lambda: "cd" * 16)
+        leaf = grant_dir / "switchyard-paste" / "imgproj"
+        landed = sorted(os.listdir(leaf)) if leaf.is_dir() else []  # nothing there reads as empty, not as a crash
+        assert landed == [f"paste-{'cd' * 16}.handoff.json", f"paste-{'cd' * 16}.png"], \
+            f"the image is in the grant directory: {landed}"
+        assert not (runtime / "switchyard-paste").exists(), "and nothing is written in the owner's runtime"
+
+
 def test_a_failed_grant_leaves_nothing_behind() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         home, runtime, _grants = _deposit_fixture(Path(tmp))
@@ -245,7 +264,7 @@ def test_a_failed_grant_leaves_nothing_behind() -> None:
             return desktop_access.grant(path, uid, perms)
 
         message = raises(paste_image.PasteImageError, paste_image.deposit, "imgproj", "app", clipboard=Board(),
-                         uid=ME.pw_uid, home=home, runtime_for=lambda _u: runtime, grant=grant)
+                         uid=ME.pw_uid, home=home, grant_dir_for=lambda _u: runtime, grant=grant)
         assert "nothing was left behind" in message and "setfacl refused" in message, message
         assert os.listdir(runtime / "switchyard-paste" / "imgproj") == []
 
@@ -256,12 +275,12 @@ def test_nothing_is_read_or_written_for_a_bad_name_or_an_unapproved_caller() -> 
         board = Board()
         for project, role in (("imgproj", "../app"), ("Img proj", "app"), ("imgproj", "")):
             raises(paste_image.PasteImageError, paste_image.deposit, project, role, clipboard=board,
-                   uid=ME.pw_uid, home=home, runtime_for=lambda _u: runtime)
+                   uid=ME.pw_uid, home=home, grant_dir_for=lambda _u: runtime)
         raises(paste_image.PasteImageError, paste_image.deposit, "unknown", "app", clipboard=board,
-               uid=ME.pw_uid, home=home, runtime_for=lambda _u: runtime)
+               uid=ME.pw_uid, home=home, grant_dir_for=lambda _u: runtime)
         empty = Board(data=b"")
         assert "was empty" in raises(paste_image.PasteImageError, paste_image.deposit, "imgproj", "app",
-                                     clipboard=empty, uid=ME.pw_uid, home=home, runtime_for=lambda _u: runtime)
+                                     clipboard=empty, uid=ME.pw_uid, home=home, grant_dir_for=lambda _u: runtime)
         assert board.reads == 0 and not (runtime / "switchyard-paste").exists()
 
 

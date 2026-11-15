@@ -243,14 +243,88 @@ login; no compositor-specific service name is hard-coded. A missing desktop
 leaves the service pending and blocks clipboard-enabled role startup. GUI logout
 is not required to test an upgrade and should not interrupt working sessions.
 
-Only an execute ACL on the GUI runtime directory and a read/write ACL on the
-selected socket are applied for the approved tenant. Unrelated ACL entries are
-retained. If expanding the ACL mask would broaden another entry's effective
-access, setup refuses it for operator review. There is no xhost grant, Xauthority
-copy, default ACL, recursive permission change, or shared private credential.
+**The tenant never gets the compositor's own socket (SYRD-791).** A client of the
+desktop owner's Wayland socket is offered every global the owner's own apps are
+offered. On KWin 6.8.2, an account with only an ACL on that socket listed every
+window with its title (`org_kde_plasma_window_management`) and typed into the
+focused window (`org_kde_kwin_fake_input`), with no prompt. The service instead
+holds a `wp_security_context_v1` listener per tenant: a socket the owner opens,
+which KWin treats as a sandbox, the same mechanism Flatpak uses. It lives in
+the desktop owner's grant directory (below) as
+`switchyard-desktop-<gui-uid>-<tenant-uid>-<project>.wayland`, or at a shorter
+name derived from that when the path would not fit a socket address. Its
+sandbox engine is `org.switchyard.desktop-access`, its app id the tenant account
+and its instance id the project. The listener lasts as long as the service, and
+the service registers a new one whenever the compositor's socket is replaced. A
+compositor that offers no `wp_security_context_manager_v1` gets no grant at all:
+install refuses and says to choose headless, rather than falling back to the
+compositor's socket.
 
-A protected GUI-owned readiness receipt in the GUI runtime records the approved
-policy digest and socket identity. The tenant cannot authorize itself by editing
+What a tenant is offered, measured on KWin 6.8.2 in a disposable VM (63 globals
+on the compositor socket, 56 through the security context):
+
+| Global | Compositor socket | Security-context socket |
+|---|---|---|
+| `org_kde_plasma_window_management` (every window and title) | offered | withheld |
+| `org_kde_kwin_fake_input` (typing into the focused window) | offered | withheld |
+| `zkde_screencast_unstable_v1` (screen capture) | offered | withheld |
+| `ext_data_control_manager_v1` (the clipboard without focus) | offered | withheld |
+| `wp_security_context_manager_v1` | offered | withheld |
+| `zwlr_layer_shell_v1` (overlays) | offered | **still offered** |
+| `org_kde_plasma_shell` (panel and desktop roles) | offered | **still offered** |
+| `kde_output_management_v2` (display configuration) | offered | **still offered** |
+| `org_kde_kwin_keystate` (lock-key state) | offered | **still offered** |
+| `xdg_wm_base`, `wl_seat`, `xdg_activation_v1`, `wl_data_device_manager` | offered | offered |
+
+The last four Plasma rows are KWin's own policy for sandboxed clients. An agent
+can still draw an overlay or change the display layout, but it can no longer read
+another window, type into one, capture the screen through KWin, or read the
+clipboard. An ordinary app run as the tenant opens its windows as before.
+
+**The tenant never traverses the desktop owner's runtime (SYRD-791).** A user
+runtime (`/run/user/<uid>`) is 0700 because the sockets in it are not protected
+by their own modes. With only `--x` on it, an agent account reached the owner's
+PipeWire and PulseAudio and recorded the microphone (measured in a disposable VM
+with PipeWire 1.6.11, counts only):
+
+| As the agent | No grant | `--x` on the owner's runtime |
+|---|---|---|
+| connect `pipewire-0`, `pipewire-0-manager` | refused | connects |
+| PipeWire objects seen | — | all 54, the owner's microphone included |
+| capture from the owner's microphone (`pw-record`) | — | a running stream linked to it |
+| connect `pulse/native`; sources listed; `parecord` | refused | connects; 3 sources; linked to the microphone |
+| connect `bus` (the session bus) | refused | connects, but registration is refused: dbus serves no other uid |
+
+So the security-context sockets and the image-handoff directories live in the
+owner's **grant directory**, `/run/switchyard-desktop/<gui-uid>/`, not in the
+runtime. Root makes `/run/switchyard-desktop` (root's, 0755) and the owner's own
+directory under it (0700) when it installs desktop access, and writes
+`/etc/tmpfiles.d/switchyard-desktop*.conf` so both are made again at boot. No
+account can claim the name first, because the parent is root's. Every reader
+checks the parent is root's and the directory the owner's, neither writable by
+anyone else. With that layout the tenant matches the table's "no grant" column
+for the runtime: no PipeWire, no PulseAudio, no bus, nothing else of the
+owner's.
+
+Only an execute ACL on the grant directory and a read/write ACL on the tenant's
+security-context socket are applied. That socket is the owner's, mode 0600 apart
+from that one entry. Nothing is granted on the runtime or the compositor's
+sockets. Install removes the entries an earlier grant left there, for every
+tenant this owner has installed, and each pass of the service removes its own
+tenant's. Unrelated ACL entries are retained, except entries for uids no account
+has: those are removed from the runtime, the grant directory, the compositor's
+sockets and the security-context sockets, so a later account given the same uid
+inherits nothing. Install likewise stops and removes the
+service, policy, helper, receipt and socket of any of this owner's grants whose
+tenant account no longer exists. If expanding the ACL mask would broaden another
+entry's effective access, setup refuses it for operator review. There is no xhost
+grant, Xauthority copy, default ACL, recursive permission change, or shared
+private credential.
+
+A protected GUI-owned readiness receipt in the grant directory records the
+approved policy digest, the security-context socket and its identity, the compositor
+socket it was registered on, and the context's metadata. Install waits, up to 20
+seconds, for the service to write it, because only the service holds the context. The tenant cannot authorize itself by editing
 its own config: startup verifies the matching receipt, socket ownership/identity,
 access and a Unix-socket connection as the tenant. The probe reads no clipboard
 content. Missing ACL tools, account/runtime, permission, session, socket or active
@@ -258,14 +332,27 @@ unit produces a pre-launch failure with its cause.
 
 While it is waiting, the service logs why every five seconds (`journalctl --user
 -u switchyard-desktop-<gui-uid>-<tenant-uid>-<project>.service`, as the GUI
-owner). Where this login has already let the tenant traverse the GUI runtime, it
-also marks the receipt `pending` with that reason, and the launch error quotes
-it. Before any grant in a login the tenant cannot read the runtime at all, and
-nothing is granted just to report a reason, so the launch error names the unit
-and the journal command instead.
+owner). Where the tenant can already traverse the grant directory, it also marks
+the receipt `pending` with that reason, and the launch error quotes it. Before
+the tenant's first grant it cannot read the grant directory at all, and nothing
+is granted just to report a reason, so the launch error names the unit and the
+command to check it instead.
+
+The receipt outlives a logout, as the grant directory does until reboot. When the
+owner logs out or its compositor is gone, the service marks the receipt pending
+with the reason (for example, that the owner is not logged in) and drops the
+socket, and a launch quotes the reason.
+
+A launch with no receipt at all, for example after desktop grants were withdrawn
+by stopping the services, says plainly that the tenant has no desktop socket,
+with the command that grants it again (`switchyard upgrade <project>` with the
+approved policy) and how to check the service. A receipt from before SYRD-791,
+which names the compositor's own socket, is refused the same way, whatever ACL
+that socket still carries; the next pass of an upgraded service takes that grant
+back.
 
 For Wayland roles and their authentication commands, `WAYLAND_DISPLAY` is the
-absolute GUI socket path. `XDG_RUNTIME_DIR` remains the tenant's logind runtime;
+absolute path of the tenant's security-context socket in the grant directory. `XDG_RUNTIME_DIR` remains the tenant's logind runtime;
 the bus address also names that tenant's runtime. `DISPLAY` and `XAUTHORITY` are
 removed so inaccessible inherited X11 settings cannot win transport selection.
 No tmux global environment is changed. Headless roles remove display/clipboard
@@ -282,7 +369,8 @@ switchyard paste-image <project> <role>
 ```
 
 It runs as the GUI owner named in this project's installed policy, and as
-nobody else. It writes the image into `<gui runtime>/switchyard-paste/<project>/`,
+nobody else. It writes the image into `<grant directory>/switchyard-paste/<project>/`
+(`/run/switchyard-desktop/<gui-uid>/…`, never the GUI runtime),
 where the tenant may traverse the parent, list the project directory and read
 each file, and write nothing. The project's listener tells the role where the
 image is once its pane is idle. This GUI-owned service removes the image 15

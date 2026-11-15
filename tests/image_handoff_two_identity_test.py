@@ -48,7 +48,9 @@ BEFORE = "3d410cadd9a81835fad9422bb9513707c4140ec9"  # main before SYRD-247's re
 PROJECT = "imgproj"
 GUI, TENANT, OTHER = ("deskowner", 1000), ("tenantacct", 1019), ("othertenant", 1020)
 RUNTIME = Path("/run/user/1000")
-LEAF = RUNTIME / "switchyard-paste" / PROJECT
+#: Since SYRD-791 handoffs live in the owner's grant directory, outside its runtime: root's /run/switchyard-desktop.
+GRANT = Path("/run/switchyard-desktop/1000")
+LEAF = GRANT / "switchyard-paste" / PROJECT
 TTL = 15 * 60
 
 failures: list[str] = []
@@ -88,7 +90,7 @@ printf '/run/user/%s\\n' "$(id -u "$2")"
 #: Like an agent CLI: the submitted line lands on screen (what directorctl waits
 #: for), then the image is opened a second later, as a model's tool call would.
 PROVIDER = r"""stty -echo; while IFS= read -r line; do printf 'got: %s\n' "$line"; printf '%s\n' "$line" >> "$RECEIVED"
-p=$(printf '%s' "$line" | grep -o '/run/user/[^ ]*\.png'); sleep 1
+p=$(printf '%s' "$line" | grep -o '/run/switchyard-desktop/[^ ]*\.png'); sleep 1
 if [ -f "$p" ]; then printf 'opened %s %s\n' "$p" "$(sha256sum < "$p" | cut -d' ' -f1)" >> "$OPENED"
 else printf 'missing %s\n' "$p" >> "$OPENED"; fi; done"""
 
@@ -154,7 +156,9 @@ def py(user, code: str, *args: str, env: dict[str, str], tree: Path) -> subproce
 
 
 def namespace(base: Path) -> dict:
-    subprocess.run(["mount", "-t", "tmpfs", "-o", "mode=0755", "tmpfs", "/run/user"], check=True)
+    # A fresh /run, as root's: the owners' runtimes, and the grant directories root makes (SYRD-791).
+    subprocess.run(["mount", "-t", "tmpfs", "-o", "mode=0755", "tmpfs", "/run"], check=True)
+    Path("/run/user").mkdir(mode=0o755)
     users = [GUI, TENANT, OTHER]
     (base / "passwd").write_text("root:x:0:0::/root:/bin/sh\n" + "".join(
         f"{name}:x:{uid}:{uid}::{base / 'home' / name}:/bin/sh\n" for name, uid in users))
@@ -175,6 +179,9 @@ def namespace(base: Path) -> dict:
 
     sys.path[:0] = [str(base / "after")]
     from scripts import desktop_access
+    desktop_access.TMPFILES_DIR = base / "tmpfiles.d"  # root's /etc/tmpfiles.d is the host's
+    import pwd as _pwd
+    desktop_access.ensure_grant_dir(_pwd.getpwnam(GUI[0]))
     from scripts.ticket_board.project_provision import build_plan, render_listener_unit
 
     policy = desktop_access.generated_policy(project=PROJECT, tenant=TENANT[0], gui_user=GUI[0],
@@ -221,7 +228,7 @@ def namespace(base: Path) -> dict:
                               str(base / "after" / "scripts" / "switchyard"), "paste-image", PROJECT, "app"], gui_env)
     # The approved grant's runtime entry, exactly as the access service's
     # `apply` makes it; the socket half needs a compositor and is not involved.
-    applied = py(GUI, f"from scripts import desktop_access as d; d.grant(__import__('pathlib').Path({str(RUNTIME)!r}), {TENANT[1]}, '--x')",
+    applied = py(GUI, f"from scripts import desktop_access as d; d.grant(__import__('pathlib').Path({str(GRANT)!r}), {TENANT[1]}, '--x')",
                  env=gui_env, tree=base / "after")
     assert applied.returncode == 0, applied.stderr
     result: dict = {"unapplied": [unapplied.returncode, (unapplied.stdout + unapplied.stderr).strip()[-300:],
@@ -261,6 +268,7 @@ def namespace(base: Path) -> dict:
                      f"image, leaf = {image!r}, {str(LEAF)!r}\n"
                      "print(json.dumps({\n"
                      f"  'list_runtime': attempt(lambda: os.listdir({str(RUNTIME)!r})),\n"
+                     f"  'reach_runtime': attempt(lambda: os.stat({str(RUNTIME / 'bus')!r}) and None),\n"
                      "  'list_parent': attempt(lambda: os.listdir(os.path.dirname(leaf))),\n"
                      "  'list_leaf': attempt(lambda: sorted(os.listdir(leaf))),\n"
                      "  'read_image': attempt(lambda: hashlib.sha256(open(image, 'rb').read()).hexdigest()),\n"
@@ -283,7 +291,7 @@ def namespace(base: Path) -> dict:
             run["restart"] = [again.returncode, received.read_text().splitlines() if received.exists() else []]
             created = run.get("created_at", 0.0)
             sweep = ("from scripts import desktop_access as d; import os, json\n"
-                     f"print(json.dumps([d.sweep_handoffs({str(RUNTIME)!r}, {PROJECT!r}, now=float(sys.argv[1])), sorted(os.listdir({str(LEAF)!r}))]))")
+                     f"print(json.dumps([d.sweep_handoffs({str(GRANT)!r}, {PROJECT!r}, now=float(sys.argv[1])), sorted(os.listdir({str(LEAF)!r}))]))")
             run["sweep_early"] = json.loads(py(GUI, sweep, str(created + TTL - 2), env=gui_env, tree=tree).stdout)
             run["sweep_due"] = json.loads(py(GUI, sweep, str(created + TTL + 1), env=gui_env, tree=tree).stdout)
             # A second handoff, then the grant withdrawn: rollback removes it.
@@ -367,6 +375,8 @@ def main() -> int:
     reach = after["tenant_reach"]
     check(reach["list_runtime"] == ["refused", 13] and reach["list_parent"] == ["refused", 13],
           f"after: the tenant cannot list the owner's runtime or the handoff parent: {reach}")
+    check(reach["reach_runtime"] == ["refused", 13],
+          f"after: nor reach anything in the owner's runtime, its bus or PipeWire, as it could with --x there: {reach}")
     check(reach["list_leaf"][0] == "ok" and len(reach["list_leaf"][1]) == 2 and reach["read_image"] == ["ok", digest],
           f"after: the tenant lists its project's handoffs and reads the image: {reach}")
     check(reach["create_in_leaf"] == ["refused", 13] and reach["unlink_image"] == ["refused", 13]
@@ -379,7 +389,10 @@ def main() -> int:
     # The tenant's listener, from its shipped entry point.
     check(after["listener"][0] == 0 and after["listener"][1] == ['{"handoffs": "ImageHandoffs"}'],
           f"after: the listener's main() wires the handoffs from the tenant's own policy: {after['listener']}")
-    check(len(after["received"]) == 1 and after["received"][0].startswith("Image from deskowner's clipboard: /run/user/1000/switchyard-paste/imgproj/paste-")
+    # The longer grant-directory path takes the listener's short wording, which keeps the line direct (<= 200).
+    check(len(after["received"]) == 1
+          and after["received"][0].startswith(("Image from deskowner's clipboard: /run/switchyard-desktop/1000/switchyard-paste/imgproj/paste-",
+                                               "Image: /run/switchyard-desktop/1000/switchyard-paste/imgproj/paste-"))
           and len(after["received"][0]) <= 200,
           f"after: the role is told once, in one direct line, where its image is: {after['received']}")
     check(len(after["opened"]) == 1 and after["opened"][0].startswith("opened ") and after["opened"][0].endswith(digest),

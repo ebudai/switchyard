@@ -11,6 +11,11 @@ watcher loop, tenant verifier and launcher pre-launch check. The accounts and
 logind are fixtures, as in desktop_access_test: the GUI owner is this uid, the
 tenant a numeric uid with no account, and each login's runtime a temporary
 directory. Nothing outside the temporary directory is touched.
+
+Since SYRD-791 each compositor socket is a fake compositor that speaks Wayland
+(`fake_wayland_compositor`), and the tenant is granted the sandboxed
+security-context socket the watcher registers on the selected compositor socket
+-- never the compositor's own socket.
 """
 import contextlib
 import io
@@ -27,6 +32,8 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / 'tests'))
+from fake_wayland_compositor import FakeCompositor  # noqa: E402
 from scripts import desktop_access as desktop
 from scripts import team_launcher as launcher
 
@@ -68,6 +75,9 @@ class Host:
         self.active = False
         self.session_uid = self.gui.pw_uid
         self.accounts = {a.pw_name: a for a in (self.gui, self.tenant)}
+        # Root's /run/switchyard-desktop, here this uid's; it outlives a logout, as /run does until reboot (SYRD-791).
+        self.base = root / 'sd'
+        self.grant = self.base / str(self.gui.pw_uid)
 
     def _listen(self, path):
         server = socket.socket(socket.AF_UNIX)
@@ -83,12 +93,11 @@ class Host:
             self.start(name)
 
     def start(self, name):
-        self.servers[name] = self._listen(self.runtime / name)
+        self.servers[name] = FakeCompositor(self.runtime / name)
         (self.runtime / f'{name}.lock').write_text('')
 
     def stop(self, name):
-        self.servers.pop(name).close()
-        (self.runtime / name).unlink()
+        self.servers.pop(name).close()  # removes its socket, and the context listeners it held
         (self.runtime / f'{name}.lock').unlink()
 
     def logout(self):
@@ -114,6 +123,14 @@ class Host:
     def acl(self, path):
         return desktop.acl_map(desktop.read_acl(path)).get(f'user:{self.tenant.pw_uid}')
 
+    def context(self, name):
+        """The sandboxed socket the watcher holds for this grant, in the grant directory."""
+        return desktop.context_socket(self.grant, name)
+
+    def compositors_granted(self):
+        """Every compositor socket in the runtime that carries the tenant's grant: none, ever (SYRD-791)."""
+        return [p.name for p in desktop.wayland_sockets(self.runtime) if self.acl(p) is not None]
+
     def as_tenant(self):
         stack = contextlib.ExitStack()
         stack.enter_context(patch.object(desktop.os, 'geteuid', return_value=self.tenant.pw_uid))
@@ -122,9 +139,7 @@ class Host:
         return stack
 
     def accept(self, name):
-        """Take the verifier's probe connection off the compositor's queue."""
-        self.servers[name].settimeout(2)
-        self.servers[name].accept()[0].close()
+        """The fake compositor accepts the verifier's probe connection itself."""
 
 
 def watch_once(policy_path):
@@ -179,25 +194,32 @@ def main():
         root = Path(tmp)
         host = Host(root)
         actual = desktop.run
+        accounts = {a.pw_uid for a in host.accounts.values()}
         with patch.object(desktop.pwd, 'getpwnam', side_effect=lambda name: host.accounts[name]), \
-             patch.object(desktop, 'run', side_effect=host.run(actual)):
+             patch.object(desktop, 'account_exists', side_effect=lambda uid: uid in accounts), \
+             patch.object(desktop, 'run', side_effect=host.run(actual)), \
+             patch.object(desktop, 'DESKTOP_BASE', host.base), patch.object(desktop, 'BASE_OWNER_UID', os.getuid()), \
+             patch.object(desktop, 'TMPFILES_DIR', root / 'tmpfiles.d'):
+            desktop.ensure_grant_dir(host.gui)
             pinned = policy('wayland-0')
             name = desktop.names(pinned)[2]
             policy_path = root / 'gui-home' / f'{name}.json'
             policy_path.parent.mkdir(parents=True)
             policy_path.write_text(json.dumps(pinned))
-            receipt = host.runtime / f'{name}.json'
+            receipt = host.grant / f'{name}.json'
 
             # 1. The reboot after the upgrade: the greeter holds wayland-0 in its own
             #    runtime, the owner's session KWin listens on wayland-1 only.
             host.login('wayland-1')
             log = watch_once(policy_path)
-            check('watcher grants the owner\'s only socket when the pinned name is absent',
-                  receipt.exists() and host.acl(host.runtime / 'wayland-1') == 'rw-' and host.acl(host.runtime) == '--x',
-                  log)
+            check('watcher grants a sandboxed socket on the owner\'s only compositor socket when the pinned name is absent',
+                  receipt.exists() and host.acl(host.context(name)) == 'rw-' and host.acl(host.grant) == '--x'
+                  and host.acl(host.runtime) is None and host.compositors_granted() == [], (log, host.compositors_granted()))
             value = json.loads(receipt.read_text()) if receipt.exists() else {}
-            check('readiness receipt names the socket used and the one configured',
-                  value.get('socket') == str(host.runtime / 'wayland-1') and value.get('configured_socket') == 'wayland-0', value)
+            check('readiness receipt names the sandboxed socket, the compositor socket used and the one configured',
+                  value.get('socket') == str(host.context(name))
+                  and value.get('compositor_socket') == str(host.runtime / 'wayland-1')
+                  and value.get('configured_socket') == 'wayland-0', value)
             check('watcher reports the absent configured socket and the one it granted',
                   'configured socket wayland-0 is absent' in log and 'wayland-1' in log and 'pending' not in log, log)
             check('the greeter\'s wayland-0 in another runtime is never granted',
@@ -211,7 +233,8 @@ def main():
                     env = desktop.verify(pinned)
                 except Exception as exc:  # noqa: BLE001 - reported as the check's detail
                     env = {'error': repr(exc)}
-            check('tenant verification connects to wayland-1', env.get('WAYLAND_DISPLAY') == str(host.runtime / 'wayland-1'), env)
+            check('tenant verification connects to the sandboxed socket, not wayland-1',
+                  env.get('WAYLAND_DISPLAY') == str(host.context(name)), env)
             if 'error' not in env:
                 host.accept('wayland-1')
             check('launch pre-check passes on the moved socket', launch_error(host, pinned) == '')
@@ -224,34 +247,39 @@ def main():
             check('after logout the watcher waits and grants nothing',
                   log.startswith('Wayland access pending:') and not host.runtime.exists(), log)
             error = verify_error(host, pinned)
-            check('a launch after logout points at the service journal by unit name',
-                  f'journalctl --user -u {name}.service' in error and 'not recorded cerulean-worker as ready' in error, error)
+            check('a launch after logout says the service is waiting and why: the desktop user is logged out',
+                  'is waiting: desktop-owner is not logged in' in error and not host.context(name).exists(), error)
 
             # 3. The next login: KWin again on wayland-1, a new socket inode.
             host.login('wayland-1')
             log = watch_once(policy_path)
-            check('next login: the watcher grants the new wayland-1', receipt.exists()
-                  and host.acl(host.runtime / 'wayland-1') == 'rw-' and 'configured socket wayland-0 is absent' in log, log)
+            check('next login: the watcher registers a new sandboxed socket on the new wayland-1', receipt.exists()
+                  and host.acl(host.context(name)) == 'rw-' and host.compositors_granted() == []
+                  and json.loads(receipt.read_text()).get('compositor_socket') == str(host.runtime / 'wayland-1')
+                  and 'configured socket wayland-0 is absent' in log, log)
             with host.as_tenant():
                 try:
                     env = desktop.verify(pinned)
                     host.accept('wayland-1')
                 except Exception as exc:  # noqa: BLE001
                     env = {'error': repr(exc)}
-            check('next login: tenant verification connects', env.get('WAYLAND_DISPLAY') == str(host.runtime / 'wayland-1'), env)
+            check('next login: tenant verification connects', env.get('WAYLAND_DISPLAY') == str(host.context(name)), env)
 
             # 4. The pinned name comes back beside the one used for it: the pinned
             #    name wins, and the socket used in its absence keeps no grant.
             host.start('wayland-0')
             log = watch_once(policy_path)
             value = json.loads(receipt.read_text())
-            check('a pinned name that is present again is the one granted',
-                  value.get('socket') == str(host.runtime / 'wayland-0') and host.acl(host.runtime / 'wayland-0') == 'rw-'
+            check('a pinned name that is present again is the one the sandboxed socket is registered on',
+                  value.get('compositor_socket') == str(host.runtime / 'wayland-0') and host.acl(host.context(name)) == 'rw-'
                   and 'absent' not in log, (value, log))
-            check('the socket granted in its absence loses the tenant\'s grant', host.acl(host.runtime / 'wayland-1') is None)
+            check('neither compositor socket carries the tenant\'s grant', host.compositors_granted() == [],
+                  host.compositors_granted())
             host.stop('wayland-0')
             watch_once(policy_path)
-            check('back to the only socket when the pinned name goes again', host.acl(host.runtime / 'wayland-1') == 'rw-')
+            check('back to the only socket when the pinned name goes again',
+                  json.loads(receipt.read_text()).get('compositor_socket') == str(host.runtime / 'wayland-1')
+                  and host.acl(host.context(name)) == 'rw-')
 
             # 5. Within that login KWin restarts onto two sockets: which one is the
             #    approved desktop is a choice nobody made, so nothing is granted,
@@ -267,7 +295,7 @@ def main():
             value = json.loads(receipt.read_text())
             check('the reachable receipt is marked pending with the reason, keeping its grants',
                   value.get('state') == 'pending' and 'socket' not in value and 'wayland-2, wayland-3' in value.get('reason', '')
-                  and any(r['path'] == str(host.runtime) for r in value.get('grants', [])), value)
+                  and any(r['path'] == str(host.grant) for r in value.get('grants', [])), value)
             error = verify_error(host, pinned)
             check('tenant verification names the absent socket and the live ones',
                   'is waiting: Configured Wayland socket wayland-0 is absent' in error and 'wayland-2, wayland-3' in error, error)
@@ -284,8 +312,11 @@ def main():
             check('a receipt of another policy is not marked pending', json.loads(receipt.read_text()) == foreign)
             receipt.write_bytes(kept[1])
             desktop.rollback(pinned)
-            check('rollback from a pending receipt removes the tenant\'s runtime grant',
-                  not receipt.exists() and host.acl(host.runtime) is None)
+            check('rollback from a pending receipt removes the tenant\'s grant-directory entry and the sandboxed socket',
+                  not receipt.exists() and host.acl(host.grant) is None and host.acl(host.runtime) is None
+                  and not host.context(name).exists(),
+                  (receipt.exists(), host.acl(host.grant), host.acl(host.runtime), host.context(name).exists(),
+                   desktop.read_acl(host.grant)))
 
             # 6. A fresh login with several sockets: nothing is granted to report
             #    it, so the launch names the service's journal; and EACCES on the
@@ -294,15 +325,15 @@ def main():
             host.login('wayland-1', 'wayland-2')
             log = watch_once(policy_path)
             check('fresh login with several sockets: no grant and no receipt anywhere',
-                  not receipt.exists() and host.acl(host.runtime) is None
+                  not receipt.exists() and host.acl(host.grant) is None and host.acl(host.runtime) is None
                   and host.acl(host.runtime / 'wayland-1') is None and 'wayland-1, wayland-2' in log, log)
-            host.runtime.chmod(0)
+            host.grant.chmod(0)
             try:
                 error = verify_error(host, pinned)
             finally:
-                host.runtime.chmod(0o700)
-            check('EACCES on the runtime is explained, with the unit\'s journal',
-                  'Permission denied' in error and f'journalctl --user -u {name}.service' in error, error)
+                host.grant.chmod(0o700)
+            check('EACCES on the grant directory is explained, with the unit\'s status',
+                  'Permission denied' in error and f'systemctl --user status {name}.service' in error, error)
 
             # 7. The boundary that stays: a pinned name present as a symlink is not
             #    replaced by a fallback, a sole socket of another owner is refused,

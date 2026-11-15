@@ -214,7 +214,11 @@ def test_a_receipt_anybody_could_rewrite_is_refused() -> None:
         policy = wayland_policy()
         with _accounts():
             _gui, _tenant, name = desktop.names(policy)
-        receipt = gui_runtime / (name + ".json")
+        # Since SYRD-791 the receipt is in the owner's grant directory, not its runtime; the directory's own checks
+        # are desktop_security_context_test's, so here it is simply where the receipt is.
+        grant_dir = tmp_path / "grant"
+        grant_dir.mkdir()
+        receipt = grant_dir / (name + ".json")
         receipt.write_text(json.dumps({"policy_digest": "no"}), encoding="utf-8")
 
         runtimes = {GUI_USER: gui_runtime, TENANT: tenant_runtime}
@@ -222,7 +226,8 @@ def test_a_receipt_anybody_could_rewrite_is_refused() -> None:
         def attempt() -> str:
             with _accounts():
                 with patch.object(desktop.os, "geteuid", lambda: TENANT_UID):
-                    with patch.object(desktop, "runtime_for", lambda user: runtimes[user.pw_name]):
+                    with patch.object(desktop, "runtime_for", lambda user: runtimes[user.pw_name]), \
+                         patch.object(desktop, "grant_dir_for", lambda user: grant_dir):
                         try:
                             desktop.verify(policy)
                         except desktop.DesktopAccessError as exc:

@@ -15,6 +15,8 @@ from unittest.mock import patch
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
+sys.path.insert(0,str(ROOT/'tests'))
+from fake_wayland_compositor import FakeCompositor
 from scripts import desktop_access as desktop
 from scripts import team_launcher as launcher
 
@@ -60,8 +62,10 @@ def test_exported_release_acl_lifecycle():
         gui_runtime=root/'gui-runtime';gui_runtime.mkdir(mode=0o700)
         tenant_runtime=root/'tenant-runtime';tenant_runtime.mkdir(mode=0o700)
         socket_path=gui_runtime/'wayland-7'
-        server=socket.socket(socket.AF_UNIX);server.bind(str(socket_path));server.listen(10)
+        # A compositor that speaks Wayland: the tenant gets a security-context socket on it, never its own (SYRD-791).
+        server=FakeCompositor(socket_path)
         accounts={x.pw_name:x for x in [gui,tenant,second]}
+        serving=[]
         actual_run=mod.run
         calls=[];fail_enable=False
         def fixture_run(args):
@@ -74,17 +78,31 @@ def test_exported_release_acl_lifecycle():
             if args[0]=='systemctl':
                 if fail_enable and 'enable' in args:
                     raise mod.DesktopAccessError('fixture unit enable denied')
+                if ('enable' in args or 'restart' in args) and serving:
+                    mod.apply(serving[-1])  # the owner's service: its first pass, in this process, holding the context
                 return 'active'
             return actual_run(args)
-        with patch.object(mod.pwd,'getpwnam',side_effect=lambda name:accounts[name]), patch.object(mod,'run',side_effect=fixture_run):
-            p=policy();name=mod.names(p)[2]
+        uids={x.pw_uid for x in accounts.values()}
+        # Root's /run/switchyard-desktop, here this uid's: the only directory the tenant traverses (SYRD-791).
+        base=root/'sd';grantdir=base/str(gui.pw_uid)
+        with patch.object(mod.pwd,'getpwnam',side_effect=lambda name:accounts[name]), patch.object(mod,'run',side_effect=fixture_run), \
+             patch.object(mod,'account_exists',side_effect=lambda uid: uid in uids), \
+             patch.object(mod,'DESKTOP_BASE',base), patch.object(mod,'BASE_OWNER_UID',os.getuid()), \
+             patch.object(mod,'TMPFILES_DIR',root/'tmpfiles.d'):
+            mod.ensure_grant_dir(gui)
+            p=policy();name=mod.names(p)[2];serving.append(p)
+            context=mod.context_socket(grantdir,name)
             original_runtime=mod.read_acl(gui_runtime);original_socket=mod.read_acl(socket_path)
             payload={'policy':p,'helper':(release/'desktop_access.py').read_text(),'python':sys.executable}
             mod.install_owner(payload)
-            receipt=gui_runtime/(name+'.json')
+            receipt=grantdir/(name+'.json')
             assert receipt.exists()
-            assert mod.acl_map(mod.read_acl(gui_runtime))[f'user:{tenant.pw_uid}']=='--x'
-            assert mod.acl_map(mod.read_acl(socket_path))[f'user:{tenant.pw_uid}']=='rw-'
+            assert mod.acl_map(mod.read_acl(grantdir))[f'user:{tenant.pw_uid}']=='--x'
+            assert f'user:{tenant.pw_uid}' not in mod.acl_map(mod.read_acl(gui_runtime)), 'the runtime is never granted'
+            assert mod.acl_map(mod.read_acl(context))[f'user:{tenant.pw_uid}']=='rw-'
+            assert f'user:{tenant.pw_uid}' not in mod.acl_map(mod.read_acl(socket_path)), 'the compositor socket is never granted'
+            assert server.contexts and server.contexts[-1].committed and server.contexts[-1].metadata=={
+                'engine':'org.switchyard.desktop-access','app_id':tenant.pw_name,'instance_id':'cerulean'}
             installed=Path(gui.pw_dir)/'.config/switchyard/desktop-access'/(name+'.json')
             assert json.loads(installed.read_text())==p
             unit=Path(gui.pw_dir)/'.config/systemd/user'/(name+'.service')
@@ -96,10 +114,9 @@ def test_exported_release_acl_lifecycle():
             # Actual socket connection; UID/access checks are fixture boundaries.
             with patch.object(mod.os,'geteuid',return_value=tenant.pw_uid), patch.object(mod,'runtime_for',side_effect=lambda user: gui_runtime if user==gui else tenant_runtime):
                 env=mod.verify(p)
-                assert env['WAYLAND_DISPLAY']==str(socket_path)
+                assert env['WAYLAND_DISPLAY']==str(context)
                 assert env['XDG_RUNTIME_DIR']==str(tenant_runtime)
                 assert env['DBUS_SESSION_BUS_ADDRESS']==f'unix:path={tenant_runtime}/bus'
-            server.accept()[0].close()
             # Real receipt modes; account identities and GUI sessions remain fixtures.
             # This does not exercise ownership enforcement across real accounts.
             receipt_mode=receipt.stat().st_mode & 0o7777
@@ -117,23 +134,25 @@ def test_exported_release_acl_lifecycle():
                     receipt.chmod(receipt_mode)
             # A second independent tenant's grant survives first-tenant rollback.
             p2=policy(second.pw_name,'amber');mod.apply(p2)
+            context2=mod.context_socket(grantdir,mod.names(p2)[2])
             mod.rollback(p)
-            assert f'user:{tenant.pw_uid}' not in mod.acl_map(mod.read_acl(socket_path))
-            assert mod.acl_map(mod.read_acl(socket_path))[f'user:{second.pw_uid}']=='rw-'
+            assert not context.exists() and f'user:{tenant.pw_uid}' not in mod.acl_map(mod.read_acl(grantdir))
+            assert mod.acl_map(mod.read_acl(context2))[f'user:{second.pw_uid}']=='rw-'
             mod.apply(p)
             # Compositor replaces the socket: old receipt cannot authorize it.
-            server.close();socket_path.unlink()
-            server=socket.socket(socket.AF_UNIX);server.bind(str(socket_path));server.listen(5)
+            server.close()
+            server=FakeCompositor(socket_path)
             with patch.object(mod.os,'geteuid',return_value=tenant.pw_uid), patch.object(mod,'runtime_for',side_effect=lambda user: gui_runtime if user==gui else tenant_runtime):
                 rejects(lambda:mod.verify(p))
             mod.apply(p)
-            assert mod.acl_map(mod.read_acl(socket_path))[f'user:{tenant.pw_uid}']=='rw-'
+            assert mod.acl_map(mod.read_acl(context))[f'user:{tenant.pw_uid}']=='rw-' and len(server.contexts)==1
             shared=policy(tenant.pw_name,'another-project')
             mod.apply(shared)
+            shared_context=mod.context_socket(grantdir,mod.names(shared)[2])
             mod.rollback(p)
-            assert mod.effective_acl(socket_path,tenant.pw_uid)==6
+            assert mod.effective_acl(shared_context,tenant.pw_uid)==6 and mod.effective_acl(grantdir,tenant.pw_uid)==1
             mod.rollback(shared)
-            assert f'user:{tenant.pw_uid}' not in mod.acl_map(mod.read_acl(socket_path))
+            assert f'user:{tenant.pw_uid}' not in mod.acl_map(mod.read_acl(grantdir)) and not shared_context.exists()
             mod.apply(p)
             # Selected desktop disappears; no grant to an unrelated path.
             with patch.object(mod,'selected_socket',side_effect=mod.DesktopAccessError('no compositor')):
@@ -158,6 +177,7 @@ def test_exported_release_acl_lifecycle():
                 rejects(lambda:mod.install_owner(payload))
             assert not installed.exists() and not unit.exists() and not receipt.exists()
             assert f'user:{tenant.pw_uid}' not in mod.acl_map(mod.read_acl(gui_runtime))
+            assert f'user:{tenant.pw_uid}' not in mod.acl_map(mod.read_acl(grantdir))
             server.close()
 
 

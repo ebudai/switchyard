@@ -220,7 +220,7 @@ def deposit(
     clipboard: Clipboard | None = None,
     uid: int | None = None,
     home: Path | None = None,
-    runtime_for: Callable[[Any], Path] = desktop.runtime_for,
+    grant_dir_for: Callable[[Any], Path] = desktop.grant_dir_for,
     grant: Callable[[Path, int, str], Any] = desktop.grant,
     clock: Callable[[], float] = time.time,
     token: Callable[[], str] = lambda: secrets.token_hex(16),
@@ -235,7 +235,8 @@ def deposit(
     me = pwd.getpwuid(uid)
     policy = approved_policy(project, uid=uid, home=Path(me.pw_dir) if home is None else home)
     tenant_uid = pwd.getpwnam(policy["tenant_user"]).pw_uid
-    runtime = runtime_for(me)
+    # The owner's grant directory, outside its runtime: the tenant may traverse it and nothing else (SYRD-791).
+    runtime = grant_dir_for(me)
 
     board = clipboard or Clipboard()
     mime = chosen_image_type(board.types())

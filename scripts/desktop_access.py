@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import array
 import contextlib
 import fcntl
 import hashlib
@@ -14,6 +15,7 @@ import re
 import shlex
 import socket
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -244,6 +246,306 @@ def selected_socket(policy, gui, runtime):
     return path
 
 
+#: The tenant is a client of a socket KWin marks as sandboxed, never of the compositor's own socket (SYRD-791). A client
+#: of the desktop user's raw socket is offered every global the desktop user's own apps are, and on KWin 6.8.2 that let
+#: another account list every window with its title and type into the focused one (`org_kde_plasma_window_management`,
+#: `org_kde_kwin_fake_input`). A `wp_security_context_v1` listener withholds those, screen capture and the clipboard.
+SECURITY_CONTEXT_INTERFACE = 'wp_security_context_manager_v1'
+SECURITY_CONTEXT_ENGINE = 'org.switchyard.desktop-access'
+WAYLAND_TIMEOUT_SECONDS = 5
+
+
+class WaylandProtocolError(DesktopAccessError):
+    """The compositor refused or did not answer a request."""
+
+
+def _wl_string(text: str) -> bytes:
+    raw = text.encode() + b'\0'
+    return struct.pack('<I', len(raw)) + raw + b'\0' * (-len(raw) % 4)
+
+
+def _wl_read_string(body: bytes, at: int) -> tuple[str, int]:
+    (length,) = struct.unpack_from('<I', body, at)
+    raw = body[at + 4:at + 4 + length]
+    return raw[:-1].decode(errors='replace'), at + 4 + length + (-length % 4)
+
+
+class WaylandClient:
+    """Just enough of the Wayland wire protocol to list a compositor's globals and register a security context: the
+    desktop access helper runs on its own, from the standard library alone."""
+
+    def __init__(self, path: Path, *, timeout: float = WAYLAND_TIMEOUT_SECONDS):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(timeout)
+        self.sock.connect(str(path))
+        self.buffer = b''
+        self.last_id = 1  # 1 is wl_display
+
+    def close(self):
+        self.sock.close()
+
+    def new_id(self) -> int:
+        self.last_id += 1
+        return self.last_id
+
+    def send(self, obj: int, opcode: int, payload: bytes = b'', fds: tuple[int, ...] = ()):
+        message = struct.pack('<II', obj, ((8 + len(payload)) << 16) | opcode) + payload
+        if fds:
+            self.sock.sendmsg([message], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array('i', fds))])
+        else:
+            self.sock.sendall(message)
+
+    def _event(self) -> tuple[int, int, bytes]:
+        while True:
+            if len(self.buffer) >= 8:
+                obj, word = struct.unpack_from('<II', self.buffer)
+                size = word >> 16
+                if size < 8:
+                    raise WaylandProtocolError('the compositor sent a malformed message')
+                if len(self.buffer) >= size:
+                    body, self.buffer = self.buffer[8:size], self.buffer[size:]
+                    return obj, word & 0xffff, body
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise WaylandProtocolError('the compositor closed the connection')
+            self.buffer += chunk
+
+    def roundtrip(self, on_event=lambda obj, opcode, body: None):
+        """Everything the compositor says until it has handled every request sent so far; its error, raised."""
+        callback = self.new_id()
+        self.send(1, 0, struct.pack('<I', callback))  # wl_display.sync
+        while True:
+            obj, opcode, body = self._event()
+            if obj == 1 and opcode == 0:  # wl_display.error(object_id, code, message)
+                failed, code = struct.unpack_from('<II', body)
+                message, _ = _wl_read_string(body, 8)
+                raise WaylandProtocolError(f'the compositor refused a request (object {failed}, code {code}): {message}')
+            if obj == callback and opcode == 0:  # wl_callback.done
+                return
+            on_event(obj, opcode, body)
+
+    def globals(self) -> tuple[int, dict[str, tuple[int, int]]]:
+        """(the registry's id, {interface: (name, version)})."""
+        registry = self.new_id()
+        self.send(1, 1, struct.pack('<I', registry))  # wl_display.get_registry
+        found: dict[str, tuple[int, int]] = {}
+
+        def on_event(obj, opcode, body):
+            if obj == registry and opcode == 0:  # wl_registry.global(name, interface, version)
+                (name,) = struct.unpack_from('<I', body)
+                interface, at = _wl_read_string(body, 4)
+                (version,) = struct.unpack_from('<I', body, at)
+                found[interface] = (name, version)
+
+        self.roundtrip(on_event)
+        return registry, found
+
+    def bind(self, registry: int, name: int, interface: str, version: int) -> int:
+        obj = self.new_id()
+        self.send(registry, 0, struct.pack('<I', name) + _wl_string(interface) + struct.pack('<II', version, obj))
+        return obj
+
+
+def offers_security_context(compositor: Path) -> bool:
+    client = WaylandClient(compositor)
+    try:
+        return SECURITY_CONTEXT_INTERFACE in client.globals()[1]
+    finally:
+        client.close()
+
+
+def register_security_context(compositor: Path, listen_fd: int, close_fd: int, *, app_id: str, instance_id: str):
+    """Ask the compositor to accept clients on `listen_fd` as sandboxed ones, until `close_fd`'s peer hangs up."""
+    client = WaylandClient(compositor)
+    try:
+        registry, offered = client.globals()
+        if SECURITY_CONTEXT_INTERFACE not in offered:
+            raise DesktopAccessError(
+                f'the compositor at {compositor} offers no {SECURITY_CONTEXT_INTERFACE}, so it cannot keep another '
+                "account's windows from the desktop user's: desktop access grants nothing rather than the compositor's "
+                'own socket (SYRD-791)')
+        manager = client.bind(registry, offered[SECURITY_CONTEXT_INTERFACE][0], SECURITY_CONTEXT_INTERFACE, 1)
+        context = client.new_id()
+        client.send(manager, 1, struct.pack('<I', context), fds=(listen_fd, close_fd))  # create_listener
+        client.send(context, 1, _wl_string(SECURITY_CONTEXT_ENGINE))  # set_sandbox_engine
+        client.send(context, 2, _wl_string(app_id))  # set_app_id
+        client.send(context, 3, _wl_string(instance_id))  # set_instance_id
+        client.send(context, 4)  # commit
+        client.send(context, 0)  # destroy: the listener outlives this object and this connection
+        client.send(manager, 0)  # destroy
+        client.roundtrip()
+    finally:
+        client.close()
+
+
+#: Security contexts this process holds, by grant name: the listener's path and identity, the compositor socket it was
+#: registered on, and the write end of the pipe whose closing ends it. Only the owner's long-lived service holds one;
+#: a context dies with the process that registered it.
+HELD_CONTEXTS: dict[str, dict] = {}
+
+
+def socket_identity(path: Path) -> list[int]:
+    info = path.stat()
+    return [info.st_dev, info.st_ino, info.st_ctime_ns]
+
+
+#: A Unix socket's path is at most 107 bytes (`sun_path` less its NUL); a project's name has no such limit.
+UNIX_PATH_MAX = 107
+
+
+def context_socket(directory: Path, name: str) -> Path:
+    """`<grant directory>/<grant name>.wayland`, or -- when that would not fit in a socket address -- a name of fixed
+    length derived from it, the same for the service that binds it and the tenant that connects."""
+    path = directory / f'{name}.wayland'
+    if len(os.fsencode(str(path))) <= UNIX_PATH_MAX:
+        return path
+    return directory / f"switchyard-{hashlib.sha256(name.encode()).hexdigest()[:12]}.wayland"
+
+
+def release_context(name: str):
+    held = HELD_CONTEXTS.pop(name, None)
+    if held:
+        with contextlib.suppress(OSError):
+            os.close(held['closer'])
+
+
+def _remove_own_socket(path: Path):
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.geteuid():
+        raise DesktopAccessError(f'{path} is not a socket of this account; it is left alone, and nothing is granted')
+    path.unlink()
+
+
+def hold_context(name: str, compositor: Path, directory: Path, *, app_id: str, instance_id: str) -> Path:
+    """This grant's security-context socket, registered on `compositor` and held by this process -- a new one whenever
+    the compositor's socket was replaced or the listener's file is gone."""
+    path = context_socket(directory, name)
+    held = HELD_CONTEXTS.get(name)
+    with contextlib.suppress(OSError):
+        # Device and inode, not ctime: granting the socket's ACL changes its ctime, and that is still this listener.
+        if held and held['compositor'] == socket_identity(compositor)[:2] and held['identity'] == socket_identity(path)[:2]:
+            return path
+    release_context(name)
+    _remove_own_socket(path)
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    read_end, write_end = os.pipe()
+    try:
+        listener.bind(str(path))
+        os.chmod(path, 0o600)
+        listener.listen(64)
+        register_security_context(compositor, listener.fileno(), read_end, app_id=app_id, instance_id=instance_id)
+    except BaseException:
+        os.close(write_end)
+        with contextlib.suppress(OSError):
+            path.unlink()
+        raise
+    finally:
+        listener.close()  # the compositor holds its own copies of both
+        os.close(read_end)
+    HELD_CONTEXTS[name] = {'compositor': socket_identity(compositor)[:2], 'identity': socket_identity(path)[:2],
+                           'closer': write_end}
+    return path
+
+
+def account_exists(uid: int) -> bool:
+    try:
+        pwd.getpwuid(uid)
+        return True
+    except KeyError:
+        return False
+
+
+def drop_orphan_entries(paths) -> list[str]:
+    """Remove named ACL entries for uids no account has: a later account given that uid would inherit the grant."""
+    dropped = []
+    for path in paths:
+        try:
+            entries = acl_map(read_acl(path))
+        except (DesktopAccessError, OSError):
+            continue
+        for entry in entries:
+            kind, _, who = entry.partition(':')
+            if kind == 'user' and who.isdigit() and not account_exists(int(who)):
+                run(['setfacl', '--no-mask', '-x', f'u:{who}', str(path)])
+                dropped.append(f'{path}:{who}')
+    return dropped
+
+
+#: Where a desktop user's grants live, outside its runtime (SYRD-791): `/run/switchyard-desktop/<gui uid>/`, the user's
+#: own 0700 directory under root's 0755 parent, recreated at boot by tmpfiles.d. The tenant gets `--x` there only. A
+#: user runtime is 0700 because the sockets in it are not protected by their own modes: with `--x` on it, an agent
+#: reached the user's PipeWire and PulseAudio and recorded the microphone (measured in a VM).
+DESKTOP_BASE = Path('/run/switchyard-desktop')
+#: Who must own `DESKTOP_BASE`: root, so no account can create the name first.
+BASE_OWNER_UID = 0
+TMPFILES_DIR = Path('/etc/tmpfiles.d')
+
+
+def grant_dir(gui) -> Path:
+    return DESKTOP_BASE / str(gui.pw_uid)
+
+
+def _trusted_dir(path: Path, uid: int, what: str):
+    try:
+        info = path.lstat()
+    except FileNotFoundError as exc:
+        raise DesktopAccessError(f'{path} does not exist; {what}') from exc
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != uid or info.st_mode & 0o022:
+        raise DesktopAccessError(f'{path} is not a directory of uid {uid} that no one else may write; {what}')
+
+
+def grant_dir_for(gui) -> Path:
+    """The desktop user's grant directory, checked by whoever reads it: root's parent, the user's own directory."""
+    what = ("the operator's `switchyard upgrade <project>` with the approved desktop policy makes it, "
+            'or choose headless')
+    _trusted_dir(DESKTOP_BASE, BASE_OWNER_UID, what)
+    directory = grant_dir(gui)
+    _trusted_dir(directory, gui.pw_uid, what)
+    return directory
+
+
+def ensure_grant_dir(gui) -> Path:
+    """As root, at install: make the parent and the desktop user's directory, and the tmpfiles.d entries that make
+    them again at boot. Anyone else may only find them made."""
+    if os.geteuid() != BASE_OWNER_UID:
+        return grant_dir_for(gui)
+    directory = grant_dir(gui)
+    for path, owner, mode in ((DESKTOP_BASE, BASE_OWNER_UID, 0o755), (directory, gui.pw_uid, 0o700)):
+        if not os.path.lexists(path):
+            os.mkdir(path, mode)
+            os.chown(path, owner, -1)
+        os.chmod(path, mode, follow_symlinks=False)
+    grant_dir_for(gui)
+    group = getattr(gui, 'pw_gid', gui.pw_uid)
+    TMPFILES_DIR.mkdir(parents=True, exist_ok=True)
+    for name, line in (('switchyard-desktop.conf', f'd {DESKTOP_BASE} 0755 {BASE_OWNER_UID} {BASE_OWNER_UID} -\n'),
+                       (f'switchyard-desktop-{gui.pw_uid}.conf', f'd {directory} 0700 {gui.pw_uid} {group} -\n')):
+        target = TMPFILES_DIR / name
+        if not target.exists() or target.read_text() != line:
+            target.write_text(line)
+            target.chmod(0o644)
+    return directory
+
+
+def revoke_runtime_entries(runtime: Path, uids) -> list[str]:
+    """Remove these tenants' named entries from the desktop user's runtime and its Wayland sockets: grants from before
+    SYRD-791 put them there, and nothing does now."""
+    removed = []
+    for path in (runtime, *wayland_sockets(runtime)):
+        try:
+            entries = acl_map(read_acl(path))
+        except (DesktopAccessError, OSError):
+            continue
+        for uid in sorted(set(uids)):
+            if f'user:{uid}' in entries:
+                run(['setfacl', '--no-mask', '-x', f'u:{uid}', str(path)])
+                removed.append(f'{path}:{uid}')
+    return removed
+
+
 def names(policy):
     policy = validate_policy(policy, project=policy["project"], tenant=policy["tenant_user"])
     gui, tenant = identity(policy)
@@ -328,8 +630,8 @@ def atomic_json(path, value, mode=0o600):
 
 
 @contextlib.contextmanager
-def gui_lock(runtime):
-    path = runtime / '.switchyard-desktop.lock'
+def gui_lock(directory):
+    path = directory / '.switchyard-desktop.lock'
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
@@ -339,8 +641,9 @@ def gui_lock(runtime):
 
 
 #: Where the GUI owner leaves a clipboard image for one project's tenant
-#: (SYRD-247): `<gui runtime>/switchyard-paste/<project>/`, inside the runtime
-#: the approved grant already lets the tenant traverse. The owner creates
+#: (SYRD-247): `<grant directory>/switchyard-paste/<project>/`, inside the
+#: directory the approved grant already lets the tenant traverse -- since
+#: SYRD-791 the grant directory, never the GUI runtime. The owner creates
 #: everything here; the tenant may traverse the parent, list its own project's
 #: directory and read each file, and write nothing.
 HANDOFF_DIR = 'switchyard-paste'
@@ -430,10 +733,10 @@ def remove_handoffs(runtime, project):
             os.rmdir(path)
 
 
-def record_pending(policy, gui, tenant, runtime, ready, reason):
+def record_pending(policy, gui, tenant, directory, ready, reason):
     """Say in the readiness receipt why access is waiting, where the tenant can already read it.
 
-    Only where this login already lets the tenant traverse the runtime -- an
+    Only where the tenant can already traverse the grant directory -- an
     earlier grant to this or another of its projects -- because that is the only
     place the tenant's launch can read it. Nothing is granted to say it: before
     the first grant of a login the launch can only point at the service's
@@ -441,11 +744,11 @@ def record_pending(policy, gui, tenant, runtime, ready, reason):
     restores them, and the socket the receipt named is dropped, so no launch
     takes it for ready.
     """
-    with gui_lock(runtime):
+    with gui_lock(directory):
         previous = json.loads(ready.read_text()) if ready.exists() else {}
         if previous and previous.get('policy_digest') != digest(policy):
             return
-        if not effective_acl(runtime, tenant.pw_uid) & 1:
+        if not effective_acl(directory, tenant.pw_uid) & 1:
             return
         pending = {'policy_digest': digest(policy), 'state': 'pending', 'reason': reason,
                    'gui_uid': gui.pw_uid, 'tenant_uid': tenant.pw_uid, 'grants': previous.get('grants', [])}
@@ -457,28 +760,53 @@ def apply(policy):
     gui, tenant, name = names(policy)
     if os.geteuid() != gui.pw_uid:
         raise DesktopAccessError('ACL reapplication must execute as the configured GUI owner')
-    runtime = runtime_for(gui)
-    ready = runtime / (name+'.json')
+    # Everything the tenant may reach is in the grant directory; nothing of the runtime is granted (SYRD-791).
+    directory = grant_dir_for(gui)
+    ready = directory / (name+'.json')
     try:
-        path = selected_socket(policy, gui, runtime)
-    except SocketSelectionError as exc:
-        record_pending(policy, gui, tenant, runtime, ready, str(exc))
-        raise
-    with gui_lock(runtime):
+        runtime = runtime_for(gui)
+        compositor = selected_socket(policy, gui, runtime)
+    except (DesktopAccessError, OSError) as exc:
+        # No session, or no one socket to use: the receipt outlives a logout now that it is outside the runtime, so
+        # it says why, and the socket whose compositor is gone goes (SYRD-791).
+        release_context(name)
+        with contextlib.suppress(DesktopAccessError, OSError):
+            _remove_own_socket(context_socket(directory, name))
+        reason = (str(exc) if isinstance(exc, DesktopAccessError)
+                  else f'{gui.pw_name} is not logged in: its runtime directory is unavailable ({exc.strerror or exc})')
+        record_pending(policy, gui, tenant, directory, ready, reason)
+        if isinstance(exc, DesktopAccessError):
+            raise
+        raise DesktopAccessError(reason) from exc
+    with gui_lock(directory):
+        # No grant outlives its account, and the runtime keeps none of this tenant's (SYRD-791).
+        drop_orphan_entries([runtime, directory, *wayland_sockets(runtime), *directory.glob('switchyard-*.wayland')])
+        revoke_runtime_entries(runtime, [tenant.pw_uid])
+        legacy = runtime / (name+'.json')
+        with contextlib.suppress(OSError):
+            legacy.unlink()  # a receipt from before SYRD-791, in the runtime; its grants are gone with the entries
+    # The tenant connects to a security-context socket this service holds, never to the compositor's own (SYRD-791).
+    try:
+        path = hold_context(name, compositor, directory, app_id=tenant.pw_name, instance_id=policy['project'])
+    except (DesktopAccessError, OSError) as exc:
+        record_pending(policy, gui, tenant, directory, ready, f'no sandboxed Wayland socket for {tenant.pw_name}: {exc}')
+        raise DesktopAccessError(str(exc)) from exc
+    with gui_lock(directory):
         previous = json.loads(ready.read_text()) if ready.exists() else {}
         info = path.stat()
-        if previous.get('policy_digest') == digest(policy) and previous.get('socket_identity') == [info.st_dev,info.st_ino,info.st_ctime_ns]:
+        if (previous.get('policy_digest') == digest(policy) and previous.get('state') != 'pending'
+                and previous.get('socket_identity') == [info.st_dev,info.st_ino,info.st_ctime_ns]):
             # Check ACLs as well: revocation should not be hidden by a stale marker.
-            if effective_acl(runtime,tenant.pw_uid) == 1 and effective_acl(path,tenant.pw_uid) == 6:
+            if effective_acl(directory,tenant.pw_uid) == 1 and effective_acl(path,tenant.pw_uid) == 6:
                 return ready
         records = []
         try:
-            records.append(grant(runtime, tenant.pw_uid, '--x'))
+            records.append(grant(directory, tenant.pw_uid, '--x'))
             records.append(grant(path, tenant.pw_uid, 'rw-'))
             info = path.stat()
-            # Preserve original rollback state for the runtime and same socket.
+            # Preserve original rollback state for the grant directory and same socket.
             peer_records = []
-            for peer in runtime.glob(f'switchyard-desktop-{gui.pw_uid}-{tenant.pw_uid}-*.json'):
+            for peer in directory.glob(f'switchyard-desktop-{gui.pw_uid}-{tenant.pw_uid}-*.json'):
                 if peer != ready:
                     peer_records.extend(json.loads(peer.read_text()).get('grants', []))
             originals = {(r['device'],r['inode']):r for r in [*previous.get('grants', []), *peer_records]}
@@ -486,24 +814,30 @@ def apply(policy):
                 prior = originals.get((r['device'],r['inode']))
                 if prior:
                     r['before'] = prior['before']
-            # A socket this receipt granted before and no longer selects -- the
-            # pinned name back beside the one used in its absence -- keeps no
-            # grant from it: the tenant is a client of the selected socket only.
+            # A socket this receipt granted before and no longer uses keeps no
+            # grant from it: the tenant is a client of its security-context
+            # socket only. That includes the compositor's own socket, which a
+            # receipt from before SYRD-791 granted directly.
             held = {(r['device'],r['inode']) for r in [*records, *peer_records]}
             for stale in previous.get('grants', []):
                 if (stale['device'],stale['inode']) not in held:
                     restore_grant(stale)
+            compositor_info = compositor.stat()
             atomic_json(ready, {'policy_digest':digest(policy), 'socket':str(path),
                 'socket_identity':[info.st_dev,info.st_ino,info.st_ctime_ns],
+                'compositor_socket':str(compositor),
+                'compositor_identity':[compositor_info.st_dev,compositor_info.st_ino,compositor_info.st_ctime_ns],
+                'security_context':{'engine':SECURITY_CONTEXT_ENGINE,'app_id':tenant.pw_name,
+                                    'instance_id':policy['project']},
                 'configured_socket':policy['wayland_display'],
                 'gui_uid':gui.pw_uid, 'tenant_uid':tenant.pw_uid, 'grants':records}, mode=0o644)
         except Exception:
             for record in reversed(records):
                 restore_grant(record)
             raise
-    if policy['wayland_display'] not in ('auto', path.name):
+    if policy['wayland_display'] not in ('auto', compositor.name):
         print(f"Wayland access: configured socket {policy['wayland_display']} is absent from {runtime}; "
-              f'granted the only live Wayland socket there, {path.name}', file=sys.stderr, flush=True)
+              f'used the only live Wayland socket there, {compositor.name}', file=sys.stderr, flush=True)
     return ready
 
 
@@ -511,19 +845,21 @@ def verify(policy):
     gui, tenant, name = names(policy)
     if os.geteuid() != tenant.pw_uid:
         raise DesktopAccessError('Readiness validation must execute as the tenant')
-    gui_runtime = runtime_for(gui)
     tenant_runtime = runtime_for(tenant)
-    ready = gui_runtime / (name+'.json')
     try:
+        directory = grant_dir_for(gui)
+        ready = directory / (name+'.json')
         info = ready.lstat()
-    except (FileNotFoundError, PermissionError) as exc:
+    except (FileNotFoundError, PermissionError, DesktopAccessError) as exc:
         # Unreadable before the owner's service has granted anything in this
         # login, so why it is waiting is in its journal, not here (SYRD-592).
+        # Or no service at all: desktop grants withdrawn as eric (SYRD-791).
         raise DesktopAccessError(
-            f"Desktop access is not ready before launch: {gui.pw_name}'s desktop access service has not recorded "
-            f'{tenant.pw_name} as ready in this login ({exc}). It retries every 5 seconds and logs why it is waiting, '
-            f'such as a configured Wayland socket that is absent while other Wayland sockets are live; as {gui.pw_name}, '
-            f'run: journalctl --user -u {name}.service') from exc
+            f"{tenant.pw_name} has no desktop socket: {gui.pw_name}'s desktop access service for {policy['project']} "
+            f'has not granted one in this login ({exc}). Either the service is stopped -- desktop grants withdrawn -- '
+            f'and `switchyard upgrade {policy["project"]}` with the approved desktop policy grants it again, or it is '
+            f'still waiting and says why; as {gui.pw_name}: systemctl --user status {name}.service. '
+            'A headless policy needs no desktop socket.') from exc
     try:
         if not stat.S_ISREG(info.st_mode) or info.st_uid != gui.pw_uid or info.st_mode & 0o022:
             raise DesktopAccessError('Desktop readiness record is not protected by the GUI owner')
@@ -534,12 +870,19 @@ def verify(policy):
             raise DesktopAccessError(f"Desktop access is not ready before launch: {gui.pw_name}'s desktop access service "
                                      f"is waiting: {value.get('reason')}")
         path = Path(value['socket'])
-        if path.parent != gui_runtime or path.is_symlink():
+        if path.parent != directory or path.is_symlink():
             raise DesktopAccessError('Desktop readiness refers to an invalid socket')
+        if path != context_socket(directory, name) or path.name.startswith('wayland-'):
+            # A receipt from before SYRD-791 named the compositor's own socket, whose clients may list and type
+            # into every window of the desktop user's. It is not used, whatever its ACL still says.
+            raise DesktopAccessError(
+                f"{tenant.pw_name}'s desktop grant names {gui.pw_name}'s own Wayland socket ({path.name}), not a "
+                f'sandboxed one; it is not used. Grant it again with `switchyard upgrade {policy["project"]}` and the '
+                'approved desktop policy, or choose headless')
         info = path.stat()
         if not stat.S_ISSOCK(info.st_mode) or info.st_uid != gui.pw_uid or value['socket_identity'] != [info.st_dev,info.st_ino,info.st_ctime_ns]:
             raise DesktopAccessError('Wayland socket was recreated or changed; wait for the GUI access service to reapply before launching')
-        if not os.access(gui_runtime,os.X_OK) or not os.access(path,os.R_OK|os.W_OK):
+        if not os.access(directory,os.X_OK) or not os.access(path,os.R_OK|os.W_OK):
             raise DesktopAccessError('Approved Wayland ACL is not ready; check the GUI access service before launching')
         with socket.socket(socket.AF_UNIX) as probe:
             probe.settimeout(2)
@@ -565,6 +908,8 @@ def install(policy, *, helper: Path):
     runtime = runtime_for(gui)
     selected_socket(policy,gui,runtime)
     run(gui_command(gui,runtime,['which','setfacl','getfacl']))
+    # Root makes the grant directory, outside the desktop user's runtime, before the user's service runs (SYRD-791).
+    ensure_grant_dir(gui)
     if not helper.is_absolute() or not helper.is_file():
         raise DesktopAccessError('Installed desktop-access helper is missing')
     # Copy reviewed release code into GUI-owned state. Its service must not depend
@@ -601,6 +946,18 @@ RestartSec=5
 [Install]
 WantedBy=default.target
 """
+    directory = grant_dir_for(gui)
+    # Installs left by tenants whose account is gone: their service, files and receipt (SYRD-791).
+    remove_orphan_installs(gui, directory, runtime)
+    # Grants from before SYRD-791 put this owner's tenants on the runtime and its Wayland sockets: none stays.
+    revoke_runtime_entries(runtime, owner_tenant_uids(gui))
+    # Refused before anything is written: a compositor that cannot sandbox the tenant gets no grant at all.
+    compositor = selected_socket(policy, gui, runtime)
+    if not offers_security_context(compositor):
+        raise DesktopAccessError(
+            f'the compositor at {compositor} offers no {SECURITY_CONTEXT_INTERFACE}, so it cannot keep '
+            f"{tenant.pw_name}'s windows from {gui.pw_name}'s; desktop access is not installed (SYRD-791). "
+            'Choose headless for this project.')
     try:
         atomic_json(policy_path,policy)
         helper_path.parent.mkdir(parents=True,exist_ok=True)
@@ -608,13 +965,14 @@ WantedBy=default.target
         helper_path.chmod(0o600)
         unit_path.parent.mkdir(parents=True,exist_ok=True)
         unit_path.write_text(unit)
-        apply(policy)
         run(['systemctl','--user','daemon-reload'])
         run(['systemctl','--user','enable','--now',name+'.service'])
         # Apply new helper version to the service without touching worker panes.
         if was_installed and previous[helper_path] != payload['helper'].encode():
             run(['systemctl','--user','restart',name+'.service'])
         run(['systemctl','--user','is-active',name+'.service'])
+        # The service holds the tenant's security context, so the grant is ready when its receipt says so.
+        wait_for_service_grant(policy, gui, directory, name)
     except Exception:
         if not was_installed:
             subprocess.run(['systemctl','--user','disable','--now',name+'.service'],capture_output=True)
@@ -628,6 +986,66 @@ WantedBy=default.target
         if was_installed:
             subprocess.run(['systemctl','--user','restart',name+'.service'],capture_output=True)
         raise
+
+
+SERVICE_GRANT_TIMEOUT_SECONDS = 20
+
+
+def wait_for_service_grant(policy, gui, directory, name, *, timeout=SERVICE_GRANT_TIMEOUT_SECONDS,
+                           sleep=time.sleep, monotonic=time.monotonic):
+    """Until the owner's service has recorded this tenant's sandboxed socket as ready; its reason, raised, if not."""
+    ready = directory / (name + '.json')
+    deadline = monotonic() + timeout
+    reason = 'it has not recorded a grant yet'
+    while True:
+        with contextlib.suppress(OSError, ValueError):
+            value = json.loads(ready.read_text())
+            if value.get('policy_digest') == digest(policy):
+                if value.get('state') == 'pending':
+                    reason = value.get('reason') or 'it is waiting'
+                elif Path(value.get('socket', '')) == context_socket(directory, name) and Path(value['socket']).is_socket():
+                    return value
+        if monotonic() >= deadline:
+            raise DesktopAccessError(f"{gui.pw_name}'s desktop access service did not grant {policy['tenant_user']} a "
+                                     f'sandboxed Wayland socket within {timeout:g}s: {reason}. As {gui.pw_name}: '
+                                     f'journalctl --user -u {name}.service')
+        sleep(0.25)
+
+
+GRANT_FILE = re.compile(r'switchyard-desktop-(\d+)-(\d+)-([a-z0-9][a-z0-9_-]*)')
+
+
+def owner_tenant_uids(gui) -> set[int]:
+    """Every tenant uid this desktop user has installed a grant for, past or present, from its own unit names."""
+    uids = set()
+    for unit in (Path(gui.pw_dir) / '.config/systemd/user').glob(f'switchyard-desktop-{gui.pw_uid}-*.service'):
+        match = GRANT_FILE.fullmatch(unit.name[:-len('.service')])
+        if match and int(match.group(1)) == gui.pw_uid:
+            uids.add(int(match.group(2)))
+    return uids
+
+
+def remove_orphan_installs(gui, directory, runtime) -> list[str]:
+    """Stop and remove this owner's desktop grants for tenants whose account no longer exists -- service, policy,
+    helper, receipt and socket -- so a later account given the same uid inherits none of it."""
+    removed = []
+    unit_dir = Path(gui.pw_dir) / '.config/systemd/user'
+    for unit in sorted(unit_dir.glob(f'switchyard-desktop-{gui.pw_uid}-*.service')):
+        match = GRANT_FILE.fullmatch(unit.name[:-len('.service')])
+        if not match or int(match.group(1)) != gui.pw_uid or account_exists(int(match.group(2))):
+            continue
+        name = match.group(0)
+        subprocess.run(['systemctl', '--user', 'disable', '--now', unit.name], capture_output=True)
+        for path in (unit, Path(gui.pw_dir) / '.config/switchyard/desktop-access' / (name + '.json'),
+                     Path(gui.pw_dir) / '.local/lib/switchyard/desktop-access' / (name + '.py'),
+                     directory / (name + '.json'), runtime / (name + '.json')):
+            path.unlink(missing_ok=True)
+        with contextlib.suppress(DesktopAccessError, OSError):
+            _remove_own_socket(context_socket(directory, name))
+        removed.append(name)
+    if removed:
+        subprocess.run(['systemctl', '--user', 'daemon-reload'], capture_output=True)
+    return removed
 
 
 def uninstall(policy):
@@ -656,14 +1074,23 @@ def rollback(policy):
     if os.geteuid() != gui.pw_uid:
         raise DesktopAccessError('Rollback must run as GUI owner')
     runtime = runtime_for(gui)
-    with gui_lock(runtime):
-        ready = runtime/(name+'.json')
+    # A grant from before SYRD-791 lived in the runtime: its receipt and the tenant's entries go, whatever else exists.
+    with contextlib.suppress(OSError):
+        (runtime/(name+'.json')).unlink()
+    revoke_runtime_entries(runtime, [tenant.pw_uid])
+    try:
+        directory = grant_dir_for(gui)
+    except DesktopAccessError:
+        release_context(name)
+        return
+    with gui_lock(directory):
+        ready = directory/(name+'.json')
         if ready.exists():
             value = json.loads(ready.read_text())
             if value['policy_digest'] != digest(policy):
                 raise DesktopAccessError('Rollback policy differs from active grant')
             peers = []
-            for other in runtime.glob(f'switchyard-desktop-{gui.pw_uid}-{tenant.pw_uid}-*.json'):
+            for other in directory.glob(f'switchyard-desktop-{gui.pw_uid}-{tenant.pw_uid}-*.json'):
                 if other != ready:
                     peers.extend(json.loads(other.read_text()).get('grants', []))
             active = {(r['device'],r['inode']) for r in peers}
@@ -671,8 +1098,12 @@ def rollback(policy):
                 if (record['device'],record['inode']) not in active:
                     restore_grant(record)
             ready.unlink()
+        # The sandboxed socket goes with the grant; its service, if still running, stops listening when it ends.
+        release_context(name)
+        with contextlib.suppress(DesktopAccessError, OSError):
+            _remove_own_socket(context_socket(directory, name))
         # Withdrawing the grant withdraws anything still handed over under it.
-        remove_handoffs(runtime, policy['project'])
+        remove_handoffs(directory, policy['project'])
 
 
 def main(argv=None):

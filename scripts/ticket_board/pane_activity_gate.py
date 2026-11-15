@@ -1092,10 +1092,13 @@ class PaneActivityGate:
     def _stale_codex_busy_trace(self, target: str, state: PaneHookState) -> ActivityTrace | None:
         from . import notify_listener as listener
 
-        if state.state != "busy" or not state.source.startswith("codex."):
+        # SYRD-793: Claude's too. A turn interrupted by Esc runs no Stop, StopFailure or idle_prompt (measured, 2.1.318),
+        # so its UserPromptSubmit busy never ends; the screen, checked below, is what says it did. Served, never
+        # rewritten: the hook's word stands for the busy-pane watchdog (SYRD-695), and the notice's turn replaces it.
+        if state.state != "busy" or not state.source.startswith(("codex.", "claude.")):
             return None
         # A turn that ended on Codex's capacity error is over at any age, and is retried, not idle (SYRD-594).
-        if (capacity_trace := listener.capacity_retry.turn_end_trace(self, target, state)) is not None:
+        if state.source.startswith("codex.") and (capacity_trace := listener.capacity_retry.turn_end_trace(self, target, state)) is not None:
             return capacity_trace
         if self.stale_codex_busy_hook_seconds <= 0:
             return None
@@ -1118,6 +1121,8 @@ class PaneActivityGate:
             return listener.ActivityTrace(True, "cursor_state_unavailable")
         if cursor_composing:
             return listener.ActivityTrace(True, "human_composing")
+        if state.source.startswith("claude."):
+            return listener.ActivityTrace(False, "stale_claude_busy")
         try:
             self.state_store.write(target, "idle", source="listener.stale_codex_busy_recovery", now=now)
         except OSError as exc:

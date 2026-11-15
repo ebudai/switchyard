@@ -1,0 +1,54 @@
+{
+ "claude_code": "2.1.318",
+ "what": "a completed turn, then a prompt interrupted by three Esc presses 1.8 s after submission while its request was in flight, then 110 s of waiting; every hook event Claude Code ran",
+ "marks": [
+  {
+   "at": 0.0,
+   "what": "send first"
+  },
+  {
+   "at": 6.11,
+   "what": "send second"
+  },
+  {
+   "at": 7.91,
+   "what": "esc"
+  },
+  {
+   "at": 119.75,
+   "what": "end"
+  }
+ ],
+ "hooks": [
+  {
+   "at": -2.86,
+   "event": "SessionStart",
+   "source": "startup",
+   "prompt": ""
+  },
+  {
+   "at": 0.32,
+   "event": "UserPromptSubmit",
+   "source": "",
+   "prompt": "first: say hi"
+  },
+  {
+   "at": 0.37,
+   "event": "Stop",
+   "source": "",
+   "prompt": ""
+  },
+  {
+   "at": 6.43,
+   "event": "UserPromptSubmit",
+   "source": "",
+   "prompt": "an accidental paste meant for another pane"
+  },
+  {
+   "at": 119.77,
+   "event": "SessionEnd",
+   "source": "",
+   "prompt": ""
+  }
+ ]
+}

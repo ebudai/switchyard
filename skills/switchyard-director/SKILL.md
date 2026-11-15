@@ -415,7 +415,11 @@ What is never counted:
 - Triage, Draft, Backlog, Done and Cancelled;
 - blocked, held, snoozed or dependency-waiting work;
 - work queued behind a role's current ticket;
-- your own and the User's stages;
+- the User's stages;
+- your own stages, while any role is working or running background work.
+  When every role is idle, work waiting on you counts too, and its digest
+  says "Board idle": nothing else may be telling you, if your own handoff is
+  held;
 - tickets already in their own stall episode.
 
 `ticket-board-read stall` shows why the digest did or did not fire. No second

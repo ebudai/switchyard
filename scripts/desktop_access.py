@@ -913,6 +913,9 @@ def gui_command(gui, runtime, args):
 
 def install(policy, *, helper: Path):
     gui, tenant, name = names(policy)
+    # Before root's own checks, any of which may refuse: no unit of this owner's keeps a helper from before SYRD-791
+    # that re-grants the desktop user's runtime (SYRD-798).
+    stop_pre_791_units_from_root(gui)
     runtime = runtime_for(gui)
     selected_socket(policy,gui,runtime)
     run(gui_command(gui,runtime,['which','setfacl','getfacl']))
@@ -1042,24 +1045,60 @@ def wait_for_service_grant(policy, gui, directory, name, *, timeout=SERVICE_GRAN
 GRANT_FILE = re.compile(r'switchyard-desktop-(\d+)-(\d+)-([a-z0-9][a-z0-9_-]*)')
 
 
-def stop_pre_791_services(gui) -> list[str]:
-    """Stop and disable this owner's grant services whose helper predates SYRD-791, the one being upgraded included:
-    that helper grants the desktop user's runtime and Wayland socket. Their files stay for an upgrade to replace.
-    A service on a current helper is left alone. Returns the names stopped."""
-    stopped = []
+def pre_791_units(gui) -> list[str]:
+    """This owner's grant unit files whose helper predates SYRD-791 (or is missing): that helper grants the desktop
+    user's runtime and Wayland socket every pass."""
+    found = []
     for unit in sorted((Path(gui.pw_dir) / '.config/systemd/user').glob(f'switchyard-desktop-{gui.pw_uid}-*.service')):
         name = unit.name[:-len('.service')]
-        helper = Path(gui.pw_dir) / '.local/lib/switchyard/desktop-access' / (name + '.py')
         if not GRANT_FILE.fullmatch(name):
             continue
+        helper = Path(gui.pw_dir) / '.local/lib/switchyard/desktop-access' / (name + '.py')
         try:
             current_code = SECURITY_CONTEXT_INTERFACE in helper.read_text(errors='replace')
         except OSError:
             current_code = False
         if not current_code:
-            subprocess.run(['systemctl', '--user', 'disable', '--now', unit.name], capture_output=True)
-            stopped.append(name)
+            found.append(unit.name)
+    return found
+
+
+def stop_pre_791_services(gui) -> list[str]:
+    """Stop and disable this owner's grant services whose helper predates SYRD-791, the one being upgraded included.
+    Their files stay for an upgrade to replace; a service on a current helper is left alone. Returns the names."""
+    stopped = []
+    for unit in pre_791_units(gui):
+        subprocess.run(['systemctl', '--user', 'disable', '--now', unit], capture_output=True)
+        stopped.append(unit[:-len('.service')])
     return stopped
+
+
+#: Where a user's systemd manager listens, `<base>/<uid>/bus`: how root tells whether that manager is up without
+#: asking logind, which is one of the checks that may refuse.
+USER_RUNTIME_BASE = Path('/run/user')
+
+
+def stop_pre_791_units_from_root(gui) -> list[str]:
+    """Root's half, first in `install`, before its own checks can refuse (SYRD-798): every pre-791 unit of this owner's
+    is disabled -- through the user's manager when it is up, as the user -- and its `default.target.wants` link is
+    removed, as the user, so a manager that is down does not start it at the next login. Errors are swallowed: the
+    install's own checks still decide, and say why."""
+    units = pre_791_units(gui)
+    runtime = USER_RUNTIME_BASE / str(gui.pw_uid)
+    manager_up = (runtime / 'bus').is_socket()
+    for unit in units:
+        if manager_up:
+            with contextlib.suppress(DesktopAccessError, OSError):
+                run(gui_command(gui, runtime, ['systemctl', '--user', 'disable', '--now', unit]))
+        link = Path(gui.pw_dir) / '.config/systemd/user/default.target.wants' / unit
+        if not os.path.lexists(link):
+            continue
+        with contextlib.suppress(DesktopAccessError, OSError):
+            if os.geteuid() == gui.pw_uid:
+                link.unlink()
+            else:  # never as root in another account's home: as the user, whose file it is
+                run(['runuser', '-u', gui.pw_name, '--', 'rm', '-f', '--', str(link)])
+    return units
 
 
 def owner_tenant_uids(gui) -> set[int]:

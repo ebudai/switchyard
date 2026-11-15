@@ -72,6 +72,12 @@ class Host:
 
     def run(self, actual):
         def fixture(args):
+            if args[:1] == ['env']:  # gui_command's form: `env XDG_RUNTIME_DIR=… DBUS_…=… <command>`
+                rest = list(args[1:])
+                while rest and '=' in rest[0] and not rest[0].startswith('-'):
+                    rest.pop(0)
+                if rest[:1] == ['systemctl']:
+                    args = rest
             if args[0] == 'loginctl':
                 if args[1] == 'show-session':
                     return f'Type=wayland\nActive=yes\nUser={self.gui.pw_uid}'
@@ -567,6 +573,70 @@ def test_install_stops_this_owners_services_from_before_syrd_791() -> None:
               and not any(f'{new_name}.service' in c for c in h.systemctl),
               f"another tenant's service from before SYRD-791 is stopped; one on this release is left alone: {h.systemctl}")
         h.compositor.close()
+
+
+def test_the_first_install_repairs_a_mask_an_earlier_release_wiped() -> None:
+    """SYRD-798: 8f4d4b9d's chmod left the live grant directory at mask::--- with two tenants' --x in place; the fixed
+    install's first pass has to make them effective again, and the next grant must not be refused."""
+    raw, h = host()
+    with raw, h.fixtures():
+        for who in (h.tenant, h.second):
+            desktop.run(['setfacl', '-m', f'u:{who.pw_uid}:--x', str(h.grant)])
+        os.chmod(h.grant, 0o700)  # what 8f4d4b9d's ensure_grant_dir did on every install
+        check(desktop.acl_map(desktop.read_acl(h.grant)).get('mask:') == '---'
+              and [desktop.effective_acl(h.grant, w.pw_uid) for w in (h.tenant, h.second)] == [0, 0],
+              'fixture: the live state, two tenants\' entries in place and ineffective under mask::---')
+        third = SimpleNamespace(pw_name='violet-worker', pw_uid=62003, pw_dir=str(h.root / 'third-home'))
+        h.accounts[third.pw_name] = third
+        h.uids.add(third.pw_uid)
+        p = policy(third.pw_name, 'violet')
+        desktop.ensure_grant_dir(h.gui)  # root's step of the install
+        h.on_enable = lambda: desktop.apply(p)
+        try:
+            desktop.install_owner(_payload(p))
+            refused = ''
+        except desktop.DesktopAccessError as exc:
+            refused = str(exc)
+        entries = desktop.acl_map(desktop.read_acl(h.grant))
+        effective = [desktop.effective_acl(h.grant, w.pw_uid) for w in (h.tenant, h.second, third)]
+        check(not refused and entries.get('mask:') == '--x' and effective == [1, 1, 1],
+              f'one install later the mask is --x and all three tenants can traverse it: {entries} {effective} {refused}')
+        h.compositor.close()
+
+
+def test_roots_install_stops_pre_791_units_before_its_own_checks() -> None:
+    """Audit's residual (SYRD-798): root's install() runs runtime_for and selected_socket before install-owner, so a
+    refusal there never reached the early stop. Root now stops them first: through the manager when it is up, and by
+    the unit's default.target.wants link when it is down."""
+    for manager in ('up', 'down'):
+        raw, h = host()
+        with raw, h.fixtures():
+            base = h.root / 'run-user'
+            (base / str(h.gui.pw_uid)).mkdir(parents=True)
+            if manager == 'up':
+                bus = socket.socket(socket.AF_UNIX)
+                bus.bind(str(base / str(h.gui.pw_uid) / 'bus'))
+            p = policy()
+            name = desktop.names(p)[2]
+            _old_install(h, name, p, '# a desktop access helper from before SYRD-791\n')
+            wants = Path(h.gui.pw_dir) / '.config/systemd/user/default.target.wants' / f'{name}.service'
+            wants.parent.mkdir(parents=True, exist_ok=True)
+            wants.symlink_to(f'../{name}.service')
+            h.systemctl.clear()
+            with patch.object(desktop, 'USER_RUNTIME_BASE', base), \
+                 patch.object(desktop, 'selected_socket', side_effect=desktop.DesktopAccessError('fixture: two sockets, none chosen')):
+                try:
+                    desktop.install(p, helper=ROOT / 'scripts/desktop_access.py')
+                    outcome = 'installed'
+                except desktop.DesktopAccessError as exc:
+                    outcome = str(exc)
+            stopped = ['systemctl', '--user', 'disable', '--now', f'{name}.service'] in h.systemctl
+            check('none chosen' in outcome and not os.path.lexists(wants) and stopped == (manager == 'up'),
+                  f'manager {manager}: the refused install still disabled the pre-791 unit '
+                  f'(through the manager: {stopped}) and removed its wants link: {outcome} {h.systemctl}')
+            if manager == 'up':
+                bus.close()
+            h.compositor.close()
 
 
 def test_a_launch_with_no_desktop_socket_says_so_plainly() -> None:

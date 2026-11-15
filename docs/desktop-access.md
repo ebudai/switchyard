@@ -243,8 +243,12 @@ until the next upgrade (SYRD-796). First of all, before any check that could
 refuse it, install stops every one of the owner's grant services still running a
 helper from before SYRD-791, the tenant's own included, and removes every
 tenant's entries from the runtime. So even a refused upgrade leaves no old helper
-re-granting the runtime. A successful install starts the tenant's new service
-itself; the others are replaced by their own upgrades.
+re-granting the runtime. Root's part of the install does the same first,
+before its own checks (logind's runtime, the Wayland socket): through the
+desktop owner's manager when it is up, and in every case by removing each such
+unit's `default.target.wants` link, as the owner, so a manager that is down does
+not start it at the next login (SYRD-798). A successful install starts the
+tenant's new service itself; the others are replaced by their own upgrades.
 
 The GUI-owned service starts with the user manager and checks every five seconds
 for the approved session/socket. It reapplies after socket recreation or a later

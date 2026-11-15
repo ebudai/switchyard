@@ -250,6 +250,15 @@ unit's `default.target.wants` link, as the owner, so a manager that is down does
 not start it at the next login (SYRD-798). A successful install starts the
 tenant's new service itself; the others are replaced by their own upgrades.
 
+After starting or restarting the service (a new helper is restarted), install
+waits, for up to 20 seconds, until the receipt names the socket that is in place
+now and something accepts connections on it, the same things the tenant's
+launch check tests. Right after a restart the old receipt and socket file are
+still there with nothing listening, so a service that is still starting is
+waited for, not reported as a failed upgrade ("Connection refused"). A service
+that does not come up in time fails the install with the bound, its unit and
+`journalctl --user -u <unit>` (SYRD-803).
+
 The GUI-owned service starts with the user manager and checks every five seconds
 for the approved session/socket. It reapplies after socket recreation or a later
 login; no compositor-specific service name is hard-coded. A missing desktop

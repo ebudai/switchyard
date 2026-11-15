@@ -639,6 +639,75 @@ def test_roots_install_stops_pre_791_units_before_its_own_checks() -> None:
             h.compositor.close()
 
 
+def _restart_hook(h, then):
+    """systemd restarting the owner's service: the old process's context dies with it -- its socket file and receipt
+    stay, with nothing listening -- and `then`, in a thread, is the new process starting."""
+    def hook():
+        if not (h.systemctl and 'restart' in h.systemctl[-1]):
+            return  # `enable --now` on a service that is already running starts nothing
+        for held in list(desktop.HELD_CONTEXTS):
+            desktop.release_context(held)
+        threading.Thread(target=then, daemon=True).start()
+    return hook
+
+
+def test_an_upgrade_waits_for_the_restarted_service_to_listen() -> None:
+    """SYRD-803: syrd's upgrade restarted eric's desktop service for a new helper and judged readiness at once: the
+    receipt and socket from before the restart were still there, nothing listened, and the launch check got
+    "[Errno 111] Connection refused". A rerun a minute later passed."""
+    raw, h = host()
+    with raw, h.fixtures():
+        p = policy()
+        name = desktop.names(p)[2]
+        h.on_enable = lambda: desktop.apply(p)
+        desktop.install_owner(_payload(p))  # the release before: installed, granted, listening
+        newer = dict(_payload(p), helper=_payload(p)['helper'] + '\n# the next release\n')
+        stages = []
+
+        def slow_start():  # the new process: its listener a moment later, its receipt a moment after that
+            time.sleep(0.4)
+            desktop.hold_context(name, h.compositor_path, h.grant, app_id=h.tenant.pw_name, instance_id=p['project'])
+            stages.append(('listening', time.monotonic()))
+            time.sleep(0.4)
+            desktop.apply(p)
+            stages.append(('recorded', time.monotonic()))
+        h.on_enable = _restart_hook(h, slow_start)
+        h.systemctl.clear()
+        started = time.monotonic()
+        try:
+            desktop.install_owner(newer)
+            outcome = 'installed'
+        except desktop.DesktopAccessError as exc:
+            outcome = str(exc)
+        returned = time.monotonic()
+        with h.as_tenant():
+            try:
+                env = desktop.verify(p)
+                verdict = 'ready' if env['WAYLAND_DISPLAY'] == str(desktop.context_socket(h.grant, name)) else str(env)
+            except desktop.DesktopAccessError as exc:
+                verdict = str(exc)
+        check(any('restart' in c for c in h.systemctl) and outcome == 'installed' and verdict == 'ready',
+              f'a helper restart whose listener comes up late is ready, with no failure: {outcome}; {verdict}')
+        check(dict(stages).get('recorded', returned + 1) <= returned and returned - started >= 0.7,
+              f'install returns only once the new service listens and has recorded it: {stages} {returned - started:.2f}s')
+        # A restarted service that never comes back fails, within the bound, naming its unit and journal.
+        newest = dict(newer, helper=newer['helper'] + '# and the one after\n')
+        h.on_enable = _restart_hook(h, lambda: None)
+        started = time.monotonic()
+        with patch.object(desktop, 'SERVICE_GRANT_TIMEOUT_SECONDS', 1):
+            try:
+                desktop.install_owner(newest)
+                outcome = 'installed'
+            except desktop.DesktopAccessError as exc:
+                outcome = str(exc)
+        took = time.monotonic() - started
+        check('did not grant cerulean-worker a sandboxed Wayland socket within 1s' in outcome
+              and 'nothing accepts connections on its socket yet' in outcome
+              and f'systemctl --user status {name}.service' in outcome and f'journalctl --user -u {name}.service' in outcome
+              and 0.9 <= took < 5, f'a service that never listens fails with the bound named, after it: {outcome} ({took:.2f}s)')
+        h.compositor.close()
+
+
 def test_a_launch_with_no_desktop_socket_says_so_plainly() -> None:
     raw, h = host()
     with raw, h.fixtures():

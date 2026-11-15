@@ -1021,9 +1021,31 @@ WantedBy=default.target
 SERVICE_GRANT_TIMEOUT_SECONDS = 20
 
 
-def wait_for_service_grant(policy, gui, directory, name, *, timeout=SERVICE_GRANT_TIMEOUT_SECONDS,
-                           sleep=time.sleep, monotonic=time.monotonic):
-    """Until the owner's service has recorded this tenant's sandboxed socket as ready; its reason, raised, if not."""
+def live_grant_problem(value, directory, name) -> str | None:
+    """Why a ready receipt is not yet live for the tenant's verify, or None: right after a restart the old receipt and
+    socket file are still there with nothing listening (SYRD-803)."""
+    path = context_socket(directory, name)
+    if Path(value.get('socket', '')) != path:
+        return 'its receipt names another socket'
+    try:
+        info = path.stat()
+    except OSError as exc:
+        return f'its socket is not there yet ({exc.strerror or exc})'
+    if not stat.S_ISSOCK(info.st_mode) or value.get('socket_identity') != [info.st_dev, info.st_ino, info.st_ctime_ns]:
+        return 'its socket was replaced and the receipt does not record the new one yet'
+    try:
+        with socket.socket(socket.AF_UNIX) as probe:
+            probe.settimeout(2)
+            probe.connect(str(path))
+    except OSError as exc:
+        return f'nothing accepts connections on its socket yet ({exc})'
+    return None
+
+
+def wait_for_service_grant(policy, gui, directory, name, *, timeout=None, sleep=time.sleep, monotonic=time.monotonic):
+    """Until the owner's service has recorded this tenant's sandboxed socket and listens on it, as `verify` checks
+    (SYRD-803); its reason, raised, if not within the bound."""
+    timeout = SERVICE_GRANT_TIMEOUT_SECONDS if timeout is None else timeout
     ready = directory / (name + '.json')
     deadline = monotonic() + timeout
     reason = 'it has not recorded a grant yet'
@@ -1033,12 +1055,15 @@ def wait_for_service_grant(policy, gui, directory, name, *, timeout=SERVICE_GRAN
             if value.get('policy_digest') == digest(policy):
                 if value.get('state') == 'pending':
                     reason = value.get('reason') or 'it is waiting'
-                elif Path(value.get('socket', '')) == context_socket(directory, name) and Path(value['socket']).is_socket():
-                    return value
+                else:
+                    problem = live_grant_problem(value, directory, name)
+                    if problem is None:
+                        return value
+                    reason = problem
         if monotonic() >= deadline:
             raise DesktopAccessError(f"{gui.pw_name}'s desktop access service did not grant {policy['tenant_user']} a "
                                      f'sandboxed Wayland socket within {timeout:g}s: {reason}. As {gui.pw_name}: '
-                                     f'journalctl --user -u {name}.service')
+                                     f'systemctl --user status {name}.service; journalctl --user -u {name}.service')
         sleep(0.25)
 
 

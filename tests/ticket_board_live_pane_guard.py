@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -90,12 +91,25 @@ def run_module_tests_with_live_pane_guard(
     patch_bound_run_defaults: tuple[Callable[..., Any], ...] = (),
 ) -> None:
     guard = LivePaneShelloutGuard(patch_bound_run_defaults=patch_bound_run_defaults)
+    failed: list[str] = []
+    ran = 0
     with guard:
+        # SYRD-809: each case on its own -- one failure no longer hides every case after it. Each failure is printed
+        # as it happens, and all of them are named at the end.
         for name, test in module_test_functions(module_globals, first=first):
             guard.current_test = name
-            test()
+            ran += 1
+            try:
+                test()
+            except Exception:  # noqa: BLE001 - a failed case is reported, and the next one still runs
+                import traceback
+
+                failed.append(name)
+                print(f"FAIL {name}:\n{traceback.format_exc()}", file=sys.stderr, flush=True)
         guard.current_test = ""
     guard.assert_no_escapes()
+    if failed:
+        raise AssertionError(f"FAILED CHECK: {len(failed)} of {ran} cases failed: {failed}")
 
 
 def assert_capture_pane_guard_blocks_without_shelling_out(test_name: str) -> None:

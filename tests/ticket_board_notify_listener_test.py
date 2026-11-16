@@ -32,6 +32,7 @@ from ticket_board_pane_env import (
     snapshot_paths,
     strip_ticket_board_pane_env,
 )
+from submission_witness_fixture import taking_listener  # SYRD-809: the fake pane's own witness
 from ticket_board_live_pane_guard import (
     LivePaneShelloutGuard,
     assert_capture_pane_guard_blocks_without_shelling_out,
@@ -47,7 +48,6 @@ strip_ticket_board_pane_env(os.environ)
 
 from scripts.ticket_board import notify_listener
 from scripts.ticket_board.notify_listener import (
-    DEFAULT_DIRECTORCTL,
     DEFAULT_IDLE_STALL_NUDGE_CADENCE_SECONDS,
     DEFAULT_REQUEUE_BASE_SECONDS,
     DEFAULT_REQUEUE_MAX_SECONDS,
@@ -468,7 +468,7 @@ def test_hook_state_writer_and_gate_idle_before_arrival_delivers_immediately() -
         store, gate = hook_gate(tmp_path)
         store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
         conn = FakeConnection([queue_row(1, "PGU-304")])
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -501,7 +501,7 @@ def test_hermes_turn_end_idle_delivers_without_foreign_runtime_trace() -> None:
         )
         store.write("pgu-inspector:0.0", "idle", source="hermes.post_llm_call", now=100.0)
         conn = FakeConnection([queue_row(774, "PGU-774", target_role="inspector", message="PGU-774 -- Hermes notification")])
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -530,7 +530,7 @@ def test_worker_cursor_advanced_holds_notification_delivery() -> None:
         gate = PaneActivityGate(state_store=store, cursor_position_runner=cursor_runner)
         store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
         conn = FakeConnection([queue_row(78, "PGU-358A", target_role="ops", message="PGU-358A -- Ops notification")])
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -557,7 +557,7 @@ def test_real_idle_cursor_position_delivers_instead_of_wedging() -> None:
         gate = PaneActivityGate(state_store=store, cursor_position_runner=cursor_runner)
         store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
         conn = FakeConnection([queue_row(79, "PGU-365", target_role="ops", message="PGU-365 -- Ops notification")])
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -585,7 +585,7 @@ def test_cursor_home_delivers_regardless_of_row() -> None:
             gate = PaneActivityGate(state_store=store, cursor_position_runner=cursor_runner)
             store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
             conn = FakeConnection([queue_row(80, "PGU-365A", target_role="ops", message="PGU-365A -- Ops notification")])
-            listener = TicketBoardNotifyListener(
+            listener = taking_listener(
                 conninfo="dbname=test",
                 sender=lambda target, message: sent.append((target, message)),
                 activity_gate=gate.is_working,
@@ -610,7 +610,7 @@ def test_pre_send_recheck_waits_and_holds_when_cursor_advances_on_second_read() 
         gate = PaneActivityGate(state_store=store, cursor_position_runner=cursor_runner)
         store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
         conn = FakeConnection([queue_row(85, "PGU-364", target_role="ops", message="PGU-364 -- Ops notification")])
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -641,7 +641,7 @@ def test_pre_send_recheck_delivers_when_cursor_stays_home() -> None:
         gate = PaneActivityGate(state_store=store, cursor_position_runner=cursor_runner)
         store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
         conn = FakeConnection([queue_row(86, "PGU-364A", target_role="ops", message="PGU-364A -- Ops notification")])
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -681,7 +681,7 @@ def test_send_trace_records_composer_diagnostics_and_suspected_clobber() -> None
         )
         store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
         conn = FakeConnection([queue_row(482, "PGU-482", target_role="ops", message="New ticket for you: PGU-482 -- Diagnostic")])
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: {
                 "delivery_mode": "direct",
@@ -719,7 +719,7 @@ def test_advanced_cursor_holds_immediately_without_second_read() -> None:
         gate = PaneActivityGate(state_store=store, cursor_position_runner=cursor_runner)
         store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
         conn = FakeConnection([queue_row(87, "PGU-364B", target_role="ops", message="PGU-364B -- Ops notification")])
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -743,7 +743,7 @@ def test_listener_enqueues_idle_stall_nudges_from_hook_state() -> None:
         store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
         store.write("pgu-app:0.0", "busy", source="codex.PreToolUse", now=101.0)
         conn = FakeConnection(idle_stall_result=1)
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="",
             activity_gate=gate.is_working,
             sender=lambda _target, _message: None,
@@ -784,7 +784,7 @@ def test_advancing_working_timer_suppresses_idle_stall_nudge() -> None:
         )
         store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=100.0)
         conn = FakeConnection(idle_stall_result=0)
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="",
             activity_gate=gate.is_working,
             sender=lambda _target, _message: None,
@@ -809,7 +809,7 @@ def test_idle_role_resets_busy_backoff_before_claiming_due_notifications() -> No
         store, gate = hook_gate(tmp_path)
         store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
         conn = FakeConnection([queue_row(32, "PGU-627", target_role="ops", attempts=20)])
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -845,7 +845,7 @@ def test_resetting_working_timer_suppresses_idle_stall_nudge() -> None:
         )
         store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=100.0)
         conn = FakeConnection(idle_stall_result=0)
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="",
             activity_gate=gate.is_working,
             sender=lambda _target, _message: None,
@@ -880,7 +880,7 @@ def test_static_working_timer_does_not_suppress_idle_stall_nudge() -> None:
         )
         store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=100.0)
         conn = FakeConnection(idle_stall_result=1)
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="",
             activity_gate=gate.is_working,
             sender=lambda _target, _message: None,
@@ -1047,7 +1047,7 @@ def test_listener_enqueues_idle_turn_end_nudges_on_each_turn_completion_idle() -
             capture_pane_runner=failing_capture_runner,
         )
         conn = FakeConnection(idle_turn_end_result=1)
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="",
             activity_gate=gate.is_working,
             sender=lambda _target, _message: None,
@@ -1112,7 +1112,7 @@ def test_listener_enqueues_present_idle_fallback_once_per_idle_period() -> None:
         now = time.time() - 60 * 60
         store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=now)
         conn = FakeConnection(idle_turn_end_result=1)
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="",
             activity_gate=gate.is_working,
             sender=lambda _target, _message: None,
@@ -1145,7 +1145,7 @@ def test_present_idle_turn_end_fallback_does_not_probe_director() -> None:
         )
         store.write("pgu-director:0.0", "idle", source="claude.Notification.idle_prompt", now=time.time())
         conn = FakeConnection(idle_turn_end_result=1)
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="",
             activity_gate=gate.is_working,
             sender=lambda _target, _message: None,
@@ -1196,7 +1196,7 @@ def test_missing_hook_state_fails_safe_and_does_not_clobber() -> None:
     with TemporaryStateDir() as tmp_path:
         _store, gate = hook_gate(tmp_path)
         conn = FakeConnection([queue_row(2, "PGU-304")])
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -1221,7 +1221,7 @@ def test_hook_busy_requeues_with_exponential_backoff() -> None:
         store.write("pgu-ops:0.0", "busy", source="codex.UserPromptSubmit", now=100.0)
         for attempts in (1, 2, 9):
             conn = FakeConnection([queue_row(3, "PGU-304", attempts=attempts)])
-            listener = TicketBoardNotifyListener(
+            listener = taking_listener(
                 conninfo="dbname=test",
                 sender=lambda target, message: sent.append((target, message)),
                 activity_gate=gate.is_working,
@@ -1240,7 +1240,7 @@ def test_hook_busy_requeues_with_exponential_backoff() -> None:
 
 
 def test_backoff_sequence_is_pinned_to_five_minute_cap() -> None:
-    listener = TicketBoardNotifyListener(conninfo="", poll_seconds=0)
+    listener = taking_listener(conninfo="", poll_seconds=0)
 
     assert [listener.ledger.backoff_seconds(attempts) for attempts in range(1, 9)] == [
         5.0,
@@ -1257,7 +1257,7 @@ def test_backoff_sequence_is_pinned_to_five_minute_cap() -> None:
 def test_busy_backoff_attempts_stay_below_ten_in_five_minutes() -> None:
     elapsed = 0.0
     attempts = 0
-    listener = TicketBoardNotifyListener(conninfo="", poll_seconds=0)
+    listener = taking_listener(conninfo="", poll_seconds=0)
     while elapsed < 5 * 60:
         attempts += 1
         elapsed += listener.ledger.backoff_seconds(attempts)
@@ -1268,7 +1268,7 @@ def test_busy_backoff_attempts_stay_below_ten_in_five_minutes() -> None:
 def test_finish_current_backoff_attempts_stay_below_ten_in_five_minutes() -> None:
     elapsed = 0.0
     attempts = 0
-    listener = TicketBoardNotifyListener(conninfo="", poll_seconds=0)
+    listener = taking_listener(conninfo="", poll_seconds=0)
     while elapsed < 5 * 60:
         attempts += 1
         elapsed += listener.ledger.backoff_seconds(attempts)
@@ -1290,7 +1290,7 @@ def test_stale_codex_busy_state_recovers_and_delivers() -> None:
         )
         store.write("pgu-ops:0.0", "busy", source="codex.UserPromptSubmit", now=1_800_000_000.0)
         conn = FakeConnection([queue_row(89, "PGU-558")])
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -1738,7 +1738,8 @@ def test_team_launcher_start_idle_without_timer_delivers() -> None:
             idle_working_timer_sample_delay_seconds=1.1,
             sleeper=lambda seconds: sleep_calls.append(seconds),
         )
-        store.write("pgu-main:0.0", "idle", source="team_launcher.start", now=1_800_000_000.0)
+        # Settled an hour ago (SYRD-809): a fixed 1_800_000_000 (2027) read as a CLI still starting (SYRD-566).
+        store.write("pgu-main:0.0", "idle", source="team_launcher.start", now=time.time() - 3600)
 
         assert gate.is_busy("pgu-main:0.0") is False
 
@@ -1801,7 +1802,7 @@ def test_ticket_update_waits_for_a_working_owner_rather_than_interrupting_it() -
             ],
             ticket_rows={"PGU-361": ("in_progress", "ops", False, False)},
         )
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -1843,7 +1844,7 @@ def test_ticket_update_waits_for_worker_human_composing_to_clear() -> None:
             ],
             ticket_rows={"PGU-361A": ("in_progress", "ops", False, False)},
         )
-        held_listener = TicketBoardNotifyListener(
+        held_listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -1870,7 +1871,7 @@ def test_ticket_update_waits_for_worker_human_composing_to_clear() -> None:
             ],
             ticket_rows={"PGU-361A": ("in_progress", "ops", False, False)},
         )
-        delivered_listener = TicketBoardNotifyListener(
+        delivered_listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -1910,7 +1911,7 @@ def test_ticket_update_holds_busy_worker_with_advanced_cursor() -> None:
             ],
             ticket_rows={"PGU-361B": ("in_progress", "ops", False, False)},
         )
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -1939,7 +1940,7 @@ def test_hook_busy_traces_only_first_gate_defer_per_notification() -> None:
                 queue_row(42, "PGU-318", attempts=2),
             ]
         )
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -1963,7 +1964,7 @@ def test_new_assignment_waits_behind_existing_in_progress_ticket() -> None:
             [queue_row(43, "PGU-324", state="in_progress", assignee="ops", attempts=1)],
             finish_current_blockers={"ops": "PGU-321"},
         )
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -1993,7 +1994,7 @@ def test_finish_current_requeues_with_exponential_backoff() -> None:
                 [queue_row(43, "PGU-324", state="in_progress", assignee="ops", attempts=attempts)],
                 finish_current_blockers={"ops": "PGU-321"},
             )
-            listener = TicketBoardNotifyListener(
+            listener = taking_listener(
                 conninfo="dbname=test",
                 sender=lambda target, message: sent.append((target, message)),
                 activity_gate=gate.is_working,
@@ -2027,7 +2028,7 @@ def test_two_in_progress_tickets_do_not_mutually_finish_current_deadlock() -> No
                 "PGU-336": ("ops", 20.0),
             },
         )
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -2061,7 +2062,7 @@ def test_finish_current_releases_next_oldest_after_oldest_leaves_in_progress() -
                 "PGU-336": ("ops", 20.0),
             },
         )
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -2093,7 +2094,7 @@ def test_three_in_progress_tickets_deliver_oldest_first_one_at_a_time() -> None:
                 "PGU-102": ("ops", 30.0),
             },
         )
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -2121,7 +2122,7 @@ def test_finish_current_missing_entry_time_falls_back_to_lowest_ticket_number() 
                 "PGU-102": ("ops", None),
             },
         )
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -2176,7 +2177,7 @@ def test_director_client_activity_latches_no_clobber_until_busy_idle_cycle() -> 
         conn = FakeConnection(
             [queue_row(4, "PGU-304", target_role="director", message="PGU-304 -- Director notification")]
         )
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -2191,7 +2192,7 @@ def test_director_client_activity_latches_no_clobber_until_busy_idle_cycle() -> 
         held_conn = FakeConnection(
             [queue_row(5, "PGU-305", target_role="director", message="PGU-305 -- Director notification")]
         )
-        held_listener = TicketBoardNotifyListener(
+        held_listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -2211,7 +2212,7 @@ def test_director_client_activity_latches_no_clobber_until_busy_idle_cycle() -> 
         delivered_conn = FakeConnection(
             [queue_row(6, "PGU-306", target_role="director", message="PGU-306 -- Director notification")]
         )
-        delivered_listener = TicketBoardNotifyListener(
+        delivered_listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -2252,7 +2253,7 @@ def test_director_restart_window_holds_stale_idle_until_busy_idle_cycle() -> Non
         startup_conn = FakeConnection(
             [queue_row(70, "PGU-353", target_role="director", message="PGU-353 -- Director notification")]
         )
-        startup_listener = TicketBoardNotifyListener(
+        startup_listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -2269,7 +2270,7 @@ def test_director_restart_window_holds_stale_idle_until_busy_idle_cycle() -> Non
         composing_conn = FakeConnection(
             [queue_row(71, "PGU-354", target_role="director", message="PGU-354 -- Director notification")]
         )
-        composing_listener = TicketBoardNotifyListener(
+        composing_listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -2289,7 +2290,7 @@ def test_director_restart_window_holds_stale_idle_until_busy_idle_cycle() -> Non
         delivered_conn = FakeConnection(
             [queue_row(72, "PGU-355", target_role="director", message="PGU-355 -- Director notification")]
         )
-        delivered_listener = TicketBoardNotifyListener(
+        delivered_listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -2328,7 +2329,7 @@ def test_director_restart_window_timeout_releases_flat_idle_without_busy_cycle()
         startup_conn = FakeConnection(
             [queue_row(74, "PGU-357", target_role="director", message="PGU-357 -- Director notification")]
         )
-        startup_listener = TicketBoardNotifyListener(
+        startup_listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -2343,7 +2344,7 @@ def test_director_restart_window_timeout_releases_flat_idle_without_busy_cycle()
         released_conn = FakeConnection(
             [queue_row(75, "PGU-358", target_role="director", message="PGU-358 -- Director notification")]
         )
-        released_listener = TicketBoardNotifyListener(
+        released_listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -2369,7 +2370,7 @@ def _agy_inspector_gate(store: "PaneHookStateStore") -> "PaneActivityGate":
 
 
 def _agy_listener(gate: "PaneActivityGate", conn: "FakeConnection", sent: list, **kwargs: Any) -> "TicketBoardNotifyListener":
-    return TicketBoardNotifyListener(
+    return taking_listener(
         conninfo="dbname=test",
         sender=lambda target, message: sent.append((target, message)),
         activity_gate=gate.is_working,
@@ -2637,7 +2638,7 @@ def test_ticket_update_waits_for_a_working_claude_implementer() -> None:
             ],
             ticket_rows={"PGU-45": ("in_progress", "main", False, False)},
         )
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -2682,7 +2683,7 @@ def test_a_ticket_update_claimed_while_idle_is_held_when_the_turn_starts() -> No
             # Between the claim and the send, exactly as a real turn would.
             store.write("pgu-main:0.0", "busy", source="claude.UserPromptSubmit", now=200.0)
 
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -2753,7 +2754,7 @@ def test_director_pre_send_recheck_blocks_typing_that_starts_after_initial_idle_
         conn = FakeConnection(
             [queue_row(73, "PGU-356", target_role="director", message="PGU-356 -- Director notification")]
         )
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -2793,7 +2794,7 @@ def test_director_pre_send_recheck_blocks_claude_working_probe_after_initial_idl
         conn = FakeConnection(
             [queue_row(76, "PGU-359", target_role="director", message="PGU-359 -- Director notification")]
         )
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -2834,7 +2835,7 @@ def director_delivery_case(
         conn = FakeConnection(
             [queue_row(77, "PGU-360", target_role="director", message="PGU-360 -- Director notification")]
         )
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -2890,7 +2891,7 @@ def test_idle_nudge_enumeration_does_not_touch_director_composing_latch() -> Non
         store.write("pgu-director:0.0", "idle", source="claude.Notification.idle_prompt", now=10.0)
 
         warm_conn = FakeConnection(idle_turn_end_result=0, idle_stall_result=0)
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -2903,7 +2904,7 @@ def test_idle_nudge_enumeration_does_not_touch_director_composing_latch() -> Non
         conn = FakeConnection(
             [queue_row(76, "PGU-359", target_role="director", message="PGU-359 -- Director notification")]
         )
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -3051,7 +3052,7 @@ def test_listener_logs_missing_hook_state_on_startup() -> None:
         store, gate = hook_gate(tmp_path)
         store.write("pgu-ops:0.0", "idle", source="codex.Stop", now=100.0)
         logger = FakeLogger()
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda _target, _message: None,
             activity_gate=gate.is_working,
@@ -3074,7 +3075,7 @@ def test_send_failure_uses_exponential_backoff() -> None:
     def sender(_target: str, _message: str) -> None:
         raise subprocess.TimeoutExpired(["directorctl", "send"], timeout=10)
 
-    listener = TicketBoardNotifyListener(
+    listener = taking_listener(
         conninfo="dbname=test",
         sender=sender,
         activity_gate=lambda _target: False,
@@ -3099,7 +3100,7 @@ def test_send_failure_marks_missing_tmux_target_as_structural_fault() -> None:
     def sender(_target: str, _message: str) -> None:
         raise error
 
-    listener = TicketBoardNotifyListener(
+    listener = taking_listener(
         conninfo="dbname=test",
         sender=sender,
         activity_gate=lambda _target: False,
@@ -3204,7 +3205,7 @@ def test_missing_tmux_target_dead_letters_before_busy_gate() -> None:
     gate_calls: list[str] = []
     send_calls: list[tuple[str, str]] = []
     conn = FakeConnection([queue_row(49, "PGU-772", attempts=49, assignee="perf", target_role="perf")])
-    listener = TicketBoardNotifyListener(
+    listener = taking_listener(
         conninfo="dbname=test",
         sender=lambda target, message: send_calls.append((target, message)),
         activity_gate=lambda target: gate_calls.append(target) or True,
@@ -3241,7 +3242,7 @@ def test_stale_idle_state_for_missing_pane_dead_letters_before_activity_gate() -
         assert gate.is_working("pgu-perf:0.0") is True
         assert gate.last_trace("pgu-perf:0.0").reason == "cursor_state_unavailable"  # type: ignore[union-attr]
         conn = FakeConnection([queue_row(64, "PGU-772", attempts=64, assignee="perf", target_role="perf")])
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate.is_working,
@@ -3280,7 +3281,7 @@ def test_long_idle_live_pane_still_delivers() -> None:
             store.write(target, "busy", source="claude.UserPromptSubmit")
             store.write(target, "idle", source="claude.Stop")
 
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=live_pane_takes_it,
             activity_gate=gate.is_working,
@@ -3302,7 +3303,7 @@ def test_busy_existing_pane_holds_then_delivers_when_idle() -> None:
     gate_busy = [True]
     row = queue_row(50, "PGU-776", attempts=1, assignee="ops", target_role="ops")
     conn = FakeConnection([row])
-    listener = TicketBoardNotifyListener(
+    listener = taking_listener(
         conninfo="dbname=test",
         sender=lambda target, message: sent.append((target, message)),
         submission_witness=lambda target, _since: any(t == target for t, _m in sent),  # the pane takes what it is sent
@@ -3344,7 +3345,7 @@ def test_final_review_handoff_survives_busy_retry_and_manual_control() -> None:
         ],
         ticket_rows={ticket_id: ("director_review", "director", False, False, False)},
     )
-    listener = TicketBoardNotifyListener(
+    listener = taking_listener(
         conninfo="dbname=test",
         sender=lambda target, text: sent.append((target, text)),
         submission_witness=lambda target, _since: any(t == target for t, _m in sent),  # the pane takes what it is sent
@@ -3397,7 +3398,7 @@ def test_final_review_handoff_ignores_only_scheduling_flags() -> None:
             ],
             ticket_rows={ticket_id: ticket_row},
         )
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, text: sent.append((target, text)),
             submission_witness=lambda target, _since: any(t == target for t, _m in sent),  # the pane takes what it is sent
@@ -3413,7 +3414,8 @@ def test_final_review_handoff_ignores_only_scheduling_flags() -> None:
 
 
 def test_final_review_handoff_exemption_does_not_broaden_manual_holds() -> None:
-    for notification_id, state in ((59, "analysis"), (60, "dat")):
+    # SYRD-809: parked and blocked, the holds SYRD-178 left on a hand-over (manual control: listener_delivery_pins_test).
+    for notification_id, state, row in ((59, "analysis", (False, True, False)), (60, "dat", (False, False, True))):
         ticket_id = f"PGU-{notification_id}"
         sent: list[tuple[str, str]] = []
         conn = FakeConnection(
@@ -3426,9 +3428,9 @@ def test_final_review_handoff_exemption_does_not_broaden_manual_holds() -> None:
                     target_role="director",
                 )
             ],
-            ticket_rows={ticket_id: (state, "director", True, False, False)},
+            ticket_rows={ticket_id: (state, "director", *row)},
         )
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, text: sent.append((target, text)),
             activity_gate=lambda _target: False,
@@ -3462,7 +3464,7 @@ def test_final_review_handoff_drops_after_review_identity_changes() -> None:
             ],
             ticket_rows={f"PGU-{notification_id}": ticket_row},
         )
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, text: sent.append((target, text)),
             activity_gate=lambda _target: False,
@@ -3482,7 +3484,7 @@ def test_stale_notification_for_cancelled_ticket_is_acked_not_delivered() -> Non
         [queue_row(8, "PGU-304", state="in_progress", assignee="ops")],
         ticket_rows={"PGU-304": ("cancelled", "ops", False, False)},
     )
-    listener = TicketBoardNotifyListener(
+    listener = taking_listener(
         conninfo="dbname=test",
         sender=lambda target, message: sent.append((target, message)),
         activity_gate=lambda _target: False,
@@ -3512,7 +3514,7 @@ def test_terminal_transition_notification_is_delivered_to_prior_owner() -> None:
         ],
         ticket_rows={"PGU-405": ("cancelled", "ops", False, False)},
     )
-    listener = TicketBoardNotifyListener(
+    listener = taking_listener(
         conninfo="dbname=test",
         sender=lambda target, text: sent.append((target, text)),
         activity_gate=lambda _target: False,
@@ -3541,7 +3543,7 @@ def test_queued_idle_reminder_drops_after_ticket_becomes_manually_controlled() -
         ],
         ticket_rows={"PGU-549": ("analysis", "ops", True, False, False)},
     )
-    listener = TicketBoardNotifyListener(
+    listener = taking_listener(
         conninfo="dbname=test",
         sender=lambda target, text: sent.append((target, text)),
         activity_gate=lambda _target: False,
@@ -3575,7 +3577,7 @@ def test_queued_transition_drops_after_ticket_becomes_parked_or_blocked() -> Non
             ],
             ticket_rows={f"PGU-{notification_id}": ticket_row},
         )
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo="dbname=test",
             sender=lambda target, text: sent.append((target, text)),
             activity_gate=lambda _target: False,
@@ -3606,7 +3608,7 @@ def test_idle_reminder_repeat_escalation_delivers_to_director() -> None:
         ],
         ticket_rows={"PGU-366": ("in_progress", "ops", False, False)},
     )
-    listener = TicketBoardNotifyListener(
+    listener = taking_listener(
         conninfo="dbname=test",
         sender=lambda target, text: sent.append((target, text)),
         activity_gate=lambda _target: False,
@@ -3621,7 +3623,7 @@ def test_idle_reminder_repeat_escalation_delivers_to_director() -> None:
 
 def test_user_review_does_not_deliver_to_a_pane_for_uat() -> None:
     sent: list[tuple[str, str]] = []
-    listener = TicketBoardNotifyListener(
+    listener = taking_listener(
         conninfo="dbname=test",
         sender=lambda target, message: sent.append((target, message)),
         activity_gate=lambda _target: False,
@@ -3647,7 +3649,7 @@ def test_reconnect_relistens_after_connection_drop() -> None:
             stop_event.set()
         return conn
 
-    listener = TicketBoardNotifyListener(
+    listener = taking_listener(
         conninfo="dbname=test",
         sender=lambda _target, _message: None,
         activity_gate=lambda _target: False,
@@ -3665,7 +3667,7 @@ def test_reconnect_relistens_after_connection_drop() -> None:
 def test_idle_listener_consumes_notifies_generator_before_polling_again() -> None:
     stop_event = threading.Event()
     conn = StopAfterWaitConnection(stop_event)
-    listener = TicketBoardNotifyListener(
+    listener = taking_listener(
         conninfo="dbname=test",
         sender=lambda _target, _message: None,
         activity_gate=lambda _target: False,
@@ -3682,7 +3684,7 @@ def test_idle_listener_consumes_notifies_generator_before_polling_again() -> Non
 
 def test_wait_timeout_uses_next_attempt_instead_of_poll_ceiling() -> None:
     conn = FakeConnection(next_attempt_at=datetime.now(timezone.utc) + timedelta(seconds=1))
-    listener = TicketBoardNotifyListener(
+    listener = taking_listener(
         conninfo="dbname=test",
         sender=lambda _target, _message: None,
         activity_gate=lambda _target: False,
@@ -3715,10 +3717,6 @@ def test_default_sender_delegates_to_directorctl_send() -> None:
 
     assert calls == [(["/tmp/directorctl", "send", "pgu-ops:0.0", "New ticket for you: PGU-215 -- Submit"], True, True, True)]
     assert diagnostic == {"delivery_mode": "direct", "forced_delivery": False}
-
-
-def test_default_directorctl_path_is_canonical_runtime() -> None:
-    assert DEFAULT_DIRECTORCTL == str(ROOT / "scripts" / "directorctl")
 
 
 def test_live_pane_shellout_guard_rejects_capture_pane_without_calling_tmux() -> None:

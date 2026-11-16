@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +27,9 @@ def run_isolated_tmux(server: str, args: list[str], **kwargs: Any) -> subprocess
 
 
 def isolated_tmux_socket_path(server: str) -> Path:
-    return Path(os.environ.get("TMUX_TMPDIR", tempfile.gettempdir())) / f"tmux-{os.getuid()}" / server
+    # tmux's own rule: $TMUX_TMPDIR, else /tmp -- never $TMPDIR, which tempfile follows (SYRD-809: under a disposable
+    # TMPDIR this looked in the wrong directory, and the cleanup missed the socket it was asked to remove).
+    return Path(os.environ.get("TMUX_TMPDIR") or "/tmp") / f"tmux-{os.getuid()}" / server
 
 
 def cleanup_dead_isolated_tmux_socket(server: str) -> None:

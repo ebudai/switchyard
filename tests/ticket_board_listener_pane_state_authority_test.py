@@ -35,6 +35,7 @@ from ticket_board_pane_env import strip_ticket_board_pane_env  # noqa: E402
 
 strip_ticket_board_pane_env(os.environ)
 
+from submission_witness_fixture import taking_listener  # noqa: E402 - SYRD-809: the fake pane's own witness
 from scripts.ticket_board.notify_listener import (  # noqa: E402
     PaneActivityGate,
     PaneHookStateStore,
@@ -650,7 +651,7 @@ SET next_attempt_at = clock_timestamp() - interval '10 seconds';
 
         # --- fails closed, and a liveness check would not have noticed -------
         sent: list[tuple[str, str]] = []
-        stalled = TicketBoardNotifyListener(
+        stalled = taking_listener(
             conninfo=listener_conninfo,
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate_for(wrong_dir).is_working,
@@ -685,7 +686,7 @@ SET next_attempt_at = clock_timestamp() - interval '10 seconds';
             admin,
             "UPDATE ticket_board.ticket_notification_queue SET next_attempt_at = clock_timestamp() - interval '10 seconds';",
         )
-        restarted = TicketBoardNotifyListener(
+        restarted = taking_listener(
             conninfo=listener_conninfo,
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate_for(right_dir).is_working,
@@ -724,7 +725,7 @@ SET next_attempt_at = clock_timestamp() - interval '10 seconds';
         PaneHookStateStore(right_dir).write("pgu-ops:0.0", "busy", source="codex.PreInvocation")
         before = queued_ids(admin)
         assert len(before) == 1, before
-        busy_listener = TicketBoardNotifyListener(
+        busy_listener = taking_listener(
             conninfo=listener_conninfo,
             sender=lambda target, message: sent.append((target, message)),
             activity_gate=gate_for(right_dir).is_working,

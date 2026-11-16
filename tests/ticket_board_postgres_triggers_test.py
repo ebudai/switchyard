@@ -17,7 +17,8 @@ if str(ROOT) not in sys.path:
 
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 
-from scripts.ticket_board.notify_listener import TicketBoardNotifyListener
+sys.path.insert(0, str(ROOT / "tests"))
+from submission_witness_fixture import taking_listener  # noqa: E402 - SYRD-809: the fake pane's own witness
 
 from temporary_cluster import temporary_cluster  # noqa: E402
 
@@ -246,12 +247,8 @@ GRANT EXECUTE ON FUNCTION ticket_board.audit_sign_off(text, text) TO ticket_boar
 GRANT EXECUTE ON FUNCTION ticket_board.inspector_sign_off(text) TO ticket_board_service;
 """,
         )
-        psql(conninfo, "GRANT USAGE ON SCHEMA ticket_board TO ticket_board_listener;")
-        psql(conninfo, "GRANT SELECT ON ALL TABLES IN SCHEMA ticket_board TO ticket_board_listener;")
-        psql(conninfo, "GRANT EXECUTE ON FUNCTION ticket_board.claim_notification(timestamptz, interval) TO ticket_board_listener;")
-        psql(conninfo, "GRANT EXECUTE ON FUNCTION ticket_board.ack_notification(bigint) TO ticket_board_listener;")
-        psql(conninfo, "GRANT EXECUTE ON FUNCTION ticket_board.requeue_notification(bigint, interval, text) TO ticket_board_listener;")
-        psql(conninfo, "GRANT EXECUTE ON FUNCTION ticket_board.record_notification_trace(text, bigint, text, text, text, text, text, text, jsonb) TO ticket_board_listener;")
+        # SYRD-809: the listener's grants as production makes them (a stale hand list left it failing closed on holds).
+        psql(conninfo, (ROOT / "scripts" / "ticket_board" / "rbac.sql").read_text())
 
         insert_ticket(conninfo, "PGU-1", title="Workflow", assignee="director")
         assert_error(
@@ -2164,11 +2161,12 @@ WHERE ticket_id = 'PGU-29701';
             }
         ], analysis_insert_queue
         listener_sent: list[tuple[str, str]] = []
-        listener = TicketBoardNotifyListener(
+        listener = taking_listener(
             conninfo=listener_conninfo,
             sender=lambda target, message: listener_sent.append((target, message)),
             activity_gate=lambda _target: False,
             poll_seconds=0,
+            target_exists=lambda _target: True,  # the fake pane is there; no live tmux is asked
         )
         assert listener.listen_once(max_notifications=1) == 1
         assert listener_sent == [

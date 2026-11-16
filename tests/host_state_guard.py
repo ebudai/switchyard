@@ -46,9 +46,23 @@ sitecustomize) first on PYTHONPATH and names a shared record in
 SWITCHYARD_TEST_HOST_GUARD_LOG, and every child started through subprocess,
 os.system, os.exec* or os.posix_spawn* gets both, even with an `env=` of its
 own. `assert_untouched()` reads that record, so a child's reach fails the
-suite too. Other programs a child runs are not interposed: suites that run
-shell or C tooling against host paths still belong in a sandbox that hides
-these roots.
+suite too.
+
+A shell -c script is read simple command by simple command, reserved words
+(`if then elif else while until do ! { time` and their ends) seen through, so
+each command is judged with its own leading assignments. What the guard does
+not model is refused, failing closed (SYRD-816): in any script, a `$` or
+backtick expansion in the word a command runs (an assembled `$s$t` names no
+tool the guard could see); and in a script that names a privileged tool or a
+Python interpreter, an expansion in a PATH assignment, `eval`, `source` or `.`,
+a function definition, and a relative command after `cd`.
+
+Still not covered: a program that is neither Python nor a shell -c string --
+a compiled binary, or a shell script *file* -- that sets its own PATH or names
+a tool by absolute path, and so passes the shims; and, in a -c script, any sh
+construct beyond the ones above that changes PATH or the command run without
+an expansion, an assignment or a word the guard reads. Suites that run such
+tooling against host paths still belong in a sandbox that hides these roots.
 """
 
 from __future__ import annotations
@@ -263,25 +277,102 @@ def _env_options(words: list[str], at: int, env: dict) -> tuple[int, dict]:
 
 
 def _python_guarded(words: list[str], at: int, env: dict) -> str:
-    """Why the Python interpreter at `words[at]` would start without the guard, or ''."""
-    for word in words[at + 1:]:
-        if word in ("-c", "-m") or not word.startswith("-") or word.startswith("--"):
-            break
-        letters = word[1:]
-        for index, letter in enumerate(letters):
+    """Why the Python interpreter at `words[at]` would start without the guard, or ''.
+
+    Every interpreter option is read, up to the program (`-c`, `-m`, a script or `-`): the value of `-X` or `-W`
+    -- the rest of its word, or the next word -- is skipped, never taken for the end of the options, so an `-I`, `-E`
+    or `-S` after one is still seen (SYRD-816)."""
+    index = at + 1
+    while index < len(words):
+        word = words[index]
+        if word in ("-", "--") or not word.startswith("-"):
+            break  # the script, or stdin: the rest is the program's
+        if word.startswith("--"):
+            index += 2 if word == "--check-hash-based-pycs" else 1
+            continue
+        letters, program = word[1:], False
+        for position, letter in enumerate(letters):
             if letter in "IES":
                 return f"-{letter} keeps sitecustomize from loading"
-            if letter in "cm" or (letter in "WX" and index == len(letters) - 1):
+            if letter in "cm":
+                program = True  # its code or module follows: the rest is the program's
                 break
+            if letter in "WX":
+                index += 1 if position == len(letters) - 1 else 0  # its value is the next word, or the rest of this
+                break
+        if program:
+            break
+        index += 1
     path = env.get("PYTHONPATH", "").split(os.pathsep)
     if SITE_DIR not in path or not env.get(LOG_ENV):
         return "its environment does not carry the guard"
     return ""
 
 
+#: A word in a shell script that names a privileged tool or a Python interpreter.
+_NAMED = re.compile(r"(?<![\w.-])(?:" + "|".join(sorted(map(re.escape, PRIVILEGED))) + r"|python(?:\d+(?:\.\d+)*)?)(?![\w.-])")
+
+
+#: Words that open or close a compound command; the simple command after one is judged on its own, with its own
+#: leading assignments (Audit of 47083b2f: `if true; then PATH=... systemctl; fi` read `then` as the command word).
+RESERVED = frozenset({"if", "then", "elif", "else", "fi", "while", "until", "do", "done", "!", "{", "}", "time",
+                      "esac"})
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _without_reserved(words: list[str]) -> list[str]:
+    words = list(words)
+    while words and words[0] in RESERVED:
+        words.pop(0)
+        while words and words[0] == "-p":  # time -p
+            words.pop(0)
+    return words
+
+
+def _command_word(words: list[str]) -> str:
+    """The word a simple command runs: past reserved words, assignments, and `exec`, `command` and the wrappers
+    with their options."""
+    words = _without_reserved(words)
+    while words and _ASSIGNMENT.match(words[0]):
+        words.pop(0)
+    while words and words[0] in ("exec", "command", *WRAPPERS):
+        words.pop(0)
+        while words and (words[0].startswith("-") or words[0].replace(".", "").isdigit()):
+            words.pop(0)
+    return words[0] if words else ""
+
+
+def _unmodelled(commands: list[list[str]], tokens: list[str]) -> str:
+    """What in a script naming a privileged tool or an interpreter the guard does not model, or ''. It refuses that
+    rather than modelling more of sh (SYRD-816): an expansion where a PATH is decided, `eval` and sourcing, a
+    function, and a relative command after `cd`. (An expansion in a command word is refused in any script.)"""
+    if "function" in tokens or "()" in tokens or any(a == "(" and b == ")" for a, b in zip(tokens, tokens[1:])):
+        return "a function definition"
+    moved = False
+    for command in commands:
+        words = _without_reserved(command)
+        while words and re.match(r"[A-Za-z_][A-Za-z0-9_]*=", words[0]):
+            key, value = words.pop(0).split("=", 1)
+            if key == "PATH" and ("$" in value or "`" in value):
+                return "an expansion in a PATH assignment"
+        if not words:
+            continue
+        if words[0] in ("export", "declare", "typeset", "readonly") and any(
+                w.startswith("PATH=") and ("$" in w or "`" in w) for w in words[1:]):
+            return "an expansion in a PATH assignment"
+        if words[0] in ("eval", "source", "."):
+            return f"`{words[0]}`"
+        if words[0] in ("cd", "pushd", "popd"):
+            moved = True
+        elif moved and "/" in words[0] and not words[0].startswith("/"):
+            return "a relative command after cd"
+    return ""
+
+
 def _shell_commands(script: str, env: dict, depth: int) -> None:
     """A shell -c script, simple command by simple command: assignments and `export` change what follows,
-    `command -p` asks for the default path, and each command is judged as an argv under that environment."""
+    `command -p` asks for the default path, and each command is judged as an argv under that environment. In a
+    script that names a privileged tool or an interpreter, what this does not model is refused (`_unmodelled`)."""
     try:
         lexer = shlex.shlex(script, posix=True, punctuation_chars=";&|()\n")
         lexer.whitespace_split = True
@@ -289,10 +380,26 @@ def _shell_commands(script: str, env: dict, depth: int) -> None:
         tokens = list(lexer)
     except ValueError:
         tokens = script.split()
+    commands, current = [], []
+    for token in [*tokens, ";"]:
+        if token and set(token) <= set(";&|()\n"):
+            if current:
+                commands.append(current)
+            current = []
+        else:
+            current.append(token)
+    # A command assembled from expansions names no tool the guard can see (`$s$t` for systemctl), so it is refused
+    # in any script (Audit of 47083b2f); the rest only where the script names a tool or an interpreter.
+    assembled = next((c for c in commands if "$" in _command_word(c) or "`" in _command_word(c)), None)
+    why = "an expansion in a command word" if assembled else (_unmodelled(commands, tokens) if _NAMED.search(script)
+                                                             else "")
+    if why:
+        _refuse(f"a shell script the guard cannot model ({why}): {script}")
     env = dict(env)
     command: list[str] = []
     for token in [*tokens, ";"]:
         if token and set(token) <= set(";&|()\n"):
+            command = _without_reserved(command)
             if command:
                 assignments = 0
                 while assignments < len(command) and "=" in command[assignments] and \

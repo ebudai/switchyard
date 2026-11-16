@@ -251,6 +251,97 @@ guard._state.update(asserted=True)
           f"{result.get('allowed')}")
 
 
+def test_what_the_guard_cannot_model_is_refused() -> None:
+    """SYRD-816 (Audit of e15974c7): each of these ran the real tool, or an unguarded Python, with nothing recorded."""
+    with tempfile.TemporaryDirectory(prefix="syrd816g.") as tmp:
+        stand_in = Path(tmp) / "bin"
+        stand_in.mkdir()
+        (stand_in / "systemctl").write_text("#!/bin/sh\necho stand-in\n")
+        (stand_in / "systemctl").chmod(0o755)
+        done, result = probe(f"""
+guard.install()
+outcomes = {{}}
+for name, argv in {{
+    "an expansion in a PATH assignment": ["sh", "-c", "p=/usr/bin:/bin; PATH=$p systemctl --version"],
+    "an expansion in an exported PATH": ["sh", "-c", "export PATH=`echo /usr/bin`; systemctl --version"],
+    "an expansion in a command word": ["sh", "-c", "t=systemctl; $t --version"],
+    "eval": ["sh", "-c", "eval 'PATH=/usr/bin:/bin systemctl --version'"],
+    "sourcing": ["sh", "-c", ". /dev/null; sudo --version"],
+    "a function": ["sh", "-c", "f() {{ PATH=/usr/bin:/bin systemctl --version; }}; f"],
+    "a relative command after cd": ["sh", "-c", "cd /usr/bin && ./systemctl --version"],
+    "an assembled command name": ["sh", "-c", "s=sys; t=temctl; PATH=/usr/bin:/bin $s$t --version"],
+    "an expanded command naming no tool": ["sh", "-c", "t=echo; $t ok"],
+    "an expanded command after exec": ["sh", "-c", "t=systemctl; exec $t --version"],
+}}.items():
+    try:
+        outcomes[name] = subprocess.run(argv, capture_output=True).returncode
+    except PermissionError:
+        outcomes[name] = "refused"
+# Audit of 47083b2f: a reserved word hid the simple command after it, so its PATH reset passed.
+reserved = {{}}
+for name, argv in {{
+    "if ... then": ["sh", "-c", "if true; then PATH=/usr/bin:/bin systemctl --version; fi"],
+    "while ... do": ["sh", "-c", "while true; do PATH=/usr/bin:/bin systemctl --version; break; done"],
+    "a brace group": ["sh", "-c", "{{ PATH=/usr/bin:/bin systemctl --version; }}"],
+    "!": ["sh", "-c", "! PATH=/usr/bin:/bin sudo --version"],
+    "time -p": ["bash", "-c", "time -p PATH=/usr/bin:/bin sudo --version"],
+}}.items():
+    try:
+        reserved[name] = subprocess.run(argv, capture_output=True).returncode
+    except PermissionError:
+        reserved[name] = "refused"
+for name, argv in {{
+    "python -X utf8 -I": [sys.executable, "-X", "utf8", "-I", "-c", "pass"],
+    "python -Xutf8 -E": [sys.executable, "-Xutf8", "-E", "-c", "pass"],
+    "python -W ignore -S": [sys.executable, "-W", "ignore", "-S", "-c", "pass"],
+}}.items():
+    try:
+        outcomes[name] = subprocess.run(argv, capture_output=True).returncode
+    except PermissionError:
+        outcomes[name] = "refused"
+allowed = {{
+    "an option of the program, not the interpreter": subprocess.run(
+        [sys.executable, "-X", "utf8", "-c", "import sys; print(sys.argv[1])", "-I"], capture_output=True,
+        text=True).stdout.strip(),
+    "a function in a script naming no tool": subprocess.run(["sh", "-c", "f() {{ echo ok; }}; f"], capture_output=True,
+                                                           text=True).stdout.strip(),
+    "a reserved word before an ordinary command": subprocess.run(["sh", "-c", "if true; then echo ok; fi"],
+                                                                 capture_output=True, text=True).stdout.strip(),
+    "an absolute command after cd": subprocess.run(["sh", "-c", "cd /tmp && /bin/echo ok"], capture_output=True,
+                                                   text=True).stdout.strip(),
+    "a stand-in on its own PATH": subprocess.run(["env", "PATH={stand_in}:/usr/bin", "systemctl", "status"],
+                                                 capture_output=True, text=True).stdout.strip(),
+}}
+print("RESULT " + json.dumps({{"outcomes": outcomes, "reserved": reserved, "allowed": allowed,
+                              "reached": guard.reached()}}))
+guard._state.update(asserted=True)
+""")
+    outcomes, reached = result.get("outcomes", {}), result.get("reached", [])
+    reserved = result.get("reserved", {})
+    check(len(reserved) == 5 and set(reserved.values()) == {"refused"}
+          and sum(line.startswith("exec of the real") for line in reached) == 5,
+          f"after if/then, while/do, a brace, ! or time, a command's own PATH reset is seen and its real tool refused: "
+          f"{reserved} {[l for l in reached if l.startswith('exec of the real')]}")
+    shells = {k: v for k, v in outcomes.items() if not k.startswith("python")}
+    check(len(shells) == 10 and set(shells.values()) == {"refused"}
+          and sum("a shell script the guard cannot model" in line for line in reached) == 10,
+          f"a script naming a tool is refused, and recorded, for an expansion where a command or its PATH is decided, "
+          f"eval, sourcing, a function and a relative command after cd: {shells} {reached} {done.stderr[-300:]}")
+    for shape, why in (("p=/usr/bin", "an expansion in a PATH assignment"), ("`echo", "an expansion in a PATH assignment"),
+                       ("$t", "an expansion in a command word"), ("eval '", "`eval`"), (". /dev/null", "`.`"),
+                       ("f() {", "a function definition"), ("cd /usr/bin", "a relative command after cd"),
+                       ("$s$t", "an expansion in a command word"), ("t=echo; $t ok", "an expansion in a command word")):
+        check(any(shape in line and f"({why})" in line for line in reached), f"{shape!r} is recorded as {why}: {reached}")
+    pythons = {k: v for k, v in outcomes.items() if k.startswith("python")}
+    check(set(pythons.values()) == {"refused"} and sum("an unguarded Python child" in l for l in reached) == 3,
+          f"an -I, -E or -S after an option that takes a value is seen: {pythons} {reached}")
+    check(result.get("allowed") == {"an option of the program, not the interpreter": "-I",
+                                    "a function in a script naming no tool": "ok",
+                                    "a reserved word before an ordinary command": "ok",
+                                    "an absolute command after cd": "ok", "a stand-in on its own PATH": "stand-in"},
+          f"what the guard does model still runs: {result.get('allowed')}")
+
+
 def test_the_run_fails_on_any_reach_and_never_runs_as_root() -> None:
     done, result = probe("""
 guard.install()

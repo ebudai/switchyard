@@ -735,6 +735,75 @@ def test_a_launch_with_no_desktop_socket_says_so_plainly() -> None:
         h.compositor.close()
 
 
+def _runtime_with_grants(raw: Path, entries: str) -> tuple[Path, Path]:
+    """A desktop runtime directory and its Wayland socket, each with these named entries and their mask (SYRD-831)."""
+    runtime = raw / 'runtime'
+    runtime.mkdir(mode=0o700)
+    with socket.socket(socket.AF_UNIX) as server:
+        server.bind(str(runtime / 'wayland-0'))
+    for path in (runtime, runtime / 'wayland-0'):
+        desktop.run(['setfacl', '-m', entries, str(path)])
+    return runtime, runtime / 'wayland-0'
+
+
+def test_revoking_the_last_named_entries_leaves_the_runtime_0700_with_no_acl() -> None:
+    with tempfile.TemporaryDirectory(prefix='syrd831-runtime.') as raw:
+        runtime, wayland = _runtime_with_grants(Path(raw), 'u:62031:--x,u:62032:--x,m::--x')
+        check(stat.S_IMODE(runtime.stat().st_mode) == 0o710, 'the fixture is the live shape: a mask shown as 0710')
+        removed = desktop.revoke_runtime_entries(runtime, [62031, 62032])
+        check(len(removed) == 4, f'both tenants removed from the directory and its socket: {removed}')
+        for path in (runtime, wayland):
+            left = desktop.acl_map(desktop.read_acl(path))
+            check(sorted(left) == ['group:', 'other:', 'user:'],
+                  f'{path.name}: no access ACL left, its mask included, once no named entry is: {left}')
+        check(stat.S_IMODE(runtime.stat().st_mode) == 0o700, f'the runtime is 0700 again: {stat.S_IMODE(runtime.stat().st_mode):o}')
+
+
+def test_an_unrelated_default_acl_is_kept_when_the_runtime_goes_back_to_0700() -> None:
+    """SYRD-831 Audit: only the access ACL's mask goes; a default ACL that is not Switchyard's stays."""
+    with tempfile.TemporaryDirectory(prefix='syrd831-default.') as raw:
+        runtime, _ = _runtime_with_grants(Path(raw), 'u:62031:--x,u:62032:--x,m::--x')
+        desktop.run(['setfacl', '-m', 'd:u:62077:rwx', str(runtime)])
+        desktop.revoke_runtime_entries(runtime, [62031, 62032])
+        lines = desktop.read_acl(runtime)
+        check(stat.S_IMODE(runtime.stat().st_mode) == 0o700 and 'default:user:62077:rwx' in lines
+              and not [line for line in lines if line.startswith(('user:6', 'mask:'))],
+              f'the runtime is 0700, the tenants and the access mask are gone, the default entry is kept: {lines}')
+
+
+def test_an_unrelated_named_entry_keeps_its_bits_and_the_mask_is_not_widened() -> None:
+    with tempfile.TemporaryDirectory(prefix='syrd831-kept.') as raw:
+        runtime, wayland = _runtime_with_grants(Path(raw), 'u:62031:--x,u:62032:--x,u:62077:r-x,m::--x')
+        try:
+            desktop.revoke_runtime_entries(runtime, [62031, 62032])
+            refused = ''
+        except desktop.DesktopAccessError as exc:
+            refused = str(exc)
+        check(refused == '', f"the revocation goes through with another's entry left, its mask untouched: {refused}")
+        for path in (runtime, wayland):
+            left = desktop.acl_map(desktop.read_acl(path))
+            check('user:62031' not in left and 'user:62032' not in left and left.get('user:62077') == 'r-x'
+                  and left.get('mask:') == '--x' and desktop.effective_acl(path, 62077) == 1,
+                  f"{path.name}: the tenants go; another's entry stays, its effective bits (--x) unchanged, the mask not "
+                  f'widened to its r-x: {left}')
+
+
+def test_a_runtime_that_is_not_0700_is_named_with_its_fix() -> None:
+    from scripts import desktop_runtime_mode
+
+    me = __import__('pwd').getpwuid(os.getuid()).pw_name
+    with tempfile.TemporaryDirectory(prefix='syrd831-mode.') as raw:
+        runtime = Path(raw) / str(os.getuid())
+        runtime.mkdir(mode=0o700)
+        check(desktop_runtime_mode.runtime_mode_warning(me, runtime_parent=Path(raw)) == '', 'a 0700 runtime says nothing')
+        desktop.run(['setfacl', '-m', 'u:62031:--x,m::--x', str(runtime)])
+        desktop.run(['setfacl', '--no-mask', '-x', 'u:62031', str(runtime)])  # as revocation did before SYRD-831
+        said = desktop_runtime_mode.runtime_mode_warning(me, runtime_parent=Path(raw))
+        check('mode 0710, not 0700' in said and f'`setfacl -b {runtime}`' in said,
+              f'a runtime a leftover mask made 0710 is named, with the fix: {said}')
+        check(desktop_runtime_mode.runtime_mode_warning('syrd831-no-such-account') == '', 'an unknown owner says nothing')
+
+
 def main() -> int:
     for tool in ('setfacl', 'getfacl'):
         assert shutil.which(tool), f'{tool} required; this suite must not silently skip'

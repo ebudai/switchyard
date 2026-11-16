@@ -250,6 +250,15 @@ unit's `default.target.wants` link, as the owner, so a manager that is down does
 not start it at the next login (SYRD-798). A successful install starts the
 tenant's new service itself; the others are replaced by their own upgrades.
 
+Removing those entries also removes the access ACL's mask once no named entry
+is left, so the runtime and its Wayland sockets are back to their own modes, the
+runtime 0700; a default ACL there is kept. Removing only the entries left the
+mask behind, and the mask shows as the group's mode bits: 0710, which KDE
+refuses ("wrong permissions on runtime directory"). An entry that is not
+Switchyard's keeps the mask as it was, never widened. Before a launch and in `switchyard status`, a desktop owner's runtime
+that is not 0700 is named with its fix: as that owner, `setfacl -b
+/run/user/<uid>` (SYRD-831).
+
 After starting or restarting the service (a new helper is restarted), install
 waits, for up to 20 seconds, until the receipt names the socket that is in place
 now and something accepts connections on it, the same things the tenant's

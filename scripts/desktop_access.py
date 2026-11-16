@@ -539,18 +539,18 @@ def ensure_grant_dir(gui) -> Path:
 
 
 def revoke_runtime_entries(runtime: Path, uids) -> list[str]:
-    """Remove these tenants' named entries from the desktop user's runtime and its Wayland sockets: grants from before
-    SYRD-791 put them there, and nothing does now."""
+    """Remove these tenants' named entries from the desktop user's runtime and its Wayland sockets (grants from before
+    SYRD-791), and the access ACL's mask once no named entry is left, so it does not show as the mode 0710 (SYRD-831)."""
     removed = []
     for path in (runtime, *wayland_sockets(runtime)):
         try:
             entries = acl_map(read_acl(path))
         except (DesktopAccessError, OSError):
             continue
-        for uid in sorted(set(uids)):
-            if f'user:{uid}' in entries:
-                run(['setfacl', '--no-mask', '-x', f'u:{uid}', str(path)])
-                removed.append(f'{path}:{uid}')
+        for uid in (gone := [uid for uid in sorted(set(uids)) if f'user:{uid}' in entries]):
+            run(['setfacl', '--no-mask', '-x', f'u:{uid}', str(path)]); removed.append(f'{path}:{uid}')
+        if gone and not [k for k in acl_map(read_acl(path)) if k.split(':')[0] in ('user', 'group') and k.split(':')[1]]:
+            run(['setfacl', '-x', 'm::', str(path)])  # the access mask only: a default ACL stays; never widened
     return removed
 
 

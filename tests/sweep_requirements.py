@@ -52,6 +52,7 @@ HOST_ONLY: dict[str, tuple[str, ...]] = {
     ),
     # ACLs and owners naming ids outside bwrap's map are refused with EINVAL.
     "ids outside a sandbox's map": (
+        "desktop_security_context_test",
         "desktop_socket_rename_test",
         "privileged_job_reconcile_test",
     ),

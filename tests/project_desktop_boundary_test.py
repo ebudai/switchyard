@@ -39,6 +39,7 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -225,6 +226,47 @@ def test_prepare_verifies_as_the_tenant_and_replaces_the_desktop_environment() -
           f"installed only when asked, with the helper beside it: {installs}")
     check(refused == "switchyard: desktop setup incomplete before launch: syrd327 denied",
           f"a failed verification stops the launch and says why: {refused!r}")
+
+
+def test_a_runtime_that_is_not_0700_is_said_before_launch_and_in_status() -> None:
+    """SYRD-831: a desktop owner's runtime directory left wider than 0700 is named, never a launch blocker."""
+    from scripts import desktop_access, desktop_runtime_mode, project_desktop, project_status, team_launcher
+
+    fake = Desktop()
+    run, _ = verifier()
+    asked: list[str] = []
+    for warning in ("syrd327-desk's runtime directory /run/user/1327 is mode 0710, not 0700", ""):
+        err = io.StringIO()
+        with patched(desktop_access, validate_policy=fake.validate_policy), \
+                patched(team_launcher, _owner_command_args=lambda who, args: ["as", who, *args]), \
+                patched(desktop_runtime_mode, runtime_mode_warning=lambda user, _w=warning: asked.append(user) or _w), \
+                contextlib.redirect_stderr(err):
+            prepared = project_desktop.prepare_project_desktop(tenant(WAYLAND), runner=run)
+        said = err.getvalue()
+        check(prepared.roles[0].env.get("WAYLAND_DISPLAY") == "wayland-9"
+              and (f"switchyard: WARNING: {warning}" in said if warning else "WARNING" not in said),
+              f"before launch the desktop owner's runtime is checked, said if it is not 0700, and the launch goes on: "
+              f"{warning!r} {said!r}")
+    check(asked == ["syrd327-desk", "syrd327-desk"], f"asked about the policy's desktop owner: {asked}")
+    configs = [SimpleNamespace(desktop_access=WAYLAND), SimpleNamespace(desktop_access=dict(WAYLAND)),
+               SimpleNamespace(desktop_access={"mode": "headless"}), SimpleNamespace(desktop_access=None)]
+    with patched(desktop_runtime_mode, runtime_mode_warning=lambda user: f"{user} is 0710"):
+        warnings = project_status._desktop_runtime_warnings(configs)
+    check(warnings == ["syrd327-desk is 0710"], f"status asks once per Wayland desktop owner, and no headless one: {warnings}")
+    with tempfile.TemporaryDirectory(prefix="syrd831s.") as raw:
+        (Path(raw) / "config").mkdir()
+        (Path(raw) / "registry").mkdir()
+        quiet = lambda *a, **k: SimpleNamespace(returncode=1, stdout="", stderr="")  # noqa: E731
+        lines: list[str] = []
+        out: list[str] = []
+        with patched(project_status, _desktop_runtime_warnings=lambda configs: ["syrd327-desk is 0710"]):
+            project_status.switchyard_status_command(config_dir=Path(raw) / "config", registry_dir=Path(raw) / "registry",
+                                                     runner=quiet, print_func=lines.append)
+            project_status.switchyard_status_command(config_dir=Path(raw) / "config", registry_dir=Path(raw) / "registry",
+                                                     runner=quiet, json_output=True, print_func=out.append)
+    check("switchyard: WARNING: syrd327-desk is 0710" in lines
+          and json.loads(out[-1]).get("desktop_runtime_warnings") == ["syrd327-desk is 0710"],
+          f"switchyard status says it, and carries it in --json: {lines} {out[-1:]}")
 
 
 def no_runner(args: list[str], **kwargs: object) -> object:

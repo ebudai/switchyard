@@ -63,6 +63,11 @@ def prepare_project_desktop(config: ProjectConfig, *, install: bool = False,
             if result.returncode:
                 raise desktop.DesktopAccessError(str(result.stderr).strip())
             env = json.loads(result.stdout)
+            from scripts import desktop_runtime_mode
+
+            # Not a launch blocker: the desktop owner's own sessions are what a wider runtime directory breaks (SYRD-831).
+            if warning := desktop_runtime_mode.runtime_mode_warning(policy["gui_user"]):
+                print(f"switchyard: WARNING: {warning}", file=sys.stderr)
         roles = [replace(role,
                          env={**{k:v for k,v in role.env.items() if k not in DESKTOP_ENV_KEYS}, **env},
                          unset_env=DESKTOP_ENV_KEYS) for role in config.roles]

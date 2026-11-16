@@ -635,6 +635,7 @@ def switchyard_status_command(
     )
     supervised = supervised_board_entries()
     postgres_warning = _postgres_warning(runner)
+    desktop_warnings = _desktop_runtime_warnings(configs)
     if json_output:
         payload: dict[str, Any] = {
             "projects": [_switchyard_project_status_payload(status) for status in statuses],
@@ -656,6 +657,8 @@ def switchyard_status_command(
                                   if (answer := work_pause_reader(config)) is not None}
         if postgres_warning:
             payload["postgres_warning"] = postgres_warning
+        if desktop_warnings:
+            payload["desktop_runtime_warnings"] = desktop_warnings
         print_func(json.dumps(payload, indent=2))
         return 0
     rows = [("NAME", "SLUG", "STATE", "PANES", "VIEWER")]
@@ -767,7 +770,21 @@ def switchyard_status_command(
     if postgres_warning:
         print_func("")
         print_func(f"switchyard: WARNING: {postgres_warning}")
+    for warning in desktop_warnings:
+        print_func("")
+        print_func(f"switchyard: WARNING: {warning}")
     return 0
+
+
+def _desktop_runtime_warnings(configs: Sequence[Any]) -> list[str]:
+    """SYRD-831: each desktop owner whose runtime directory is not 0700, from the Wayland policies of the configurations
+    this account can read. Read-only; nothing when it cannot tell."""
+    from scripts import desktop_runtime_mode
+
+    owners = sorted({str(config.desktop_access.get("gui_user") or "") for config in configs
+                     if isinstance(getattr(config, "desktop_access", None), dict)
+                     and config.desktop_access.get("mode") == "wayland"} - {""})
+    return [warning for owner in owners if (warning := desktop_runtime_mode.runtime_mode_warning(owner))]
 
 
 def _postgres_warning(runner: Callable[..., Any]) -> str:

@@ -156,6 +156,16 @@ install_source_checkout_policy() {
     fi
 }
 
+tell_directors() {
+    # SYRD-799: tell each registered tenant's Director, once, through its own board, that the release just installed
+    # is ready, with the exact commands. It upgrades nothing, and nothing it finds fails the install.
+    local notice="$REPO_ROOT/scripts/release_notice.py"
+    [[ -f "$notice" ]] || return 0
+    python3 -I -B "$notice" --source-repo "$REPO_ROOT" --source-user "$ORIGINAL_USER" \
+        --shared-root "${SWITCHYARD_SHARED_INSTALL_ROOT:-/opt/switchyard}" \
+        || printf 'warning: install: could not tell the Directors that a new release is ready\n' >&2
+}
+
 if [[ "$DRY_RUN" -eq 1 ]]; then
     dry_run_install
     exit 0
@@ -173,4 +183,5 @@ run_cmd env \
     SWITCHYARD_INSTALL_PATH="${SWITCHYARD_INSTALL_PATH:-/usr/local/bin/switchyard}" \
     "$SWITCHYARD_INSTALL_SCRIPT" --apply
 install_source_checkout_policy
+tell_directors
 print_final_next_step

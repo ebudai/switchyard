@@ -605,6 +605,11 @@ the live workflow and command help are the current operating contract;
   reports release drift; `--dry-run` first, always. Run as you, it cannot make
   the checks only root can (the tenant-control sudoers rule is one) and says
   so instead of declaring the tenant ready.
+- A "release ... is ready" notice comes from the host's `./install`, once per
+  release, through this board: it names that release, the one you run, what
+  changed, and the three commands below with the commit filled in. Nothing was
+  upgraded; you decide when. A board that has not yet deployed a release that
+  carries these notices gets the first one from the operator instead.
 - Your tenant's upgrade and board deploy are yours, through the approved
   privileged boundary and pinned to an exact release commit:
   `switchyard privileged-action <project> preview-upgrade commit=<sha>` is

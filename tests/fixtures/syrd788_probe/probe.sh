@@ -6,6 +6,14 @@ set -u
 O=$1; TREE=${2:-}; D=$(cd "$(dirname "$0")" && pwd)
 rm -rf "$O"; mkdir -p "$O/home/.claude" "$O/work"
 K=$(mktemp -d /tmp/s788k.XXXX)
+# SYRD-800: on every exit -- done, failed or timed out -- the private tmux server and its socket directory go. A
+# timeout kills inner.sh's process group (the stand-in API with it) before its own kill-server, and the tmux server,
+# in a session of its own, outlives it.
+cleanup() {
+    tmux -S "$K/t" kill-server 2>/dev/null
+    rm -rf "$K"
+}
+trap cleanup EXIT
 H=$O/home; W=$O/work
 cat > "$H/.claude/.credentials.json" <<JSON
 {"claudeAiOauth": {"accessToken": "sk-ant-oat01-fake", "refreshToken": "sk-ant-ort01-fake", "expiresAt": $(( ($(date +%s) + 30*86400) * 1000 )), "scopes": ["user:inference", "user:profile", "user:sessions:claude_code"], "subscriptionType": "max", "rateLimitTier": "default_claude_max_20x"}}
@@ -42,5 +50,5 @@ send 'SYRD-785 -- Aborting switchyard new takes many Ctrl-C presses entered Impl
 kill \$API
 INNER
 chmod +x "$O/inner.sh"
-timeout 150 unshare -rn bash "$O/inner.sh"
+timeout "${SYRD788_PROBE_TIMEOUT:-150}" unshare -rn bash "$O/inner.sh"
 echo "probe exit $?"

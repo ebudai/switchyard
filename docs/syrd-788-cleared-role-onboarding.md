@@ -79,7 +79,8 @@ above remove the cause.
     ticket verbatim;
   - the real hook gives a cleared session of a resumed launch its onboarding, and its onboarding then its active
     work; other starts are as before;
-  - the real Claude Code probe above. It says so when it is skipped, where Claude Code, tmux or an unprivileged user
+  - the real Claude Code probe above. On every exit, a timeout included, it stops its private tmux server and
+    removes its socket directory, and the test checks a normal and a cut-off run leave nothing behind (SYRD-800). It says so when it is skipped, where Claude Code, tmux or an unprivileged user
     namespace is missing.
 - 11 mutants, all killed, including the clear not counted as fresh, the resumed launch still blocking it, the
   preface dropped, after the notice, on every notice, or given to an implementer.

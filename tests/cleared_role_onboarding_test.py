@@ -154,6 +154,17 @@ def test_other_starts_are_as_they_were() -> None:
 
 
 # -- a real Claude Code, offline ------------------------------------------------------------------------------------
+def probe_leftovers() -> set[str]:
+    """What a probe run could leave: its socket directories, and processes naming them or its stand-in API."""
+    import glob
+
+    found = {f"dir {path}" for path in glob.glob("/tmp/s788k.*")}
+    ps = subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True, text=True).stdout
+    found |= {f"process {line.split(None, 1)[0]}" for line in ps.splitlines()
+              if "/tmp/s788k." in line or "fake_api.py 18788" in line}
+    return found
+
+
 def test_a_real_claude_session_hears_the_prompt_after_clear() -> None:
     missing = [name for name, ok in (("Claude Code", CLAUDE.exists()), ("tmux", shutil.which("tmux")),
                                      ("unshare", shutil.which("unshare"))) if not ok]
@@ -162,10 +173,18 @@ def test_a_real_claude_session_hears_the_prompt_after_clear() -> None:
     if missing:
         print(f"cleared_role_onboarding_test: the real Claude Code probe is skipped: no {', '.join(missing)}")
         return
+    leftovers = probe_leftovers()
     with tempfile.TemporaryDirectory(prefix="syrd788.") as raw:
         out = Path(raw) / "out"
         env = {"PATH": "/usr/bin:/bin", "HOME": raw, "LANG": "C.UTF-8"}
         subprocess.run(["bash", str(PROBE), str(out), str(ROOT)], env=env, capture_output=True, text=True, timeout=200)
+        left = probe_leftovers() - leftovers
+        check(not left, f"the probe leaves nothing behind: no socket directory, tmux server or stand-in API: {left}")
+        # SYRD-800: cut off by its timeout mid-run, before inner.sh's own kill-server, it still cleans up after itself.
+        subprocess.run(["bash", str(PROBE), str(Path(raw) / "cut"), str(ROOT)], env={**env, "SYRD788_PROBE_TIMEOUT": "4"},
+                       capture_output=True, text=True, timeout=200)
+        left = probe_leftovers() - leftovers
+        check(not left, f"and so does a run its timeout cuts off: {left}")
         requests = []
         for line in (out / "api.jsonl").read_text().splitlines() if (out / "api.jsonl").exists() else []:
             row = json.loads(line)

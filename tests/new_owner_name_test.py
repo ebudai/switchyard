@@ -15,6 +15,10 @@ with `/etc`, `/home`, `/srv` and `/var/lib` byte for byte unchanged; an ordinary
 
 from __future__ import annotations
 
+import live_boundary  # noqa: E402
+
+live_boundary.isolate()  # SYRD-627: no live home, pane store or runtime directory, here or in a child (SYRD-819)
+
 import hashlib
 import io
 import json
@@ -76,6 +80,7 @@ def enter_root_owned_root(stage: Path) -> None:
     sh("mount", "--rbind", "/usr", str(new / "usr"))
     sh("mount", "--rbind", "/dev", str(new / "dev"))
     sh("mount", "--bind", str(stage), str(new / "stage"))
+    live_boundary.keep_reachable(new)  # the native guard still loads in there (SYRD-819)
     os.chroot(new)
     os.chdir("/")
     sh("mount", "-t", "proc", "proc", "/proc")

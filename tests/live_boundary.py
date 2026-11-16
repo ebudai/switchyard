@@ -687,6 +687,18 @@ def install_native_guard(directory: Path) -> Path:
     return target
 
 
+def keep_reachable(new_root: Path | str) -> None:
+    """Before a namespace suite chroots into `new_root`: bind this run's native guard there at its own path, so every
+    process started inside still loads it, and ld.so prints no preload warning into the output the suite reads
+    (SYRD-819). Only the guard's file is bound, read as it is; nothing of the live home is."""
+    for item in os.environ.get("LD_PRELOAD", "").split(":"):
+        if item.endswith("/live-boundary.so") and os.path.isfile(item):
+            inside = Path(new_root) / item.lstrip("/")
+            inside.parent.mkdir(parents=True, exist_ok=True)
+            inside.touch()
+            subprocess.run(["mount", "--bind", item, str(inside)], check=True)
+
+
 # --------------------------------------------------------------------------
 # the sentinel
 # --------------------------------------------------------------------------

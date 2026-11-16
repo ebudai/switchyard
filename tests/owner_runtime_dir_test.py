@@ -23,6 +23,10 @@ main's code, from a git archive.
 
 from __future__ import annotations
 
+import live_boundary  # noqa: E402
+
+live_boundary.isolate()  # SYRD-627: no live home, pane store or runtime directory, here or in a child (SYRD-819)
+
 import io
 import json
 import os

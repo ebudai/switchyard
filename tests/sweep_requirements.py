@@ -14,20 +14,39 @@ from __future__ import annotations
 #: Why a suite needs the host, and the suites that do. Each reason names what the sandbox lacks.
 HOST_ONLY: dict[str, tuple[str, ...]] = {
     # bwrap's own user namespace refuses a nested one ("newuidmap: Could not set caps"), or the suite must be uid 0
-    # of a namespace it maps itself.
+    # of a namespace it maps itself. live_boundary_test checks each such suite isolates itself first (SYRD-819).
     "user namespaces": (
         "board_ui_delegation_test",
         "image_handoff_two_identity_test",
         "install_switchyard_release_marker_test",
         "legacy_presentation_launch_test",
         "legacy_presentation_migration_test",
-        "live_boundary_test",
         "live_boundary_sentinel_test",
+        "live_boundary_test",
+        "new_caller_decided_owner_test",
+        "new_decided_owner_test",
+        "new_output_dir_root_alone_test",
+        "new_owner_name_test",
         "new_project_link_paths_test",
+        "new_uid0_owner_test",
+        "onboarding_release_provenance_test",
+        "owner_runtime_dir_test",
+        "presentation_state_boundary_test",
+        "project_state_acl_boundary_test",
+        "projection_identity_test",
         "release_bytecode_boundary_test",
+        "release_status_cross_account_test",
+        "release_status_trampoline_test",
+        "root_owner_from_record_test",
+        "root_plan_identity_test",
+        "root_residual_paths_test",
+        "root_residuals_two_test",
+        "root_role_account_test",
         "size_review_cache_ownership_test",
         "tailnet_user_authority_test",
         "worker_pool_cross_account_test",
+        "workflow_layout_owner_test",
+        "workflow_projection_ownership_test",
     ),
     # ACLs and owners naming ids outside bwrap's map are refused with EINVAL.
     "ids outside a sandbox's map": (

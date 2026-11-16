@@ -28,6 +28,10 @@ longer its commit's archive, and a later tree comparison cannot tell the two apa
 
 from __future__ import annotations
 
+import live_boundary  # noqa: E402
+
+live_boundary.isolate()  # SYRD-627: no live home, pane store or runtime directory, here or in a child (SYRD-819)
+
 import ast
 import hashlib
 import json

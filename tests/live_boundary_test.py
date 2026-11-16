@@ -793,6 +793,13 @@ def test_every_namespace_suite_is_isolated() -> None:
             missing.append(path.name)
     check(missing == [], f"every suite that maps root in a user namespace isolates itself before importing production "
                          f"code: {missing}")
+    # A chroot hides the native guard isolate() preloads: each process then runs unguarded, and ld.so's warning lands
+    # in the output the suite reads (SYRD-819). Not the bridge's end-to-end suite: it checks the bridge strips
+    # LD_PRELOAD from what it runs, which a loaded guard puts back into every exec (measured).
+    unreachable = [path.name for path in sorted((HERE / "tests").glob("*_test.py"))
+                   if path.name not in ("live_boundary_test.py", "tenant_control_bridge_e2e_test.py") and "--map-root-user" in (text := path.read_text(encoding="utf-8", errors="replace"))
+                   and "os.chroot(" in text and not -1 < text.find("live_boundary.keep_reachable(") < text.find("os.chroot(")]
+    check(unreachable == [], f"every namespace suite that chroots keeps the native guard reachable first: {unreachable}")
 
 
 def main() -> int:

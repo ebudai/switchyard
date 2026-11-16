@@ -2,6 +2,11 @@
 """Split team-launcher regression tests."""
 
 from __future__ import annotations
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+import host_state_guard  # noqa: E402  - before any production module: no host state (SYRD-818)
+host_state_guard.install()
 
 from team_launcher_test_helpers import *
 from provider_store_fixture import owned_record, transcript_for  # SYRD-638: the role's own conversation

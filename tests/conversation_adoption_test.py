@@ -43,6 +43,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import host_state_guard  # noqa: E402  - before any production module: no host state (SYRD-818)
+
+host_state_guard.install()
+# A role's git template comes from the tenant-control tree: the run's own, never this host's (SYRD-818).
+os.environ.setdefault("SWITCHYARD_TENANT_CONTROL_ROOT", tempfile.mkdtemp(prefix="syrd818-tenant-control."))
 CHECKS = 0
 LEGACY = "019944aa-1111-7000-8000-000000000694"
 OWN = "019944aa-2222-7000-8000-000000000694"
@@ -724,6 +730,7 @@ def main() -> int:
               f"the wrapper hands root's operation straight to its module, which refuses a non-root caller: {wrapper}")
     finally:
         shutil.rmtree(work, ignore_errors=True)
+    host_state_guard.assert_untouched("conversation_adoption_test")
     print(f"conversation_adoption_test: {CHECKS} checks ok")
     return 0
 

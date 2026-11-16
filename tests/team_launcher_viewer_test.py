@@ -2,7 +2,7 @@
 """Split team-launcher regression tests."""
 
 from __future__ import annotations
-import live_boundary; live_boundary.isolate()  # noqa: E402,E702 - SYRD-627 (live-home pane stores), within the line budget
+import live_boundary; live_boundary.isolate(); import host_state_guard; host_state_guard.install()  # noqa: E402,E702 - SYRD-627 (live-home pane stores), SYRD-818 (no host state), within the line budget
 from team_launcher_test_helpers import *; from provider_store_fixture import owned_record, session_line, transcript_for  # noqa: E702 - SYRD-638 (a session as its provider files it), within the line budget
 
 def test_viewer_session_argument_is_required_and_has_no_global_default() -> None:

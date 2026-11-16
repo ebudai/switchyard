@@ -556,8 +556,8 @@ def _unchecked_exit() -> None:
     if shims:
         shutil.rmtree(shims, ignore_errors=True)
     if found and not _state["asserted"]:
-        sys.stderr.write("host state guard: the run reached host state and never checked it:\n"
-                         + "".join(f"  {line}\n" for line in found))
+        sys.stderr.write(f"FAILED CHECK: host state guard: the run reached host state {len(found)} time(s), and never "
+                         f"checked it:\n" + "".join(f"  {line}\n" for line in found))
         sys.stderr.flush()
         os._exit(EXIT_UNCHECKED)
 

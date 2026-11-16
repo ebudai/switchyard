@@ -2,6 +2,7 @@
 """Split team-launcher regression tests."""
 
 from __future__ import annotations
+import live_boundary; live_boundary.isolate()  # noqa: E402,E702 - its shells get the run's own HOME, never a live one (SYRD-818)
 
 from team_launcher_test_helpers import *
 from provider_store_fixture import owned_record, transcript_for  # SYRD-638: a session as its provider files it

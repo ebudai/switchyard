@@ -23,6 +23,7 @@ reported this fixed while it was not.
 """
 
 from __future__ import annotations
+import live_boundary; live_boundary.isolate()  # noqa: E402,E702 - its shells get the run's own HOME, never a live one (SYRD-818)
 
 import os
 import pty

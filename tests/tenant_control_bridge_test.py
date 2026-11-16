@@ -22,6 +22,11 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import host_state_guard  # noqa: E402  - before any production module: no host state (SYRD-818)
+
+host_state_guard.install()
+import host_record_redirects  # noqa: E402,F401  - root's records, units and staged trees are the run's own (SYRD-818)
 
 from standalone_test_runner import run_module_tests  # noqa: E402
 from scripts import team_launcher  # noqa: E402
@@ -306,7 +311,8 @@ def _register(root: Path, slug: str, name: str) -> None:
                 "project_name": name,
                 "layout": str(layout),
                 "run_as_user": f"{slug}-agent",
-                "pane_launcher": "/opt/switchyard/current/scripts/team-launcher",
+                # The shared release's launcher, in the run's own install root: status reads its release (SYRD-818).
+                "pane_launcher": f"{os.environ['SWITCHYARD_SHARED_INSTALL_ROOT']}/current/scripts/team-launcher",
                 "roles": [{"role": "director", "slot": 0, "cli": ["claude"]}],
             }
         )
@@ -584,5 +590,8 @@ def test_teardown_removes_the_grant_and_the_sudo_rule() -> None:
 
 
 if __name__ == "__main__":
-    run_module_tests(globals())
+    try:
+        run_module_tests(globals())
+    finally:  # a reach that also broke a case is reported as the reach
+        host_state_guard.assert_untouched("tenant_control_bridge_test")
     print("tenant_control_bridge_test: ok")

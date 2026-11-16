@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-import json
+import json; import live_boundary; live_boundary.isolate()  # noqa: E702 - shells get the run's own HOME (SYRD-818)
 import os
 import shutil
 import subprocess

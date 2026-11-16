@@ -28,6 +28,7 @@ terminal's wheel sequence. `send-keys` alone would not consult a key table.
 """
 
 from __future__ import annotations
+import live_boundary; live_boundary.isolate()  # noqa: E402,E702 - its shells get the run's own HOME, never a live one (SYRD-818)
 
 import json
 import os

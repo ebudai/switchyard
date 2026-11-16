@@ -44,6 +44,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import launcher_call_sites as sites  # noqa: E402 - SYRD-811: every module, not a list
+
 CHECKS = 0
 
 EXPORTED = ("DESKTOP_ENV_KEYS", "configure_project_desktop", "prepare_project_desktop")
@@ -56,7 +58,9 @@ READ_ELSEWHERE = {
 #: Measured on the baseline: the launcher's own call sites. SYRD-340 moved one
 #: prepare_project_desktop site, in launch_project's P5 reload branch, to
 #: launch_phases, which calls it through the launcher; the totals are unchanged.
-LAUNCHER_CALLS = {"prepare_project_desktop": 6, "configure_project_desktop": 2}
+# SYRD-811: prepare_project_desktop has 10 now, every one through the launcher -- callers added since (first-run auth's,
+# launcher_dispatch's, new_project_phases', presentation_controller's, switchyard_dispatch's two, workflow_launcher's).
+LAUNCHER_CALLS = {"prepare_project_desktop": 10, "configure_project_desktop": 2}
 LAUNCHER_READS = ("prepare_project_desktop", "configure_project_desktop", "_load_json", "_owner_command_args",
                   "_write_json_atomic", "current_user_name")
 WAYLAND = {"mode": "wayland", "gui_user": "syrd327-desk", "tag": "new"}
@@ -164,42 +168,19 @@ def test_either_import_order_gives_one_set_of_objects() -> None:
 
 
 def test_every_reader_reaches_its_names_through_the_launcher() -> None:
-    for module, names in READ_ELSEWHERE.items():
-        tree = ast.parse((ROOT / "scripts" / f"{module}.py").read_text(encoding="utf-8"))
-        for name in names:
-            check(name in EXPORTED, f"{name} is exported")
-            uses = [n for n in ast.walk(tree) if (isinstance(n, ast.Attribute) and n.attr == name)
-                    or (isinstance(n, ast.Name) and n.id == name)]
-            through = [n for n in uses if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
-                       and n.value.id in ("launcher", "team_launcher")]
-            check(uses and through == uses, f"{module} reads {name} through the launcher, and only there")
+    for name in sorted({name for names in READ_ELSEWHERE.values() for name in names}):
+        check(name in EXPORTED, f"{name} is exported")
+        found = sites.readers(name, ("project_desktop",))
+        check(found and all(through == uses for uses, through in found.values()),
+              f"every module that reads {name} reads it through the launcher, and only there: {found}")
 
 
 def test_the_seams_and_the_functions_own_imports() -> None:
-    launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
-    # SYRD-350 moved the upgrade's U2 phase to upgrade_phases, which calls through
-    # the launcher too; its sites count with launch_phases' and the totals are unchanged.
-    # SYRD-426 moved new_project_command, one of configure_project_desktop's two callers, to
-    # scripts/new_project_command.py, which calls through the launcher too; its site counts here and the totals are unchanged.
-    moved_caller = ROOT / "scripts" / "new_project_command.py"
-    moved_launch = ROOT / "scripts" / "project_launch.py"
-    phases = ast.Module(body=[*ast.parse((ROOT / "scripts" / "launch_phases.py").read_text(encoding="utf-8")).body,
-                              *ast.parse((ROOT / "scripts" / "upgrade_phases.py").read_text(encoding="utf-8")).body,
-                              *(ast.parse(moved_caller.read_text(encoding="utf-8")).body if moved_caller.exists() else []),
-                              # SYRD-429 moved launch_project, one of prepare_project_desktop's callers, to
-                              # scripts/project_launch.py, which calls through the launcher; the totals are unchanged.
-                              *(ast.parse(moved_launch.read_text(encoding="utf-8")).body if moved_launch.exists() else [])],
-                        type_ignores=[])
     for name, count in LAUNCHER_CALLS.items():
-        calls = [n for n in ast.walk(launcher_tree)
-                 if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
-        phase_calls = [n for n in ast.walk(phases)
-                       if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
-        check(len(calls) + len(phase_calls) == count and all(isinstance(n.func, ast.Name) for n in calls)
-              and all(isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
-                      and n.func.value.id == "launcher" for n in phase_calls),
-              f"{name} is called at its {count} baseline sites: by the launcher's own patchable name there, "
-              "through the launcher from launch_phases")
+        own, through, past = sites.calls(name)
+        check(len(own) + len(through) == count and not past,
+              f"{name} is called at its {count} sites: by the launcher's own patchable name there, through the "
+              f"launcher in any other module: {own} {through} past it: {past}")
     moved = ast.parse((ROOT / "scripts" / "project_desktop.py").read_text(encoding="utf-8"))
     bare = sorted({n.id for n in ast.walk(moved) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
                    and n.id in LAUNCHER_READS})

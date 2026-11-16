@@ -328,9 +328,13 @@ def run(binary: str) -> None:
         check(all(path.read_bytes() == data for path, data in before.items()),
               "installing twice left the owner's hook file and settings exactly as they were")
         ours = json.loads((pane.home / ".copilot" / "hooks" / "ticket-board-pane-state.json").read_text())
+        # The seven state events, and since SYRD-753 the shell guard before each tool (SYRD-811: red since then, where
+        # a real Copilot is on PATH).
         check(ours["version"] == 1 and set(ours["hooks"]) == set(
             ["sessionStart", "userPromptSubmitted", "postToolUse", "notification", "errorOccurred", "agentStop",
-             "sessionEnd"]), f"our own hook file holds the seven events: {sorted(ours['hooks'])}")
+             "sessionEnd", "preToolUse"]), f"our own hook file holds the seven events and the guard: {sorted(ours['hooks'])}")
+        guard = " ".join(entry.get("bash", "") for entry in ours["hooks"]["preToolUse"])
+        check("copilot" in guard and "guard" in guard, f"preToolUse runs the shell guard, for Copilot: {guard}")
         check("e2e-placeholder" not in json.dumps(ours), "no provider credential is written into a hook command")
 
         gate = PaneActivityGate(state_store=PaneHookStateStore(pane.states), role_runtimes={"main": "copilot"})

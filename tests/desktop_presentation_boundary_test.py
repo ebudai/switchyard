@@ -46,6 +46,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import launcher_call_sites as sites  # noqa: E402 - SYRD-811: every module, not a list
+
 CHECKS = 0
 
 EXPORTED = {
@@ -128,24 +130,19 @@ def test_either_import_order_gives_one_set_of_objects() -> None:
 
 
 def test_every_reader_reaches_its_names_through_the_launcher() -> None:
-    for module, names in READ_ELSEWHERE.items():
-        tree = ast.parse((ROOT / "scripts" / f"{module}.py").read_text(encoding="utf-8"))
-        for name in names:
-            check(any(name in exported for exported in EXPORTED.values()), f"{name} is exported")
-            uses = [n for n in ast.walk(tree) if (isinstance(n, ast.Attribute) and n.attr == name)
-                    or (isinstance(n, ast.Name) and n.id == name)]
-            through = [n for n in uses if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
-                       and n.value.id in ("launcher", "team_launcher")]
-            check(uses and through == uses, f"{module} reads {name} through the launcher, and only there")
+    owners = tuple(module.rsplit(".", 1)[-1] for module in EXPORTED)
+    for name in sorted({name for names in READ_ELSEWHERE.values() for name in names}):
+        check(any(name in exported for exported in EXPORTED.values()), f"{name} is exported")
+        found = sites.readers(name, owners)
+        check(found and all(through == uses for uses, through in found.values()),
+              f"every module that reads {name} reads it through the launcher, and only there: {found}")
 
 
 def test_the_patched_seams_are_reached_through_the_launcher() -> None:
-    launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
-    calls = [n for n in ast.walk(launcher_tree)
-             if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", ""))
-             == "complete_desktop_presentation"]
-    check(len(calls) == 1 and isinstance(calls[0].func, ast.Name),
-          "the bridge exec calls complete_desktop_presentation at its one baseline site, by the launcher's name")
+    own, through, past = sites.calls("complete_desktop_presentation")
+    check(len(own) + len(through) == 1 and not past,
+          f"the bridge exec calls complete_desktop_presentation at its one baseline site, by the launcher's name "
+          f"there or through it elsewhere: {own} {through} past it: {past}")
     for module in ("desktop_presentation.py", "desktop_layout_writer.py"):
         tree = ast.parse((ROOT / "scripts" / module).read_text(encoding="utf-8"))
         bare = sorted({n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
@@ -312,12 +309,14 @@ def test_the_writer_reads_the_launcher_when_it_runs() -> None:
     with tempfile.TemporaryDirectory(prefix="syrd317.") as raw:
         own = Path(raw) / "state" / "layout.json"
         with patched(team_launcher, uid_for_user=lambda user: os.getuid(),
-                     _write_private_json_atomic=lambda path, payload: written.append(path)):
+                     _write_private_json_atomic=lambda path, payload, **kw: written.append((path, kw))):
             same = desktop_layout_writer.write_desktop_layout(own, {"a": 1}, gui_user="syrd317-self",
                                                               runner=subprocess.run)
-        made = own.parent.is_dir()
-    check(same == "" and written == [own] and made,
-          f"the caller's own layout goes through the launcher's private writer: {same!r} {written!r}")
+    # SYRD-811: the private writer makes the directory now (SYRD-682), told to leave an existing one's mode -- and
+    # its ACL mask -- as they are; so what is pinned is that call, not a directory the stand-in never makes.
+    check(same == "" and written == [(own, {"private_parent": False})],
+          f"the caller's own layout goes through the launcher's private writer, keeping its directory: {same!r} "
+          f"{written!r}")
 
 
 def main() -> int:

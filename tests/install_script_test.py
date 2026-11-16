@@ -181,11 +181,22 @@ def test_final_next_step_points_at_user_owned_cli_install_and_project_auth() -> 
         tmpdir = Path(tmp)
         proc = _run_install(tmpdir)
 
-        assert proc.stdout.rstrip().splitlines()[-3:] == [
-            "NEXT STEP",
-            "Switchyard does not install agent CLIs. Install at least one of claude, codex, agy, or hermes yourself, with that vendor's own installer, for the user that will own the project.",
-            "Then run `switchyard new`: it detects which agent CLIs are installed and walks you through signing in to each one before any pane starts.",
-        ]
+        # SYRD-811: what the step must say, not its sentences (red since they were reworded, 4e40c34b): a NEXT STEP
+        # block that ends the output, says Switchyard runs no vendor's installer, names every agent CLI `switchyard
+        # new` offers, and sends the reader to `switchyard new`.
+        import sys as _sys
+
+        if str(ROOT) not in _sys.path:
+            _sys.path.insert(0, str(ROOT))
+        from scripts.new_project_selection import SUPPORTED_NEW_PROJECT_CLIS
+
+        lines = proc.stdout.rstrip().splitlines()
+        assert "NEXT STEP" in lines, proc.stdout[-800:]
+        step = lines[len(lines) - 1 - lines[::-1].index("NEXT STEP"):]
+        text = " ".join(step[1:])
+        assert step[0] == "NEXT STEP" and "installer" in text and "never" in text.lower(), step
+        assert all(cli in text for cli in SUPPORTED_NEW_PROJECT_CLIS), (SUPPORTED_NEW_PROJECT_CLIS, step)
+        assert step[-1].startswith("Then run `switchyard new`"), step
 
 
 def test_install_never_prompts_even_with_stdin_available() -> None:

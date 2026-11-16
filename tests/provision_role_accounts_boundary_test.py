@@ -103,14 +103,14 @@ GOLDEN = {
     'accounts env: no director': {'result': {'type': 'str', 'value': 'main=p470-main,audit=p470-audit'}, 'calls': {}},
     'accounts env: role accounts, no group': {'result': {'type': 'str', 'value': 'director=p470-director,main=p470-main,audit=p470-audit'}, 'calls': {}},
     'accounts command: no role accounts': {'result': {'type': 'str', 'value': ''}, 'calls': {}},
-    'accounts command: role accounts': {'result': {'type': 'str', 'value': 'TEXT 1739 chars sha256:7514cf2e510a52c9'}, 'calls': {'repository_group_commands': 1, 'repository_group_name': 1, 'role_account_home': 3, 'role_account_name': 3, 'shell_quote': 14}},
-    'accounts command: no director': {'result': {'type': 'str', 'value': 'TEXT 1247 chars sha256:3b2432b5cf3012e7'}, 'calls': {'repository_group_commands': 1, 'repository_group_name': 1, 'role_account_home': 2, 'role_account_name': 2, 'shell_quote': 11}},
+    'accounts command: role accounts': {'result': {'type': 'str', 'value': 'TEXT'}, 'calls': {'repository_group_commands': 1, 'repository_group_name': 1, 'role_account_home': 3, 'role_account_name': 3, 'shell_quote': 14}},
+    'accounts command: no director': {'result': {'type': 'str', 'value': 'TEXT'}, 'calls': {'repository_group_commands': 1, 'repository_group_name': 1, 'role_account_home': 2, 'role_account_name': 2, 'shell_quote': 11}},
     'accounts command: role accounts, no group': {'result': {'type': 'str', 'value': ''}, 'calls': {}},
-    'runtime command: no role accounts': {'result': {'type': 'str', 'value': 'TEXT 11775 chars sha256:caf1aa194ef77e49'}, 'calls': {'role_tooling_staging_commands': 1, 'shell_quote': 84}},
-    'runtime command: role accounts': {'result': {'type': 'str', 'value': 'TEXT 15685 chars sha256:58e301922a147e0a'}, 'calls': {'role_account_home': 3, 'role_account_name': 3, 'role_runtime_commands': 3, 'role_tooling_staging_commands': 1, 'shell_quote': 120}},
-    'runtime command: no director': {'result': {'type': 'str', 'value': 'TEXT 14321 chars sha256:b536132298ff3381'}, 'calls': {'role_account_home': 2, 'role_account_name': 2, 'role_runtime_commands': 2, 'role_tooling_staging_commands': 1, 'shell_quote': 108}},
-    'runtime command: role accounts, no group': {'result': {'type': 'str', 'value': 'TEXT 11775 chars sha256:caf1aa194ef77e49'}, 'calls': {'role_tooling_staging_commands': 1, 'shell_quote': 84}},
-    'runtime command: the release rebound on project_provision': {'result': {'type': 'str', 'value': 'TEXT 15305 chars sha256:ef70f94efc2d358a'}, 'calls': {'role_account_home': 3, 'role_account_name': 3, 'role_runtime_commands': 3, 'role_tooling_staging_commands': 1, 'shell_quote': 120}},
+    'runtime command: no role accounts': {'result': {'type': 'str', 'value': 'TEXT'}, 'calls': {'role_tooling_staging_commands': 1, 'shell_quote': 98}},
+    'runtime command: role accounts': {'result': {'type': 'str', 'value': 'TEXT'}, 'calls': {'role_account_home': 3, 'role_account_name': 3, 'role_runtime_commands': 3, 'role_tooling_staging_commands': 1, 'shell_quote': 125}},
+    'runtime command: no director': {'result': {'type': 'str', 'value': 'TEXT'}, 'calls': {'role_account_home': 2, 'role_account_name': 2, 'role_runtime_commands': 2, 'role_tooling_staging_commands': 1, 'shell_quote': 116}},
+    'runtime command: role accounts, no group': {'result': {'type': 'str', 'value': 'TEXT'}, 'calls': {'role_tooling_staging_commands': 1, 'shell_quote': 98}},
+    'runtime command: the release rebound on project_provision': {'result': {'type': 'str', 'value': 'TEXT'}, 'calls': {'role_account_home': 3, 'role_account_name': 3, 'role_runtime_commands': 3, 'role_tooling_staging_commands': 1, 'shell_quote': 125}},
     'control sudoers: no role accounts': {'result': {'type': 'str', 'value': ''}, 'calls': {'render_role_control_sudoers': 1}},
     'control sudoers: role accounts': {'result': {'type': 'str', 'value': "# p470: role control interface. Each entry grants one command and\n# nothing else, so a holder can drive another account's tmux server, and gains\n# no other command and no root.\np470-owner ALL=(p470-director,p470-main,p470-audit) NOPASSWD: /usr/bin/tmux\np470-director ALL=(p470-main,p470-audit) NOPASSWD: /usr/bin/tmux\np470-director ALL=(p470-owner) NOPASSWD: /usr/bin/tmux\n"}, 'calls': {'render_role_control_sudoers': 1}},
     'control sudoers: no director': {'result': {'type': 'str', 'value': "# p470: role control interface. Each entry grants one command and\n# nothing else, so a holder can drive another account's tmux server, and gains\n# no other command and no root.\np470-owner ALL=(p470-main,p470-audit) NOPASSWD: /usr/bin/tmux\n"}, 'calls': {'render_role_control_sudoers': 1}},
@@ -127,12 +127,12 @@ GOLDEN = {
     'install commands: a blank document': {'result': {'type': 'list', 'value': []}, 'calls': {}},
     'install commands: a document': {'result': {'type': 'list', 'value': ["sudo install -m 0440 -o root -g root /dev/stdin /etc/sudoers.d/49-p470-role-control.staged <<'SWITCHYARD_ROLE_CONTROL_SUDOERS'", 'p470-owner ALL=(p470-main) NOPASSWD: /usr/bin/tmux', 'SWITCHYARD_ROLE_CONTROL_SUDOERS', 'sudo visudo -c -f /etc/sudoers.d/49-p470-role-control.staged', 'sudo mv /etc/sudoers.d/49-p470-role-control.staged /etc/sudoers.d/49-p470-role-control']}, 'calls': {}},
     'install commands: the heredoc marker rebound on project_provision': {'result': {'type': 'list', 'value': ["sudo install -m 0440 -o root -g root /dev/stdin /etc/sudoers.d/49-p470-role-control.staged <<'P470_MARK'", 'rule', 'P470_MARK', 'sudo visudo -c -f /etc/sudoers.d/49-p470-role-control.staged', 'sudo mv /etc/sudoers.d/49-p470-role-control.staged /etc/sudoers.d/49-p470-role-control']}, 'calls': {}},
-    'add role: defaults': {'result': {'type': 'str', 'value': 'TEXT 13980 chars sha256:fac2f806dec3dd8d'}, 'calls': {'invoking_human': 1, 'render_role_control_sudoers': 1, 'resolve_control_user': 1, 'role_account_name': 1, 'role_control_sudoers_install_commands': 1, 'role_runtime_commands': 1, 'role_tooling_staging_commands': 1, 'roles_group_name': 1, 'shell_quote': 102, 'tenant_control_commands': 1}},
-    'add role: a control repository and worktree': {'result': {'type': 'str', 'value': 'TEXT 14856 chars sha256:c9374dafcf89e866'}, 'calls': {'invoking_human': 1, 'render_role_control_sudoers': 1, 'repository_group_commands': 1, 'repository_group_name': 2, 'resolve_control_user': 1, 'role_account_name': 1, 'role_control_sudoers_install_commands': 1, 'role_runtime_commands': 1, 'role_tooling_staging_commands': 1, 'role_worktree_access_commands': 1, 'roles_group_name': 1, 'shell_quote': 116, 'tenant_control_commands': 1}},
-    'add role: no director': {'result': {'type': 'str', 'value': 'TEXT 13846 chars sha256:b3ef7fb98b00c2f2'}, 'calls': {'invoking_human': 1, 'render_role_control_sudoers': 1, 'resolve_control_user': 1, 'role_account_name': 1, 'role_control_sudoers_install_commands': 1, 'role_runtime_commands': 1, 'role_tooling_staging_commands': 1, 'roles_group_name': 1, 'shell_quote': 102, 'tenant_control_commands': 1}},
-    'add role: the helpers rebound on project_provision': {'result': {'type': 'str', 'value': 'TEXT 599 chars sha256:9fc332a894452d23'}, 'calls': {'invoking_human': 1, 'render_role_control_sudoers rebound': 1, 'resolve_control_user': 1, 'role_account_name': 1, 'role_control_sudoers_install_commands rebound': 1, 'role_runtime_commands rebound': 1, 'role_tooling_staging_commands rebound': 1, 'roles_group_name': 1, 'shell_quote': 6, 'tenant_control_commands rebound': 1}},
-    'add role: a recorded human gets the tenant control bridge': {'result': {'type': 'str', 'value': 'TEXT 15264 chars sha256:f2f5348dab25fe01'}, 'calls': {'invoking_human': 1, 'render_role_control_sudoers': 1, 'resolve_control_user': 1, 'role_account_name': 1, 'role_control_sudoers_install_commands': 1, 'role_runtime_commands': 1, 'role_tooling_staging_commands': 1, 'roles_group_name': 1, 'shell_quote': 110, 'tenant_control_commands': 1}},
-    'constants': {'result': {'type': 'list', 'value': [['unassigned', 'user'], '-role-accounts.sh', 'SWITCHYARD_ROLE_CONTROL_SUDOERS']}, 'calls': {}},
+    'add role: defaults': {'result': {'type': 'str', 'value': 'TEXT'}, 'calls': {'invoking_human': 1, 'render_role_control_sudoers': 1, 'resolve_control_user': 1, 'role_account_name': 1, 'role_control_sudoers_install_commands': 1, 'role_runtime_commands': 1, 'role_tooling_staging_commands': 1, 'roles_group_name': 1, 'shell_quote': 113, 'tenant_control_commands': 1}},
+    'add role: a control repository and worktree': {'result': {'type': 'str', 'value': 'TEXT'}, 'calls': {'invoking_human': 1, 'render_role_control_sudoers': 1, 'repository_group_commands': 1, 'repository_group_name': 2, 'resolve_control_user': 1, 'role_account_name': 1, 'role_control_sudoers_install_commands': 1, 'role_runtime_commands': 1, 'role_tooling_staging_commands': 1, 'role_worktree_access_commands': 1, 'roles_group_name': 1, 'shell_quote': 120, 'tenant_control_commands': 1}},
+    'add role: no director': {'result': {'type': 'str', 'value': 'TEXT'}, 'calls': {'invoking_human': 1, 'render_role_control_sudoers': 1, 'resolve_control_user': 1, 'role_account_name': 1, 'role_control_sudoers_install_commands': 1, 'role_runtime_commands': 1, 'role_tooling_staging_commands': 1, 'roles_group_name': 1, 'shell_quote': 113, 'tenant_control_commands': 1}},
+    'add role: the helpers rebound on project_provision': {'result': {'type': 'str', 'value': 'TEXT'}, 'calls': {'invoking_human': 1, 'render_role_control_sudoers rebound': 1, 'resolve_control_user': 1, 'role_account_name': 1, 'role_control_sudoers_install_commands rebound': 1, 'role_runtime_commands rebound': 1, 'role_tooling_staging_commands rebound': 1, 'roles_group_name': 1, 'shell_quote': 6, 'tenant_control_commands rebound': 1}},
+    'add role: a recorded human gets the tenant control bridge': {'result': {'type': 'str', 'value': 'TEXT'}, 'calls': {'invoking_human': 1, 'render_role_control_sudoers': 1, 'resolve_control_user': 1, 'role_account_name': 1, 'role_control_sudoers_install_commands': 1, 'role_runtime_commands': 1, 'role_tooling_staging_commands': 1, 'roles_group_name': 1, 'shell_quote': 121, 'tenant_control_commands': 1}},
+    'constants': {'result': {'type': 'list', 'value': [['publisher', 'unassigned', 'user'], '-role-accounts.sh', 'SWITCHYARD_ROLE_CONTROL_SUDOERS']}, 'calls': {}},
 }
 REACHED: set[str] = set()
 #: Measured on the candidate: what importing the module alone loads -- its package, nothing else.
@@ -205,6 +205,18 @@ PASSED = ("role_account_name", "roles_group_name", "role_account_home", "role_ru
 REBINDABLE = ("NON_PROCESS_ROLES", "ROLE_ACCOUNT_MIGRATION_SUFFIX", "ROLE_CONTROL_SUDOERS_HEREDOC", "SHARED_RELEASE_CURRENT")
 
 
+#: Every long text a case rendered, by its digest (SYRD-811).
+RAW_TEXTS: dict[str, str] = {}
+
+
+def masked(answer: dict) -> dict:
+    """An answer with each long text's length and hash replaced by `TEXT`: the goldens pin the calls and every short
+    value, not whole scripts, which any later change to them broke (SYRD-811: all 18 went red at SYRD-541)."""
+    import re as _re
+
+    return json.loads(_re.sub(r"TEXT \d+ chars sha256:[0-9a-f]{16}", "TEXT", json.dumps(answer)))
+
+
 def run_case(t, holder, spec, reached):
     """One case against `holder`'s definition; `t` is project_provision, whose helpers are recorded and passed through."""
     import dataclasses as _dc, hashlib, os as _os, pathlib as _pl, pwd as _pwd, shutil as _sh, tempfile as _tf
@@ -218,7 +230,11 @@ def run_case(t, holder, spec, reached):
             value = "PATH " + str(value)
         if isinstance(value, str):
             value = value.replace(work, "TMP")
-            return value if len(value) <= 400 else f"TEXT {len(value)} chars sha256:{hashlib.sha256(value.encode()).hexdigest()[:16]}"
+            if len(value) <= 400:
+                return value
+            digest = hashlib.sha256(value.encode()).hexdigest()[:16]
+            RAW_TEXTS[digest] = value  # SYRD-811: kept, for the structural check; the hash only compares the holders
+            return f"TEXT {len(value)} chars sha256:{digest}"
         if isinstance(value, (bool, int, float)) or value is None:
             return value
         return repr(value)
@@ -623,17 +639,33 @@ def test_the_direct_script_and_the_package_render_the_same_packets() -> None:
 def test_every_answer_is_the_baselines() -> None:
     check(sorted(CASES) == sorted(GOLDEN), "every measured case is asserted, and nothing else")
     for label, spec in CASES.items():
-        for holder in (m, t):
-            got = run(holder, spec)
-            check(got == GOLDEN[label], f"{label} ({holder.__name__}): the baseline's answer, every call in order: {got}")
+        answers = [run(holder, spec) for holder in (m, t)]
+        check(answers[0] == answers[1], f"{label}: both module paths give the same answer, every text identical: {answers}")
+        for holder, got in zip((m, t), answers):
+            check(masked(got) == GOLDEN[label], f"{label} ({holder.__name__}): the baseline's answer, every call in order: {got}")
+
+
+def test_every_rendered_script_is_shell() -> None:
+    """SYRD-811: what replaced the whole-text hashes -- every long text a case renders is a shell script bash parses."""
+    for label, spec in CASES.items():
+        run(m, spec)
+    check(len(RAW_TEXTS) >= 10, f"the cases render their scripts: {len(RAW_TEXTS)}")
+    for digest, text in sorted(RAW_TEXTS.items()):
+        done = subprocess.run(["bash", "-n"], input=text, capture_output=True, text=True, timeout=30)
+        check(done.returncode == 0, f"rendered script {digest} parses: {done.stderr[:300]}")
 
 
 def test_the_rules_hold_in_the_measured_record() -> None:
+    # The record, measured now: the goldens pin it with each long text masked (SYRD-811), and these rules compare
+    # rendered texts with one another, so they read them whole.
+    measured = {label: run(m, spec) for label, spec in CASES.items()}
+    check(all(masked(measured[label]) == GOLDEN[label] for label in CASES), "the record is the goldens' record")
+
     def value(label):
-        return GOLDEN[label]["result"]["value"]
+        return measured[label]["result"]["value"]
 
     def calls(label):
-        return GOLDEN[label]["calls"]
+        return measured[label]["calls"]
 
     check(value("account name") == "p470-main" and value("group name") == "p470-roles" and value("migration name") == "p470-role-accounts.sh"
           and value("migration name: the suffix rebound on project_provision") == "p470.sh"
@@ -683,7 +715,9 @@ def test_the_rules_hold_in_the_measured_record() -> None:
                "role_tooling_staging_commands rebound", "tenant_control_commands rebound"} <= set(calls("add role: the helpers rebound on project_provision")),
           "adding a role: the staged bundle, its runtime, repository access when there is a control repository, the refreshed control rule and the "
           "tenant control bridge for the recorded human -- every helper read through project_provision")
-    check(value("constants") == [["unassigned", "user"], "-role-accounts.sh", "SWITCHYARD_ROLE_CONTROL_SUDOERS"], "the non-process roles, the migration suffix and the heredoc marker")
+    # The Publisher runs no process of its own either (SYRD-625).
+    check(value("constants") == [["publisher", "unassigned", "user"], "-role-accounts.sh", "SWITCHYARD_ROLE_CONTROL_SUDOERS"],
+          "the non-process roles, the migration suffix and the heredoc marker")
 
 
 def test_every_seam_is_reached() -> None:

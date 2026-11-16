@@ -727,7 +727,8 @@ def test_sentinel_contents(scratch: Path) -> None:
     (runtime_store / "pane-state").mkdir(parents=True)
     record, live_record = store / "pane-sessions/roles/ops/record.json", store / "pane-sessions/roles/ops/syrd-ops_0.0.json"
     pane_state = runtime_store / "pane-state/syrd-ops_0.0.json"
-    for path in (record, live_record, pane_state):
+    activity = runtime_store / "pane-state/syrd-ops_0.0.activity.json"  # the tool activity beside it (SYRD-695)
+    for path in (record, live_record, pane_state, activity):
         path.write_text("{}")
         path.chmod(0o600)
     pane = {"TICKET_BOARD_PANE_SESSION_DIR": f"{store}/pane-sessions/roles/app",
@@ -751,6 +752,9 @@ def test_sentinel_contents(scratch: Path) -> None:
             ("a record named for another role", lambda: (store / "pane-sessions/roles/ops/syrd-audit_0.0.json").write_text("{}"),
              True),
             ("the live pane's state rewritten", lambda: pane_state.write_text('{"busy": true}'), False),
+            ("the live pane's tool activity rewritten", lambda: activity.write_text('{"tool": "Bash"}'), False),
+            ("tool activity of another project", lambda: (runtime_store / "pane-state/mefp-ops_0.0.activity.json").write_text("{}"),
+             True),
             ("the live pane's record rewritten", lambda: live_record.write_text('{"session_id": "L"}'), False),
             ("a live record's mode changed", lambda: live_record.chmod(0o644), True),
             ("a live record deleted", lambda: pane_state.unlink(), True)):

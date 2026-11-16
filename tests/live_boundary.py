@@ -763,9 +763,9 @@ def snapshot(home: str, runtime: str) -> dict[str, tuple]:
 
 
 #: The records a live pane's own hooks keep rewriting in its project's store, relative to that store: its pane
-#: state, its session record (and what supersedes it), its resume log and its provider state -- each named for the
-#: role whose directory it is in.
-_LIVE_RECORD = r"(?:pane-state/{p}-[\w.-]+_\d+\.\d+\.json" \
+#: state and the tool activity beside it (SYRD-695; SYRD-815), its session record (and what supersedes it), its
+#: resume log and its provider state -- each named for the role whose directory it is in.
+_LIVE_RECORD = r"(?:pane-state/{p}-[\w.-]+_\d+\.\d+(?:\.activity)?\.json" \
                r"|pane-sessions/{p}-[\w.-]+_\d+\.\d+\.json(?:\.superseded(?:\.\d+)?)?" \
                r"|pane-sessions/roles/(?P<role>[\w.-]+)/{p}-(?P=role)_\d+\.\d+\.(?:json(?:\.superseded(?:\.\d+)?)?|resume\.log)" \
                r"|pane-sessions/roles/(?P<owner>[\w.-]+)/(?P=owner)\.provider-state\.json)"

@@ -241,69 +241,71 @@ def namespace(base: Path) -> dict:
         provider = PROVIDER.replace("$RECEIVED", str(received)).replace("$OPENED", str(opened))
         started = as_user(TENANT, ["tmux", "new-session", "-d", "-s", f"{PROJECT}-app", "-x", "220", "-y", "20",
                                    "bash", "-c", provider], tenant_env)
-        run["tmux"] = started.returncode
-        socket = as_user(TENANT, ["tmux", "display-message", "-p", "#{socket_path}"], tenant_env).stdout.strip()
-        run["tmux_socket_private"] = socket.startswith(str(state))
+        try:  # the tenant's tmux server ends with the pass, whatever fails in it (SYRD-815)
+            run["tmux"] = started.returncode
+            socket = as_user(TENANT, ["tmux", "display-message", "-p", "#{socket_path}"], tenant_env).stdout.strip()
+            run["tmux_socket_private"] = socket.startswith(str(state))
 
-        paste = as_user(GUI, [sys.executable, "-c", "import runpy, sys; sys.argv = sys.argv[1:]; "
-                              "runpy.run_path(sys.argv[0], run_name='__main__')",
-                              str(tree / "scripts" / "switchyard"), "paste-image", PROJECT, "app"], gui_env)
-        run["paste"] = [paste.returncode, (paste.stdout + paste.stderr).strip()[-400:]]
-        listing = py(GUI, "import os, json, subprocess\n"
-                          f"leaf = {str(LEAF)!r}\n"
-                          "out = {}\n"
-                          "for p in (os.path.dirname(leaf), leaf) + tuple(os.path.join(leaf, n) for n in sorted(os.listdir(leaf))):\n"
-                          "    st = os.lstat(p)\n"
-                          "    out[p] = [oct(st.st_mode & 0o777), st.st_uid, subprocess.run(['getfacl', '-cpn', p], capture_output=True, text=True).stdout.split()]\n"
-                          "print(json.dumps(out))", env=gui_env, tree=tree)
-        run["owner_view"] = json.loads(listing.stdout) if listing.returncode == 0 else listing.stderr[-300:]
-        if label == "after" and listing.returncode == 0:
-            image = next(p for p in run["owner_view"] if p.endswith(".png"))
-            manifest = image[: -len(".png")] + ".handoff.json"
-            run["created_at"] = json.loads(py(GUI, f"print(open({manifest!r}).read())", env=gui_env, tree=tree).stdout)["created_at"]
-            reach = ("import os, json, hashlib\n"
-                     "def attempt(f):\n"
-                     "    try:\n        return ['ok', f()]\n"
-                     "    except OSError as e:\n        return ['refused', e.errno]\n"
-                     f"image, leaf = {image!r}, {str(LEAF)!r}\n"
-                     "print(json.dumps({\n"
-                     f"  'list_runtime': attempt(lambda: os.listdir({str(RUNTIME)!r})),\n"
-                     f"  'reach_runtime': attempt(lambda: os.stat({str(RUNTIME / 'bus')!r}) and None),\n"
-                     "  'list_parent': attempt(lambda: os.listdir(os.path.dirname(leaf))),\n"
-                     "  'list_leaf': attempt(lambda: sorted(os.listdir(leaf))),\n"
-                     "  'read_image': attempt(lambda: hashlib.sha256(open(image, 'rb').read()).hexdigest()),\n"
-                     "  'create_in_leaf': attempt(lambda: open(os.path.join(leaf, 'planted'), 'x').close()),\n"
-                     "  'unlink_image': attempt(lambda: os.unlink(image)),\n"
-                     "  'write_image': attempt(lambda: open(image, 'ab').close()),\n"
-                     "}))")
-            run["tenant_reach"] = json.loads(py(TENANT, reach, env=tenant_env, tree=tree).stdout)
-            run["other_reach"] = json.loads(py(OTHER, reach, env={**common, "HOME": str(base / "home" / OTHER[0])}, tree=tree).stdout)
+            paste = as_user(GUI, [sys.executable, "-c", "import runpy, sys; sys.argv = sys.argv[1:]; "
+                                  "runpy.run_path(sys.argv[0], run_name='__main__')",
+                                  str(tree / "scripts" / "switchyard"), "paste-image", PROJECT, "app"], gui_env)
+            run["paste"] = [paste.returncode, (paste.stdout + paste.stderr).strip()[-400:]]
+            listing = py(GUI, "import os, json, subprocess\n"
+                              f"leaf = {str(LEAF)!r}\n"
+                              "out = {}\n"
+                              "for p in (os.path.dirname(leaf), leaf) + tuple(os.path.join(leaf, n) for n in sorted(os.listdir(leaf))):\n"
+                              "    st = os.lstat(p)\n"
+                              "    out[p] = [oct(st.st_mode & 0o777), st.st_uid, subprocess.run(['getfacl', '-cpn', p], capture_output=True, text=True).stdout.split()]\n"
+                              "print(json.dumps(out))", env=gui_env, tree=tree)
+            run["owner_view"] = json.loads(listing.stdout) if listing.returncode == 0 else listing.stderr[-300:]
+            if label == "after" and listing.returncode == 0:
+                image = next(p for p in run["owner_view"] if p.endswith(".png"))
+                manifest = image[: -len(".png")] + ".handoff.json"
+                run["created_at"] = json.loads(py(GUI, f"print(open({manifest!r}).read())", env=gui_env, tree=tree).stdout)["created_at"]
+                reach = ("import os, json, hashlib\n"
+                         "def attempt(f):\n"
+                         "    try:\n        return ['ok', f()]\n"
+                         "    except OSError as e:\n        return ['refused', e.errno]\n"
+                         f"image, leaf = {image!r}, {str(LEAF)!r}\n"
+                         "print(json.dumps({\n"
+                         f"  'list_runtime': attempt(lambda: os.listdir({str(RUNTIME)!r})),\n"
+                         f"  'reach_runtime': attempt(lambda: os.stat({str(RUNTIME / 'bus')!r}) and None),\n"
+                         "  'list_parent': attempt(lambda: os.listdir(os.path.dirname(leaf))),\n"
+                         "  'list_leaf': attempt(lambda: sorted(os.listdir(leaf))),\n"
+                         "  'read_image': attempt(lambda: hashlib.sha256(open(image, 'rb').read()).hexdigest()),\n"
+                         "  'create_in_leaf': attempt(lambda: open(os.path.join(leaf, 'planted'), 'x').close()),\n"
+                         "  'unlink_image': attempt(lambda: os.unlink(image)),\n"
+                         "  'write_image': attempt(lambda: open(image, 'ab').close()),\n"
+                         "}))")
+                run["tenant_reach"] = json.loads(py(TENANT, reach, env=tenant_env, tree=tree).stdout)
+                run["other_reach"] = json.loads(py(OTHER, reach, env={**common, "HOME": str(base / "home" / OTHER[0])}, tree=tree).stdout)
 
-        listener = as_user(TENANT, [sys.executable, "-c", LISTENER_PASS, str(tree), str(base), label], tenant_env, timeout=180)
-        run["listener"] = [listener.returncode, listener.stdout.strip().splitlines()[-1:] if listener.stdout else [],
-                           listener.stderr[-1500:] if listener.returncode else ""]
-        run["received"] = received.read_text().splitlines() if received.exists() else []
-        run["opened"] = opened.read_text().splitlines() if opened.exists() else []
-        if label == "after":
-            # Restarted: the same handoff is not delivered twice.
-            again = as_user(TENANT, [sys.executable, "-c", LISTENER_PASS, str(tree), str(base), "after-restart"],
-                            tenant_env, timeout=180)
-            run["restart"] = [again.returncode, received.read_text().splitlines() if received.exists() else []]
-            created = run.get("created_at", 0.0)
-            sweep = ("from scripts import desktop_access as d; import os, json\n"
-                     f"print(json.dumps([d.sweep_handoffs({str(GRANT)!r}, {PROJECT!r}, now=float(sys.argv[1])), sorted(os.listdir({str(LEAF)!r}))]))")
-            run["sweep_early"] = json.loads(py(GUI, sweep, str(created + TTL - 2), env=gui_env, tree=tree).stdout)
-            run["sweep_due"] = json.loads(py(GUI, sweep, str(created + TTL + 1), env=gui_env, tree=tree).stdout)
-            # A second handoff, then the grant withdrawn: rollback removes it.
-            second = as_user(GUI, [sys.executable, "-c", "import runpy, sys; sys.argv = sys.argv[1:]; "
-                                   "runpy.run_path(sys.argv[0], run_name='__main__')",
-                                   str(tree / "scripts" / "switchyard"), "paste-image", PROJECT, "app"], gui_env)
-            withdraw = py(GUI, "from scripts import desktop_access as d; import json, os\n"
-                               "d.rollback(json.loads(sys.argv[1]))\n"
-                               f"print(json.dumps([os.path.exists({str(LEAF)!r}), os.path.exists({str(LEAF.parent)!r})]))",
-                          json.dumps(policy), env=gui_env, tree=tree)
-            run["withdraw"] = [second.returncode, withdraw.returncode, withdraw.stdout.strip() or withdraw.stderr[-300:]]
-        as_user(TENANT, ["tmux", "kill-server"], tenant_env)
+            listener = as_user(TENANT, [sys.executable, "-c", LISTENER_PASS, str(tree), str(base), label], tenant_env, timeout=180)
+            run["listener"] = [listener.returncode, listener.stdout.strip().splitlines()[-1:] if listener.stdout else [],
+                               listener.stderr[-1500:] if listener.returncode else ""]
+            run["received"] = received.read_text().splitlines() if received.exists() else []
+            run["opened"] = opened.read_text().splitlines() if opened.exists() else []
+            if label == "after":
+                # Restarted: the same handoff is not delivered twice.
+                again = as_user(TENANT, [sys.executable, "-c", LISTENER_PASS, str(tree), str(base), "after-restart"],
+                                tenant_env, timeout=180)
+                run["restart"] = [again.returncode, received.read_text().splitlines() if received.exists() else []]
+                created = run.get("created_at", 0.0)
+                sweep = ("from scripts import desktop_access as d; import os, json\n"
+                         f"print(json.dumps([d.sweep_handoffs({str(GRANT)!r}, {PROJECT!r}, now=float(sys.argv[1])), sorted(os.listdir({str(LEAF)!r}))]))")
+                run["sweep_early"] = json.loads(py(GUI, sweep, str(created + TTL - 2), env=gui_env, tree=tree).stdout)
+                run["sweep_due"] = json.loads(py(GUI, sweep, str(created + TTL + 1), env=gui_env, tree=tree).stdout)
+                # A second handoff, then the grant withdrawn: rollback removes it.
+                second = as_user(GUI, [sys.executable, "-c", "import runpy, sys; sys.argv = sys.argv[1:]; "
+                                       "runpy.run_path(sys.argv[0], run_name='__main__')",
+                                       str(tree / "scripts" / "switchyard"), "paste-image", PROJECT, "app"], gui_env)
+                withdraw = py(GUI, "from scripts import desktop_access as d; import json, os\n"
+                                   "d.rollback(json.loads(sys.argv[1]))\n"
+                                   f"print(json.dumps([os.path.exists({str(LEAF)!r}), os.path.exists({str(LEAF.parent)!r})]))",
+                              json.dumps(policy), env=gui_env, tree=tree)
+                run["withdraw"] = [second.returncode, withdraw.returncode, withdraw.stdout.strip() or withdraw.stderr[-300:]]
+        finally:
+            as_user(TENANT, ["tmux", "kill-server"], tenant_env)
     return result
 
 

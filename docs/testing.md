@@ -20,6 +20,29 @@ when they are imported. A module that reaches tmux without importing one of them
 must call it itself; `tests/tmux_user_bus_isolation_test.py` enforces that
 across the repository.
 
+## A cold sweep
+
+```
+python3 tests/sweep.py [--out DIR] [--jobs N] <suite>...
+```
+
+To compare a candidate with its base, run the suites a change could reach from
+nothing of your pane: each in a bwrap sandbox, with no network, a private `/tmp`
+and `/run`, a disposable HOME and `env -i`. Some suites need what only the host
+gives: user namespaces of their own, ids outside a sandbox's map, root-owned
+host files, the system bus or a browser. `tests/sweep_requirements.py` declares
+those, with the reason, and the sweep runs them on the host instead, still cold.
+It gives a suite that calls `live_boundary.isolate()` no HOME, so the suite
+builds its own disposable root, and the live pane's two store names, so its
+sentinel tolerates that pane's own hooks. Every other suite gets a disposable
+HOME, and the temporary directory is one other accounts can traverse. A suite
+measured as load-sensitive is retried once, alone, and reported as passing on
+retry. The sweep never runs as root (SYRD-815).
+
+Declare a suite there only for a reason the sandbox cannot give, measured.
+Twenty suites were red in every sandboxed sweep for these reasons alone, and so
+guarded nothing (SYRD-806).
+
 ## Why the bus matters
 
 tmux built with systemd support asks the **user** systemd manager to place every

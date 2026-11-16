@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""SYRD-15: real PostgreSQL queue/RBAC + production listener with an idle sender seam."""
+"""SYRD-15: real PostgreSQL queue/RBAC + production listener with an idle sender seam.
+
+SYRD-805: both boards are built as production builds them -- schema.sql, then the release's migration runner and
+rbac.sql; the baseline by its own release -- and the owner's "wait cleared" wake (SYRD-797) is checked: held a moment,
+and dropped when a wait stands again by the time it is due."""
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
@@ -20,6 +24,30 @@ import psycopg
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / 'scripts/ticket_board/migrations/pgu920_syrd15_durable_awaiting_role.sql'
+#: The schema pgu920 was reviewed against, and the grants it ran with (SYRD-15).
+BASELINE = '8651f78634174afbea55f33d2d4546a10ddb0005'
+
+
+def check(condition: object, detail: str) -> None:
+    if not condition:
+        raise AssertionError(f"FAILED CHECK: {detail}")
+
+
+def migrate(admin: str, release: Path = ROOT) -> None:
+    """A deploy of `release` as production makes one (database_admin): its runner applies every migration the board
+    has not recorded, then its rbac.sql. SYRD-805: the upgrade below applied today's rbac.sql to the baseline with only
+    pgu920 and pgu921, and was red from the first later grant on (3c73b822's pgu923, 2026-09-06)."""
+    done = subprocess.run(['bash', str(release / 'scripts/ticket-board-migrate')], capture_output=True, text=True,
+                          env={**os.environ, 'TICKET_BOARD_ADMIN_DATABASE_URL': admin}, timeout=300)
+    check(done.returncode == 0, f"{release.name}'s migrations apply: {done.stderr[-700:]!r}")
+    fixture.psql(admin, (release / 'scripts/ticket_board/rbac.sql').read_text())
+
+
+def baseline_release(into: Path) -> Path:
+    """The baseline's own scripts, as its release held them: its schema.sql, runner, migrations and rbac.sql."""
+    archive = subprocess.run(['git', 'archive', BASELINE, 'scripts'], cwd=ROOT, capture_output=True, check=True).stdout
+    subprocess.run(['tar', '-x', '-C', str(into)], input=archive, check=True)
+    return into
 
 
 def checks(svc: str, admin: str) -> None:
@@ -290,14 +318,41 @@ def checks(svc: str, admin: str) -> None:
     role('research', "BEGIN; SELECT ticket_board.set_awaiting_role('PGU-1', 'director'); ROLLBACK;")
     assert count() == 0 and fixture.awaiting(admin, 'PGU-1') == ''
 
+    # SYRD-797 (pgu1045; notification_eligibility): the owner's "wait cleared" wake is held a moment, so the awaited
+    # role's comment can follow it; and when it falls due while the owner has asked again, it says nothing false: it
+    # is dropped, not delivered.
+    request()
+    role('director', "SELECT ticket_board.clear_awaiting_role('PGU-1');")
+    held = float(sql("SELECT coalesce(extract(epoch FROM max(next_attempt_at) - clock_timestamp()), -1) FROM "
+                     "ticket_board.ticket_notification_queue WHERE kind = 'ticket_update' AND target_role = 'research' "
+                     "AND message LIKE '%the wait on director was cleared%'"))
+    check(25 < held <= 30, f"the owner's 'wait cleared' wake is held a moment, not sent at once: due in {held:.1f}s")
+    request()  # the owner asks again before that wake is due
+    sql("UPDATE ticket_board.ticket_notification_queue SET next_attempt_at = clock_timestamp() + interval '1 hour' "
+        "WHERE kind = 'awaiting_role'")
+    sql("UPDATE ticket_board.ticket_notification_queue SET next_attempt_at = clock_timestamp() WHERE kind = 'ticket_update'")
+    told: list[str] = []
+    process(listener(lambda t, m: told.append(m)))
+    left = sql("SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE kind = 'ticket_update'")
+    check([m for m in told if 'was cleared' in m] == [] and left == '0',
+          f"a 'wait cleared' wake due while a wait stands again is dropped, not delivered: told {told}, {left} left")
+    role('director', "SELECT ticket_board.clear_awaiting_role('PGU-1');")
+    sql("DELETE FROM ticket_board.ticket_notification_queue")
+
 
 def run(svc: str, admin: str) -> None:
+    migrate(admin)  # a fresh board as production builds one: schema.sql, then every migration and rbac.sql
     checks(svc, admin)
     fresh = fixture.psql(admin, "SELECT pg_get_functiondef('ticket_board.set_awaiting_role(text,text)'::regprocedure)")
-    # Upgrade the actual reviewed pre-change schema, with a pre-existing wait.
-    baseline = subprocess.check_output(['git', 'show', '8651f78634174afbea55f33d2d4546a10ddb0005:scripts/ticket_board/schema.sql'], cwd=ROOT, text=True)
-    fixture.psql(admin, 'DROP SCHEMA ticket_board CASCADE;\n'+baseline)
-    fixture.psql(admin, (ROOT/'scripts/ticket_board/rbac.sql').read_text())
+    # Upgrade the actual reviewed pre-change board, as its release built it -- its schema.sql, every migration it
+    # shipped (recorded, as its runner records them) and its grants -- with a pre-existing wait. A schema.sql alone
+    # records no migration, and today's runner would then apply them all from the first, pgu589's `\ir ../schema.sql`
+    # among them: today's schema over the baseline's tables.
+    with tempfile.TemporaryDirectory(prefix='syrd805-baseline.') as raw:
+        baseline = baseline_release(Path(raw))
+        fixture.psql(admin, 'DROP SCHEMA ticket_board CASCADE;\n'
+                     + (baseline / 'scripts/ticket_board/schema.sql').read_text())
+        migrate(admin, baseline)
     fixture.insert_ticket(admin, 'PGU-90', state='in_progress', assignee='app')
     fixture.as_role(svc, 'app', "SELECT ticket_board.set_awaiting_role('PGU-90', 'director')")
     fixture.psql(admin, MIGRATION.read_text())
@@ -305,10 +360,11 @@ def run(svc: str, admin: str) -> None:
     fixture.psql(admin, "DELETE FROM ticket_board.ticket_notification_queue WHERE kind='awaiting_role'")
     fixture.psql(admin, MIGRATION.read_text())
     assert fixture.psql(admin, "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE kind='awaiting_role'").strip() == '0'
-    # The opt-in foundation generalizes only recipient/stage lookup; compare
-    # current fresh schema after both reviewed incremental layers.
-    fixture.psql(admin, (ROOT / "scripts/ticket_board/migrations/pgu921_syrd11_declarative_workflow.sql").read_text())
-    assert fixture.psql(admin, "SELECT pg_get_functiondef('ticket_board.set_awaiting_role(text,text)'::regprocedure)") == fresh
+    # Then the rest of the way, as a deploy goes: every later migration, then today's rbac.sql. The upgraded board
+    # ends where a fresh one starts.
+    migrate(admin)
+    upgraded = fixture.psql(admin, "SELECT pg_get_functiondef('ticket_board.set_awaiting_role(text,text)'::regprocedure)")
+    check(upgraded == fresh, "upgraded from the baseline, set_awaiting_role is the fresh board's")
     fixture.psql(admin, "DELETE FROM ticket_board.tickets")
     checks(svc, admin)
     print('durable awaiting-role: fresh + upgrade + repeat migration + PostgreSQL/listener checks passed')

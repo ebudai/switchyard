@@ -71,7 +71,7 @@ from tmux_socket_cleanup import (
     cleanup_dead_isolated_tmux_socket as _cleanup_dead_isolated_tmux_socket,
     cleanup_isolated_tmux_sessions as _cleanup_isolated_tmux_sessions,
     isolated_tmux_socket_path as _isolated_tmux_socket_path,
-    run_isolated_tmux as _run_isolated_tmux,
+    run_isolated_tmux as _run_isolated_tmux, own_isolated_tmux_server as _own_isolated_tmux_server,
     tmux_args as _tmux_args,
 )
 
@@ -773,7 +773,7 @@ def _owner_file_install_runner(args: list[str], **kwargs: object) -> subprocess.
 def _isolated_tmux_runner(server: str) -> Any:
     def runner(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
         if args and args[0] == "tmux":
-            isolated_args = ["tmux", "-L", server, *args[1:]]
+            isolated_args = ["tmux", "-L", _own_isolated_tmux_server(server), *args[1:]]  # ours to end (SYRD-823)
             isolated_args = [
                 token.replace("env TMUX= tmux attach -t", f"env TMUX= tmux -L {server} attach -t")
                 if isinstance(token, str)

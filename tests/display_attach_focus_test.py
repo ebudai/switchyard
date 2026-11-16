@@ -40,6 +40,7 @@ if str(ROOT / "tests") not in sys.path:
     sys.path.insert(0, str(ROOT / "tests"))
 
 from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
+from tmux_socket_cleanup import end_isolated_tmux_server, own_isolated_tmux_server  # noqa: E402 - SYRD-823
 
 # An isolated socket is not isolation on its own: without this the panes opened
 # on it still ask the live tenant's user manager for transient scopes, however
@@ -69,7 +70,7 @@ class _Server:
     """A private tmux server holding one viewer-shaped session."""
 
     def __init__(self, panes: int = 4) -> None:
-        self.name = os.path.basename(tempfile.mktemp(prefix="syrd211-focus."))
+        self.name = own_isolated_tmux_server(os.path.basename(tempfile.mktemp(prefix="syrd211-focus.")))
         self.session = "test-viewer"
         self.sink = tempfile.mkdtemp(prefix="syrd211-panes.")
         self.tmux("new-session", "-d", "-s", self.session, "-x", "100", "-y", "30",
@@ -93,7 +94,7 @@ class _Server:
         return self.ask("#{pane_index}")
 
     def close(self) -> None:
-        self.tmux("kill-server")
+        end_isolated_tmux_server(self.name)
         shutil.rmtree(self.sink, ignore_errors=True)
 
 

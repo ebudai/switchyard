@@ -22,6 +22,7 @@ import ticket_board_awaiting_role_survives_comment_test as fixture
 from scripts.ticket_board.notify_listener import TicketBoardNotifyListener, ROLE_TO_TARGET, DirectorctlSender
 import psycopg
 from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
+from tmux_socket_cleanup import end_isolated_tmux_server, own_isolated_tmux_server  # noqa: E402 - SYRD-823
 isolate_tmux_bus()  # SYRD-814: the tmux servers it starts get a user bus of their own, never the invoker's
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -110,7 +111,7 @@ def checks(svc: str, admin: str) -> None:
     assert tmux, 'tmux is required for the delivery acceptance check'
     with tempfile.TemporaryDirectory(prefix='syrd15-pane-') as tmp:
         pane = Path(tmp)
-        server = 'syrd15-' + str(os.getpid())
+        server = own_isolated_tmux_server('syrd15-' + str(os.getpid()))
         target = ROLE_TO_TARGET['director']
         received = pane/'received.txt'
         receiver = pane/'receiver.sh'
@@ -135,7 +136,7 @@ def checks(svc: str, admin: str) -> None:
                 time.sleep(0.02)
             assert 'PGU-1' in received.read_text() and 'New handoff.' in received.read_text()
         finally:
-            subprocess.run([tmux, '-L', server, 'kill-server'], check=False, capture_output=True)
+            end_isolated_tmux_server(server)  # the server, and the socket tmux leaves behind
     assert sent[0][0] == ROLE_TO_TARGET['director'] and 'New handoff.' in sent[0][1]
     assert fixture.awaiting(admin, 'PGU-1') == 'director', 'ACK is not resolution'
     assert count() == 3

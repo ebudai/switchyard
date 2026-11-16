@@ -48,6 +48,7 @@ for extra in (str(ROOT), str(ROOT / "tests")):
         sys.path.insert(0, extra)
 
 from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
+from tmux_socket_cleanup import end_isolated_tmux_server, own_isolated_tmux_server  # noqa: E402 - SYRD-823
 
 isolate_tmux_bus()
 os.environ.pop("TMUX", None)
@@ -185,7 +186,7 @@ class _Server:
 
     def __init__(self, inner: str, *, inner_mouse: bool) -> None:
         """`inner_mouse`: configure the role session as the slot does; otherwise leave the server's default."""
-        self.name = os.path.basename(tempfile.mktemp(prefix="syrd389-"))
+        self.name = own_isolated_tmux_server(os.path.basename(tempfile.mktemp(prefix="syrd389-")))
         self.dir = Path(tempfile.mkdtemp(prefix="syrd389-wheel."))
         self.log = self.dir / "received"
         self.log.write_bytes(b"")
@@ -211,7 +212,7 @@ class _Server:
         return self.tmux("display-message", "-p", "-t", target, spec).stdout.strip()
 
     def close(self) -> None:
-        self.tmux("kill-server")
+        end_isolated_tmux_server(self.name)
         shutil.rmtree(self.dir, ignore_errors=True)
 
 

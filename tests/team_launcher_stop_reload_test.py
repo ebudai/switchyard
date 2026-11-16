@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from team_launcher_test_helpers import *
+from tmux_socket_cleanup import end_isolated_tmux_server, own_isolated_tmux_server  # noqa: E402 - SYRD-823
 from provider_store_fixture import agy_conversation, owned_record, transcript_for  # SYRD-638: a session as its provider files it
 
 def test_detach_visible_role_updates_config_and_leaves_session_running() -> None:
@@ -899,7 +900,7 @@ def test_reload_guard_matches_cli_child_under_shell_in_real_tmux() -> None:
     if shutil.which("tmux") is None:
         return
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-real-tmux.") as tmp:
-        server = f"pgu321-reload-guard-{os.getpid()}"
+        server = own_isolated_tmux_server(f"pgu321-reload-guard-{os.getpid()}")
         runner = _isolated_tmux_runner(server)
         helper = Path(tmp) / "codex"
         marker = Path(tmp) / "running"

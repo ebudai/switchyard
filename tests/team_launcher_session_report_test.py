@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from team_launcher_test_helpers import *
+from tmux_socket_cleanup import end_isolated_tmux_server, own_isolated_tmux_server  # noqa: E402 - SYRD-823
 from launcher_isolation import record_running_provider_state  # noqa: E402 - SYRD-812
 
 def test_launch_session_record_report_waits_and_warns_for_missing_records() -> None:
@@ -266,7 +267,7 @@ def test_running_project_roles_rejects_dead_pane_in_live_tmux_session() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-launch-dead-pane-real.") as tmp:
         tmp_path = Path(tmp)
         session = f"pgu860-dead-pane-{os.getpid()}"
-        server = f"{session}-server"
+        server = own_isolated_tmux_server(f"{session}-server")
         exit_sentinel = tmp_path / "exit-now"
         layout = tmp_path / "layout.json"
         layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")

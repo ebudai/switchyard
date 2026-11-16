@@ -5,6 +5,7 @@ from __future__ import annotations
 import live_boundary; live_boundary.isolate()  # noqa: E402,E702 - its shells get the run's own HOME, never a live one (SYRD-818)
 
 from team_launcher_test_helpers import *
+from tmux_socket_cleanup import end_isolated_tmux_server, own_isolated_tmux_server  # noqa: E402 - SYRD-823
 from provider_store_fixture import owned_record, transcript_for  # SYRD-638: a session as its provider files it
 
 def test_konsole_log_is_readable_by_sudo_invoking_user() -> None:
@@ -116,7 +117,7 @@ def test_tmux_role_window_name_survives_cli_pane_title_write() -> None:
         return
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-role-title.") as tmp:
         tmp_path = Path(tmp)
-        server = f"pgu800-role-title-{os.getpid()}"
+        server = own_isolated_tmux_server(f"pgu800-role-title-{os.getpid()}")
         runner = _isolated_tmux_runner(server)
         helper = tmp_path / "fake-cli"
         helper.write_text(
@@ -232,7 +233,7 @@ def test_tmux_pane_starts_cli_from_owner_local_bin_path() -> None:
             live_commands=["home-only-cli"],
             env={},
         )
-        server = f"pgu919-owner-local-bin-{os.getpid()}"
+        server = own_isolated_tmux_server(f"pgu919-owner-local-bin-{os.getpid()}")
         runner = _isolated_tmux_runner(server)
         original_home_dir_for_user = team_launcher.home_dir_for_user
         try:

@@ -38,7 +38,8 @@ import termios
 
 from team_launcher_test_helpers import *
 
-from tmux_socket_cleanup import cleanup_dead_isolated_tmux_socket, run_isolated_tmux
+from tmux_socket_cleanup import (cleanup_dead_isolated_tmux_socket, end_isolated_tmux_server, own_isolated_tmux_server,
+                                 run_isolated_tmux)
 
 RAW_OUTPUT_KEY = "tui.raw_output_mode"
 #: A signed-in CODEX_HOME for the one live case, which is opt-in (SYRD-813).
@@ -373,7 +374,7 @@ def test_a_real_codex_pane_scrolls_rather_than_typing() -> None:
     if not signed_in or not shutil.which("codex") or not shutil.which("tmux"):
         SKIPPED.append(f"{LIVE_CODEX_HOME_ENV} is unset, or codex or tmux is not installed")
         return
-    server = f"syrd91-{os.getpid()}"
+    server = own_isolated_tmux_server(f"syrd91-{os.getpid()}")
     cleanup_dead_isolated_tmux_socket(server)
     with tempfile.TemporaryDirectory(prefix="codex-render-live.") as tmp:
         tmp_path = Path(tmp)
@@ -438,6 +439,7 @@ def test_a_real_codex_pane_scrolls_rather_than_typing() -> None:
                 stderr=subprocess.DEVNULL,
                 timeout=20,
             )
+            end_isolated_tmux_server(server)
 
 
 def main() -> int:

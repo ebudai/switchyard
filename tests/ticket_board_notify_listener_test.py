@@ -40,7 +40,7 @@ from ticket_board_live_pane_guard import (
 )
 from tmux_socket_cleanup import (
     cleanup_dead_isolated_tmux_socket,
-    isolated_tmux_socket_path,
+    isolated_tmux_socket_path, own_isolated_tmux_server,
 )
 
 LIVE_PANE_STATE_PATHS = candidate_live_pane_state_paths()
@@ -3132,7 +3132,7 @@ def test_tmux_target_exists_uses_loud_probe_on_isolated_tmux_socket() -> None:
         return
     session = f"pgu776-probe-{os.getpid()}"
     with tempfile.TemporaryDirectory(prefix="ticket-board-tmux-probe.") as tmpdir:
-        socket_name = Path(tmpdir).name
+        socket_name = own_isolated_tmux_server(Path(tmpdir).name)
 
         def tmux_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
             assert args[0] == "tmux", args
@@ -3166,7 +3166,7 @@ def test_tmux_target_exists_probe_cleanup_removes_dead_isolated_socket() -> None
         return
     session = f"pgu776-probe-cleanup-{os.getpid()}"
     with tempfile.TemporaryDirectory(prefix="ticket-board-tmux-probe.") as tmpdir:
-        socket_name = Path(tmpdir).name
+        socket_name = own_isolated_tmux_server(Path(tmpdir).name)
         socket_path = isolated_tmux_socket_path(socket_name)
         subprocess.run(
             ["tmux", "-L", socket_name, "new-session", "-d", "-s", session, "-n", "main", "sleep", "60"],

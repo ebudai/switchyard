@@ -95,8 +95,8 @@ SOCKET_LINE = "tmux_user_bus_isolation_test: server socket "
 
 
 def _possible_sockets(environment: dict[str, str], server: str) -> set[Path]:
-    """Where a `-L` server's socket can be, for a server that never said: tmux 3.8 measured (SYRD-822) puts it under
-    $TMUX_TMPDIR only while XDG_RUNTIME_DIR is unset, else under /tmp -- and this module sets XDG_RUNTIME_DIR."""
+    """Where a `-L` server's socket can be, for a server that never said: under $TMUX_TMPDIR when that names an existing
+    absolute directory, else /tmp (tmux 3.8, measured in SYRD-823; XDG_RUNTIME_DIR plays no part)."""
     return {Path(base) / f"tmux-{os.getuid()}" / server for base in (environment.get("TMUX_TMPDIR") or "/tmp", "/tmp")}
 
 

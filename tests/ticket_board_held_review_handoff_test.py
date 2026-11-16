@@ -25,6 +25,7 @@ from scripts.ticket_board.notify_listener import (
 
 from temporary_cluster import temporary_cluster  # noqa: E402
 from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
+from tmux_socket_cleanup import end_isolated_tmux_server, own_isolated_tmux_server  # noqa: E402 - SYRD-823
 isolate_tmux_bus()  # SYRD-814: the tmux servers it starts get a user bus of their own, never the invoker's
 
 MIGRATION = (
@@ -331,7 +332,7 @@ def main():
             # Send with the shipped directorctl into a private tmux server.
             tmux = shutil.which("tmux")
             assert tmux
-            name = f"syrd22-{os.getpid()}"
+            name = own_isolated_tmux_server(f"syrd22-{os.getpid()}")
             received = root / "received.txt"
             receiver = root / "receiver.sh"
             receiver.write_text(
@@ -392,7 +393,7 @@ def main():
                     time.sleep(0.02)
                 assert "awaiting director" in received.read_text()
             finally:
-                subprocess.run([tmux, "-L", name, "kill-server"], check=True)
+                assert end_isolated_tmux_server(name), f"the server {name} and its socket are gone"
             assert (
                 app.get_ticket("PGU-1")["awaiting_role"] == "director"
                 and count("PGU-1") == 3

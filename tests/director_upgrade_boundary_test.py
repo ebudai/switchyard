@@ -36,6 +36,10 @@ for extra in (str(ROOT), str(ROOT / "scripts"), str(ROOT / "tests")):
     if extra not in sys.path:
         sys.path.insert(0, extra)
 
+import host_state_guard  # noqa: E402  - before any production module: no host state (SYRD-829)
+
+host_state_guard.install()
+import host_record_redirects  # noqa: E402,F401  - root's records, units and staged trees are the run's own (SYRD-818)
 import privileged_helper_boundary_test as boundary  # noqa: E402
 from scripts import team_launcher as tl  # noqa: E402
 from scripts.ticket_board import polkit_preflight  # noqa: E402
@@ -279,6 +283,8 @@ def main() -> int:
     for name, value in sorted(globals().items()):
         if name.startswith("test_") and callable(value):
             value()
+    # Nothing of this host was read: not the live mefp board's unit or process, nor its staged tree (SYRD-829).
+    host_state_guard.assert_untouched("director_upgrade_boundary_test")
     print(f"director_upgrade_boundary_test: {CHECKS} checks ok")
     return 0
 

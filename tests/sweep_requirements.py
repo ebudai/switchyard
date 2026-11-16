@@ -16,6 +16,7 @@ HOST_ONLY: dict[str, tuple[str, ...]] = {
     # bwrap's own user namespace refuses a nested one ("newuidmap: Could not set caps"), or the suite must be uid 0
     # of a namespace it maps itself. live_boundary_test checks each such suite isolates itself first (SYRD-819).
     "user namespaces": (
+        "board_skill_staged_bundle_test",
         "board_ui_delegation_test",
         "image_handoff_two_identity_test",
         "install_switchyard_release_marker_test",

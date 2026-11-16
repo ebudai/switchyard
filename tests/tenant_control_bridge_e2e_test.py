@@ -219,7 +219,9 @@ def case_the_bridge_returns_one_validated_handoff_to_its_caller(
     assert stat.S_IMODE(info.st_mode) == 0o600, oct(info.st_mode)
     parent = published.parent.stat()
     assert parent.st_uid == accounts.human.pw_uid and stat.S_IMODE(parent.st_mode) == 0o700
-    assert json.loads(published.read_text(encoding="utf-8")) == json.loads(good)
+    # Root republishes it with its layout; none named is the default, `separate` (55e448fe; SYRD-821).
+    relayed = json.loads(published.read_text(encoding="utf-8"))
+    assert relayed == {**json.loads(good), "layout": "separate"}, ("the handoff is relayed, with its layout", relayed)
 
     # And what is not a handoff is not relayed: each of these leaves the
     # caller's home exactly as it was.
@@ -689,6 +691,18 @@ team_launcher.run_switchyard_launch_first_run_auth = (
 team_launcher.stop_before_launch_for_missing_owner_clis = lambda report: False
 team_launcher.report_first_run_auth_warnings = lambda report: None
 
+
+def recorded(key, value):
+    # Start resumes a suspended tenant and stop suspends it (SYRD-193), through units this sandbox has no systemd
+    # for: recorded, and tenant_suspension's own suites drive them (SYRD-821).
+    def step(config, *args, **kwargs):
+        record.setdefault(key, []).append(value)
+        return []
+    return step
+
+
+team_launcher.resume_tenant = recorded("resumed", "tenant")
+
 _stop = team_launcher.stop_project
 
 
@@ -700,6 +714,10 @@ def traced_stop(config, *args, **kwargs):
 
 
 team_launcher.stop_project = traced_stop
+
+
+team_launcher.stop_owner_listener = recorded("units", "listener")
+team_launcher._board_system_unit_action = recorded("units", "board")
 
 _status = team_launcher.switchyard_status_command
 
@@ -877,17 +895,21 @@ def case_all_three_verbs_run_through_the_real_public_dispatcher(accounts: Accoun
         assert ran["caller"] == accounts.human.pw_name, (operation, ran)
         # The argv the bridge chose is a command line the CLI actually accepts.
         assert ran["argv"] == argv, (operation, ran["argv"])
+        # Start resumes the tenant first; stop suspends it after its sessions: the listener, then the board.
+        assert ran.get("resumed") == (["tenant"] if operation == "start" else None), (operation, ran)
+        assert ran.get("units") == (["listener", "board"] if operation == "stop" else None), (operation, ran)
 
     # An unauthorized local user gets no help from the classifier either: it
-    # still says root is required, so they meet the ordinary sudo policy rather
-    # than a silently widened path.
-    for argv in (["stop", PROJECT], ["status", PROJECT]):
-        assert _requires_root_as(accounts.intruder.pw_name, argv), argv
+    # still says root is required to stop, so they meet the ordinary sudo policy.
+    # `status` is root's for nobody: it runs as its caller (1b5797d0; SYRD-821).
+    assert _requires_root_as(accounts.intruder.pw_name, ["stop", PROJECT]), "an intruder's stop needs root"
+    assert not _requires_root_as(accounts.intruder.pw_name, ["status", PROJECT]), "status is root's for nobody"
 
     # And the verbs the bridge does not serve keep the operator path for
-    # everyone, the authorized human included.
-    for argv in (["upgrade", PROJECT], ["teardown", PROJECT], ["status"]):
+    # everyone, the authorized human included; every `status` runs as its caller.
+    for argv in (["upgrade", PROJECT], ["teardown", PROJECT]):
         assert _requires_root_as(accounts.human.pw_name, argv), argv
+    assert not _requires_root_as(accounts.human.pw_name, ["status"]), "every tenant's status runs as its caller"
 
 
 #: What `sudo` would have been asked to run: recorded, and nothing else done.
@@ -1090,11 +1112,11 @@ def _apply(commands: list[str]) -> None:
     script = "\n".join(["set -euo pipefail", *commands])
     # There is no sudo in the namespace and we are already root, so `sudo` is a
     # transparent shim -- the commands themselves are unchanged.
-    subprocess.run(
+    done = subprocess.run(
         ["bash", "--noprofile", "--norc", "-c", script],
-        check=True,
         env={"PATH": f"{_SUDO_SHIM}:/usr/local/bin:/usr/bin:/bin", "HOME": _SUDO_SHIM},
     )
+    assert done.returncode == 0, f"the rendered operator commands run, as root in the namespace: exit {done.returncode}"
 
 
 def end_to_end() -> None:
@@ -1179,11 +1201,21 @@ def _enter_root_owned_filesystem() -> None:
     # /usr is read-only above, so the staging root gets its own writable mount.
     (sandbox / "usr/local/lib").mkdir(parents=True, exist_ok=True)
     _mount("-t", "tmpfs", "tmpfs", str(sandbox / "usr/local/lib"))
+    # So does the polkit action directory the tenant-control repair installs its action into (SYRD-821).
+    _mount("-t", "tmpfs", "tmpfs", str(sandbox / "usr/share/polkit-1/actions"))
     # The repository, at the same absolute path, so the bridge under test is
-    # the file in this checkout and not a copy.
+    # this checkout's: copied, root's and world-readable as a release is, since the
+    # case accounts cannot read a checkout whose umask kept it private (SYRD-821).
     repo = sandbox / str(ROOT).lstrip("/")
     repo.mkdir(parents=True, exist_ok=True)
-    _mount("--bind", str(ROOT), str(repo))
+    _mount("-t", "tmpfs", "-o", "mode=0755", "tmpfs", str(repo))
+    for part in ("scripts", "config", "examples", "skills", "docs", "install", "switchyard"):
+        source = ROOT / part
+        if source.is_dir():
+            shutil.copytree(source, repo / part, symlinks=True, ignore=shutil.ignore_patterns("__pycache__"))
+        elif source.exists():
+            shutil.copy2(source, repo / part)
+    subprocess.run(["chmod", "-R", "a+rX", str(repo)], check=True)
     for directory in (sandbox, sandbox / "opt", sandbox / "etc", sandbox / "usr/local/lib"):
         os.chown(directory, 0, 0)
         os.chmod(directory, 0o755)

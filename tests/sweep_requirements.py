@@ -44,6 +44,7 @@ HOST_ONLY: dict[str, tuple[str, ...]] = {
         "root_role_account_test",
         "size_review_cache_ownership_test",
         "tailnet_user_authority_test",
+        "tenant_control_bridge_e2e_test",
         "worker_pool_cross_account_test",
         "workflow_layout_owner_test",
         "workflow_projection_ownership_test",

@@ -480,13 +480,28 @@ def test_new_says_it_again_last() -> None:
 
 
 def test_the_repair_needs_no_url_when_one_board_is_declared() -> None:
+    from scripts import team_launcher as launcher
+
+    asked = []
+
+    def no_panes(config, **_kwargs):  # the owner's tmux server, holding no pane of mefp's
+        asked.append(config.project)
+        return set(), ""
+
     with host() as h:
         url = h.add_board("syrd", declared=True)
         h.add_board("otto")
-        status, said = upgrade("mefp", "--only", "upstream-report")
+        # The owner's tmux server is a fixture's: the real one here is the invoking account's, which a run behind the
+        # test boundary has none of, and which a run from a pane must never ask (SYRD-821).
+        real, launcher.owner_tmux_targets = launcher.owner_tmux_targets, no_panes
+        try:
+            status, said = upgrade("mefp", "--only", "upstream-report")
+        finally:
+            launcher.owner_tmux_targets = real
         check(status == 0 and json.loads(h.config_path.read_text())["upstream_report_url"] == url
               and h.record()["upstream_report"].get("state") == "connected", f"resolved to the declared board: {said}")
-        check("no mefp pane is running" in said, f"and it says whether running panes need a relaunch: {said}")
+        check(asked == ["mefp"] and "no mefp pane is running" in said,
+              f"and it asks mefp's owner whether running panes need a relaunch, and says so: {asked} {said}")
 
 
 def test_the_repair_refuses_to_guess_and_writes_nothing() -> None:

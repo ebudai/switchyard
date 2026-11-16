@@ -96,7 +96,7 @@ def run_as(uid: int, home: str, argv: list[str]) -> dict:
                 os.setresgid(uid, uid, uid)
                 os.setresuid(uid, uid, uid)
             os.chdir("/")
-            os.execve(argv[0], argv, {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/bin:/bin", "HOME": home,
+            os.execve(argv[0], argv, {"PATH": "/stubs/sbin:/usr/local/sbin:/usr/local/bin:/usr/bin:/bin", "HOME": home,
                                       "LANG": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1"})
         except BaseException as exc:  # noqa: BLE001
             os.write(2, f"could not become {uid}: {exc!r}".encode())
@@ -125,9 +125,12 @@ def inner(root: Path, work: Path) -> dict:
     log.chmod(0o1777)
     (log / "calls").touch()
     (log / "calls").chmod(0o666)  # every caller's attempt lands in it, whoever is first
-    Path("/usr/local/sbin/sudo").write_text(
+    # A stand-in the run's boundary knows as the fixture's own: under /usr it is "the real sudo", and refused before
+    # it can record anything (SYRD-821). First on every caller's PATH, as the host's sudo would be.
+    Path("/stubs/sbin").mkdir(parents=True)
+    Path("/stubs/sbin/sudo").write_text(
         '#!/bin/sh\necho "$(id -un): sudo $*" >> /var/tmp/sudo-log/calls\nexit 1\n', encoding="utf-8")
-    Path("/usr/local/sbin/sudo").chmod(0o755)
+    Path("/stubs/sbin/sudo").chmod(0o755)
     import http.server
 
     from scripts.ticket_board import rollout_journal

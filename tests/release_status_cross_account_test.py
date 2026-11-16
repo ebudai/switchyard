@@ -119,8 +119,36 @@ class Board(http.server.BaseHTTPRequestHandler):
         return None
 
 
+def enter_root_owned_root(*keep: Path) -> None:
+    """Become root of a filesystem namespace root really owns (as `new_uid0_owner_test` does). Production proves the
+    board's unit from `/` down, and the host's `/` belongs to an unmapped uid in here (SYRD-821). Each of `keep` is
+    bound at its own path, so the tree under test and the stage keep their names."""
+    new = Path(tempfile.mkdtemp(prefix="newroot.", dir=str(keep[0])))
+    sh("mount", "-t", "tmpfs", "-o", "mode=0755", "tmpfs", str(new))
+    for directory in ("usr", "etc/switchyard", "etc/systemd/system", "dev", "proc", "tmp", "run", "home", "opt",
+                      "var/lib/switchyard", "var/tmp", *(str(path).lstrip("/") for path in keep)):
+        (new / directory).mkdir(parents=True, exist_ok=True)
+    (new / "tmp").chmod(0o1777)
+    for link, target in (("bin", "usr/bin"), ("sbin", "usr/bin"), ("lib", "usr/lib"), ("lib64", "usr/lib")):
+        (new / link).symlink_to(target)
+    for name in ("passwd", "group"):  # bound over below
+        (new / "etc" / name).touch()
+    for name in ("nsswitch.conf", "ld.so.cache", "hosts"):
+        if Path("/etc", name).is_file():
+            shutil.copy2(Path("/etc", name), new / "etc" / name)
+    sh("mount", "--rbind", "/usr", str(new / "usr"))
+    sh("mount", "--rbind", "/dev", str(new / "dev"))
+    for path in keep:
+        sh("mount", "--bind", str(path), str(new / str(path).lstrip("/")))
+    live_boundary.keep_reachable(new)  # the native guard still loads in there (SYRD-819)
+    os.chroot(new)
+    os.chdir("/")
+    sh("mount", "-t", "proc", "proc", "/proc")
+
+
 def inner(root: Path, work: Path) -> dict:
     sh("ip", "link", "set", "lo", "up")
+    enter_root_owned_root(work, *([root] if work not in root.parents else []))
     sh("mount", "-t", "tmpfs", "-o", "mode=0755", "tmpfs", "/opt")
     release = Path("/opt/sw")
     for part in ("scripts", "config", "examples", "skills", "docs"):
@@ -262,6 +290,14 @@ def before(out: dict) -> None:
           f"before: another tenant's account gets a traceback, as on PIE: {director}")
 
 
+def board_as_root(said: str) -> bool:
+    """Root asks the board only through the socket root's own unit names, never the port a tenant's configuration
+    names (SYRD-694). Here no attested board runs, so it says that socket does not answer, and the build the decoy
+    on the configured port serves is not reported (SYRD-821)."""
+    return (f"live board build {LIVE}" not in said
+            and f"{SLUG}'s board socket /run/{SLUG}-ticket-board/ticket-board.sock does not answer" in said)
+
+
 def candidate(out: dict) -> None:
     config_path = out["config_path"]
     full = "switchyard: pie release phase\n"
@@ -288,15 +324,18 @@ def candidate(out: dict) -> None:
           f"nothing was widened or written: the owner's tree keeps its owners and modes, home 0700: {out['tree_after']}")
     for name in ("owner", "root"):
         result = out[name]
+        board = f"live board build {LIVE}" in result["said"] if name == "owner" else board_as_root(result["said"])
         check("Traceback" not in result["said"] and result["said"].startswith(full)
-              and f"live board build {LIVE}" in result["said"] and "from root-owned records only" not in result["said"],
-              f"{name}: the owner and root compare everything from the configuration itself: {result}")
+              and board and "from root-owned records only" not in result["said"],
+              f"{name}: the owner and root compare everything from the configuration itself, root asking only its "
+              f"unit's board: {result}")
     for name in ("missing_owner", "missing_root"):
         said = out[name]["said"]
         check(out[name]["code"] == 1 and "Traceback" not in said and "does not exist, so the registry entry "
               f"/etc/switchyard/projects/{SLUG}.json is stale. Restore the checkout there, or have an operator remove "
               "that entry and run `sudo switchyard register <the configuration's path>`." in said
-              and f"live board build {LIVE}" in said and said.count("(unknown without a usable configuration)") == 4,
+              and (f"live board build {LIVE}" in said if name == "missing_owner" else board_as_root(said))
+              and said.count("(unknown without a usable configuration)") == 4,
               f"{name}: a registered configuration that is not there is named stale, with what fixes it, and what "
               f"depends on it is unknown rather than unreadable: {out[name]}")
     missing = out["missing_director"]
@@ -317,7 +356,7 @@ def candidate(out: dict) -> None:
             said = result["said"]
             check(result["code"] == 1 and "Traceback" not in said
                   and f"{config_path} is not a usable launcher configuration:" in said and f"({kind})." in said
-                  and f"live board build {LIVE}" in said,
+                  and (f"live board build {LIVE}" in said if caller == "owner" else board_as_root(said)),
                   f"{case} as {caller}: a field the real loader breaks on is a diagnostic naming the failure, not a "
                   f"traceback: {result}")
 

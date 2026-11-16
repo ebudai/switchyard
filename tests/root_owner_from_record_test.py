@@ -309,13 +309,15 @@ def inner(root: Path, work: Path) -> dict:
     os.chown(entry, OWNER_UID, OWNER_UID)
     out["legacy_entry_not_roots"] = switchyard(["upgrade", SLUG])
     os.chown(entry, 0, 0)
-    # A configuration other than the one root registered is not what that record speaks for: one under the same slug in
-    # the release's own configuration directory, which the entry finds first.
+    # A configuration other than the one root registered, under the same slug in the release's own configuration
+    # directory, naming another owner: root's registry entry is authoritative for its slug, so it is never read
+    # (SYRD-709); read, it would be refused as another account's (SYRD-821).
     stray = release / "config" / "team-launcher" / f"{SLUG}.json"
     stray.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(config_path, stray)
+    stray.write_text(json.dumps(dict(generated, run_as_user=OTHER), indent=2), encoding="utf-8")
     out["legacy_other_path"] = switchyard(["upgrade", SLUG])
     out["legacy_other_path"]["stray"] = str(stray)
+    shutil.copy2(config_path, stray)  # the owner's own copy, for the load below
     # Loaded outside any command, that copy is not refused for a record that is not about it -- a fixture under a
     # live tenant's slug is not checked against the live tenant's registry entry.
     try:
@@ -326,8 +328,8 @@ def inner(root: Path, work: Path) -> dict:
     shutil.move(str(installed) + ".away", str(installed))
     with_owner(OWNER)
     # A project root holds no record of at all, found in the release's own configuration directory: refused before
-    # its configuration is read.
-    unrecorded = dict(generated, project="qux")
+    # its configuration is read. Its own name too: one a registry entry holds is never found (SYRD-709, SYRD-821).
+    unrecorded = dict(generated, project="qux", project_name="Qux Project")
     (release / "config" / "team-launcher").mkdir(parents=True, exist_ok=True)
     (release / "config" / "team-launcher" / "qux.json").write_text(json.dumps(unrecorded), encoding="utf-8")
     out["no_record"] = switchyard(["upgrade", "qux"])
@@ -454,9 +456,11 @@ def candidate(out: dict) -> None:
     check(entry["code"] != 0 and f"root's registry entry for {SLUG} cannot say whose project it is:" in entry["said"],
           f"a registry entry root does not own is no record: {entry}")
     other = out["legacy_other_path"]
-    check(other["code"] != 0 and f"root's registry entry for {SLUG} names {out['config_path_registered']}, not "
-          f"{other['stray']}" in other["said"],
-          f"a configuration other than the registered one is refused before it is read: {other}")
+    check(not any(text in other["said"] for text in REFUSED.values()) and other["stray"] not in other["said"]
+          and "Traceback" not in other["said"]
+          and f"{SLUG} has no desktop policy, and every role launch needs one" in other["said"],
+          f"a configuration under the slug in the release's own directory is never read: root's registry entry is "
+          f"authoritative, so the upgrade goes on with the registered one, to the same stop as the control: {other}")
     check(out["legacy_other_path_load"] == f"loaded as {OWNER}",
           f"and loaded outside a command, a record that is not about that file does not refuse it: {out['legacy_other_path_load']}")
     missing = out["no_record"]

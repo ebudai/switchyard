@@ -70,6 +70,17 @@ def scenario(root: Path, upgrade_from: Path | None = None) -> dict:
         board.sql("UPDATE ticket_board.ticket_notification_queue SET next_attempt_at = clock_timestamp() "
                   f"WHERE ticket_id = '{ticket}' AND claimed_at IS NULL;")
 
+    def moment_passes(board, ticket: str) -> float:
+        """SYRD-797: a clear's wake waits a moment for the clearer's comment; it passes. How long it would have waited."""
+        held = float(board.sql(
+            "SELECT coalesce(extract(epoch FROM max(next_attempt_at) - clock_timestamp()), 0) FROM "
+            f"ticket_board.ticket_notification_queue WHERE ticket_id = '{ticket}' AND kind = 'ticket_update' "
+            "AND claimed_at IS NULL AND payload->>'change_summary' LIKE 'the wait on % was cleared';"))
+        board.sql("UPDATE ticket_board.ticket_notification_queue SET next_attempt_at = clock_timestamp() "
+                  f"WHERE ticket_id = '{ticket}' AND kind = 'ticket_update' AND claimed_at IS NULL "
+                  "AND payload->>'change_summary' LIKE 'the wait on % was cleared';")
+        return held
+
     def ticket(board, number: int, owner: str) -> str:
         """Routed from Analysis to its owner, the hand-over delivered."""
         from router_role_board_test import fixture
@@ -115,6 +126,7 @@ def scenario(root: Path, upgrade_from: Path | None = None) -> dict:
             out["clear"] = short(board.act(pie, "clear_awaiting_role", "audit"))
             out["awaiting_after_clear"] = board.sql(f"SELECT awaiting_role FROM ticket_board.ticket_notification_state "
                                                     f"WHERE ticket_id = '{pie}';")
+            out["clear_held_seconds"] = moment_passes(board, pie)
             sent = deliver(board)
             out["to_ops_after_clear"] = to(board, sent, "ops")
             out["others_after_clear"] = [m for t, m in sent if t != "pgu-ops:0.0"]
@@ -156,6 +168,7 @@ def scenario(root: Path, upgrade_from: Path | None = None) -> dict:
             out["other_request"] = short(board.act(other, "request_dependency", "main", role="audit", reason="Review?"))
             deliver(board)
             out["director_clear"] = short(board.act(other, "clear_awaiting_role", "director"))
+            moment_passes(board, other)
             out["to_main_after_director_clear"] = to(board, deliver(board), "main")
             out["director_clear_again"] = short(board.act(other, "clear_awaiting_role", "director"))
             out["to_main_after_clear_again"] = to(board, deliver(board), "main")
@@ -176,6 +189,7 @@ def scenario(root: Path, upgrade_from: Path | None = None) -> dict:
                     f"SELECT awaiting_role FROM ticket_board.ticket_notification_state WHERE ticket_id = '{held}';")]
                 deliver(board)
                 out.setdefault("held_clear", {})[held] = short(board.act(held, "clear_awaiting_role", clearer))
+                moment_passes(board, held)
                 out.setdefault("to_owner_after_held_clear", {})[held] = [
                     m for m in to(board, deliver(board), owner) if m.startswith(held)]
                 out.setdefault("held_flags", {})[held] = board.sql(
@@ -271,6 +285,8 @@ def before(got: dict) -> None:
 
 def candidate(got: dict) -> None:
     pie = common(got)
+    check(25 < got["clear_held_seconds"] <= 30,
+          f"SYRD-797: the clear's wake waits a moment for the clearer's comment: {got['clear_held_seconds']}")
     check(got["to_ops_after_clear"] == [f"{pie} -- Fixture {pie} (in in_progress, that you own) was changed by audit: "
                                         f"{CLEARED} -- re-read it before continuing."] and got["others_after_clear"] == [],
           f"Audit clears the wait and Ops is told, once, by whom and what: {got['to_ops_after_clear']}")
@@ -313,8 +329,12 @@ def mirrors() -> None:
     at = schema.rfind(body)
     heads = ("CREATE OR REPLACE FUNCTION ticket_board.clear_awaiting_role(",
              "CREATE OR REPLACE FUNCTION ticket_board.board_stall_delivery_progress(")
-    check(body.startswith(heads[0]) and at >= 0 and all(at <= schema.rfind(h) < at + len(body) for h in heads),
-          "schema.sql's last clear_awaiting_role and board_stall_delivery_progress are pgu1019's, byte for byte")
+    # SYRD-797 (pgu1045) changed clear_awaiting_role since: its last copy is that migration's.
+    check(body.startswith(heads[0]) and at >= 0 and at <= schema.rfind(heads[1]) < at + len(body),
+          "schema.sql's last board_stall_delivery_progress is pgu1019's, byte for byte")
+    later = (ROOT / "scripts/ticket_board/migrations/pgu1045_syrd797_owner_notices_say_what_is_true.sql").read_text()
+    last = schema[schema.rfind(heads[0]):schema.index("$$;", schema.index("AS $$", schema.rfind(heads[0]))) + 3]
+    check(at < schema.rfind(heads[0]) and last in later, "and its last clear_awaiting_role is pgu1045's, byte for byte")
 
 
 def main() -> int:

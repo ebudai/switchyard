@@ -166,6 +166,12 @@ def assert_single_ticket_update(
     title: str,
 ) -> None:
     queued = queued_notifications(conninfo, ticket_id)
+    if summary == "new comment":
+        # SYRD-797: a comment's notice names it, by the time the ticket shows for it -- the newest comment's here.
+        stamp = psql(conninfo, f"SELECT ts_text FROM ticket_board.ticket_comments WHERE ticket_id = {sql_string(ticket_id)} "
+                               "ORDER BY position DESC LIMIT 1;").stdout.strip()
+        assert stamp, ticket_id
+        summary = f"new comment at {stamp}"
     assert queued == [
         {
             "kind": "ticket_update",

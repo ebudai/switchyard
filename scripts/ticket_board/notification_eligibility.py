@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Any, Callable
 
@@ -413,6 +414,15 @@ WHERE id = %s
             return False
 
         kind = str(parsed.get("kind") or "").strip().lower()
+        # SYRD-797: "the wait on X was cleared" only while no wait stands on the ticket. A clear empties it, so a wait
+        # standing now was raised since: on SAPI-69 a clear's wake, queued while ops was busy, reached ops after it
+        # had asked again, and said its new wait was cleared.
+        if kind == "ticket_update" and re.fullmatch(r"the wait on \S+ was cleared", str(parsed.get("change_summary") or "")):
+            row = conn.execute("SELECT coalesce(btrim(awaiting_role), '') AS waiting FROM ticket_board.ticket_notification_state "
+                               "WHERE ticket_id = %s", (ticket_id,)).fetchone()
+            waiting = (row["waiting"] if isinstance(row, dict) else row[0]) if row else ""
+            if (waiting.decode() if isinstance(waiting, (bytes, bytearray, memoryview)) else str(waiting)):
+                return False
         # A snooze batch's deadline notice is about the batch, addressed to the
         # role that set it; the ticket it hangs on proves nothing (SYRD-537).
         # Only while a ticket it calls ready is still the one snoozed (SYRD-679).

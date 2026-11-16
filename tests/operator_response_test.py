@@ -470,11 +470,16 @@ def mirrors() -> None:
     body = MIGRATION.read_text().split("BEGIN;\n\n", 1)[1].rsplit("\nCOMMIT;\n", 1)[0]
     schema = (ROOT / "scripts/ticket_board/schema.sql").read_text()
     at = schema.rfind(body)
+    # SYRD-797 (pgu1045) changed add_comment since: its last copy is that migration's.
     heads = [f"CREATE OR REPLACE FUNCTION ticket_board.{name}(" for name in (
-        "standing_operator_blockers", "notify_operator_response", "operator_response_is_current", "add_comment",
+        "standing_operator_blockers", "notify_operator_response", "operator_response_is_current",
         "release_external_blocker")]
     check(at >= 0 and all(at <= schema.rfind(h) < at + len(body) for h in heads),
           "schema.sql's last copies of pgu1026's functions are pgu1026's, byte for byte")
+    later = (ROOT / "scripts/ticket_board/migrations/pgu1045_syrd797_owner_notices_say_what_is_true.sql").read_text()
+    head = "CREATE OR REPLACE FUNCTION ticket_board.add_comment("
+    last = schema[schema.rfind(head):schema.index("$$;", schema.index("AS $$", schema.rfind(head))) + 3]
+    check(at < schema.rfind(head) and last in later, "and add_comment's last copy is pgu1045's, byte for byte")
 
 
 def main() -> int:

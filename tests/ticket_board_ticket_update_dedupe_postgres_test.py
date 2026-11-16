@@ -128,7 +128,8 @@ def main() -> int:
                   f"it is the same row, refreshed rather than a second one: {after_second}")
             check("new comment" in after_second[0]["message"],
                   f"carrying the newest description of what changed: {after_second[0]['message']}")
-            check(after_second[0]["summary"] == "new comment",
+            check(after_second[0]["summary"].startswith("new comment at ")  # SYRD-797: naming the comment
+                  and after_second[0]["summary"] in after_second[0]["message"],
                   f"in the payload the listener actually delivers, not only the message text: {after_second[0]}")
             check(after_second[0]["claimed"] is False,
                   f"and re-armed, so a wake already claimed for delivery is not left stale: {after_second[0]}")

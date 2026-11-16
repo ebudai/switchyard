@@ -31,3 +31,25 @@ def roots_own(*trees: Path | str | None):
         yield
     finally:
         owner_git._walk_git_target = real
+
+
+@contextlib.contextmanager
+def root_alone(*trees: Path | str | None):
+    """Root writes by path only into a directory nobody but root can change (SYRD-759); a suite's temporary tree,
+    owned by the account running it, stands in for one root made, for the trees named and nothing else (SYRD-808)."""
+    from scripts import owner_writes
+
+    real = owner_writes.root_alone_directory
+    named = [str(tree).rstrip("/") for tree in trees if tree]
+
+    def judged(path: Path) -> str:
+        text = str(path)
+        if any(text == tree or text.startswith(tree + "/") for tree in named):
+            return ""
+        return real(path)
+
+    owner_writes.root_alone_directory = judged
+    try:
+        yield
+    finally:
+        owner_writes.root_alone_directory = real

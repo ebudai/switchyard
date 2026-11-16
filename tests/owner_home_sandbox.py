@@ -104,6 +104,18 @@ def stand_in_home(owner_user: str, home: Path) -> None:
 
 
 @contextlib.contextmanager
+def owner_home_stood_in(owner_user: str, home: Path):
+    """`stand_in_home` for one case: `home` is the account's home until it ends, then every lookup is as before
+    (SYRD-808)."""
+    saved = (pwd.getpwnam, pwd.getpwuid, pwd.getpwall, owner_writes.owner_home)
+    stand_in_home(owner_user, home)
+    try:
+        yield
+    finally:
+        pwd.getpwnam, pwd.getpwuid, pwd.getpwall, owner_writes.owner_home = saved
+
+
+@contextlib.contextmanager
 def root_stage_in(directory: Path):
     """Root's staging directory, for a suite whose root child writes in a home of its own (SYRD-611).
 

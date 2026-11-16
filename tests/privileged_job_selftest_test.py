@@ -27,6 +27,10 @@ host's root installs; the pane identity, since the test is not in a pane; and
 the board URL, which the registry would give. The board's reconciler then
 records the results on the ticket. It runs on main, from a git archive in a
 child process, and on this tree.
+
+Guard-only (SYRD-808): `host_state_guard` refuses any read or exec of this host's Switchyard state and privileged
+tools, and the last check fails on any reach. Run it as an ordinary account, never as root, and never in a sweep
+that runs as root.
 """
 
 from __future__ import annotations
@@ -44,6 +48,10 @@ import tempfile
 import threading
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import host_state_guard  # noqa: E402  - before any production module: no host state (SYRD-808)
+
+host_state_guard.install()
 ROOT = Path(__file__).resolve().parents[1]
 BEFORE = "2c23f01012e472e6ae90f80c52370c9203572f3f"  # main before SYRD-113 slice C
 CHECKS = 0
@@ -128,7 +136,12 @@ def scenario(root: Path, prefix: str) -> dict:
             out, err = io.StringIO(), io.StringIO()
             before = sorted(os.listdir(journal / "pgu")) if (journal / "pgu").exists() else []
             files = snapshot(home)
-            with boundary.swapped(ph, privileged_install=boundary._StubInstall([]),
+            # A pre-authorized action asks the board its root's unit names (SYRD-699); here that board is this
+            # test's own, never the host's unit and its process (SYRD-808).
+            identity = getattr(ph, "board_identity", None)
+            board_unit = (boundary.swapped(identity, board_get_for=lambda project, **k: (
+                lambda _url, path: ph._board_get(base, path))) if identity else contextlib.nullcontext())
+            with board_unit, boundary.swapped(ph, privileged_install=boundary._StubInstall([]),
                                   caller_identity=lambda *a, **k: identities[caller],
                                   board_url_for=lambda project, **k: base), \
                     boundary.swapped(po, LAUNCHER=launcher), \
@@ -195,13 +208,27 @@ def scenario(root: Path, prefix: str) -> dict:
 
 
 def main() -> int:
+    try:
+        return checked_main()
+    finally:  # a reach that also broke a check is reported as the reach
+        if not (len(sys.argv) == 3 and sys.argv[1] == "--scenario"):
+            host_state_guard.assert_untouched("privileged_job_selftest_test")
+
+
+def checked_main() -> int:
     if len(sys.argv) == 3 and sys.argv[1] == "--scenario":
         print("RESULT " + json.dumps(scenario(Path(sys.argv[2]), "syrd113sb-")))
         return 0
 
     def child(tree: Path) -> dict:
-        proc = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--scenario", str(tree)], text=True,
-                              capture_output=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        # Root's registry and provision records stand in empty: neither tree's wrapper reads the host's (SYRD-808).
+        with tempfile.TemporaryDirectory(prefix="syrd808r.") as stand_in:
+            for name in ("projects", "provision"):
+                (Path(stand_in) / name).mkdir()
+            proc = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--scenario", str(tree)], text=True,
+                                  capture_output=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1",
+                                                            "SWITCHYARD_PROJECT_REGISTRY_DIR": f"{stand_in}/projects",
+                                                            "SWITCHYARD_PRIVILEGED_PROVISION_ROOT": f"{stand_in}/provision"})
         line = next((l for l in proc.stdout.splitlines() if l.startswith("RESULT ")), None)
         assert proc.returncode == 0 and line, proc.stdout[-3000:] + proc.stderr[-3000:]
         return json.loads(line[len("RESULT "):])
@@ -209,6 +236,9 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="syrd113s.") as tmp:
         before = child(tree_at(BEFORE, Path(tmp) / "before"))
     after = child(ROOT)
+    check(host_state_guard.reached() == [],
+          f"no scenario, nor anything it ran, reached this host's Switchyard state or privileged tools: "
+          f"{host_state_guard.reached()}")
     fake = ("selftest-fake-credential-0000", "selftest-fake-bearer-0000")
 
     check(all(run["code"] == 1 and run["new"] == [] and "'job-selftest' is not a catalogued action" in run["err"]
@@ -285,6 +315,7 @@ def main() -> int:
                               "job-selftest pgu --outcome x": [2], "job-selftest pgu": [2],
                               "job-selftest pgu --outcome fail extra": [2], "job-selftest /etc --outcome fail": [2]},
           f"the launcher's own answer: success exits 0, failure 1, and any other shape is refused: {after['direct']}")
+    host_state_guard.assert_untouched("privileged_job_selftest_test")
     print(f"privileged_job_selftest_test: {CHECKS} checks ok")
     return 0
 

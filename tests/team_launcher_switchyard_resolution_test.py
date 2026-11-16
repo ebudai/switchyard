@@ -1,9 +1,52 @@
 #!/usr/bin/env python3
-"""Split team-launcher regression tests."""
+"""Split team-launcher regression tests.
+
+Guard-only (SYRD-808): `host_state_guard` refuses any read or exec of this host's Switchyard state and privileged
+tools, and the last check fails on any reach. Run it as an ordinary account, never as root, and never in a sweep
+that runs as root.
+"""
 
 from __future__ import annotations
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+import host_state_guard  # noqa: E402  - before any production module: no host state (SYRD-808)
+host_state_guard.install()
 
 from team_launcher_test_helpers import *
+import contextlib as _contextlib
+import pwd
+from unittest import mock
+
+#: The owner a root command acts for here: the account running the suite, which owns every fixture file. Never a
+#: real tenant account of this host -- `otto-agent` is one here, and acting for it ran the real sudo (SYRD-808).
+OWNER = pwd.getpwuid(os.getuid()).pw_name
+OWNER_HOME = pwd.getpwuid(os.getuid()).pw_dir
+
+
+@_contextlib.contextmanager
+def roots_record_naming(project: str, owner: str):
+    """Root's provisioning record of `project`, naming `owner` as whose it is, in a stand-in root of the case's own.
+
+    A command run as root acts for the owner root's records name, never for the account a configuration says it runs
+    as (SYRD-663, SYRD-757). The privileged provision root's override is the documented seam for that record: under
+    it the caller's own uid stands in for root's (no_follow_records). Never this host's /etc/switchyard (SYRD-808).
+    """
+    with tempfile.TemporaryDirectory(prefix="syrd808-root.") as root:
+        record = Path(root) / project / "plan.json"
+        record.parent.mkdir()
+        record.write_text(json.dumps({"project": project, "owner_user": owner}) + "\n", encoding="utf-8")
+        record.chmod(0o600)
+        saved = os.environ.get("SWITCHYARD_PRIVILEGED_PROVISION_ROOT")
+        os.environ["SWITCHYARD_PRIVILEGED_PROVISION_ROOT"] = root
+        try:
+            yield record
+        finally:
+            if saved is None:
+                os.environ.pop("SWITCHYARD_PRIVILEGED_PROVISION_ROOT", None)
+            else:
+                os.environ["SWITCHYARD_PRIVILEGED_PROVISION_ROOT"] = saved
+
 
 def test_switchyard_register_cli_enables_launch_by_name_without_config_flag() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-register.") as tmp:
@@ -78,7 +121,7 @@ def test_switchyard_launch_runs_first_run_auth_before_panes_and_warns_after() ->
                     "project": "otto",
                     "project_name": "Otto System",
                     "layout": str(layout),
-                    "run_as_user": "otto-agent",
+                    "run_as_user": OWNER,
                     "roles": [{"role": "ops", "slot": 0, "cli": ["codex"], "workdir": str(tmp_path / "repo")}],
                 }
             )
@@ -86,7 +129,8 @@ def test_switchyard_launch_runs_first_run_auth_before_panes_and_warns_after() ->
             encoding="utf-8",
         )
         events: list[tuple[str, object]] = []
-        report = team_launcher.FirstRunAuthReport({"codex": ["ops"]}, [])
+        # A warning that does not stop the launch: an unfinished sign-in now refuses it before any pane (SYRD-221).
+        report = team_launcher.FirstRunAuthReport({}, [("ops", "codex", str(tmp_path / "repo"))])
         original_config_dir = team_launcher.DEFAULT_CONFIG_DIR
         original_registry_dir = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
         original_launch_project = team_launcher.launch_project
@@ -129,7 +173,8 @@ def test_switchyard_launch_runs_first_run_auth_before_panes_and_warns_after() ->
             team_launcher.launch_project = fake_launch_project
             team_launcher.report_first_run_auth_warnings = fake_report_first_run_auth_warnings
 
-            assert switchyard_main(["otto"]) == 0
+            with roots_record_naming("otto", OWNER):
+                assert switchyard_main(["otto"]) == 0
         finally:
             team_launcher.DEFAULT_CONFIG_DIR = original_config_dir
             team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = original_registry_dir
@@ -138,11 +183,11 @@ def test_switchyard_launch_runs_first_run_auth_before_panes_and_warns_after() ->
             team_launcher.report_first_run_auth_warnings = original_report_first_run_auth_warnings
             team_launcher.os.geteuid = original_geteuid  # type: ignore[method-assign]
 
-    assert [name for name, _payload in events] == ["auth", "launch", "warn"]
+    assert [name for name, _payload in events] == ["auth", "launch", "warn"], events
     assert events[0][1] == {
         "project": "otto",
-        "owner_user": "otto-agent",
-        "owner_home": Path("/home/otto-agent"),
+        "owner_user": OWNER,
+        "owner_home": Path(OWNER_HOME),
         "validate_models": False,
     }
     assert events[1][1]["config_path"] == config_path
@@ -169,7 +214,7 @@ def test_switchyard_launch_missing_owner_clis_stops_before_panes() -> None:
                     "project": "otto",
                     "project_name": "Otto System",
                     "layout": str(layout),
-                    "run_as_user": "otto-agent",
+                    "run_as_user": OWNER,
                     "roles": [
                         {"role": "designer", "slot": 0, "cli": ["claude"], "workdir": str(tmp_path / "designer")},
                         {"role": "director", "slot": 1, "cli": ["claude"], "workdir": str(tmp_path / "director")},
@@ -186,7 +231,7 @@ def test_switchyard_launch_missing_owner_clis_stops_before_panes() -> None:
             {},
             [],
             missing_cli_roles={"claude": ["designer", "director"], "codex": ["ops"]},
-            owner_user="otto-agent",
+            owner_user=OWNER,
         )
         original_config_dir = team_launcher.DEFAULT_CONFIG_DIR
         original_registry_dir = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
@@ -221,7 +266,7 @@ def test_switchyard_launch_missing_owner_clis_stops_before_panes() -> None:
             team_launcher.launch_project = fake_launch_project
             team_launcher.report_first_run_auth_warnings = fake_report_first_run_auth_warnings
 
-            with redirect_stdout(output):
+            with redirect_stdout(output), roots_record_naming("otto", OWNER):
                 result = switchyard_main(["otto"])
         finally:
             team_launcher.DEFAULT_CONFIG_DIR = original_config_dir
@@ -234,7 +279,7 @@ def test_switchyard_launch_missing_owner_clis_stops_before_panes() -> None:
     rendered = output.getvalue()
     assert result == 1
     assert [name for name, _payload in events] == ["auth"]
-    assert "cannot launch panes because required CLI(s) are missing for owner user otto-agent" in rendered
+    assert f"cannot launch panes because required CLI(s) are missing for owner user {OWNER}" in rendered
     assert "claude (roles: designer, director)" in rendered
     assert "codex (roles: ops)" in rendered
     assert "did not leave a live" not in rendered
@@ -256,7 +301,7 @@ def test_switchyard_validate_models_command_runs_model_validation_on_demand() ->
                     "project": "otto",
                     "project_name": "Otto System",
                     "layout": str(layout),
-                    "run_as_user": "otto-agent",
+                    "run_as_user": OWNER,
                     "roles": [
                         {
                             "role": "ops",
@@ -277,21 +322,32 @@ def test_switchyard_validate_models_command_runs_model_validation_on_demand() ->
         runner.login_seen.add("codex")
         output: list[str] = []
 
-        result = team_launcher.switchyard_validate_models_command(
-            "otto",
-            config_dir=config_dir,
-            registry_dir=registry_dir,
-            runner=runner,
-            print_func=output.append,
-        )
+        # The probes go through `runner`; the steps a person answers would open the owner's own CLI on a pty. The
+        # owner's home is the case's own, its folder trust stands recorded, and no interactive session may open: one
+        # did, as the real sudo -u otto-agent, a real account of this host (SYRD-808).
+        owner_home = tmp_path / "owner-home"
+        owner_home.mkdir()
 
-    assert result == 1
+        def no_session(**kwargs: object) -> bool:
+            raise AssertionError(f"validate-models opened an interactive provider session: {kwargs.get('args')}")
+
+        with mock.patch.object(team_launcher, "_owner_home_for_auth", lambda _owner: owner_home), \
+                mock.patch.object(team_launcher, "_workdir_is_trusted", lambda *_a, **_k: True), \
+                mock.patch.object(team_launcher, "run_provider_first_run_session", no_session):
+            result = team_launcher.switchyard_validate_models_command(
+                "otto",
+                config_dir=config_dir,
+                registry_dir=registry_dir,
+                runner=runner,
+                print_func=output.append,
+            )
+
+    assert result == 1, output
     assert runner.calls == [
-        ["sudo", "-u", "otto-agent", "codex", "login", "status"],
+        # The owner is this account, so its CLI runs directly; the sudo wrapping for another owner is
+        # team_launcher_first_run_auth_test's.
+        ["codex", "login", "status"],
         [
-            "sudo",
-            "-u",
-            "otto-agent",
             "codex",
             "exec",
             "--skip-git-repo-check",
@@ -303,12 +359,17 @@ def test_switchyard_validate_models_command_runs_model_validation_on_demand() ->
             runner.model_probe_cwds[0],
             team_launcher.MODEL_VALIDATION_PROMPT,
         ],
-    ]
+    ], runner.calls
     assert output == [
+        # Each probe is announced with its bound before it waits (041e3282), and its failed attempts follow the
+        # verdict.
+        "switchyard: checking ops's model (openai/not-a-model) with codex; this asks it one question and waits up to "
+        "180s for the answer",
         "warning: switchyard: model validation failed for role ops "
         "(cli codex, model openai/not-a-model): model not found: openai/not-a-model; "
-        "no model list is available for codex; validation used a one-shot prompt"
-    ]
+        "no model list is available for codex; validation used a one-shot prompt",
+        "warning: switchyard:   probe attempt 1 (exit 1) did not answer: stderr: model not found: openai/not-a-model",
+    ], output
 
 def test_switchyard_stop_resolves_project_without_launching_or_authenticating() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-stop.") as tmp:
@@ -327,7 +388,7 @@ def test_switchyard_stop_resolves_project_without_launching_or_authenticating() 
                     "project": "otto",
                     "project_name": "Otto System",
                     "layout": str(layout),
-                    "run_as_user": "otto-agent",
+                    "run_as_user": OWNER,
                     "roles": [{"role": "ops", "slot": 0, "tmux_session": "otto-ops", "target": "otto-ops:0.0", "cli": ["codex"]}],
                 }
             )
@@ -337,7 +398,7 @@ def test_switchyard_stop_resolves_project_without_launching_or_authenticating() 
         calls: list[tuple[str, object]] = []
         original_config_dir = team_launcher.DEFAULT_CONFIG_DIR
         original_registry_dir = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
-        original_stop_project = team_launcher.stop_project
+        original_suspend_tenant = team_launcher.suspend_tenant
         original_launch_project = team_launcher.launch_project
         original_first_run_auth = team_launcher.run_switchyard_launch_first_run_auth
         original_geteuid = team_launcher.os.geteuid
@@ -346,9 +407,12 @@ def test_switchyard_stop_resolves_project_without_launching_or_authenticating() 
             team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
             team_launcher.os.geteuid = lambda: 0  # type: ignore[method-assign]
 
-            def fake_stop_project(config: team_launcher.ProjectConfig, **_kwargs: object) -> int:
+            # `switchyard stop` suspends the whole tenant (SYRD-193): window, sessions, escaped processes, listener
+            # and board. Its own suite drives that; here it is stood in, so the case never scans this host's
+            # processes nor asks its systemd (SYRD-808).
+            def fake_suspend_tenant(config: team_launcher.ProjectConfig, **_kwargs: object) -> list[str]:
                 calls.append(("stop", {"project": config.project, "run_as_user": config.run_as_user}))
-                return 0
+                return []
 
             def fake_launch_project(_config: team_launcher.ProjectConfig, **_kwargs: object) -> int:
                 calls.append(("launch", {}))
@@ -358,20 +422,21 @@ def test_switchyard_stop_resolves_project_without_launching_or_authenticating() 
                 calls.append(("auth", {}))
                 return team_launcher.FirstRunAuthReport({}, [])
 
-            team_launcher.stop_project = fake_stop_project
+            team_launcher.suspend_tenant = fake_suspend_tenant
             team_launcher.launch_project = fake_launch_project
             team_launcher.run_switchyard_launch_first_run_auth = fake_first_run_auth
 
-            assert switchyard_main(["stop", "Otto", "System"]) == 0
+            with roots_record_naming("otto", OWNER):
+                assert switchyard_main(["stop", "Otto", "System"]) == 0
         finally:
             team_launcher.DEFAULT_CONFIG_DIR = original_config_dir
             team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = original_registry_dir
-            team_launcher.stop_project = original_stop_project
+            team_launcher.suspend_tenant = original_suspend_tenant
             team_launcher.launch_project = original_launch_project
             team_launcher.run_switchyard_launch_first_run_auth = original_first_run_auth
             team_launcher.os.geteuid = original_geteuid  # type: ignore[method-assign]
 
-    assert calls == [("stop", {"project": "otto", "run_as_user": "otto-agent"})]
+    assert calls == [("stop", {"project": "otto", "run_as_user": OWNER})]
 
 def test_switchyard_bare_cross_owner_project_fails_before_launch_or_auth() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-cross-owner-launch.") as tmp:
@@ -706,7 +771,13 @@ def test_switchyard_registry_does_not_change_pgu_resolution_or_launch_config() -
 
             team_launcher.launch_project = fake_launch_project
             team_launcher.run_switchyard_launch_first_run_auth = lambda _config: team_launcher.FirstRunAuthReport({}, [])
-            assert switchyard_main(["pgu"]) == 0
+            # The shipped pgu.json runs as `agent`, a real account of this host, so any other caller crosses to it
+            # through root -- the real sudo (SYRD-808). This case is about which configuration the name resolves to;
+            # who may run it is the crossing's own suite's, so the caller stands as pgu's owner. The shipped file names
+            # no desktop policy, and a launch asks for one first; desktop setup is project_desktop's to test.
+            with mock.patch.object(team_launcher, "_require_switchyard_project_owner_or_root", lambda *_a, **_k: None), \
+                    mock.patch.object(team_launcher, "prepare_project_desktop", lambda config, **_k: config):
+                assert switchyard_main(["pgu"]) == 0
         finally:
             team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = original_registry_dir
             team_launcher.launch_project = original_launch_project
@@ -720,7 +791,31 @@ def test_switchyard_registry_does_not_change_pgu_resolution_or_launch_config() -
     assert set(calls[0]["workdirs"]) == {"/home/agent/Projects/pgu"}
 
 def main() -> int:
-    run_team_launcher_tests(globals(), first=())
+    # These cases are about how a name resolves to a project and whose it is. A crossing and a launch's resume first
+    # stage a tenant's missing role bundle (32654e78), which here would be root's privileged staging for fixture
+    # tenants; that repair is single_owner_staged_tooling_test's, so it is stood in as already done (SYRD-808).
+    staged = {"ensure_staged_role_bundle_before_crossing": lambda *_args, **_kwargs: "",
+              "ensure_staged_role_tooling": lambda *_args, **_kwargs: [],
+              # and a launch's resume of a suspended tenant asks systemd itself: tenant_suspension_test's.
+              "resume_tenant": lambda *_args, **_kwargs: []}
+    original = {name: getattr(team_launcher, name) for name in staged}
+    for name, stand_in in staged.items():
+        setattr(team_launcher, name, stand_in)
+    # Each case names its own registry through DEFAULT_SWITCHYARD_REGISTRY_DIR; the helpers' registry variable would
+    # outrank it, so one case's registration -- of a directory it has since removed -- answered the next (SYRD-808).
+    # Between cases the default is the helpers' empty registry, never this host's.
+    registry_variable = os.environ.pop(team_launcher.SWITCHYARD_REGISTRY_DIR_ENV, None)
+    original_registry = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
+    team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = TEST_SWITCHYARD_REGISTRY_DIR
+    try:
+        run_team_launcher_tests(globals(), first=())
+    finally:
+        for name, value in original.items():
+            setattr(team_launcher, name, value)
+        team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = original_registry
+        if registry_variable is not None:
+            os.environ[team_launcher.SWITCHYARD_REGISTRY_DIR_ENV] = registry_variable
+        host_state_guard.assert_untouched("team_launcher_switchyard_resolution_test")  # a reach that also broke a case is reported as the reach
     print("team_launcher_switchyard_resolution_test: ok")
     return 0
 

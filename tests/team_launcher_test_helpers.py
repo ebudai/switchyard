@@ -100,7 +100,7 @@ os.environ["SWITCHYARD_TENANT_CONTROL_ROOT"] = str(
 TEST_SWITCHYARD_REGISTRY_DIR = TEST_SWITCHYARD_SHARED_INSTALL_ROOT.parent.parent / "registry"
 os.environ.setdefault("SWITCHYARD_PROJECT_REGISTRY_DIR", str(TEST_SWITCHYARD_REGISTRY_DIR))
 os.environ.update(XDG_CURRENT_DESKTOP="GNOME", KDE_FULL_SESSION="")
-import fixture_displays  # noqa: E402,F401 -- displays here are fixtures, not the host's sockets (SYRD-621)
+import fixture_displays, host_record_redirects  # noqa: E402,F401 -- fixtures, not the host's (SYRD-621, 808)
 
 import scripts.team_launcher as team_launcher
 

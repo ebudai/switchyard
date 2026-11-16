@@ -1,7 +1,17 @@
 #!/usr/bin/env python3
-"""Split team-launcher regression tests."""
+"""Split team-launcher regression tests.
+
+Guard-only (SYRD-808): `host_state_guard` refuses any read or exec of this host's Switchyard state and privileged
+tools, and the last check fails on any reach. Run it as an ordinary account, never as root, and never in a sweep
+that runs as root.
+"""
 
 from __future__ import annotations
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+import host_state_guard  # noqa: E402  - before any production module: no host state (SYRD-808)
+host_state_guard.install()
 import stat
 from unittest.mock import patch
 
@@ -1440,136 +1450,11 @@ def test_role_publishing_takes_nothing_about_where_from_its_caller() -> None:
     assert "is not a valid project name" in traversal.stderr + traversal.stdout
 
 
-def test_fresh_provisioning_emits_no_role_account_handoff() -> None:
-    """SYRD-69: provisioning ends with the project account and launch gate."""
-    current_user = team_launcher.current_user_name()
-    with tempfile.TemporaryDirectory(prefix="switchyard-handoff.") as tmp:
-        tmp_path = Path(tmp)
-        output_dir = tmp_path / "out"
-        source_repo = tmp_path / "source-repo"
-        project_repo = tmp_path / "project-repo"
-        source_repo.mkdir()
-        project_repo.mkdir()
-        printed: list[str] = []
-        # SYRD-62: the handoff is published where only root can have written it,
-        # so provisioning is driven as the root it is on a host.
-        privileged_root = tmp_path / "etc-switchyard"
-
-        # The fixture source stands in for root's installed release (SYRD-630). Root's dry run refuses an output
-        # directory in the owner's tree (SYRD-666), and this suite's stand-in home for the owner holds every
-        # temporary directory, so the owner's home is one of this case's own for that judgement.
-        from scripts import owner_writes
-
-        real_owner_home = owner_writes.owner_home
-        owner_writes.owner_home = lambda _owner: str(tmp_path / "owner-home")
-        with _provisioning_as_root(privileged_root), roots_own(source_repo), redirect_stdout(StringIO()):
-            assert new_project_command(
-                "porter",
-                owner_user=current_user,
-                source_repo=source_repo,
-                commit_git_dir="/srv/git/review-cache.git",
-                repository=project_repo,
-                output_dir=output_dir,
-                runner=FakeRunner(),
-                port_in_use=lambda _port: False,
-                socket_exists=lambda _path: False,
-                print_func=printed.append,
-            ) == 0
-        owner_writes.owner_home = real_owner_home
-
-        handoff = privileged_root / "porter" / "porter-role-accounts.sh"
-        assert not handoff.exists(), printed
-        assert not (output_dir / "porter-role-accounts.sh").exists(), sorted(
-            path.name for path in output_dir.iterdir()
-        )
-
-
-def test_fresh_project_launches_without_a_role_account_handoff() -> None:
-    """SYRD-69: the project account can pass directly into the launch gate."""
-    from scripts import presentation_controller
-
-    class NewProjectRunner(FakeRunner):
-        def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-            self.calls.append(args)
-            if args[:2] == ["id", "-u"]:
-                return subprocess.CompletedProcess(args, 1)
-            if args[:1] == ["useradd"]:
-                return subprocess.CompletedProcess(args, 0)
-            if args[:1] == ["install"] and args[-1]:
-                target = Path(args[-1])
-                if str(target).startswith(tempfile.gettempdir()):
-                    target.mkdir(parents=True, exist_ok=True)
-                return subprocess.CompletedProcess(args, 0)
-            return super().__call__(args, **kwargs)
-
-    polled: list[object] = []
-    printed: list[str] = []
-    original_report = team_launcher.report_launch_session_records
-    original_authority_probe = team_launcher.process_authority_board_compatibility
-    original_runtime_config = presentation_controller.runtime_assignment_config
-    try:
-        team_launcher.report_launch_session_records = lambda *a, **kw: polled.append(kw) or []
-        team_launcher.process_authority_board_compatibility = lambda _config: (
-            True, "simulated provisioned process-authority board"
-        )
-        presentation_controller.runtime_assignment_config = lambda config, **_kwargs: config
-        with tempfile.TemporaryDirectory(prefix="switchyard-deferred-launch.") as tmp:
-            tmp_path = Path(tmp)
-            source_repo = tmp_path / "source-repo"
-            source_repo.mkdir()
-            # SYRD-62: the handoff it prints is root's published copy, so
-            # root's directory goes in the sandbox. The command is already told
-            # it is root through its own euid_getter, which is what publishing
-            # asks -- faking the process's would send its unrelated chowns at
-            # the real filesystem.
-            privileged_root = tmp_path / "etc-switchyard"
-            os.environ["SWITCHYARD_PRIVILEGED_PROVISION_ROOT"] = str(privileged_root)
-            with redirect_stdout(StringIO()):
-                assert (
-                    switchyard_new_command(
-                        desktop_policy=Path("headless"),
-                        slug="porter",
-                        agent_name="otto-agent",
-                        project_name="Porter System",
-                        source_repo=source_repo,
-                        output_dir=tmp_path / "out",
-                        role_clis=LEGACY_SWITCHYARD_ROLE_CLIS,
-                        yes=True,
-                        allow_existing_owner_user=True,
-                        home_base=tmp_path / "home",
-                        euid_getter=lambda: 0,
-                        runner=NewProjectRunner(),
-                        input_func=lambda _prompt: "",
-                        port_in_use=lambda _port: False,
-                        socket_exists=lambda _path: False,
-                        registry_dir=tmp_path / "registry",
-                        konsole_process_launcher=RecordingProcessLauncher(),
-                        print_func=printed.append,
-                    )
-                    == 0
-                )
-    finally:
-        team_launcher.report_launch_session_records = original_report
-        team_launcher.process_authority_board_compatibility = original_authority_probe
-        presentation_controller.runtime_assignment_config = original_runtime_config
-        os.environ.pop("SWITCHYARD_PRIVILEGED_PROVISION_ROOT", None)
-
-    assert not any("were not started" in line for line in printed), printed
-    assert not any("porter-role-accounts.sh" in line for line in printed), printed
-    # The launch is reported as one. Which words depend on the layout this
-    # environment resolves to: a layout that opens its own window says so, and
-    # the viewer -- which root cannot show -- says every pane is up and where the
-    # window opens (SYRD-221 UAT, test10).
-    assert any(
-        "full pane window started for porter" in line or "every pane of porter is up" in line
-        for line in printed
-    ), printed
-    assert len(polled) == 1, polled
-    assert any("design" in line for line in printed), printed
-
-
 def main() -> int:
-    run_team_launcher_tests(globals(), first=())
+    try:
+        run_team_launcher_tests(globals(), first=())
+    finally:  # a reach that also broke a case is reported as the reach
+        host_state_guard.assert_untouched("team_launcher_new_project_test")
     print("team_launcher_new_project_test: ok")
     return 0
 

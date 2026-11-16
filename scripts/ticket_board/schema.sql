@@ -14017,7 +14017,7 @@ BEGIN
     SELECT t.id, t.state, t.assignee, ns.entered_current_state_at AS since INTO waiting
       FROM ticket_board.tickets t JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id=t.id
      WHERE t.state=policy->>'ready_stage'
-       AND ns.entered_current_state_at <= p_now - make_interval(secs => coalesce((policy->>'idle_alert_seconds')::int, 900))
+       AND ticket_board.unpaused_since(ns.entered_current_state_at, p_now) <= p_now - make_interval(secs => coalesce((policy->>'idle_alert_seconds')::int, 900))
        AND EXISTS (SELECT FROM jsonb_object_keys(free) k WHERE ticket_board.ticket_ready_for_pull(t.id, k))
      ORDER BY ns.entered_current_state_at, t.ticket_number LIMIT 1;
     IF waiting.id IS NULL THEN RETURN 0; END IF;
@@ -25694,45 +25694,6 @@ BEGIN
     DELETE FROM ticket_board.board_progress_events
      WHERE at < p_now - interval '1 day' AND id < coalesce(v_last.id, 0);
     RETURN jsonb_build_object('runnable', jsonb_array_length(v_runnable), 'episode', ep.id, 'clock_started_at', v_clock);
-END;
-$$;
-
-CREATE OR REPLACE FUNCTION ticket_board.notify_pull_idle_capacity(p_idle jsonb, p_now timestamptz)
-RETURNS integer LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
-DECLARE policy jsonb:=ticket_board.declared_scheduling(); waiting record; free jsonb;
-BEGIN
-    PERFORM ticket_board.require_ticket_board_listener('notify_pull_idle_capacity');
-    IF policy IS NULL THEN RETURN 0; END IF;
-    SELECT coalesce(jsonb_object_agg(k, v), '{}'::jsonb) INTO free
-      FROM jsonb_each_text(coalesce(p_idle,'{}'::jsonb)) AS e(k, v)
-     -- Only a declared claimant is idle capacity; the listener names the
-     -- running ones (SYRD-573), and nothing else it might send is believed.
-     WHERE k IN (SELECT ticket_board.pull_claimant_pool(ticket_board.declared_workflow()))
-       AND ticket_board.ticket_current_reserved_ticket(k) IS NULL;
-    IF free='{}'::jsonb THEN RETURN 0; END IF;
-    SELECT t.id, t.state, t.assignee, ns.entered_current_state_at AS since INTO waiting
-      FROM ticket_board.tickets t JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id=t.id
-     WHERE t.state=policy->>'ready_stage'
-       AND ticket_board.unpaused_since(ns.entered_current_state_at, p_now) <= p_now - make_interval(secs => coalesce((policy->>'idle_alert_seconds')::int, 900))
-       AND EXISTS (SELECT FROM jsonb_object_keys(free) k WHERE ticket_board.ticket_ready_for_pull(t.id, k))
-     ORDER BY ns.entered_current_state_at, t.ticket_number LIMIT 1;
-    IF waiting.id IS NULL THEN RETURN 0; END IF;
-    -- Once per episode, delivered or not: the queue's own dedupe forgets a
-    -- row once it is acknowledged; the trace of its enqueue does not.
-    IF EXISTS (SELECT FROM ticket_board.notification_trace tr
-               WHERE tr.ticket_id=waiting.id AND tr.event='enqueue'
-                 AND tr.detail->>'dedupe_key'='pull-idle:' || waiting.id || ':' || extract(epoch FROM waiting.since)::bigint) THEN
-        RETURN 0; END IF;
-    PERFORM ticket_board.enqueue_notification(
-        waiting.id, 'ticket_update', 'director',
-        format('%s has been ready to claim since %s, and these implementers are idle without claiming it: %s.',
-               waiting.id, to_char(waiting.since AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI "UTC"'),
-               (SELECT string_agg(k || ' (' || v || ')', ', ' ORDER BY k) FROM jsonb_each_text(free) AS e(k, v))),
-        jsonb_build_object('kind', 'pull_idle_capacity', 'id', waiting.id,
-                           'state', waiting.state, 'assignee', waiting.assignee, 'target_role', 'director',
-                           'idle', free, 'ready_since', waiting.since),
-        'pull-idle:' || waiting.id || ':' || extract(epoch FROM waiting.since)::bigint);
-    RETURN 1;
 END;
 $$;
 

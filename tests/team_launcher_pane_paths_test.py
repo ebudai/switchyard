@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from team_launcher_test_helpers import *
+from launcher_isolation import record_running_provider_state  # noqa: E402 - SYRD-812
 
 def test_launch_project_with_running_shared_checkout_session_skips_destructive_refresh_and_opens_window() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-running-project.") as tmp:
@@ -14,6 +15,7 @@ def test_launch_project_with_running_shared_checkout_session_skips_destructive_r
             existing_sessions={"porter-director"},
             current_commands={"porter-director:0.0": "claude"},
         )
+        record_running_provider_state(config, "director")  # the running director is current, not stale (SYRD-812)
         process_launcher = RecordingProcessLauncher()
 
         assert (
@@ -94,6 +96,7 @@ def test_launch_project_with_running_control_role_session_refreshes_only_stopped
             existing_sessions={"porter-director"},
             current_commands={"porter-director:0.0": "claude"},
         )
+        record_running_provider_state(config, "director")  # the running director is current, not stale (SYRD-812)
         process_launcher = RecordingProcessLauncher()
 
         assert (
@@ -357,36 +360,46 @@ def test_explicit_session_dir_env_beats_run_as_user_default() -> None:
         original_default_session_dir = team_launcher.DEFAULT_SESSION_DIR
         original_getpwnam = team_launcher.pwd.getpwnam
 
-        class OwnerPw:
-            pw_dir = str(owner_home)
-            pw_uid = 4242
+        def load(owner_uid: int) -> Any:
+            class OwnerPw:
+                pw_dir = str(owner_home)
+                pw_uid = owner_uid
 
-        def fake_getpwnam(user_name: str) -> Any:
-            if user_name == "porter-agent":
-                return OwnerPw()
-            return original_getpwnam(user_name)
+            def fake_getpwnam(user_name: str) -> Any:
+                if user_name == "porter-agent":
+                    return OwnerPw()
+                return original_getpwnam(user_name)
 
-        try:
-            os.environ["TICKET_BOARD_PANE_SESSION_DIR"] = str(env_session_dir)
-            os.environ.pop("PGU_TICKET_BOARD_PANE_SESSION_DIR", None)
-            team_launcher.DEFAULT_SESSION_DIR = Path("/root/.local/state/pgu-ticket-board/pane-sessions")
-            team_launcher.pwd.getpwnam = fake_getpwnam
-            config = load_project_config("porter", config_path)
-        finally:
-            for key, value in original_env.items():
-                if value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = value
-            team_launcher.DEFAULT_SESSION_DIR = original_default_session_dir
-            team_launcher.pwd.getpwnam = original_getpwnam
+            try:
+                os.environ["TICKET_BOARD_PANE_SESSION_DIR"] = str(env_session_dir)
+                os.environ.pop("PGU_TICKET_BOARD_PANE_SESSION_DIR", None)
+                team_launcher.DEFAULT_SESSION_DIR = Path("/root/.local/state/pgu-ticket-board/pane-sessions")
+                team_launcher.pwd.getpwnam = fake_getpwnam
+                return load_project_config("porter", config_path)
+            finally:
+                for key, value in original_env.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+                team_launcher.DEFAULT_SESSION_DIR = original_default_session_dir
+                team_launcher.pwd.getpwnam = original_getpwnam
 
-    role = config.roles[0]
-    entries = _env_entries(cli_command_for_role(role, session_dir=config.session_dir))
-    assert config.session_dir == env_session_dir
-    assert f"TICKET_BOARD_PANE_SESSION_DIR={env_session_dir}" in entries
-    assert not any(str(owner_home) in entry for entry in entries)
-    assert not any("/root/.local/state/pgu-ticket-board/pane-sessions" in entry for entry in entries)
+        # The explicit store beats the owner's default for the caller's own account ...
+        config = load(os.geteuid())
+        role = config.roles[0]
+        entries = _env_entries(cli_command_for_role(role, session_dir=config.session_dir))
+        assert config.session_dir == env_session_dir
+        assert f"TICKET_BOARD_PANE_SESSION_DIR={env_session_dir}" in entries
+        assert not any(str(owner_home) in entry for entry in entries)
+        assert not any("/root/.local/state/pgu-ticket-board/pane-sessions" in entry for entry in entries)
+        # ... and never for another: the caller's store is its own pane's, and handing it to another account put that
+        # project's records in the caller's live store (SYRD-627; SYRD-812: this pinned the earlier precedence).
+        other = load(4242)
+        owners = owner_home / ".local" / "state" / "pgu-ticket-board" / "pane-sessions"
+        assert other.session_dir == owners, other.session_dir
+        assert not any(str(env_session_dir) in entry
+                       for entry in _env_entries(cli_command_for_role(other.roles[0], session_dir=other.session_dir)))
 
 def test_configured_session_dir_beats_inherited_session_dir_env() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-config-session.") as tmp:
@@ -588,6 +601,18 @@ def test_root_created_owner_state_dirs_are_owned_by_run_as_user() -> None:
                 self.installed_dirs: dict[Path, tuple[str, str, int]] = {}
 
             def __call__(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+                # SYRD-812: root makes these with its descriptor helpers now -- tenant_paths in the owner's home
+                # (SYRD-605), owner_runtime_dirs in the owner's runtime directory (SYRD-655) -- not `install -d`.
+                helper = next((Path(a).name for a in args[:3] if Path(str(a)).name in ("tenant_paths.py", "owner_runtime_dirs.py")), "")
+                if helper:
+                    self.calls.append(args)
+                    mode = int(args[args.index("--mode") + 1], 8)
+                    owner = args[args.index("--owner") + 1]
+                    target = Path(args[-1])
+                    target.mkdir(parents=True, exist_ok=True)
+                    target.chmod(mode)
+                    self.installed_dirs[target] = (owner, owner, mode)
+                    return subprocess.CompletedProcess(args, 0)
                 if args[:2] == ["install", "-d"]:
                     self.calls.append(args)
                     mode = int(args[args.index("-m") + 1], 8)
@@ -637,28 +662,12 @@ def test_root_created_owner_state_dirs_are_owned_by_run_as_user() -> None:
 
         expected_session_dir = owner_home / ".local" / "state" / "pgu-ticket-board" / "pane-sessions"
         expected_pane_state_dir = owner_runtime / "porter-ticket-board" / "pane-state"
-        expected_session_install = [
-            "install",
-            "-d",
-            "-m",
-            "700",
-            "-o",
-            "porter-agent",
-            "-g",
-            "porter-agent",
-            str(expected_session_dir),
-        ]
-        expected_pane_state_install = [
-            "install",
-            "-d",
-            "-m",
-            "700",
-            "-o",
-            "porter-agent",
-            "-g",
-            "porter-agent",
-            str(expected_pane_state_dir),
-        ]
+        def made_by(helper: str, target: Path) -> int:
+            """How many of the runner's calls had root's `helper` make `target` the owner's, 0700."""
+            return sum(1 for call in runner.calls if any(Path(str(a)).name == helper for a in call[:3])
+                       and call[-1] == str(target) and call[call.index("--owner") + 1] == "porter-agent"
+                       and call[call.index("--mode") + 1] == "0700")
+
         expected_pane_start = [
             "sudo",
             "-u",
@@ -681,8 +690,8 @@ def test_root_created_owner_state_dirs_are_owned_by_run_as_user() -> None:
         assert expected_pane_start in runner.calls
         assert not root_session_dir.exists()
         assert not root_pane_state.exists()
-        assert runner.calls.count(expected_session_install) == 2
-        assert runner.calls.count(expected_pane_state_install) == 2
+        assert made_by("tenant_paths.py", expected_session_dir) == 2, runner.calls
+        assert made_by("owner_runtime_dirs.py", expected_pane_state_dir) == 2, runner.calls
         assert runner.installed_dirs[expected_session_dir] == ("porter-agent", "porter-agent", 0o700)
         assert runner.installed_dirs[expected_pane_state_dir] == ("porter-agent", "porter-agent", 0o700)
 

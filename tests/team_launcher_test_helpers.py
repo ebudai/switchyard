@@ -1317,7 +1317,7 @@ def run_team_launcher_tests(module_globals: dict[str, object], *, first: tuple[s
             True, "simulated process-authority board"
         )
         presentation_controller.runtime_assignment_config = lambda config, **_kwargs: config
-        run_module_tests(module_globals, first=first)
+        with __import__("launcher_isolation").isolated_launches(LIVE_PANE_SESSION_PATHS): run_module_tests(module_globals, first=first)  # noqa: E701 - SYRD-812: no live store, no GitHub
     finally:
         team_launcher.process_authority_board_compatibility = original_authority_probe
         presentation_controller.runtime_assignment_config = original_runtime_config

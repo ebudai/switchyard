@@ -48,31 +48,41 @@ BUNDLE = "/home/agent/.local/state/switchyard/publish-outbox/syrd/PGU-1.bundle"
 GIT_LOG_ENV = "SYRD118_GIT_LOG"
 NETWORK_SUBCOMMANDS = ("ls-remote", "fetch", "push", "clone", "remote")
 
-GIT_SHIM = """#!/usr/bin/env python3
-import os, subprocess, sys
+class GitRecorder:
+    """Every command the board's commit cache runs, with its environment (SYRD-812).
 
-argv = sys.argv[1:]
-with open(os.environ["{log_env}"], "a", encoding="utf-8") as handle:
-    handle.write("\\x1f".join(argv) + "\\n")
-raise SystemExit(subprocess.run(["{real_git}", *argv]).returncode)
-"""
+    A PATH shim used to stand in for git here; since SYRD-699 the cache runs git with its own `PATH=/usr/bin:/bin`
+    and a `git -c ...` prefix, deliberately, so no shim on anybody's PATH is ever asked. What the cache runs is
+    recorded where it runs it -- its own `subprocess` -- and then run for real."""
 
+    def __init__(self) -> None:
+        import subprocess as real
 
-def install_git_shim(root: Path) -> Path:
-    log = root / "git-argv.log"
-    shim_dir = root / "shim"
-    shim_dir.mkdir()
-    shim = shim_dir / "git"
-    shim.write_text(GIT_SHIM.format(log_env=GIT_LOG_ENV, real_git=REAL_GIT), encoding="utf-8")
-    shim.chmod(0o755)
-    log.write_text("", encoding="utf-8")
-    os.environ[GIT_LOG_ENV] = str(log)
-    os.environ["PATH"] = f"{shim_dir}{os.pathsep}{os.environ['PATH']}"
-    return log
+        self.real = real
+        self.calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def run(self, args, *a, **kw):
+        self.calls.append(([str(arg) for arg in args], dict(kw.get("env") or {})))
+        return self.real.run(args, *a, **kw)
+
+    def __getattr__(self, name):
+        return getattr(self.real, name)
 
 
-def git_calls(log: Path) -> list[list[str]]:
-    return [line.split("\x1f") for line in log.read_text(encoding="utf-8").splitlines() if line]
+def install_git_shim(root: Path) -> GitRecorder:
+    from scripts.ticket_board import commit_cache
+
+    recorder = GitRecorder()
+    commit_cache.subprocess = recorder
+    # A PATH of the caller's own, which the cache must not inherit: what its pinned PATH is checked against.
+    decoy = root / "decoy-bin"
+    decoy.mkdir()
+    os.environ["PATH"] = f"{decoy}{os.pathsep}{os.environ['PATH']}"
+    return recorder
+
+
+def git_calls(log: GitRecorder) -> list[list[str]]:
+    return [argv for argv, _env in log.calls if argv[:1] == ["git"]]
 
 
 def requests_for(admin: str, ticket: str) -> list[dict]:
@@ -105,6 +115,17 @@ MINE = "pgu935_syrd118_proven_publication.sql"
 PREVIOUS = "pgu934_syrd109_queued_reminder_suppression.sql"
 
 
+def adding_commit(migration_name: str) -> str:
+    """The commit that added `migration_name`: the release the next migration upgrades from."""
+    adding = subprocess.run(
+        ["git", "-C", str(ROOT), "log", "--format=%H", "--diff-filter=A", "--",
+         f"scripts/ticket_board/migrations/{migration_name}"],
+        text=True, capture_output=True, check=True,
+    ).stdout.strip().splitlines()
+    assert adding, migration_name
+    return adding[-1]
+
+
 def at_release(migration_name: str, path: str) -> str:
     """One file as it stood in the release that added `migration_name`.
 
@@ -133,24 +154,30 @@ def test_the_upgrade_carries_it_to_an_existing_board(cluster, cache: Path, work:
     db = "publication_proof_upgraded"
     admin = t.conninfo(cluster.socket_dir, cluster.port, db)
     t.run(["createdb", "-h", str(cluster.socket_dir), "-p", str(cluster.port), "-U", "postgres", db])
-    t.psql(admin, at_release(PREVIOUS, "scripts/ticket_board/schema.sql"))
-    try:
-        t.create_roles(admin)
-    except AssertionError as exc:
-        if "already exists" not in str(exc):
-            raise
-    t.psql(admin, at_release(PREVIOUS, "scripts/ticket_board/rbac.sql"))
+    # The board as the release before built it: its schema.sql, then its own runner -- recording the migrations it
+    # shipped -- and its grants. SYRD-812: this recorded every later migration as applied over that schema without
+    # running one, so today's rbac.sql granted on objects that board never got (red before SYRD-699).
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="syrd812-previous.") as raw:
+        previous = Path(raw)
+        archive = subprocess.run(["git", "archive", adding_commit(PREVIOUS), "scripts"], cwd=ROOT, capture_output=True,
+                                 check=True).stdout
+        subprocess.run(["tar", "-x", "-C", str(previous)], input=archive, check=True)
+        t.psql(admin, (previous / "scripts/ticket_board/schema.sql").read_text())
+        try:
+            t.create_roles(admin)
+        except AssertionError as exc:
+            if "already exists" not in str(exc):
+                raise
+        built = subprocess.run([str(previous / "scripts/ticket-board-migrate")], text=True, capture_output=True,
+                               env={"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", ""),
+                                    "TICKET_BOARD_ADMIN_DATABASE_URL": admin})
+        assert built.returncode == 0, built.stderr or built.stdout
+        t.psql(admin, (previous / "scripts/ticket_board/rbac.sql").read_text())
     t.seed_postgres_ticket(admin, "PGU-9", title="Upgraded work", state="in_progress", assignee="main")
 
-    names = [path.name for path in ordered_files(MIGRATIONS) if path.name != MINE]
-    t.psql(
-        admin,
-        "CREATE TABLE IF NOT EXISTS ticket_board.schema_migrations ("
-        "name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());\n"
-        + "INSERT INTO ticket_board.schema_migrations(name) VALUES "
-        + ",".join(f"('{name}')" for name in names)
-        + " ON CONFLICT DO NOTHING;",
-    )
+    # Then the upgrade: today's runner applies what that board has not recorded, this migration among it.
     applied = subprocess.run(
         [str(ROOT / "scripts/ticket-board-migrate")],
         text=True, capture_output=True,
@@ -320,8 +347,11 @@ def main() -> int:
                 looked = [call for call in calls if any(ref in arg for arg in call)]
                 assert looked, f"nothing was resolved for {ref}"
                 for call in looked:
-                    assert call[0] == f"--git-dir={cache}", call
+                    assert f"--git-dir={cache}" in call, call
                     assert "rev-parse" in call, call
+            # ... with the cache's own environment, which nothing inherited redirects (SYRD-699).
+            for argv, env in log.calls:
+                assert env.get("PATH") == "/usr/bin:/bin" and env.get("GIT_CONFIG_NOSYSTEM") == "1", (argv, env)
                 assert any(
                     f"{PUBLISHED_REF_NAMESPACE}/{ref}" in arg for call in looked for arg in call
                 ), looked

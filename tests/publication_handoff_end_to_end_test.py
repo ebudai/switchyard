@@ -132,6 +132,13 @@ def main() -> int:
             database_url=t.conninfo(sock, port, db, t.SERVICE_ROLE),
             commit_git_dir=cache,
         )
+        # The board judges a registered pane live from the same /proc the rest of this fixture is: the fake one its
+        # panes are in (SYRD-812: from SYRD-713 the real /proc decided, the Director's assignment read as gone, and
+        # the publication was refused before what this case is about).
+        from scripts.ticket_board import peer_identity
+
+        app.runtime_process_live = lambda pid, start: peer_identity.session_is_live(
+            peer_identity.SessionIdentity(int(pid), int(start)), proc_root=proc)
         cfg = validate(json.loads((ROOT / "examples/workflows/inspection.json").read_text()))
         server = t.TicketBoardServer(("127.0.0.1", 0), app, director_notifier=t.QuietNotifier())
         t.TEST_WRITE_TOKEN = server.write_token
@@ -280,7 +287,11 @@ def main() -> int:
             hook.chmod(0o755)
             failed = subprocess.run(publish_argv, text=True, capture_output=True, env=publish_env)
             assert failed.returncode != 0, failed.stdout
-            assert "still" in (failed.stdout + failed.stderr), failed.stdout + failed.stderr
+            # Refused by the remote itself, and the request left open -- not any line that says "still" (SYRD-812:
+            # while the Director's assignment read as gone this passed on a refusal before any push).
+            said = failed.stdout + failed.stderr
+            assert "remote refuses this ref" in said and "pre-receive hook declined" in said, said
+            assert "PGU-1 request 1 is still open" in said, said
             still_open = app.publication_requests(state="requested")
             assert len(still_open) == 1 and still_open[0]["id"] == request["id"], still_open
             assert app.publication_requests(ticket_id="PGU-1")[0]["state"] == "requested"

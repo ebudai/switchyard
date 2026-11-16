@@ -150,15 +150,36 @@ def test_control_repository_launch_uses_role_worktrees_and_preserves_repository(
                     )
                     == 0
                 )
+            # SYRD-555: a role worktree with work in it is kept, named with that work and the way to refresh it,
+            # and nothing is lost (SYRD-812: this pinned the earlier reset); ignorable bytecode is no work.
             warning = stderr.getvalue()
-            assert "will reset managed role worktree" in warning
-            assert "for ops to origin/main" in warning
-            assert "tracked.txt" in warning
-            assert "agent_notes.txt" in warning
-            assert "__pycache__" not in warning
-            assert (ops_worktree / "tracked.txt").read_text(encoding="utf-8") == "initial\n"
-            assert not (ops_worktree / "agent_notes.txt").exists()
-            assert not (app_worktree / "__pycache__").exists()
+            assert f"not refreshing ops's worktree {ops_worktree}" in warning, warning
+            assert "1 tracked change: tracked.txt" in warning and "1 untracked path: agent_notes.txt" in warning, warning
+            assert "--discard-worktree-changes ops" in warning and "__pycache__" not in warning, warning
+            assert (ops_worktree / "tracked.txt").read_text(encoding="utf-8") == "agent local edit\n"
+            assert (ops_worktree / "agent_notes.txt").exists()
+            # A refresh no longer deletes ignored files -- SYRD-555 dropped `clean -x`, which deleted every ignored
+            # local.properties -- so app's ignored bytecode is still there.
+            assert (app_worktree / "__pycache__" / "x.pyc").exists()
+            # And when the owner says to discard it, the worktree is reset to origin/main, as before SYRD-555.
+            stderr = StringIO()
+            with redirect_stderr(stderr):
+                assert (
+                    launch_project(
+                        config,
+                        config_path=config_path,
+                        mode="start",
+                        script_path=ROOT / "scripts" / "team-launcher",
+                        runner=ProjectGitRunner(tmp_path),
+                        layout_output=tmp_path / "launch-layout-3.json",
+                        pane_state_dir=tmp_path / "pane-state-3",
+                        konsole_process_launcher=RecordingProcessLauncher(),
+                        discard_worktree_changes=frozenset({"ops"}),
+                    )
+                    == 0
+                )
+            assert (ops_worktree / "tracked.txt").read_text(encoding="utf-8") == "initial\n", stderr.getvalue()
+            assert not (ops_worktree / "agent_notes.txt").exists(), stderr.getvalue()
         finally:
             team_launcher._control_repository_owner_home = original_home
 
@@ -253,9 +274,9 @@ def test_control_repository_launch_runs_bootstrap_as_configured_owner() -> None:
         assert team_launcher.git_control_worktree_add_args(config, config.roles[0]) not in runner.calls
         assert not any(call[:2] == ["chown", "-R"] for call in runner.calls)
         assert len(process_launcher.calls) == 1
-        assert process_launcher.calls[0]["args"] == konsole_launch_args(layout_output, window_title="otto")
+        assert process_launcher.calls[0]["args"] == konsole_launch_args(layout_output, window_title="otto", config_dir=(layout_output).parent)
         assert process_launcher.calls[0]["kwargs"]["start_new_session"] is True
-        assert not any(call == konsole_launch_args(layout_output, window_title="otto") for call in runner.calls)
+        assert not any(call == konsole_launch_args(layout_output, window_title="otto", config_dir=(layout_output).parent) for call in runner.calls)
 
 def test_control_repository_bootstrap_failure_aborts_without_opening_window() -> None:
     class FailingControlRunner(FakeRunner):
@@ -335,7 +356,7 @@ def test_control_repository_bootstrap_failure_aborts_without_opening_window() ->
         assert "failed to prepare control repository for otto" in stderr.getvalue()
         assert "detected dubious ownership" in stderr.getvalue()
         assert not layout_output.exists()
-        assert not any(call == konsole_launch_args(layout_output, window_title="otto") for call in runner.calls)
+        assert not any(call == konsole_launch_args(layout_output, window_title="otto", config_dir=(layout_output).parent) for call in runner.calls)
 
 def test_control_repository_repairs_owner_mismatch_before_clone() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-control-repair.") as tmp:
@@ -691,7 +712,10 @@ def test_launch_without_control_repository_does_not_owner_wrap_pgu_plan() -> Non
                     "project": "pgu",
                     "layout": str(layout_path),
                     "repository": str(repo),
-                    "run_as_user": "agent",
+                    # The invoking account, whatever it is called (SYRD-812: this assumed `agent`), with stores of
+                    # its own here: by default that account's are its live ones.
+                    "run_as_user": ME,
+                    "session_dir": str(tmp_path / "sessions"),
                     "roles": [{"role": "ops", "slot": 0, "target": "pgu-ops:0.0", "cli": ["codex"]}],
                 },
                 indent=2,
@@ -720,12 +744,15 @@ def test_launch_without_control_repository_does_not_owner_wrap_pgu_plan() -> Non
             == 0
         )
 
-        assert not any(call[:3] == ["sudo", "-u", "agent"] for call in runner.calls)
+        assert not any(call[:3] == ["sudo", "-u", ME] for call in runner.calls)
         assert not any(call[:2] == ["chown", "-R"] for call in runner.calls)
         assert len(process_launcher.calls) == 1
-        assert process_launcher.calls[0]["args"] == konsole_launch_args(layout_output, window_title="pgu")
+        assert process_launcher.calls[0]["args"] == konsole_launch_args(layout_output, window_title="pgu", config_dir=(layout_output).parent)
         assert process_launcher.calls[0]["kwargs"]["start_new_session"] is True
-        assert not any(call == konsole_launch_args(layout_output, window_title="pgu") for call in runner.calls)
+        assert not any(call == konsole_launch_args(layout_output, window_title="pgu", config_dir=(layout_output).parent) for call in runner.calls)
+
+ME = __import__("pwd").getpwuid(__import__("os").getuid()).pw_name
+
 
 def main() -> int:
     run_team_launcher_tests(globals(), first=())

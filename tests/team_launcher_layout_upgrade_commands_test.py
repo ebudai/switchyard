@@ -8,6 +8,19 @@ import live_boundary  # noqa: E402
 live_boundary.isolate()  # SYRD-627: this suite wrote pane stores into the invoking account's live home
 
 from team_launcher_test_helpers import *
+from unittest import mock  # noqa: E402
+
+def _root_staged_units(provision_dir: Path, project: str, base: Path):
+    """What `switchyard upgrade` run as root stages: root's own copy of the tenant's three board units, under root's
+    provision root. The release report renders a deploy only from that copy (SYRD-138, SYRD-700); from the tenant's
+    own copy it omits the step. SYRD-812: these cases expected the step from the tenant's copy."""
+    privileged_root = base / "etc-switchyard-provision"
+    staged = team_launcher.privileged_provision_dir(project, root=privileged_root)
+    staged.mkdir(parents=True)
+    for unit in ("ticket-board", "ticket-board-canary", "ticket-board-notify-listener"):
+        shutil.copy2(provision_dir / f"{project}-{unit}.service", staged / f"{project}-{unit}.service")
+    return mock.patch.object(team_launcher, "switchyard_privileged_provision_root", lambda: privileged_root)
+
 
 def _layout_titles(node: object) -> list[str]:
     if isinstance(node, dict) and isinstance(node.get("Widgets"), list):
@@ -185,9 +198,9 @@ def test_launch_auto_upgrades_column_major_layout_before_materializing() -> None
         )
 
         assert len(process_launcher.calls) == 1
-        assert process_launcher.calls[0]["args"] == konsole_launch_args(launch_layout, window_title="otto")
+        assert process_launcher.calls[0]["args"] == konsole_launch_args(launch_layout, window_title="otto", config_dir=(launch_layout).parent)
         assert process_launcher.calls[0]["kwargs"]["start_new_session"] is True
-        assert not any(call == konsole_launch_args(launch_layout, window_title="otto") for call in runner.calls)
+        assert not any(call == konsole_launch_args(launch_layout, window_title="otto", config_dir=(launch_layout).parent) for call in runner.calls)
         assert json.loads(layout_path.read_text(encoding="utf-8")) == team_launcher._new_project_layout_payload(6)
         materialized = json.loads(launch_layout.read_text(encoding="utf-8"))
         assert _layout_session_tree(materialized) == {
@@ -197,7 +210,10 @@ def test_launch_auto_upgrades_column_major_layout_before_materializing() -> None
                 {"Orientation": "Horizontal", "Widgets": [3, 4, 5]},
             ],
         }
-        assert _layout_titles(materialized) == ["otto"] * 6
+        assert _layout_titles(materialized) == [team_launcher.pane_split_title(config, role) for role in config.roles], (
+            _layout_titles(materialized))
+        # Each split names its role, the window the project (SYRD-139; SYRD-812: these predated that).
+        assert not any("otto" in title for title in _layout_titles(materialized)), _layout_titles(materialized)
 
 def test_konsole_window_title_uses_project_name_for_every_layout_leaf() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-launcher-konsole-title.") as tmp:
@@ -239,8 +255,12 @@ def test_konsole_window_title_uses_project_name_for_every_layout_leaf() -> None:
     assert process_launcher.calls[0]["args"] == konsole_launch_args(
         launch_layout,
         window_title="Otto Scheduler",
+        config_dir=launch_layout.parent,
     )
-    assert _layout_titles(materialized) == ["Otto Scheduler"] * 6
+    assert _layout_titles(materialized) == [team_launcher.pane_split_title(config, role) for role in config.roles], (
+        _layout_titles(materialized))
+    # Each split names its role, the window the project (SYRD-139; SYRD-812: these predated that).
+    assert not any("Otto Scheduler" in title for title in _layout_titles(materialized)), _layout_titles(materialized)
 
 def test_two_konsole_projects_get_distinct_window_titles() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-launcher-konsole-two-title.") as tmp:
@@ -280,8 +300,8 @@ def test_two_konsole_projects_get_distinct_window_titles() -> None:
             )
 
     assert [call["args"] for call in process_launcher.calls] == [
-        konsole_launch_args(tmp_path / "porter-launch-layout.json", window_title="Porter System"),
-        konsole_launch_args(tmp_path / "otto-launch-layout.json", window_title="Otto Scheduler"),
+        konsole_launch_args(tmp_path / "porter-launch-layout.json", window_title="Porter System", config_dir=(tmp_path / "porter-launch-layout.json").parent),
+        konsole_launch_args(tmp_path / "otto-launch-layout.json", window_title="Otto Scheduler", config_dir=(tmp_path / "otto-launch-layout.json").parent),
     ]
 
 def test_gnome_auto_layout_starts_with_tmux_viewer_without_konsole() -> None:
@@ -407,6 +427,10 @@ def test_switchyard_upgrade_command_updates_registered_project_layout() -> None:
             encoding="utf-8",
         )
         config_path = _write_launcher_config(provision_dir)
+        # A project being upgraded was installed first: its onboarding docs directory is there (SYRD-812). Under /tmp
+        # nothing above it is root's alone, and tenant_paths rightly will not make it there without a race (SYRD-605).
+        (root / "otto" / "docs" / "onboarding").mkdir(parents=True, mode=0o755)
+        (root / "otto" / "docs").chmod(0o755)
         (registry_dir / "otto.json").write_text(
             json.dumps(
                 {
@@ -421,14 +445,12 @@ def test_switchyard_upgrade_command_updates_registered_project_layout() -> None:
             + "\n",
             encoding="utf-8",
         )
-        previous_registry = team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR
-        team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = registry_dir
+        # The registry this case wrote, by the variable the helpers set for every launcher suite -- which wins over
+        # the default this used to rebind (SYRD-812: "unknown project 'otto'").
         stdout = StringIO()
-        try:
-            with redirect_stdout(stdout):
-                assert switchyard_main(["upgrade", "otto"]) == 0
-        finally:
-            team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR = previous_registry
+        with mock.patch.dict(os.environ, {team_launcher.SWITCHYARD_REGISTRY_DIR_ENV: str(registry_dir)}), \
+                redirect_stdout(stdout):
+            assert switchyard_main(["upgrade", "otto"]) == 0
 
         assert "upgraded generated layout template" in stdout.getvalue()
         assert json.loads(layout_path.read_text(encoding="utf-8")) == team_launcher._new_project_layout_payload(6)
@@ -487,14 +509,21 @@ def test_switchyard_upgrade_reports_tenant_release_update_command() -> None:
         updated_unit = (provision_dir / "otto-ticket-board.service").read_text(encoding="utf-8")
         updated_commands = (provision_dir / "operator-commands.sh").read_text(encoding="utf-8")
 
-        # SYRD-45: the release enforces the per-role authority table, so the
-        # upgrade withholds its deploy sequence until this tenant's roles are
-        # actually running under those accounts. The sequence itself is what
-        # this case is about, so it is rendered directly.
-        assert "withholding" in upgraded_output, upgraded_output
+        # The upgrade repatriates the roles' state itself now, so it reaches the release report -- and, run as
+        # the owner rather than root, omits the deploy step: root's units are never rendered from a copy the
+        # tenant can write (SYRD-138, SYRD-700). SYRD-812: this expected SYRD-45's withholding. The sequence itself
+        # is what this case is about, so it is rendered directly.
+        assert "omitting the deploy step for otto" in upgraded_output, upgraded_output
         assert "deploy-restart" not in upgraded_output, upgraded_output
+        # The upgrade tries the owner's GitHub identity with `ssh -T git@github.com`; here the stand-in answers it,
+        # and nothing reached GitHub (SYRD-812: these cases authenticated with the invoking account's own keys).
+        import launcher_isolation
+
+        assert any(argv[-1:] == ["git@github.com"] and "-T" in argv and "ssh" in argv
+                   for argv in launcher_isolation.GITHUB_PROBES_ANSWERED), launcher_isolation.GITHUB_PROBES_ANSWERED
+        assert f"cannot publish to GitHub: {launcher_isolation.OFFLINE_GITHUB_ANSWER}" in upgraded_output, upgraded_output
         report = StringIO()
-        with redirect_stdout(report):
+        with _root_staged_units(provision_dir, "otto", root), redirect_stdout(report):
             team_launcher.report_tenant_release_upgrade(
                 config,
                 config_path=config_path,
@@ -506,29 +535,21 @@ def test_switchyard_upgrade_reports_tenant_release_update_command() -> None:
 
     assert f"old: {old_sha} at {old_release}" in rendered
     assert f"new: {target_sha} from origin/main" in rendered
-    assert "matching-release deployment sequence" in rendered
-    assert "systemctl --user stop otto-ticket-board-notify-listener.service" in rendered
-    assert "systemctl --user daemon-reload && systemctl --user start otto-ticket-board-notify-listener.service" in rendered
-    assert f"HOME={root}" in rendered
-    assert f"TICKET_BOARD_OWNER_HOME={root}" in rendered
-    assert "TICKET_BOARD_PROJECT=otto" in rendered
-    assert f"SOURCE_REPO={source_repo}" in rendered
-    assert f"BOARD_ROOT={board_root}" in rendered
-    assert "DEPLOY_REF=origin/main" in rendered
-    # The readable copy root publishes, never root's own path: the deployer
-    # runs as the project account and cannot traverse the provision directory,
-    # which made a present and correct unit read as absent (SYRD-126/127).
-    assert "TICKET_BOARD_PROVISIONED_SYSTEM_UNIT=/usr/local/lib/switchyard/otto/otto-ticket-board.service" in rendered
-    assert f"TICKET_BOARD_PROVISIONED_SYSTEM_UNIT={provision_dir / 'otto-ticket-board.service'}" not in rendered
-    assert "TICKET_BOARD_COMMIT_GIT_DIR=/srv/git/review-cache.git" in rendered
-    assert f"{source_repo}/scripts/ticket-board-service.sh deploy-restart" in rendered
+    # SYRD-700: one root command -- recorded, rendering the board's units for exactly this release -- in place of
+    # the steps by hand this pinned (stop the listener, export the deployer's environment, deploy-restart, start
+    # it again); SYRD-812 re-pins it.
+    assert "matching-release deployment sequence, one root command" in rendered, rendered
+    assert "never install the staged units themselves" in rendered, rendered
+    assert f"switchyard-record-rollout otto --target-commit {target_sha} --label deploy-release" in rendered, rendered
+    assert f"switchyard deploy-release otto --commit {target_sha}" in rendered, rendered
+    assert "systemctl --user stop" not in rendered and "deploy-restart" not in rendered, rendered
     assert updated_plan["source_repo"] == str(source_repo)
     assert updated_plan["commit_git_dir"] == "/srv/git/review-cache.git"
     assert "Environment=TICKET_BOARD_COMMIT_GIT_DIR=/srv/git/review-cache.git" in updated_unit
     assert f"SOURCE_REPO='{source_repo}'" in updated_commands
     assert "TICKET_BOARD_COMMIT_GIT_DIR='/srv/git/review-cache.git'" in updated_commands
     assert "panes must be restarted after the release update" in rendered
-    assert "deploy-restart" in rendered
+    assert "switchyard restart-role otto <role>" in rendered, rendered
 
 
 def test_switchyard_upgrade_from_shared_release_prints_exact_cache_export_deploy_command() -> None:
@@ -600,11 +621,11 @@ def test_switchyard_upgrade_from_shared_release_prints_exact_cache_export_deploy
                 )
 
             upgraded_output = stdout.getvalue()
-            # SYRD-45: the deploy sequence is withheld until this tenant's roles
-            # run under their own accounts; the sequence is rendered directly.
-            assert "withholding" in upgraded_output, upgraded_output
+            # Run as the owner, the upgrade omits the deploy step (SYRD-138, SYRD-700; SYRD-812: this expected
+            # SYRD-45's withholding); the sequence is rendered directly.
+            assert "omitting the deploy step for otto" in upgraded_output, upgraded_output
             report = StringIO()
-            with redirect_stdout(report):
+            with _root_staged_units(provision_dir, "otto", root), redirect_stdout(report):
                 team_launcher.report_tenant_release_upgrade(
                     config,
                     config_path=config_path,
@@ -617,23 +638,14 @@ def test_switchyard_upgrade_from_shared_release_prints_exact_cache_export_deploy
         assert "cannot determine artifact source checkout freshness" not in rendered
         assert f"old: {old_sha} at {old_release}" in rendered
         assert f"new: {target_sha} from origin/main" in rendered
-        assert "matching-release deployment sequence" in rendered
-        assert f"TICKET_BOARD_OWNER_HOME={root}" in rendered
-        assert f"git --git-dir={cache} archive {target_sha}" in rendered
-        assert f'{{"commit":"{target_sha}"}}' in rendered
-        assert 'SOURCE_REPO="$tmpdir"' in rendered
-        assert f"BOARD_ROOT={board_root}" in rendered
-        assert "DEPLOY_REF=origin/main" in rendered
-        # The readable copy root publishes, never root's own path: the deployer
-        # runs as the project account and cannot traverse the provision directory,
-        # which made a present and correct unit read as absent (SYRD-126/127).
-        assert "TICKET_BOARD_PROVISIONED_SYSTEM_UNIT=/usr/local/lib/switchyard/otto/otto-ticket-board.service" in rendered
-        assert f"TICKET_BOARD_PROVISIONED_SYSTEM_UNIT={provision_dir / 'otto-ticket-board.service'}" not in rendered
-        assert '"$tmpdir/scripts/ticket-board-service.sh" deploy-restart' in rendered
+        # SYRD-700: the exact release's one root command -- deploy-release exports that commit itself -- in place of
+        # the cache export by hand this pinned (git archive into a temporary tree, deploy-restart from it); SYRD-812.
+        assert "matching-release deployment sequence, one root command" in rendered, rendered
+        assert f"switchyard-record-rollout otto --target-commit {target_sha} --label deploy-release" in rendered, rendered
+        assert f"switchyard deploy-release otto --commit {target_sha}" in rendered, rendered
+        assert "git --git-dir" not in rendered and "deploy-restart" not in rendered, rendered
         assert f"SOURCE_REPO={release}" not in rendered
-        assert f"{release}/scripts/ticket-board-service.sh deploy-restart" not in rendered
         assert "panes must be restarted after the release update" in rendered
-        assert "deploy-restart" in rendered
     finally:
         if original_shared_root is None:
             os.environ.pop("SWITCHYARD_SHARED_INSTALL_ROOT", None)
@@ -769,9 +781,9 @@ def test_switchyard_upgrade_reports_unchanged_tenant_release() -> None:
             )
 
         upgraded_output = stdout.getvalue()
-        # SYRD-45: withheld until the roles run under their own accounts, so the
-        # report this case is about is rendered directly.
-        assert "withholding" in upgraded_output, upgraded_output
+        # The release is unchanged, so the upgrade says no deploy is needed (SYRD-812: this expected SYRD-45's
+        # withholding); the report this case is about is rendered directly.
+        assert "otto deployed board release unchanged; no release deploy needed" in upgraded_output, upgraded_output
         report = StringIO()
         with redirect_stdout(report):
             team_launcher.report_tenant_release_upgrade(
@@ -921,7 +933,7 @@ def test_explicit_separate_layout_still_launches_konsole_when_desktop_is_undetec
         )
 
     assert len(process_launcher.calls) == 1
-    assert process_launcher.calls[0]["args"] == konsole_launch_args(layout_output, window_title="otto")
+    assert process_launcher.calls[0]["args"] == konsole_launch_args(layout_output, window_title="otto", config_dir=(layout_output).parent)
 
 def test_materialize_layout_refuses_more_than_six_visible_roles() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-visible-cap.") as tmp:

@@ -330,6 +330,10 @@ def test_worker_pool_status_judges_each_worker_by_its_own_runtime_and_says_who_c
         command = [str(part) for part in args]
         if "has-session" in command:
             return subprocess.CompletedProcess(command, 0)
+        if "capture-pane" in command:
+            # The worker's own screen, through this runner: a pane stopped at its provider's question is not ready
+            # (SYRD-566). These ask nothing (SYRD-812: this runner predated the look).
+            return subprocess.CompletedProcess(command, 0, stdout="ready for the next prompt\n> \n", stderr="")
         raise AssertionError(f"readiness asked the host something it should not: {command}")
 
     try:

@@ -323,6 +323,11 @@ def test_switchyard_status_lists_registered_projects_from_process_snapshot() -> 
         "Otto Scheduler  otto     running  1/3    otto-viewer",
         "PGU             pgu      running  2/2    pgu-viewer",
         "Something Else  stopped  stopped  0/2    stopped-viewer",
+        # SYRD-674's reports footer, one line per tenant (SYRD-812: this predated it).
+        "",
+        "switchyard: reports: otto: not recorded; check it with `sudo switchyard upgrade otto --only upstream-report --dry-run`",
+        "switchyard: reports: pgu: not recorded; check it with `sudo switchyard upgrade pgu --only upstream-report --dry-run`",
+        "switchyard: reports: stopped: not recorded; check it with `sudo switchyard upgrade stopped --only upstream-report --dry-run`",
     ]
 
 def test_switchyard_status_json_reports_same_project_facts() -> None:
@@ -384,6 +389,12 @@ def test_switchyard_status_json_reports_same_project_facts() -> None:
                 "name": "Atlas",
                 "slug": "atlas",
                 "state": "running",
+                # What each layer reports, beside the summary (SYRD-193; SYRD-812: this predated them). None where
+                # the probe was not asked.
+                "runtime_state": "running",
+                "board_active": None,
+                "listener_active": None,
+                "presentation_open": None,
                 "panes_up": 1,
                 "panes_total": 1,
                 "panes": "1/1",
@@ -396,6 +407,9 @@ def test_switchyard_status_json_reports_same_project_facts() -> None:
             }
         ],
         "runtime_copies": [],
+        "reports": {"atlas": {"state": "not-recorded", "board": "", "url": "", "detail": "", "recorded_at": "",
+                              "takes_tenant_reports": False}},
+        "work_pauses": {},
     }
 
 def test_switchyard_status_lists_unreadable_config_as_unknown() -> None:
@@ -507,6 +521,8 @@ def test_switchyard_status_ignores_tmux_server_new_session_argv_with_pane_target
     assert lines == [
         "NAME   SLUG   STATE    PANES  VIEWER",
         "Atlas  atlas  stopped  0/1    atlas-viewer",
+        "",  # SYRD-674's reports footer (SYRD-812)
+        "switchyard: reports: atlas: not recorded; check it with `sudo switchyard upgrade atlas --only upstream-report --dry-run`",
     ]
 
 def test_switchyard_status_default_probe_asks_the_owners_tmux_server() -> None:
@@ -577,7 +593,9 @@ def test_switchyard_status_default_probe_asks_the_owners_tmux_server() -> None:
         assert "-n" in probe and "-u" in probe, probe
         assert "root" not in probe, probe
     assert "list-panes" in probe, probe
-    assert lines[-1].strip().endswith("running  1/1    atlas-viewer")
+    # The table row, not the last line: the reports footer follows the table (SYRD-674; SYRD-812).
+    row = next(line for line in lines if line.startswith("Atlas"))
+    assert row.strip().endswith("running  1/1    atlas-viewer"), lines
 
 def test_switchyard_status_reports_runtime_copy_staleness_without_fetching() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-status-stale.") as tmp:

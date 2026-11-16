@@ -514,8 +514,11 @@ def test_running_panes_are_told_to_relaunch() -> None:
         status = launcher.upgrade_project_command(config, config_path=h.config_path, only="upstream-report",
                                                   registry_dir=h.registry, runner=tmux, print_func=said.append)
         note = next((line for line in said if "were launched before this link" in line), "")
+        # SYRD-750: each running role restarted on its own, the Director last -- not the whole tenant stopped and
+        # started (SYRD-812: this pinned that).
         check(status == 0 and "1 of 2 mefp panes (director)" in note
-              and "`switchyard stop mefp` then `switchyard start mefp`" in note and "by hand with `" in note,
+              and "`switchyard restart-role mefp <role>` for each, the Director's own last" in note
+              and "switchyard stop" not in note and "by hand with `" in note,
               f"the running pane is named, with the relaunch: {said}")
         by_hand = note.split("by hand with `", 1)[1].split("`", 1)[0].split()
         check(by_hand[:1] == ["ticket-board-write"] and by_hand[-1] == "...", f"one whole command: {by_hand}")
@@ -539,10 +542,19 @@ def test_an_opt_out_for_an_existing_tenant() -> None:
         status, said = upgrade("mefp", "--only", "upstream-report")
         check(status == 0 and "had opted out of Switchyard reports; this connection replaces that record" in said
               and h.record()["upstream_report"].get("state") == "connected", f"connecting replaces it, saying so: {said}")
-        before = h.tree()
+        # SYRD-721: opting out is how a linked tenant's report parent is removed -- recorded in root's registry
+        # record with its history, the credentials issued and the receipts kept, so what it filed can still be
+        # followed up (SYRD-812: this pinned the refusal SYRD-721 removed).
+        credentials = h.record().get("report_credentials")
         status, said = upgrade("mefp", "--only", "upstream-report", "--no-upstream-report")
-        check(status == 1 and f"it files them to {url}" in said and h.tree() == before,
-              f"a linked tenant is not opted out by a record alone: {said}")
+        record = h.record()
+        check(status == 0 and "recorded mefp's report parent as none (was syrd)" in said
+              and "Credentials already issued and its receipts are kept" in said
+              and record["upstream_report"].get("state") == "opted-out" and record["report_parent"].get("project") == ""
+              and {k: record["report_parent_history"][-1].get(k) for k in ("from", "to", "reason")}
+              == {"from": "syrd", "to": "", "reason": "removed by the operator"}
+              and record.get("report_credentials") == credentials,
+              f"a linked tenant's opt-out removes its report parent, journaled, nothing filed erased: {said} {record}")
 
 
 # ------------------------------------------------------------------ root's declaration

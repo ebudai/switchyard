@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from team_launcher_test_helpers import *
+from unittest import mock  # noqa: E402
 
 def test_team_launcher_tests_use_controlled_shared_install_root() -> None:
     assert os.environ["SWITCHYARD_SHARED_INSTALL_ROOT"] == str(TEST_SWITCHYARD_SHARED_INSTALL_ROOT)
@@ -218,12 +219,19 @@ def test_explicit_pane_state_dir_env_beats_run_as_user_runtime_default() -> None
             "--skip-launcher-check",
             "--no-attach",
             "--pane-state-dir",
-            str(env_pane_state),
+            # SYRD-627: the caller's explicit store is its own pane's, never another account's -- porter-agent's
+            # pane gets its own runtime store (SYRD-812: this pinned the earlier precedence).
+            str(owner_runtime / "porter-ticket-board" / "pane-state"),
         ]
         owner_state = owner_runtime / "pgu-ticket-board" / "pane-state" / pane_state_file_name("porter-ops:0.0")
-        assert expected_call in runner.calls
+        assert expected_call in runner.calls, runner.calls
+        assert not any(str(env_pane_state) in " ".join(map(str, call)) for call in runner.calls), runner.calls
         assert not owner_state.exists()
         assert not (root_pane_state / pane_state_file_name("porter-ops:0.0")).exists()
+        # For the caller's own account the explicit store still beats the runtime default.
+        me = __import__("pwd").getpwuid(os.geteuid()).pw_name
+        with mock.patch.dict(os.environ, {"TICKET_BOARD_PANE_STATE_DIR": str(env_pane_state)}):
+            assert team_launcher.default_pane_state_dir_for_user(me, project="porter") == env_pane_state
 
 def test_cli_command_prepends_invoking_user_bin() -> None:
     original_home = os.environ.get("HOME")
@@ -287,7 +295,9 @@ def test_cli_command_with_explicit_owner_uses_owner_bin_and_drops_invoker_privat
         team_launcher.current_user_name = original_current_user_name
 
     path = next(entry.split("=", 1)[1] for entry in _env_entries(command) if entry.startswith("PATH="))
-    assert path.startswith("/home/porter-agent/bin:/home/porter-agent/.local/bin:")
+    # The tenant's staged, root-owned board clients first -- a role under its own account cannot traverse the owner's
+    # home (SYRD-45) -- then the owner's own bins; never the invoker's (SYRD-812: this predated the staged copy).
+    assert path.startswith("/usr/local/lib/switchyard/pgu:/home/porter-agent/bin:/home/porter-agent/.local/bin:"), path
     assert "/root/bin" not in path.split(":")
 
 def test_modern_env_names_win_over_legacy_aliases_with_legacy_fallback() -> None:
@@ -396,7 +406,9 @@ def test_cli_command_exports_durable_session_dir_for_pane_hooks() -> None:
     assert "PGU_PANE_TARGET=pgu-ops:0.0" in entries
     assert f"TICKET_BOARD_PANE_SESSION_DIR={config.session_dir}" in entries
     assert f"PGU_TICKET_BOARD_PANE_SESSION_DIR={config.session_dir}" in entries
-    assert str(config.session_dir) == str(Path.home() / ".local" / "state" / "pgu-ticket-board" / "pane-sessions")
+    # The configured owner's own durable store -- `agent`'s, which is the invoker's only where the invoker is agent
+    # (SYRD-812: this assumed Path.home()).
+    assert config.session_dir == team_launcher.default_session_dir_for_user(config.run_as_user), config.session_dir
     assert not any(entry.startswith("TICKET_BOARD_PANE_SESSION_ID=") for entry in entries)
 
 def test_cli_command_exports_known_resume_session_id_for_hooks() -> None:

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from team_launcher_test_helpers import *
+from launcher_isolation import record_running_provider_state  # noqa: E402 - SYRD-812
 
 def test_launch_session_record_report_waits_and_warns_for_missing_records() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-launch-session-records.") as tmp:
@@ -167,6 +168,7 @@ def test_launch_project_reports_running_attach_or_start_panes_as_attached() -> N
                 "porter-ops:0.0": "codex",
             },
         )
+        record_running_provider_state(config, "main", "ops")  # both running panes are current (SYRD-812)
         process_launcher = RecordingProcessLauncher()
         messages: list[str] = []
 

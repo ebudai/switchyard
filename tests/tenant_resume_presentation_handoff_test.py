@@ -891,8 +891,8 @@ def test_a_tenant_staged_by_an_older_release_is_restaged_before_it_is_used() -> 
         check(len(commands) == 1, f"one recorded privileged step: {commands}")
         check("switchyard-record-rollout" in commands[0],
               f"through the rollout journal: {commands[0][:120]}")
-        check(any("older release" in line for line in said),
-              f"and says why it is doing it: {said}")
+        check(any("test's staged tooling is not" in line and "restaging it from there" in line for line in said),
+              f"and says why it is doing it, in SYRD-551's words (SYRD-812): {said}")
 
         upgraded = _module_from(mine / "switchyard-display-attach", "upgraded_staged_helper")
         check(hasattr(upgraded, "VIEWER_TARGET"),

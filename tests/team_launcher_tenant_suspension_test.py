@@ -32,6 +32,7 @@ import live_boundary  # noqa: E402
 live_boundary.isolate()  # SYRD-627: no live home, pane store or runtime directory, here or in a child
 
 from team_launcher_test_helpers import *
+from launcher_isolation import staged_tenant_bundle  # noqa: E402 - SYRD-812
 
 CHECKS = 0
 
@@ -360,9 +361,10 @@ def test_resume_stops_at_the_boundary_that_failed() -> None:
                 return subprocess.CompletedProcess(args, 1, stdout="", stderr="unit failed")
             raise AssertionError(f"nothing after the board should run: {args}")
 
-        problems = team_launcher.resume_tenant(
-            config, config_path=config_path, runner=runner, print_func=lambda _line: None
-        )
+        with staged_tenant_bundle(config.project):  # the bundle a resume checks first (SYRD-812)
+            problems = team_launcher.resume_tenant(
+                config, config_path=config_path, runner=runner, print_func=lambda _line: None
+            )
     check(any("could not start" in problem for problem in problems), f"the failure is named: {problems}")
     check(any("nothing after it was started" in problem for problem in problems),
           f"and so is the boundary it stopped at: {problems}")
@@ -381,9 +383,10 @@ def test_resuming_a_running_tenant_does_not_bounce_it() -> None:
             return subprocess.CompletedProcess(args, 0, stdout="active", stderr="")
 
         said: list[str] = []
-        problems = team_launcher.resume_tenant(
-            config, config_path=config_path, runner=runner, print_func=said.append
-        )
+        with staged_tenant_bundle(config.project):  # the bundle a resume checks first (SYRD-812)
+            problems = team_launcher.resume_tenant(
+                config, config_path=config_path, runner=runner, print_func=said.append
+            )
     check(problems == [], f"a running tenant resumes cleanly: {problems}")
     check(not any(args[:2] == ["systemctl", "start"] for args in seen),
           f"without restarting the board: {seen}")

@@ -8396,6 +8396,7 @@ BEGIN
             IF ticket_board.declared_scheduling() IS NOT NULL
                AND ticket_board.declared_stage_kind(proposed.state)='implementation'
                AND ticket_board.ticket_is_implementer_assignee(proposed.assignee)
+               AND proposed.assignee IN (SELECT ticket_board.pull_claimant_pool(cfg))  -- SYRD-795: only a claimant waits there
                AND NOT proposed.manually_controlled
                AND ticket_board.ticket_current_reserved_ticket(proposed.assignee,proposed.id) IS NOT NULL THEN
                 -- SYRD-599: Router changes the owner and nothing else. Diverting its
@@ -8621,9 +8622,15 @@ BEGIN
     -- stage lands there, assigned, even when that implementer already has
     -- active work, and waits in their queue until it is the active ticket. A
     -- pull policy keeps its ready stage as the queue (SYRD-539): there the
-    -- move is still diverted, pinned to the busy author.
+    -- move is still diverted, pinned to the busy author -- when the author is a
+    -- claimant, the only one who may take it from there. An implementer the
+    -- Director dispatches on a pull board claims nothing, so pinned there its
+    -- ticket was never taken, not even when its slot freed (SYRD-795, MEFP-1213
+    -- behind a blocked MEFP-1209): its work queues in place, as SYRD-568's does,
+    -- and the freed slot hands it over.
     IF ticket_board.declared_scheduling() IS NOT NULL
        AND dest->>'kind'='implementation' AND NOT ticket_board.router_holds(dest->>'name',proposed.assignee)
+       AND proposed.assignee IN (SELECT ticket_board.pull_claimant_pool(cfg))
        AND ticket_board.ticket_current_reserved_ticket(proposed.assignee,proposed.id) IS NOT NULL AND NOT proposed.manually_controlled THEN
         IF cfg->'queue' IS NULL OR cfg->'queue'='null'::jsonb THEN RAISE EXCEPTION 'implementer already owns reserved work; configure a holding destination'; END IF;
         queued_for:=proposed.assignee;

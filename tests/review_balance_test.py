@@ -325,10 +325,12 @@ def candidate(got: dict) -> None:
     check(affinity["current"] == "audit", f"audit's current review is never taken: {affinity}")
     schema = (ROOT / "scripts/ticket_board/schema.sql").read_text()
     mine = (ROOT / "scripts/ticket_board/migrations/pgu1033_syrd745_review_balance.sql").read_text()
-    for name in ("enforce_declared_ticket_update", "balance_review_stage"):
+    # SYRD-795 (pgu1044) changed enforce_declared_ticket_update since, so its copy is that migration's.
+    later = (ROOT / "scripts/ticket_board/migrations/pgu1044_syrd795_dispatched_work_queues_in_place.sql").read_text()
+    for name, owner, label in (("enforce_declared_ticket_update", later, "pgu1044"), ("balance_review_stage", mine, "pgu1033")):
         start = schema.rindex(f"CREATE OR REPLACE FUNCTION ticket_board.{name}(")
-        check(schema[start:schema.index("\n$$;\n", schema.index("AS $$", start)) + 5] in mine,
-              f"schema.sql's {name}, the one a board built from it runs, is pgu1033's")
+        check(schema[start:schema.index("\n$$;\n", schema.index("AS $$", start)) + 5] in owner,
+              f"schema.sql's {name}, the one a board built from it runs, is {label}'s")
     reassigned = got["reassigned"]
     check(reassigned["delivery"] == "delivered" and reassigned["to_audit_2"] == [reassigned["ticket"]],
           f"a direct reassignment to idle audit-2 is delivered on the next pass: {reassigned}")

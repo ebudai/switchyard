@@ -85,9 +85,12 @@ def candidate_live_pane_session_paths(environ: Mapping[str, str] | None = None) 
         value = env.get(key, "").strip()
         if value:
             candidates.append(Path(value).expanduser())
+    # Both state homes: a launch may write under ~/.local/state whatever XDG_STATE_HOME says, and watching only the
+    # variable's let a suite write the account's own store unseen (SYRD-813).
     xdg_state_home = env.get("XDG_STATE_HOME", "").strip()
-    state_home = Path(xdg_state_home).expanduser() if xdg_state_home else Path.home() / ".local" / "state"
-    candidates.append(state_home / "pgu-ticket-board" / "pane-sessions")
+    if xdg_state_home:
+        candidates.append(Path(xdg_state_home).expanduser() / "pgu-ticket-board" / "pane-sessions")
+    candidates.append(Path.home() / ".local" / "state" / "pgu-ticket-board" / "pane-sessions")
     candidates.append(Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-sessions"))
     return _unique_paths(candidates)
 

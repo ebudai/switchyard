@@ -141,7 +141,8 @@ def test_launcher_freshness_probe_uses_owner_runner_when_launcher_user_differs()
             git_launcher_ls_remote_ref_args(config, launcher_repo),
         ]
         for call in launcher_probe_calls:
-            assert ["sudo", "-u", "agent", *call] in runner.calls
+            # The probe runs as whoever owns the launcher checkout: the account running the suite (SYRD-813).
+            assert ["sudo", "-u", owner_home_sandbox.INVOKING_ACCOUNT, *call] in runner.calls
             assert call not in runner.calls
     finally:
         team_launcher.current_user_name = original_current_user_name

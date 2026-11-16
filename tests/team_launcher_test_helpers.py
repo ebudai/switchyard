@@ -602,7 +602,7 @@ def _pgu_project_root() -> Path:
 
 def _write_pgu_config_with_shared_checkout(tmp: Path) -> Path:
     source = json.loads((ROOT / "config" / "team-launcher" / "pgu.json").read_text(encoding="utf-8"))
-    source["desktop_access"] = {"mode": "headless"}
+    source.update(desktop_access={"mode": "headless"}, run_as_user=owner_home_sandbox.INVOKING_ACCOUNT)  # owns its files
     source["layout"] = str(ROOT / "config" / "team-launcher" / "pgu-konsole-layout.json")
     source["repository"] = str(tmp / "repo")
     source["worktree_base"] = str(tmp / "worktrees")
@@ -830,7 +830,7 @@ def _write_minimal_shared_checkout_config(
         "layout": str(layout_path),
         "repository": str(repo),
         "run_as_user": run_as_user,
-        "worktree_base": str(tmp / "worktrees"),
+        "worktree_base": str(tmp / "worktrees"), "session_dir": str(tmp / "sessions"),  # never the account's own store
         "roles": [
             {
                 "role": role,

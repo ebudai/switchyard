@@ -78,9 +78,9 @@ def test_start_does_not_sync_live_cli_or_model() -> None:
         assert config_path.read_text(encoding="utf-8") == before
         research_new_session = next(call for call in runner.calls if call[:5] == ["tmux", "new-session", "-d", "-s", "pgu-research"])
         # start resumes the recorded id; cli/model stay configured (not synced from live)
-        assert "live-research-session" in research_new_session[-1]
-        assert "--model gpt-5.5" in research_new_session[-1]
-        assert "claude-sonnet-5" not in research_new_session[-1]
+        assert "live-research-session" in tmux_first_command(research_new_session)[-1]
+        assert "--model gpt-5.5" in tmux_first_command(research_new_session)[-1]
+        assert "claude-sonnet-5" not in tmux_first_command(research_new_session)[-1]
 
 def test_detached_research_attach_checks_session_without_attaching() -> None:
     config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})

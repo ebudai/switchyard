@@ -41,6 +41,9 @@ from team_launcher_test_helpers import *
 from tmux_socket_cleanup import cleanup_dead_isolated_tmux_socket, run_isolated_tmux
 
 RAW_OUTPUT_KEY = "tui.raw_output_mode"
+#: A signed-in CODEX_HOME for the one live case, which is opt-in (SYRD-813).
+LIVE_CODEX_HOME_ENV = "SWITCHYARD_LIVE_CODEX_HOME"
+SKIPPED: list[str] = []
 #: SGR wheel-up at column 20, row 10, the encoding tmux asks its terminal for.
 SGR_WHEEL_UP = b"\x1b[<64;20;10M"
 
@@ -359,8 +362,16 @@ def test_a_real_codex_pane_scrolls_rather_than_typing() -> None:
     two pane flags decide between scrolling and typing, and they are read here
     off a real codex started from the launcher's own argv, with the session
     options the launcher gives a role session.
+
+    Opt-in (SYRD-813): a codex with no account of its own opens on its sign-in
+    screen, which holds the alternate screen, so this answers only for a
+    signed-in one. Name a signed-in CODEX_HOME in SWITCHYARD_LIVE_CODEX_HOME;
+    it is copied, so the original is never written. Unset, the case is skipped
+    and says so.
     """
-    if not shutil.which("codex") or not shutil.which("tmux"):
+    signed_in = os.environ.get(LIVE_CODEX_HOME_ENV, "").strip()
+    if not signed_in or not shutil.which("codex") or not shutil.which("tmux"):
+        SKIPPED.append(f"{LIVE_CODEX_HOME_ENV} is unset, or codex or tmux is not installed")
         return
     server = f"syrd91-{os.getpid()}"
     cleanup_dead_isolated_tmux_socket(server)
@@ -369,9 +380,9 @@ def test_a_real_codex_pane_scrolls_rather_than_typing() -> None:
         config = _project(tmp_path, [_role_payload("ops", ["codex"], workdir=str(tmp_path))])
         role = next(item for item in config.roles if item.role == "ops")
         session = role.tmux_session
-        # A codex of its own, so this never reads or writes the owner's.
+        # A copy of the signed-in codex, so this never writes the one it was given.
         codex_home = tmp_path / "codex-home"
-        codex_home.mkdir()
+        shutil.copytree(signed_in, codex_home, symlinks=True)
         argv = cli_command_for_role(role, session_dir=tmp_path / "sessions")
         started = run_isolated_tmux(
             server,
@@ -431,6 +442,8 @@ def test_a_real_codex_pane_scrolls_rather_than_typing() -> None:
 
 def main() -> int:
     run_team_launcher_tests(globals(), first=())
+    for reason in SKIPPED:
+        print(f"team_launcher_codex_rendered_scrollback_test: the live codex case was skipped: {reason}")
     print("team_launcher_codex_rendered_scrollback_test: ok")
     return 0
 

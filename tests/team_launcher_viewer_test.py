@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 import live_boundary; live_boundary.isolate()  # noqa: E402,E702 - SYRD-627 (live-home pane stores), within the line budget
-from team_launcher_test_helpers import *; from provider_store_fixture import owned_record, transcript_for  # noqa: E702 - SYRD-638 (a session as its provider files it), within the line budget
+from team_launcher_test_helpers import *; from provider_store_fixture import owned_record, session_line, transcript_for  # noqa: E702 - SYRD-638 (a session as its provider files it), within the line budget
 
 def test_viewer_session_argument_is_required_and_has_no_global_default() -> None:
     signature = inspect.signature(team_launcher.launch_tmux_viewer_session)
@@ -720,7 +720,7 @@ def test_all_detached_undetected_viewer_launch_still_reports_detached_start_fail
                     "desktop_access": {"mode": "headless"},
                     "project": "porter",
                     "layout": str(layout),
-                    "repository": str(repo),
+                    "repository": str(repo), "session_dir": str(tmp_path / "sessions"),  # never the account's store
                     "roles": [
                         {
                             "role": "research",
@@ -1223,20 +1223,17 @@ def test_reload_syncs_live_cli_and_model_from_process_argv_before_relaunch() -> 
         config = load_project_config("pgu", config_path)
         research = next(role for role in config.roles if role.role == "research")
         config.session_dir.mkdir(parents=True, exist_ok=True)
+        # claude is live, and the conversation it holds is claude's own (SYRD-638), in a worktree every role shares.
         transcript = tmp_path / "claude-research-session.jsonl"
-        transcript.write_text(transcript_for(research), encoding="utf-8")
-        (config.session_dir / session_file_name(research.target)).write_text(
-            _session_payload(
-                research.target,
-                "live-research-session",
-                {
-                    "session_id": "live-research-session",
-                    "cwd": "/home/agent/Projects/pgu",
-                    "transcript_path": str(transcript),
-                },
-            ),
-            encoding="utf-8",
-        )
+        transcript.write_text(session_line("claude", "live-research-session", research.workdir) + "\n", encoding="utf-8")
+        record = json.loads(_session_payload(research.target, "live-research-session", {
+            "session_id": "live-research-session", "cwd": research.workdir, "transcript_path": str(transcript)}))
+        owned_record(config.session_dir, research).write_text(json.dumps({**record, "source": "claude.SessionStart"}) + "\n")
+        # The idle-checkpoint gate asks a live pane, so it is answered (and must be asked); the snapshot's pids are
+        # fiction and never signalled: the old pane has gone (SYRD-767's wait has its own suites; SYRD-813).
+        from scripts import role_pane_entry as entry, runtime_handover as handover; asked: list[str] = []  # noqa: E702
+        saved = entry.desktop_reload_is_safe, handover.pane_holders
+        entry.desktop_reload_is_safe, handover.pane_holders = (lambda role, _d: asked.append(role.target) or True), (lambda *_a, **_k: [])
         runner = FakeRunner(existing_sessions={"pgu-research"}, pane_pids={research.target: 1200})
         process_launcher = RecordingProcessLauncher()
         original_snapshot = _patch_process_snapshot(
@@ -1264,6 +1261,8 @@ def test_reload_syncs_live_cli_and_model_from_process_argv_before_relaunch() -> 
             )
         finally:
             team_launcher._process_snapshot = original_snapshot
+            entry.desktop_reload_is_safe, handover.pane_holders = saved
+        assert asked == [research.target], asked
 
         synced = json.loads(config_path.read_text(encoding="utf-8"))
         synced_research = next(role for role in synced["roles"] if role["role"] == "research")
@@ -1276,8 +1275,8 @@ def test_reload_syncs_live_cli_and_model_from_process_argv_before_relaunch() -> 
         assert synced_research["yolo"] is True
 
         research_new_session = next(call for call in runner.calls if call[:5] == ["tmux", "new-session", "-d", "-s", "pgu-research"])
-        assert "claude --resume live-research-session --model claude-sonnet-5" in research_new_session[-1]
-        assert "codex resume" not in research_new_session[-1]
+        assert "claude --resume live-research-session --model claude-sonnet-5" in tmux_first_command(research_new_session)[-1]
+        assert "codex resume" not in tmux_first_command(research_new_session)[-1]
 
 def test_reload_sync_leaves_config_unchanged_when_live_matches() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher.") as tmp:

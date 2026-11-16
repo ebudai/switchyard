@@ -153,11 +153,23 @@ INSERT INTO ticket_board.tickets (
     )
 
 
+def commit_cache(root: Path) -> Path:
+    """The board's trusted commit cache: a bare repository, as on a host, holding this checkout's commits.
+
+    The cache reader refuses a linked worktree's `.git` file by design (SYRD-699), and the suite runs from worktrees
+    as often as from clones, so it never hands the checkout itself over (SYRD-813). `--shared` borrows the objects.
+    """
+    cache = root / "commit-cache.git"
+    if not cache.exists():
+        run(["git", "clone", "-q", "--bare", "--shared", str(ROOT), str(cache)])
+    return cache
+
+
 def make_app(root: Path, socket_dir: Path, port: int, dbname: str, role: str) -> TicketBoardApp:
     return TicketBoardApp(
         root / "frames",
         root / "assets",
-        commit_git_dir=ROOT,
+        commit_git_dir=commit_cache(root),
         database_url=conninfo(socket_dir, port, dbname, role),
     )
 
@@ -195,6 +207,10 @@ WHERE table_schema = 'ticket_board'
         alternate_commit_hash = run(["git", "-C", str(ROOT), "rev-parse", "HEAD^"]).stdout.strip()
 
         service_app = make_app(root, socket_dir, port, dbname, SERVICE_ROLE)
+        try:  # first, by name: the board verifies this checkout's commits from the cache it was given (SYRD-813)
+            service_app._validate_commit_hash(commit_hash)
+        except ValueError as exc:
+            raise AssertionError(f"the board cannot verify this checkout's commits from its commit cache: {exc}") from exc
         service_conn = conninfo(socket_dir, port, dbname, SERVICE_ROLE)
         assert service_app.workflow_columns() == EXPECTED_COLUMNS
         initial_snapshot = service_app.snapshot()

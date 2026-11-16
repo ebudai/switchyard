@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 from team_launcher_test_helpers import *
+
+#: Who owns the shared-checkout fixture: the account running the suite, never a host's real `agent` (SYRD-813).
+OWNER = owner_home_sandbox.INVOKING_ACCOUNT
 from provider_store_fixture import owned_record, transcript_for  # SYRD-638: a session as its provider files it
 
 def test_visible_start_fails_before_attach_when_cli_exits_immediately() -> None:
@@ -279,22 +282,25 @@ def test_start_runs_research_detached_before_opening_visible_layout() -> None:
             git_checkout_shared_ref_args(config),
             git_clean_shared_checkout_args(config),
         ]
+        assert all(call in runner.calls for call in shared_checkout_calls), runner.calls[:12]  # run directly, as owner
         shared_checkout_indexes = [runner.calls.index(call) for call in shared_checkout_calls]
         assert shared_checkout_indexes == sorted(shared_checkout_indexes)
         assert not any(call[:5] == ["git", "-C", call[2], "worktree", "add"] for call in runner.calls)
         research_new_session = next(call for call in runner.calls if call[:5] == ["tmux", "new-session", "-d", "-s", "pgu-research"])
         assert research_new_session[:5] == ["tmux", "new-session", "-d", "-s", "pgu-research"]
         assert research_new_session[5:7] == ["-c", str(tmp_path / "repo")]
-        assert "TICKET_BOARD_PANE_TARGET=pgu-research:0.0" in research_new_session[-1]
-        assert "PGU_PANE_TARGET=pgu-research:0.0" in research_new_session[-1]
-        assert "--model claude-opus-5" in research_new_session[-1]
+        assert "TICKET_BOARD_PANE_TARGET=pgu-research:0.0" in tmux_first_command(research_new_session)[-1]
+        assert "PGU_PANE_TARGET=pgu-research:0.0" in tmux_first_command(research_new_session)[-1]
+        assert "--model claude-opus-5" in tmux_first_command(research_new_session)[-1]
         state = _read_pane_state(tmp_path / "pane-state", "pgu-research:0.0")
         assert state["state"] == "idle"
         assert state["source"] == "team_launcher.start"
         layout = json.loads(layout_output.read_text(encoding="utf-8"))
         assert {leaf.get("WorkingDirectory") for leaf in team_launcher._layout_leaves(layout)} == {str(tmp_path / "repo")}
         assert len(process_launcher.calls) == 1
-        assert process_launcher.calls[0]["args"] == konsole_launch_args(layout_output, window_title="pgu")
+        # Konsole reads its profile from beside the layout (4265ce05).
+        assert process_launcher.calls[0]["args"] == konsole_launch_args(layout_output, window_title="pgu",
+                                                                        config_dir=layout_output.parent)
         assert process_launcher.calls[0]["kwargs"]["start_new_session"] is True
         assert not any(call == konsole_launch_args(layout_output, window_title="pgu") for call in runner.calls)
         assert ["tmux", "attach", "-t", "pgu-research"] not in runner.calls
@@ -330,7 +336,7 @@ def test_plain_shared_checkout_git_runs_as_owner_when_launcher_user_differs() ->
         owner_git_calls = [
             call[3:]
             for call in runner.calls
-            if call[:3] == ["sudo", "-u", "agent"] and len(call) > 3 and call[3] == "git"
+            if call[:3] == ["sudo", "-u", OWNER] and len(call) > 3 and call[3] == "git"
         ]
         expected_refresh_calls = {
             tuple(git_fetch_worktree_ref_args(config)),
@@ -350,7 +356,7 @@ def test_plain_shared_checkout_git_runs_as_owner_when_launcher_user_differs() ->
         assert [
             "sudo",
             "-u",
-            "agent",
+            OWNER,
             "-H",
             str(ROOT / "scripts" / "team-launcher"),
             "pgu",
@@ -373,7 +379,7 @@ def test_plain_shared_checkout_git_stays_direct_when_already_owner() -> None:
         process_launcher = RecordingProcessLauncher()
         original_current_user_name = team_launcher.current_user_name
         try:
-            team_launcher.current_user_name = lambda: "agent"
+            team_launcher.current_user_name = lambda: OWNER
             assert (
                 launch_project(
                     config,
@@ -392,7 +398,7 @@ def test_plain_shared_checkout_git_stays_direct_when_already_owner() -> None:
             team_launcher.current_user_name = original_current_user_name
 
         assert git_fetch_worktree_ref_args(config) in runner.calls
-        assert not any(call[:3] == ["sudo", "-u", "agent"] and len(call) > 3 and call[3] == "git" for call in runner.calls)
+        assert not any(call[:3] == ["sudo", "-u", OWNER] and len(call) > 3 and call[3] == "git" for call in runner.calls)
 
 def main() -> int:
     run_team_launcher_tests(globals(), first=())

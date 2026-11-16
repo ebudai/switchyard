@@ -204,7 +204,11 @@ def test_the_authorized_human_reaches_the_owner_through_the_bridge_alone() -> No
         return subprocess.CompletedProcess(list(argv), 0, "", "")
 
     original = team_launcher.current_user_name
+    original_bundle = team_launcher.ensure_staged_role_bundle_before_crossing
     team_launcher.current_user_name = lambda: HUMAN  # type: ignore[assignment]
+    # So is the bundle staging after it (32654e78), which read this host's /usr/local/lib/switchyard and
+    # /opt/switchyard/current; single_owner_staged_tooling_test drives it (SYRD-813).
+    team_launcher.ensure_staged_role_bundle_before_crossing = lambda *_args, **_kwargs: ""  # type: ignore[assignment]
     try:
         # The subject here is what crosses the boundary at the PRODUCTION path,
         # so the SYRD-211 staged-helper verification is stood down rather than
@@ -216,9 +220,10 @@ def test_the_authorized_human_reaches_the_owner_through_the_bridge_alone() -> No
         )
         raise AssertionError("the bridge should have run")
     except SystemExit as exit_error:
-        assert int(str(exit_error) or 0) == 0, exit_error
+        assert str(exit_error.code or 0) == "0", exit_error
     finally:
         team_launcher.current_user_name = original  # type: ignore[assignment]
+        team_launcher.ensure_staged_role_bundle_before_crossing = original_bundle  # type: ignore[assignment]
 
     # Run rather than exec'd, because the bridge answers with a handoff the
     # caller has to act on afterwards; what crosses the boundary is unchanged

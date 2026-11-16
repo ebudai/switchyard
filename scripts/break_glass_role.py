@@ -90,12 +90,19 @@ def instructions(grant: int, hold: int, operations: list[str], client: str, expi
              "hold, the roles and tickets it affects, and the recovery choices. It holds no ticket text.", "",
              "You may make ONE board operation. The board enforces this: after one operation, a refusal, an abort, "
              f"or {expires}, the grant has ended and this session is stopped.", "", "Allowed, one of:"]
-    examples = {"record": "record --ticket PREFIX-N --text 'what the board should know'",
-                "isolate": "isolate --ticket PREFIX-N",
-                "reassign": "reassign --ticket PREFIX-N --assignee ROLE --reason 'why'",
-                "unblock": "unblock --ticket PREFIX-N --blocker BLOCKER"}
+    # Prose goes in through a quoted heredoc, which the shell leaves as written (SYRD-753, SYRD-807).
+    examples = {"record": ("record --ticket PREFIX-N --text-file -", "what the board should know"),
+                "isolate": ("isolate --ticket PREFIX-N", ""),
+                "reassign": ("reassign --ticket PREFIX-N --assignee ROLE --reason-file -", "why"),
+                "unblock": ("unblock --ticket PREFIX-N --blocker BLOCKER", "")}
     for operation in operations:
-        lines.append(f"- `python3 {client} {examples[operation]}`")
+        command, prose = examples[operation]
+        if prose:
+            # At column 0: a heredoc ends only at a line that is exactly its word, and an indented block keeps the
+            # indent -- the role would send it, and the "EOF", as its one operation's text (Audit of d23f7c53).
+            lines += [f"- {operation}:", "", "```", f"python3 {client} {command} <<'EOF'", prose, "EOF", "```", ""]
+        else:
+            lines.append(f"- `python3 {client} {command}`")
     lines += [f"- `python3 {client} abort` -- end the grant without a change.", "",
               "Every mutation passes the board's ordinary rules; a refusal is final for this grant."]
     return "\n".join(lines) + "\n"

@@ -227,6 +227,107 @@ def test_the_argument_shapes_are_exact() -> None:
     check(bg.digest("T" * 43) == __import__("hashlib").sha256(b"T" * 43).hexdigest(), "the board keeps the sha256")
 
 
+def test_prose_reaches_the_board_through_stdin_or_a_file() -> None:
+    """SYRD-807: the instructions told the role to type its text inline (`--text '...'`), through the shell; now the
+    client takes `--text-file`/`--reason-file` (a path, or `-` for stdin), and the instructions teach the heredoc."""
+    import http.server
+    import threading
+
+    posted: list[dict] = []
+
+    class Board(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_a) -> None:
+            pass
+
+        def do_POST(self) -> None:
+            posted.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            body = b'{"state": "completed"}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Board)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    prose = "It's `stuck` -- \"quoted\" $HOME; and a second line\nhere"
+    try:
+        with tempfile.TemporaryDirectory(prefix="syrd807.") as raw:
+            token, reason = Path(raw) / "token", Path(raw) / "reason.txt"
+            token.write_text("T" * 43)
+            reason.write_text(prose + "\n")
+            env = {"PATH": "/usr/bin:/bin", "TICKET_BOARD_BREAK_GLASS_TOKEN_FILE": str(token),
+                   "TICKET_BOARD_URL": f"http://127.0.0.1:{server.server_address[1]}/"}
+            client = str(ROOT / "scripts/ticket_board/break_glass.py")
+            record = subprocess.run([sys.executable, "-I", client, "record", "--ticket", "PGU-2", "--text-file", "-"],
+                                    input=prose + "\n", env=env, capture_output=True, text=True, timeout=30)
+            reassign = subprocess.run([sys.executable, "-I", client, "reassign", "--ticket", "PGU-2", "--assignee",
+                                       "main", "--reason-file", str(reason)], env=env, capture_output=True, text=True,
+                                      timeout=30)
+            both = subprocess.run([sys.executable, "-I", client, "record", "--ticket", "PGU-2", "--text", "x",
+                                   "--text-file", "-"], input="y", env=env, capture_output=True, text=True, timeout=30)
+    finally:
+        server.shutdown()
+    check(record.returncode == 0 and posted[0]["args"] == {"ticket": "PGU-2", "text": prose},
+          f"record's text from stdin reaches the board exactly as written: {posted[:1]} {record.stderr}")
+    check(reassign.returncode == 0 and posted[1]["args"] == {"ticket": "PGU-2", "assignee": "main", "reason": prose},
+          f"reassign's reason from a file reaches the board exactly as written: {posted[1:2]} {reassign.stderr}")
+    check(both.returncode == 2 and "not both" in both.stderr and len(posted) == 2,
+          f"text given both ways is refused before anything is sent: {both.stderr}")
+    taught = bgr.instructions(7, 3, ["record", "isolate", "reassign", "unblock"], "/sandbox/break-glass", "in 20 min")
+    check("record --ticket PREFIX-N --text-file - <<'EOF'" in taught and "--reason-file - <<'EOF'" in taught
+          and "--text '" not in taught and "--reason '" not in taught,
+          f"the instructions teach prose through a quoted heredoc, never inline: {taught}")
+
+
+def test_the_taught_heredocs_send_what_they_say() -> None:
+    """Audit of d23f7c53: each fenced block was indented in its list item, so its `EOF` was never the heredoc's end
+    and the role's one operation sent the indent and an "EOF" as its text. Each block INSTRUCTIONS.md teaches is run
+    here exactly as rendered, through bash, with the real client, against a stand-in board."""
+    import http.server
+    import re
+    import threading
+
+    posted: list[dict] = []
+
+    class Board(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_a) -> None:
+            pass
+
+        def do_POST(self) -> None:
+            posted.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            body = b'{"state": "completed"}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Board)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    client = ROOT / "scripts/ticket_board/break_glass.py"
+    taught = bgr.instructions(7, 3, ["record", "isolate", "reassign", "unblock"], str(client), "in 20 min")
+    blocks = re.findall(r"^[ \t]*```\n(.*?)^[ \t]*```$", taught, flags=re.M | re.S)
+    ran = []
+    try:
+        with tempfile.TemporaryDirectory(prefix="syrd807.") as raw:
+            token = Path(raw) / "token"
+            token.write_text("T" * 43)
+            env = {"PATH": "/usr/bin:/bin", "TICKET_BOARD_BREAK_GLASS_TOKEN_FILE": str(token),
+                   "TICKET_BOARD_URL": f"http://127.0.0.1:{server.server_address[1]}/"}
+            for block in blocks:
+                block = block.replace("python3 ", f"{sys.executable} -I ", 1).replace("PREFIX-N", "PGU-2")
+                block = block.replace("--assignee ROLE", "--assignee main")
+                done = subprocess.run(["bash", "-c", block], env=env, capture_output=True, text=True, timeout=30)
+                ran.append((done.returncode, done.stderr.strip()[-200:]))
+    finally:
+        server.shutdown()
+    sent = {p["operation"]: p["args"] for p in posted}
+    check(len(blocks) == 2 and all(code == 0 and not said for code, said in ran),
+          f"each taught block runs as written, with no warning from bash: {len(blocks)} blocks {ran}")
+    check(sent.get("record", {}).get("text") == "what the board should know"
+          and sent.get("reassign", {}).get("reason") == "why",
+          f"and sends exactly the text its example shows: {sent}")
+
+
 def test_only_a_named_operator_through_pkexec_may_start_one() -> None:
     for kwargs, said in (({"euid": 1000}, "root's to start"), ({"operator": Operator(source="sudo")}, "elevated by sudo"),
                          ({"operator": Operator(known=False)}, "has to be authorized"), ({"reason": " "}, "needs a reason")):

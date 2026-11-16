@@ -183,10 +183,26 @@ def main(argv: list[str]) -> int:
     parser.add_argument("operation", choices=[*OPERATIONS, "abort"])
     parser.add_argument("--ticket")
     parser.add_argument("--text")
+    parser.add_argument("--text-file", help="read --text from this file, or from stdin for -")
     parser.add_argument("--assignee")
     parser.add_argument("--reason")
+    parser.add_argument("--reason-file", help="read --reason from this file, or from stdin for -")
     parser.add_argument("--blocker")
     args = parser.parse_args(argv)
+    # SYRD-807: prose comes through a file or stdin (a quoted heredoc), never through the shell (SYRD-753).
+    for name in ("text", "reason"):
+        source = getattr(args, f"{name}_file")
+        if source is None:
+            continue
+        if getattr(args, name) is not None:
+            print(f"break-glass: give --{name} or --{name}-file, not both", file=sys.stderr)
+            return 2
+        try:
+            value = sys.stdin.read() if source == "-" else Path(source).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            print(f"break-glass: cannot read --{name}-file {source}: {exc}", file=sys.stderr)
+            return 2
+        setattr(args, name, value.rstrip("\n"))
     token_file = os.environ.get("TICKET_BOARD_BREAK_GLASS_TOKEN_FILE", "")
     board_url = os.environ.get("TICKET_BOARD_URL", "")
     if not token_file or not board_url:

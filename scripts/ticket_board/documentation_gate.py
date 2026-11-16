@@ -70,7 +70,10 @@ import copy
 from pathlib import PurePosixPath
 from typing import Any, Callable, Iterable
 
-from .publisher_stage import canonical_publisher_returns
+try:
+    from .publisher_stage import canonical_publisher_returns
+except ImportError:  # pragma: no cover - `python write_client.py` runs outside the package (SYRD-807)
+    from publisher_stage import canonical_publisher_returns
 
 LIBRARIAN_ROLE = "librarian"
 LIBRARIAN_KIND = "reviewer"

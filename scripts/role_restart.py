@@ -51,13 +51,20 @@ import fcntl
 import json
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any, Callable, Sequence
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 
-from scripts import launch_environment
+if __name__ == "__main__":
+    # Root's runuser runs this file as a script, isolated (`-I`): its tree is on no path until this puts it there, and
+    # the import below needs it (SYRD-801: `sudo switchyard restart-role` died on "No module named 'scripts'").
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts import launch_environment  # noqa: E402 - after the operator entry's path, above
 
 BOARD_TIMEOUT_SECONDS = 5.0
 REGISTER_TIMEOUT_SECONDS = 90.0
@@ -206,7 +213,13 @@ def _me() -> int:
 
 def other_work(pane_pid: int, proc_root: Path) -> list[int]:
     """The pane's live processes that are neither this command nor what runs it (its ancestors -- the pane's CLI and
-    the shell its tool started) nor this command's own children: work the pane's end would kill."""
+    the shell its tool started) nor this command's own children: work the pane's end would kill.
+
+    Nor the rest of the command line that runs it, when the tool started that line in a session of its own: the
+    `tail` of `switchyard restart-role ... | tail`, which ends with it, before the turn does (SYRD-801: a Claude Code
+    Director's restart of itself named its own pipeline as work besides it). Its session is its own when the session's
+    leader is one of this command's ancestors below the pane's root; a command in the pane's own session -- typed at a
+    shell that is the pane -- shares it with the pane's other work, and is given nothing for it."""
     table = _table(proc_root)
     mine, pid = set(), _me()
     while pid in table and pid not in mine:
@@ -214,7 +227,27 @@ def other_work(pane_pid: int, proc_root: Path) -> list[int]:
         pid = table[pid][0]
     tree = pane_tree(pane_pid, proc_root)
     below = _descendants(table, _me())
-    return sorted(p for p in tree if p not in mine and p not in below)
+    session = _session(_me(), proc_root)
+    line = {p for p in tree if _session(p, proc_root) == session} \
+        if session in mine and session in tree and session != pane_pid else set()
+    return sorted(p for p in tree if p not in mine and p not in below and p not in line)
+
+
+def _name(pid: int, proc_root: Path) -> str:
+    try:
+        stat = (proc_root / str(pid) / "stat").read_text()
+        return stat[stat.index("(") + 1:stat.rindex(")")]
+    except (OSError, ValueError):
+        return ""
+
+
+def _session(pid: int, proc_root: Path) -> int | None:
+    """The kernel's session id of `pid`; None when it cannot be read."""
+    try:
+        stat = (proc_root / str(pid) / "stat").read_text()
+        return int(stat[stat.rindex(")") + 2:].split()[3])
+    except (OSError, ValueError, IndexError):
+        return None
 
 
 def ended(pid: int, start: int, proc_root: Path) -> bool:
@@ -327,7 +360,7 @@ def reconnect_slots(config: Any, *, config_path: Path, role_name: str, runner: C
 
 
 def refusals(role: Any, facts: dict[str, Any], *, pane: tuple[int, int] | None, busy: bool,
-             while_holding: Sequence[str], others: Sequence[int] = ()) -> list[str]:
+             while_holding: Sequence[str], others: Sequence[object] = ()) -> list[str]:
     """Every reason not to restart this role now; empty when it may be."""
     out: list[str] = []
     declared = facts["declared"]
@@ -489,7 +522,8 @@ def restart_role_command(
         # The caller's own pane is busy with the very turn that runs this command, which the successor waits out; so
         # there its turn is no refusal, but any other process in the pane is -- the pane's end would kill it.
         busy = alive and not own and role_runtime._is_busy(role, pane_state_dir=pane_state_dir, runner=role_runner)
-        others = other_work(pane[0], root) if own and pane else []
+        # Each named as the kernel names it, so the refusal says what it would end (SYRD-801).
+        others = [f"{pid} {_name(pid, root)}".strip() for pid in other_work(pane[0], root)] if own and pane else []
         problems = refusals(role, facts, pane=pane, busy=busy, while_holding=while_holding, others=others)
         session_dir = launcher.role_session_dir(config, role)
         if not problems:
@@ -648,8 +682,4 @@ def main(argv: Sequence[str]) -> int:
 
 
 if __name__ == "__main__":
-    import sys
-
-    sys.dont_write_bytecode = True
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     raise SystemExit(main(sys.argv[1:]))

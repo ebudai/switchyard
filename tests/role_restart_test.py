@@ -60,10 +60,10 @@ class Kernel:
         self.root = root
 
     def spawn(self, pid: int, start: int, env: dict[str, str] | None = None, comm: str = "claude", ppid: int = 1,
-              state: str = "S") -> None:
+              state: str = "S", sid: int = 0) -> None:
         d = self.root / str(pid)
         d.mkdir(parents=True, exist_ok=True)
-        fields = [state, str(ppid)] + ["0"] * 17 + [str(start)] + ["0"] * 5
+        fields = [state, str(ppid), "0", str(sid)] + ["0"] * 15 + [str(start)] + ["0"] * 5
         (d / "stat").write_text(f"{pid} ({comm}) {' '.join(fields)}\n")
         (d / "environ").write_bytes(b"\0".join(f"{k}={v}".encode() for k, v in (env or {}).items()) + b"\0")
 
@@ -458,8 +458,44 @@ def test_the_directors_own_turn_is_no_refusal_but_other_work_is() -> None:
         rig.busy = True
         kernel.spawn(4110, 510, comm="pytest", ppid=4101)  # a background command of the CLI's
         code = rig.run()
-        check(code == 1 and rig.armed == [] and any("runs work besides this command (pid 4110)" in s for s in rig.said),
+        check(code == 1 and rig.armed == [] and any("runs work besides this command (pid 4110 pytest)" in s for s in rig.said),
               f"a background command still running from its own pane is refused, nothing armed: {rig.said}")
+    # SYRD-801: Claude Code starts each tool command in a session of its own. A Director's `switchyard restart-role
+    # ... | tail` has its `tail` beside it there: the same command line, ending with it -- no work besides it.
+    with project() as (config, path, kernel, base):
+        rig = Rig(config, path, kernel, base, role="director")
+        in_own_pane(rig)
+        rig.busy = True
+        kernel.spawn(4102, 502, comm="bash", ppid=4101, sid=4102)  # the tool's shell: a session of its own
+        kernel.spawn(4103, 503, comm="python3", ppid=4102, sid=4102)  # this command
+        kernel.spawn(4106, 506, comm="tail", ppid=4102, sid=4102)  # the other end of its pipe
+        kernel.spawn(4107, 507, comm="tee", ppid=4102, sid=4102)
+        code = rig.run()
+        check(code == 0 and rig.armed == ["director"] and not any("work besides" in s for s in rig.said),
+              f"its own command line's pipeline, in the session its tool started, is part of this command: {rig.said}")
+    with project() as (config, path, kernel, base):
+        rig = Rig(config, path, kernel, base, role="director")
+        in_own_pane(rig)
+        rig.busy = True
+        kernel.spawn(4102, 502, comm="bash", ppid=4101, sid=4102)
+        kernel.spawn(4103, 503, comm="python3", ppid=4102, sid=4102)
+        kernel.spawn(4106, 506, comm="tail", ppid=4102, sid=4102)
+        kernel.spawn(4110, 510, comm="pytest", ppid=4101, sid=4110)  # another tool command: a session of its own
+        code = rig.run()
+        check(code == 1 and rig.armed == [] and any("runs work besides this command (pid 4110 pytest)" in s for s in rig.said),
+              f"a background command in another session is still work besides it, the pipeline still not: {rig.said}")
+    with project() as (config, path, kernel, base):
+        rig = Rig(config, path, kernel, base, role="director")
+        in_own_pane(rig)
+        rig.busy = True
+        for pid, start, comm, ppid in ((4100, 500, "bash", 1), (4101, 501, "codex", 4100), (4102, 502, "bash", 4101),
+                                       (4103, 503, "python3", 4102)):
+            kernel.spawn(pid, start, comm=comm, ppid=ppid, sid=4100)  # all in the pane's own session
+        kernel.spawn(4108, 508, comm="sleep", ppid=4100, sid=4100)  # the pane shell's background job
+        code = rig.run()
+        check(code == 1 and rig.armed == [] and any("runs work besides this command (pid 4108 sleep)" in s for s in rig.said),
+              f"in the pane's own session, the session is the pane's, not this command's: its other work refuses: "
+              f"{rig.said}")
     with project() as (config, path, kernel, base):
         rig = Rig(config, path, kernel, base, role="director")
         in_own_pane(rig)
@@ -541,7 +577,7 @@ def test_every_depth_of_the_pane_is_counted() -> None:
             kernel.spawn(4300 + depth, 700 + depth, ppid=parent)
             parent = 4300 + depth
         code = rig.run()
-        check(code == 1 and rig.armed == [] and any("4309, 4310)" in s for s in rig.said)
+        check(code == 1 and rig.armed == [] and any("4309 claude, 4310 claude)" in s for s in rig.said)
               and not any("421" in s for s in rig.said),
               f"live work deep in its own pane is refused, its own deep children are not: {rig.said}")
 
@@ -749,6 +785,64 @@ def test_discoverable_where_a_restart_is_needed() -> None:
     check("## Restarting a role's pane" in guide and "restarts no pane" in guide
           and "needed only when the board, its listener or the" in guide and "restart that role (`switchyard restart-role" in guide,
           "the Director guide names it, says when stop/start is still needed, and that reopening the window is no restart")
+
+
+def test_a_real_claude_code_pipeline_is_no_work_besides_it() -> None:
+    """SYRD-801, measured: real Claude Code (offline, a stand-in API) as a pane's root runs `look.py | tail` with its
+    Bash tool. That command's tool shell is a session of its own, the `tail` beside it there, and other_work finds
+    nothing -- where it named the `tail` before."""
+    import glob
+    import shutil
+
+    claude = Path("/opt/claude-code/bin/claude")
+    missing = [name for name, ok in (("Claude Code", claude.exists()), ("tmux", shutil.which("tmux")),
+                                     ("unshare", shutil.which("unshare"))) if not ok]
+    if not missing and subprocess.run(["unshare", "-rn", "true"], capture_output=True).returncode != 0:
+        missing.append("an unprivileged user namespace")
+    if missing:
+        print(f"role_restart_test: the real Claude Code probe is skipped: no {', '.join(missing)}")
+        return
+    kit = ROOT / "tests" / "fixtures" / "syrd801_claude_tool_session"
+
+    def leftovers(raw: str) -> set[str]:
+        """What a run could leave: its socket directory, and any process naming this run's own directory (its tmux
+        server's socket, its stand-in API's log) -- this run's paths, which no other command line carries."""
+        found = {f"dir {path}" for path in glob.glob("/tmp/s801.*")}
+        ps = subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True, text=True).stdout
+        mine = os.getpid()
+        return found | {f"process {line.strip()[:160]}" for line in ps.splitlines()
+                        if raw in line and int(line.split(None, 1)[0]) != mine}
+
+    before = set(glob.glob("/tmp/s801.*"))
+    with tempfile.TemporaryDirectory(prefix="syrd801.") as raw:
+        out = Path(raw) / "out"
+        command = Path(raw) / "command.txt"
+        command.write_text(f"python3 {kit / 'look.py'} {out / 'look.json'} {ROOT} 2>&1 | tail -3\n")
+        subprocess.run(["bash", str(kit / "probe.sh"), str(out), str(command)], capture_output=True, text=True,
+                       timeout=150, env={"PATH": "/usr/bin:/bin", "HOME": raw, "LANG": "C.UTF-8"})
+        look = json.loads((out / "look.json").read_text()) if (out / "look.json").exists() else {}
+        left = {item for item in leftovers(raw) if not item.startswith("dir ") or item[4:] not in before}
+    check(look.get("cli") == "claude" and look.get("session") not in (None, look.get("pane"))
+          and look.get("session") in look.get("chain", []),
+          f"Claude Code's tool command runs in a session of its own, which its shell leads: {look}")
+    check([name for _pid, name in look.get("beside", [])] == ["tail"] and look.get("other_work") == [],
+          f"its pipe's `tail` is beside it there, and is no work besides it: {look}")
+    check(not left, f"and the probe leaves nothing behind: no socket directory, tmux server or stand-in API: {left}")
+
+
+def test_the_operators_entry_starts_as_root_starts_it() -> None:
+    """SYRD-801: `sudo switchyard restart-role` died before anything ("No module named 'scripts'"): root runs this file
+    as a script, isolated, and its first tree import ran before the tree was on its path. Here the exact command root
+    builds, less its runuser prefix, from outside the tree and with a bare environment, gets as far as the board."""
+    with project() as (config, path, kernel, base):
+        argv = role_restart.operator_argv(config, path, "director", ["PGU-1"], True)
+        check(argv[:2] == ["runuser", "-u"] and argv[3] == "--" and "-I" in argv, f"root's command: {argv}")
+        done = subprocess.run(argv[4:], cwd=base, capture_output=True, text=True, timeout=60,
+                              env={"PATH": "/usr/bin:/bin", "HOME": str(base), "LANG": "C.UTF-8"})
+        said = done.stdout + done.stderr
+        check(done.returncode == 1 and "Traceback" not in said and "refusing to restart director" in said
+              and "Nothing was changed" in said,
+              f"it starts, reads the board (unreachable here) and refuses in words, changing nothing: {said[-600:]!r}")
 
 
 def main() -> int:

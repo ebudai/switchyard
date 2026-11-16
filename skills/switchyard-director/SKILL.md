@@ -371,9 +371,11 @@ These reshape the running team rather than a ticket, so they belong to you:
   role works, runs a leased command, has its provider held, or holds a ticket
   you did not name with `--while-holding`. Only you, from your registered pane, or
   the operator, as root (`sudo switchyard restart-role ...`), may run it. Run it for
-  your own role last, as the end of your turn (your own busy turn is expected; a
-  background command still running in your pane refuses it): a successor outside your
-  pane does the restart. Run it as it is; clear no environment first. It keeps your
+  your own role last, as the end of your turn (your own busy turn is expected, and
+  so is the rest of the command line you run it in, such as a `| tail` or an
+  `&` job on that line, which the restart ends; a
+  background command still running in your pane refuses it, named process by
+  process): a successor outside your pane does the restart. Run it as it is; clear no environment first. It keeps your
   pane's identity and your agent CLI's own variables out of the launch, reconnects the
   window's display slots, and, if the replacement fails after the old pane ended,
   says the role is stopped and how to start it again. Reopening the

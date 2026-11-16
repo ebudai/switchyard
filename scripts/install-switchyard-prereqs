@@ -12,6 +12,10 @@ SWITCHYARD_PYTHON_VENV="${SWITCHYARD_PYTHON_VENV:-/opt/switchyard/venv}"
 # not merely under some python3 on PATH.
 SWITCHYARD_SERVICE_FALLBACK_PYTHON="${SWITCHYARD_SERVICE_FALLBACK_PYTHON:-/usr/bin/python3}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Read-only package queries, and the running-server check: named here so a test can stand them in (SYRD-828).
+PACMAN_BIN="${SWITCHYARD_PACMAN_BIN:-pacman}"
+DPKG_QUERY_BIN="${SWITCHYARD_DPKG_QUERY_BIN:-dpkg-query}"
+POSTGRES_REPLACED_CHECK="${SWITCHYARD_POSTGRES_REPLACED_CHECK:-}"
 
 usage() {
     cat <<'EOF'
@@ -157,14 +161,87 @@ apt_polkit_packages() {
     fi
 }
 
+#: SYRD-828: this installer never upgrades a package that is already installed. `pacman -S --needed` skips a
+#: current package but UPGRADES an outdated one -- a partial upgrade, without the -Syu that host upgrades are -- and
+#: `apt-get install` does the same for a newer known version. On 2026-11-16 that moved the shared PostgreSQL from
+#: 18.6 to 18.7 under every tenant's running boards. So only what is missing is installed, and the rest is named as
+#: left alone: host upgrades stay the operator's.
+pacman_missing() {
+    # `pacman -T` prints each dependency it cannot satisfy, provides included, and nothing else; exit 127 then.
+    "$PACMAN_BIN" -T "$@" 2>/dev/null || true
+}
+
+apt_missing() {
+    local package
+    for package in "$@"; do
+        if [[ "$("$DPKG_QUERY_BIN" -W -f='${db:Status-Status}' "$package" 2>/dev/null || true)" != "installed" ]]; then
+            printf '%s\n' "$package"
+        fi
+    done
+}
+
+say_package_plan() {
+    local upgrade_hint="$1"
+    shift
+    local -a wanted=("$@") missing=() present=()
+    local package
+    for package in "${wanted[@]}"; do
+        if printf '%s\n' "${MISSING[@]}" | grep -Fxq -- "$package"; then
+            missing+=("$package")
+        else
+            present+=("$package")
+        fi
+    done
+    if ((${#present[@]})); then
+        printf 'Already installed, left as they are (this installer never upgrades a package; host upgrades are yours: %s): %s\n' \
+            "$upgrade_hint" "${present[*]}"
+    fi
+    if ((${#missing[@]})); then
+        printf 'Installing the missing packages: %s\n' "${missing[*]}"
+    else
+        printf 'Nothing to install: every package is already present.\n'
+    fi
+}
+
+#: Installing a package can still move PostgreSQL: pacman pulls a dependency (postgresql-libs) at the version the
+#: new package needs. A running server older than its binary then fails every new backend that loads plpgsql. It
+#: is shared by every tenant on the host, so this never restarts it: it stops, naming the restart (SYRD-828).
+check_running_postgres() {
+    local -a check
+    if [[ -n "$POSTGRES_REPLACED_CHECK" ]]; then
+        check=("$POSTGRES_REPLACED_CHECK")
+    else
+        check=("$PYTHON_BIN" -I "$SCRIPT_DIR/postgres_health.py" --replaced)
+    fi
+    local said status=0
+    said="$("${check[@]}" 2>&1)" || status=$?
+    if (( status == 1 )); then
+        printf '%s\n' "$said" >&2
+        if [[ "$DRY_RUN" -eq 1 ]]; then
+            # Nothing was installed: this is the server as it runs now, and a real run would stop here (Audit, SYRD-828).
+            printf 'Dry run: a real run would stop here: the running PostgreSQL server is older than its installed binary (above). It serves every tenant on this host, so this installer never restarts it; restart it first: sudo systemctl restart postgresql\n'
+            return
+        fi
+        die "the running PostgreSQL server is older than the PostgreSQL now installed, and it serves every tenant on this host, so this installer does not restart it. Restart it yourself: sudo systemctl restart postgresql -- then re-run this installer"
+    elif (( status != 0 )); then
+        printf 'Could not check whether the running PostgreSQL server needs a restart (%s); `switchyard status` warns if it does.\n' \
+            "${said:-exit $status}"
+    fi
+}
+
 manager="$(detect_manager)"
 case "$manager" in
     apt)
         printf 'Refreshing apt package index with apt-get update before installing packages.\n'
         run_root_cmd apt-get update
         # shellcheck disable=SC2046 # one package name per word, on purpose
-        run_root_cmd apt-get install -y \
-            python3 postgresql postgresql-client tmux git curl python3-venv python3-pil acl $(apt_polkit_packages)
+        APT_PACKAGES=(python3 postgresql postgresql-client tmux git curl python3-venv python3-pil acl $(apt_polkit_packages))
+        mapfile -t MISSING < <(apt_missing "${APT_PACKAGES[@]}")
+        say_package_plan "$SUDO_BIN apt-get upgrade" "${APT_PACKAGES[@]}"
+        if ((${#MISSING[@]})); then
+            run_root_cmd apt-get install -y --no-upgrade "${MISSING[@]}"
+            check_running_postgres
+        fi
         printf 'KDE/separate layout users also need Konsole: %s apt-get install -y konsole\n' "$SUDO_BIN"
         ensure_postgres_cluster
         printf 'Installing psycopg into the shared Switchyard Python venv at %s.\n' "$SWITCHYARD_PYTHON_VENV"
@@ -183,8 +260,13 @@ case "$manager" in
         # under Arch's default use_pty, put pacman's [Y/n] on a nested pty that
         # no keystroke reached, so a fresh install hung at its own confirmation
         # (SYRD-235). The confirmation stays: it is the operator's consent.
-        run_root_cmd pacman -S --needed \
-            python postgresql tmux git curl python-pillow python-psycopg acl polkit
+        PACMAN_PACKAGES=(python postgresql tmux git curl python-pillow python-psycopg acl polkit)
+        mapfile -t MISSING < <(pacman_missing "${PACMAN_PACKAGES[@]}")
+        say_package_plan "$SUDO_BIN pacman -Syu first" "${PACMAN_PACKAGES[@]}"
+        if ((${#MISSING[@]})); then
+            run_root_cmd pacman -S --needed "${MISSING[@]}"
+            check_running_postgres
+        fi
         printf 'KDE/separate layout users also need Konsole: %s pacman -S --needed konsole\n' "$SUDO_BIN"
         ensure_postgres_cluster
         printf 'Installing psycopg from the distribution package python-psycopg, which satisfies %s.\n' "$PIP_SPEC"

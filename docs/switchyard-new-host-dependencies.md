@@ -35,6 +35,24 @@ opaque `setfacl` parse error.
 | asset and frame directories | Durable attachments and frame uploads | Generated commands create these directories and grant `boardsvc` access when board-service traversal is enabled. |
 | project repository | User-owned project checkout | `switchyard new` creates and initializes the repository unless told not to; lower-level `team-launcher new` requires one and fails preflight if it is absent. |
 
+### What the prerequisites installer changes
+
+`scripts/install-switchyard-prereqs` installs only the packages that are **missing**. It never upgrades an
+installed one: on pacman it asks `pacman -T` which are unsatisfied and installs only those; on apt it installs
+only those `dpkg-query` does not report installed, with `--no-upgrade`. It names the packages it installed
+and the ones it left as they were. Upgrading the host stays the operator's job (`pacman -Syu`, `apt-get
+upgrade`).
+
+The reason (SYRD-828): `pacman -S --needed` upgrades an installed but outdated package without the matching
+`-Syu`, a partial upgrade. On 2026-11-16 that moved the shared PostgreSQL server's files from 18.6 to 18.7
+while the 18.6 server kept running, and every tenant's next deploy failed loading plpgsql.
+
+Installing a missing package can still move PostgreSQL, for example a dependency pulled in at a newer
+version. So after it installs anything, the installer checks the running server
+(`scripts/postgres_health.py --replaced`). If the server is older than the binary now on disk, the installer
+stops before setting up the cluster and names `sudo systemctl restart postgresql`. It never restarts a server
+that every tenant on the host shares.
+
 ## Development-host state observed
 
 On the PGU development host, these items already existed before this fix:

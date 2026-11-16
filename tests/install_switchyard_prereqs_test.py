@@ -32,9 +32,40 @@ def executed_commands(output: str) -> list[str]:
     return [line for line in output.splitlines() if line.startswith("+ ")]
 
 
-def run_dry(manager: str, *, python_venv: str = "/nonexistent/switchyard-venv") -> str:
+STAND_INS = Path(tempfile.mkdtemp(prefix="syrd828-stand-ins."))
+
+
+def stand_in(name: str, body: str) -> str:
+    """An executable in this suite's own directory: never the host's package manager or PostgreSQL."""
+    path = STAND_INS / name
+    path.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+    path.chmod(0o755)
+    return str(path)
+
+
+def host_with(*, installed: tuple[str, ...] = (), server: str = "current") -> dict[str, str]:
+    """A host whose package database holds `installed` (everything else is missing) and whose running PostgreSQL
+    server is `server`: "current", or "replaced" (older than its installed binary)."""
+    tag = "-".join(installed) or "fresh"
+    listed = " ".join(installed)
+    pacman = stand_in(f"pacman-{tag}", f"""[ "$1" = -T ] || {{ echo "unmodelled pacman $*" >&2; exit 99; }}
+shift; missing=0
+for p in "$@"; do case " {listed} " in *" $p "*) ;; *) echo "$p"; missing=1;; esac; done
+[ $missing = 1 ] && exit 127 || exit 0
+""")
+    dpkg = stand_in(f"dpkg-query-{tag}", f"""p="$(eval echo \\${{$#}})"
+case " {listed} " in *" $p "*) printf installed; exit 0;; *) exit 1;; esac
+""")
+    check = stand_in(f"pg-check-{server}", "echo 'the running PostgreSQL server (pid 42) started before its binary "
+                     "/usr/bin/postgres was replaced'; exit 1\n" if server == "replaced" else "exit 0\n")
+    return {"SWITCHYARD_PACMAN_BIN": pacman, "SWITCHYARD_DPKG_QUERY_BIN": dpkg, "SWITCHYARD_POSTGRES_REPLACED_CHECK": check}
+
+
+def run_dry(manager: str, *, python_venv: str = "/nonexistent/switchyard-venv", host: dict[str, str] | None = None,
+            check: bool = True) -> str:
     env = {
         **os.environ,
+        **(host if host is not None else host_with()),
         "SWITCHYARD_PREREQS_ASSUME_MANAGER": manager,
         "SWITCHYARD_SUDO_BIN": "sudo",
         "SWITCHYARD_PREREQS_FORCE_SUDO_PREFIX": "1",
@@ -47,11 +78,11 @@ def run_dry(manager: str, *, python_venv: str = "/nonexistent/switchyard-venv") 
         [str(SCRIPT), "--dry-run"],
         cwd=ROOT,
         env=env,
-        check=True,
+        check=check,
         text=True,
         capture_output=True,
     )
-    return proc.stdout
+    return proc.stdout if check else proc.stdout + proc.stderr + f"\nexit {proc.returncode}"
 
 
 AGENT_CLI_NAMES = ("claude", "codex", "agy", "hermes")
@@ -117,9 +148,9 @@ def test_apt_commands() -> None:
     output = run_dry("apt", python_venv="/opt/switchyard/venv")
     assert "Refreshing apt package index with apt-get update before installing packages." in output
     assert "+ sudo apt-get update" in output
-    assert f"+ sudo apt-get install -y {APT_AFTER}" in output
+    assert f"+ sudo apt-get install -y --no-upgrade {APT_AFTER}" in output
     apt_install_line = next(line for line in output.splitlines() if line.startswith("+ sudo apt-get install -y "))
-    apt_packages = set(apt_install_line.removeprefix("+ sudo apt-get install -y ").split())
+    apt_packages = set(apt_install_line.removeprefix("+ sudo apt-get install -y --no-upgrade ").split())
     assert apt_packages.isdisjoint(AGENT_CLI_PACKAGE_NAMES)
     assert APT_BEFORE not in output
     assert "KDE/separate layout users also need Konsole: sudo apt-get install -y konsole" in output
@@ -209,6 +240,7 @@ def test_pacman_path_installs_nothing_as_the_invoking_user_when_run_as_root() ->
         "SWITCHYARD_PYTHON_VENV": "/nonexistent/switchyard-venv",
         "SWITCHYARD_INSTALL_ORIGINAL_USER": "alice",
         "SWITCHYARD_PREREQS_TEST_ASSUME_ROOT": "1",
+        **host_with(),
     }
     proc = subprocess.run(
         [str(SCRIPT), "--dry-run"],
@@ -375,6 +407,103 @@ def test_package_sets_match_the_platform_python_strategy() -> None:
     assert set(PACMAN_AFTER.split()) - set(PACMAN_BEFORE.split()) == {"python-pillow", "python-psycopg"}
 
 
+def install_line(output: str, prefix: str) -> list[str]:
+    lines = [line for line in executed_commands(output) if line.startswith(prefix)]
+    return lines[0].removeprefix(prefix).split() if lines else []
+
+
+def test_an_installed_package_is_never_upgraded_by_pacman() -> None:
+    """SYRD-828: `pacman -S --needed` upgraded an installed, outdated postgresql under every running board."""
+    output = run_dry("pacman", host=host_with(installed=("python", "postgresql", "tmux")))
+    installing = install_line(output, "+ sudo pacman -S --needed ")
+    assert installing == ["git", "curl", "python-pillow", "python-psycopg", "acl", "polkit"], (installing, output)
+    assert ("Already installed, left as they are (this installer never upgrades a package; host upgrades are yours: "
+            "sudo pacman -Syu first): python postgresql tmux") in output, output
+    assert "Installing the missing packages: git curl python-pillow python-psycopg acl polkit" in output, output
+    assert not [c for c in executed_commands(output) if "pacman -Sy" in c or "pacman -Su" in c], executed_commands(output)
+
+    everything = run_dry("pacman", host=host_with(
+        installed=("python", "postgresql", "tmux", "git", "curl", "python-pillow", "python-psycopg", "acl", "polkit"),
+        server="replaced"), check=False)
+    assert everything.rstrip().endswith("exit 0"), everything
+    assert install_line(everything, "+ sudo pacman -S") == [], executed_commands(everything)
+    assert "Nothing to install: every package is already present." in everything
+    # Nothing installed, so nothing moved: the running server is not this installer's to report (status does).
+    assert "systemctl restart postgresql" not in everything, everything
+
+
+def test_an_installed_package_is_never_upgraded_by_apt() -> None:
+    output = run_dry("apt", python_venv="/opt/switchyard/venv", host=host_with(installed=("postgresql", "postgresql-client")))
+    installing = install_line(output, "+ sudo apt-get install -y --no-upgrade ")
+    assert installing and "postgresql" not in installing and "postgresql-client" not in installing, (installing, output)
+    assert {"python3", "tmux", "git", "curl", "python3-venv", "python3-pil", "acl"} <= set(installing), installing
+    assert ("Already installed, left as they are (this installer never upgrades a package; host upgrades are yours: "
+            "sudo apt-get upgrade): postgresql postgresql-client") in output, output
+    assert not [c for c in executed_commands(output) if "apt-get upgrade" in c or "dist-upgrade" in c]
+
+
+def run_real(manager: str, *, host: dict[str, str]) -> tuple[int, str, list[str]]:
+    """The installer for real, but every privileged command goes to a stand-in sudo that records it and refuses
+    anything other than the package install, so nothing reaches this host. (exit code, output, sudo's commands)."""
+    log = STAND_INS / f"sudo-{manager}-{len(list(STAND_INS.iterdir()))}.log"
+    sudo = stand_in(log.name + ".sh", f"""echo "$*" >> {log}
+case "$1" in pacman|apt-get) exit 0;; *) exit 1;; esac
+""")
+    proc = subprocess.run([str(SCRIPT)], cwd=ROOT, text=True, capture_output=True, env={
+        **os.environ, **host, "SWITCHYARD_PREREQS_ASSUME_MANAGER": manager, "SWITCHYARD_SUDO_BIN": sudo,
+        "SWITCHYARD_PREREQS_FORCE_SUDO_PREFIX": "1", "SWITCHYARD_PYTHON_BIN": "python3",
+        "SWITCHYARD_PYTHON_VENV": "/nonexistent/switchyard-venv"})
+    return proc.returncode, proc.stdout + proc.stderr, log.read_text().splitlines() if log.exists() else []
+
+
+def test_a_running_server_left_stale_stops_the_install() -> None:
+    """Installing a missing package can still move PostgreSQL (a dependency pulled at a newer version). The server is
+    shared, so the installer never restarts it: it stops, naming the restart, before anything relies on it."""
+    for manager in ("pacman", "apt"):
+        code, said, sudo = run_real(manager, host=host_with(installed=("python",), server="replaced"))
+        assert code == 1, (manager, code, said)
+        assert "started before its binary /usr/bin/postgres was replaced" in said, (manager, said)
+        assert "older than the PostgreSQL now installed" in said, (manager, said)
+        assert "does not restart it. Restart it yourself: sudo systemctl restart postgresql" in said, (manager, said)
+        assert "Ensuring the local PostgreSQL cluster" not in said, (manager, said)
+        assert sudo and all(line.split()[0] in ("pacman", "apt-get") for line in sudo), (manager, sudo)
+    quiet = run_dry("pacman", host=host_with(installed=("python",), server="current"))
+    assert "Ensuring the local PostgreSQL cluster" in quiet and "restart postgresql" not in quiet, quiet
+
+
+def test_a_dry_run_reports_a_stale_server_and_goes_on() -> None:
+    """Audit, SYRD-828: a dry run installs nothing, so it cannot have made the server stale, and it must not die. It
+    says what a real run would do."""
+    for manager in ("pacman", "apt"):
+        said = run_dry(manager, python_venv="/opt/switchyard/venv", host=host_with(installed=("python",), server="replaced"),
+                       check=False)
+        assert said.rstrip().endswith("exit 0"), (manager, said)
+        assert "now installed" not in said, (manager, said)
+        assert "Dry run: a real run would stop here" in said and "sudo systemctl restart postgresql" in said, (manager, said)
+        assert "Ensuring the local PostgreSQL cluster" in said, (manager, said)
+
+
+def test_a_check_that_cannot_run_is_said_and_the_install_goes_on() -> None:
+    """Audit, SYRD-828: a host where the check itself fails -- no systemctl in a container, python3 not usable yet --
+    must not be stopped by it; only a stale server stops an install."""
+    for code in (2, 127):
+        host = {**host_with(installed=("python",)),
+                "SWITCHYARD_POSTGRES_REPLACED_CHECK": stand_in(f"pg-check-broken-{code}", f"echo 'cannot ask'; exit {code}\n")}
+        said = run_dry("pacman", host=host, check=False)
+        assert said.rstrip().endswith("exit 0"), (code, said)
+        assert "Could not check whether the running PostgreSQL server needs a restart (cannot ask)" in said, (code, said)
+        assert "restart postgresql" not in said and "would stop" not in said, (code, said)
+        assert "Ensuring the local PostgreSQL cluster" in said, (code, said)
+
+
+def test_the_default_check_is_postgres_health() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert '"$PYTHON_BIN" -I "$SCRIPT_DIR/postgres_health.py" --replaced' in source
+    usage = subprocess.run([sys.executable, "-I", str(ROOT / "scripts" / "postgres_health.py"), "--bogus"],
+                           capture_output=True, text=True)
+    assert usage.returncode == 2 and "--replaced" in usage.stderr, usage
+
+
 def test_system_site_venv_runs_ticket_board_entrypoint() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         venv = Path(tmpdir) / "venv"
@@ -424,4 +553,10 @@ if __name__ == "__main__":
     test_prereqs_rejects_the_removed_cli_flags()
     test_package_sets_match_the_platform_python_strategy()
     test_system_site_venv_runs_ticket_board_entrypoint()
+    test_an_installed_package_is_never_upgraded_by_pacman()
+    test_an_installed_package_is_never_upgraded_by_apt()
+    test_a_running_server_left_stale_stops_the_install()
+    test_a_dry_run_reports_a_stale_server_and_goes_on()
+    test_a_check_that_cannot_run_is_said_and_the_install_goes_on()
+    test_the_default_check_is_postgres_health()
     print("install_switchyard_prereqs_test: ok")

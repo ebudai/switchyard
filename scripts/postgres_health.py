@@ -105,3 +105,24 @@ def server_replaced(*, runner: Callable[..., Any] = subprocess.run, proc: Path =
         return (f"the running PostgreSQL server (pid {pid}) started before its binary {binary} was replaced: a new "
                 f"connection may fail to load its libraries. Restart it: `{RESTART}`")
     return ""
+
+
+def main(argv: list[str] | None = None) -> int:
+    """`postgres_health.py --replaced`: say whether the running server predates its binary; exit 1 when it does.
+
+    Stdlib only, so the prerequisites installer runs it with `python3 -I` from the source checkout (SYRD-828)."""
+    import sys
+
+    args = sys.argv[1:] if argv is None else argv
+    if args != ["--replaced"]:
+        print("usage: postgres_health.py --replaced", file=sys.stderr)
+        return 2
+    said = server_replaced()
+    if said:
+        print(said)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -39,6 +39,12 @@ def _dry_run(manager: str, *, apt_has_pkexec: bool | None = None) -> str:
                 encoding="utf-8",
             )
             stub.chmod(0o755)
+        # SYRD-828: the installer installs only what is missing, so this host's own packages would decide the
+        # command. These are a fresh host's answers -- every package missing -- and a server needing no restart.
+        for name, body in (("pacman-fresh", '[ "$1" = -T ] || exit 99\nshift\nfor p in "$@"; do echo "$p"; done\nexit 127\n'),
+                           ("dpkg-query-fresh", "exit 1\n"), ("postgres-current", "exit 0\n")):
+            (bin_dir / name).write_text("#!/bin/sh\n" + body, encoding="utf-8")
+            (bin_dir / name).chmod(0o755)
         proc = subprocess.run(
             [str(PREREQS), "--dry-run"],
             cwd=ROOT,
@@ -50,6 +56,9 @@ def _dry_run(manager: str, *, apt_has_pkexec: bool | None = None) -> str:
                 "SWITCHYARD_PREREQS_FORCE_SUDO_PREFIX": "1",
                 "SWITCHYARD_PYTHON_BIN": "python3",
                 "SWITCHYARD_PYTHON_VENV": "/nonexistent/switchyard-venv",
+                "SWITCHYARD_PACMAN_BIN": str(bin_dir / "pacman-fresh"),
+                "SWITCHYARD_DPKG_QUERY_BIN": str(bin_dir / "dpkg-query-fresh"),
+                "SWITCHYARD_POSTGRES_REPLACED_CHECK": str(bin_dir / "postgres-current"),
             },
             check=True,
             text=True,

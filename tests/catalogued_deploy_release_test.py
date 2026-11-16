@@ -68,12 +68,12 @@ class Host:
     """systemd and the deploy, as the recording runner answers them."""
 
     def __init__(self, tenant, board, unit_dir: Path, trusted_release: Path,
-                 *, stop="ok", units="ok", deploy="ok", start="ok", restart="ok", database="ok") -> None:
+                 *, stop="ok", units="ok", deploy="ok", start="ok", restart="ok", database="ok", postgres="ok") -> None:
         self.tenant, self.board = tenant, board
         self.unit_dir = unit_dir
         self.trusted_release = trusted_release
         self.outcome = {"stop": stop, "units": units, "deploy": deploy, "start": start, "restart": restart,
-                        "database": database}
+                        "database": database, "postgres": postgres}
         self.steps: list[str] = []
         # SYRD-700: whether root's template chain installed a staged (legacy) board or canary itself.
         self.legacy_installed = False
@@ -128,6 +128,11 @@ class Host:
                 return result(0)
             self.steps.append("restart board")
             return result(0 if self.outcome["restart"] == "ok" else 1)
+        if argv[:4] == ["runuser", "-u", "postgres", "--"] and argv[-2:] == ["-c", "DO $$ BEGIN NULL; END $$;"]:
+            # SYRD-826: the deploy asks first whether a fresh connection runs plpgsql, as the cluster's account.
+            assert argv[4:6] == ["env", "-i"] and _kwargs.get("cwd") == "/", argv
+            self.steps.append("postgres probe")
+            return result(0 if self.outcome["postgres"] == "ok" else 3)
         if argv[:4] == ["runuser", "-u", "postgres", "--"]:
             # SYRD-706: root's own database work, as the cluster's account, from root's trusted release only.
             assert argv[4:6] == ["env", "-i"] and _kwargs.get("cwd") == "/", argv
@@ -372,7 +377,7 @@ def main() -> int:
     now = child("--scenarios", ROOT)
     ok = now["deployed"]
     check(ok["code"] == 0 and ok["steps"] == [
-              "stop listener", "install templates", "install exact units",
+              "postgres probe", "stop listener", "install templates", "install exact units",
               "migrate as postgres", "rbac as postgres", "canary exact candidate", "deploy-restart exact candidate", "health passed", "start listener"],
           f"a prepared tenant: listener down, root's units, the deploy, listener up -- in that order: {ok['steps']} {ok['said'][-600:]}")
     check(ok["board"] == NEW and ok["release"] == "done" and ok["listener"] == "active",
@@ -394,7 +399,7 @@ def main() -> int:
           f"preparation is not activation: an unprepared tenant is refused before anything runs: {unprepared}")
     failed = now["deploy fails, board unchanged"]
     check(failed["code"] == 1 and failed["steps"] == [
-              "stop listener", "install templates", "install exact units", "migrate as postgres", "rbac as postgres", "canary exact candidate",
+              "postgres probe", "stop listener", "install templates", "install exact units", "migrate as postgres", "rbac as postgres", "canary exact candidate",
               "deploy-restart exact candidate",
               "health failed", "restore units", "restart restored board", "start listener"]
           and failed["board"] == OLD and failed["listener"] == "active" and failed["release"] == "blocked",
@@ -403,14 +408,14 @@ def main() -> int:
           f"failed health restores the captured board unit before the listener: {failed}")
     database = now["database work fails"]
     check(database["code"] == 1 and database["steps"] == [
-              "stop listener", "install templates", "install exact units", "migrate as postgres", "restore units",
+              "postgres probe", "stop listener", "install templates", "install exact units", "migrate as postgres", "restore units",
               "restart restored board", "start listener"]
           and database["board"] == OLD and database["listener"] == "active" and database["release"] == "blocked"
           and "the database work for" in database["said"] and "as postgres failed" in database["said"],
           f"SYRD-706: root's migration fails: no tenant deploy runs, the units come back, the phase is blocked: {database}")
     moved = now["deploy fails, board moved"]
     check(moved["code"] == 1 and moved["steps"] == [
-              "stop listener", "install templates", "install exact units", "migrate as postgres", "rbac as postgres", "canary exact candidate",
+              "postgres probe", "stop listener", "install templates", "install exact units", "migrate as postgres", "rbac as postgres", "canary exact candidate",
               "deploy-restart exact candidate",
               "health failed", "restore units", "restart restored board"]
           and moved["listener"] == "inactive" and moved["release"] == "blocked" and "left stopped" in moved["said"],
@@ -423,7 +428,7 @@ def main() -> int:
           and wrong["board_unit"] == "old board unit\n",
           f"another live build restores selector and units and reports rolled back: {wrong}")
     already = now["already deployed"]
-    check(already["code"] == 0 and already["steps"] == [] and already["release"] == "done",
+    check(already["code"] == 0 and already["steps"] == ["postgres probe"] and already["release"] == "done",
           f"a board already serving the release is only closed, nothing restarted: {already}")
     # SYRD-700: no path installs root's staged (legacy-shaped) board or canary itself; they are templates.
     check(not any(result["legacy_installed"] for result in now.values()),
@@ -431,7 +436,7 @@ def main() -> int:
           f"{[n for n, r in now.items() if r['legacy_installed']]}")
     converged = now["already named, legacy unit"]
     check(converged["code"] == 0 and converged["steps"] == [
-              "stop listener", "install templates", "install exact units", "restart board", "start listener"]
+              "postgres probe", "stop listener", "install templates", "install exact units", "restart board", "start listener"]
           and converged["release"] == "done" and NEW in converged["board_unit"]
           and "-E -s -B" in converged["board_unit"] and "EnvironmentFile=" not in converged["board_unit"],
           f"a tenant already naming the release under a legacy unit converges on root's exact unit: no deploy, "
@@ -441,13 +446,13 @@ def main() -> int:
     for name in ("exact board, legacy canary", "exact board, another release's canary"):
         both = now[name]
         check(both["code"] == 0 and both["steps"] == [
-                  "stop listener", "install templates", "install exact units", "restart board", "start listener"]
+                  "postgres probe", "stop listener", "install templates", "install exact units", "restart board", "start listener"]
               and both["release"] == "done" and f"releases/{NEW}/scripts/ticket-board.py" in both["canary_unit"]
               and f"releases/{OLD}" not in both["canary_unit"] and "/bin/sh" not in both["canary_unit"],
               f"{name}: both units converge on root's render of the release: {both}")
     unconverged = now["already named, legacy unit, restart fails"]
     check(unconverged["code"] == 3 and unconverged["steps"] == [
-              "stop listener", "install templates", "install exact units", "restart board", "restore units",
+              "postgres probe", "stop listener", "install templates", "install exact units", "restart board", "restore units",
               "restart restored board", "start listener"]
           and unconverged["board_unit"] == "old board unit\n" and unconverged["release"] == "blocked",
           f"a board that will not serve under its exact unit gets its previous unit back, rolled back: {unconverged}")

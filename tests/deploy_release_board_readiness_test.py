@@ -59,8 +59,11 @@ if mode == "never":
     time.sleep(3600)
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path.endswith("/api/workflow") and mode == "nodb":
+            # SYRD-826: its own memory answers (the build), every request that reads the database fails.
+            self.send_response(500); self.send_header("Content-Length", "0"); self.end_headers(); return
         if self.path.endswith("/api/workflow"):
-            body = {"document": {"roles": [], "migrations": {"director_onboarding": True}}}
+            body = {"revision": 1, "document": {"roles": [], "migrations": {"director_onboarding": True}}}
         else:
             body = {"build_id": open(build_file).read().strip(), "tickets": []}
         data = json.dumps(body).encode()
@@ -90,8 +93,12 @@ class Host:
     """systemd for one tenant: a real board process behind its unit, and the owner's listener unit."""
 
     def __init__(self, tenant, work: Path, unit_dir: Path, trusted_release: Path, *, exact_units: bool,
-                 board_unit: str, listener: str, board_mode: str = "ok") -> None:
+                 board_unit: str, listener: str, board_mode: str = "ok", postgres: tuple[str, ...] = ("ok",),
+                 restored_mode: str | None = None, deploy_fails: bool = False) -> None:
         self.tenant, self.work, self.mode = tenant, work, board_mode
+        # SYRD-826: the host's PostgreSQL, as each fresh-connection probe finds it, in turn (the last one repeats);
+        # the mode a restored board comes back in; whether the tenant's deploy fails its health gate.
+        self.postgres, self.restored_mode, self.deploy_fails = list(postgres), restored_mode, deploy_fails
         self.unit_dir, self.trusted_release = unit_dir, trusted_release
         self.exact_units = exact_units
         self.port = free_port()
@@ -195,9 +202,18 @@ class Host:
         if argv[:2] == ["systemctl", "restart"]:
             self.steps.append("restart restored board")
             self._stop()
+            self.mode = self.restored_mode or self.mode
             self._start(delay=0.0)
             self._wait_until_serving()
             return done(0)
+        if argv[:4] == ["runuser", "-u", "postgres", "--"] and argv[-2:] == ["-c", "DO $$ BEGIN NULL; END $$;"]:
+            # SYRD-826: one plpgsql block in a fresh connection, as the cluster's account.
+            self.steps.append("postgres probe")
+            found = self.postgres.pop(0) if len(self.postgres) > 1 else self.postgres[0]
+            if found == "ok":
+                return done(0)
+            return SimpleNamespace(returncode=3, stdout="", stderr='ERROR:  could not load library "/usr/lib/postgresql/'
+                                   'plpgsql.so": /usr/lib/postgresql/plpgsql.so: undefined symbol: heap_datum_update_type')
         if argv[:4] == ["runuser", "-u", "postgres", "--"]:
             # SYRD-706: root migrates and grants first, as the cluster's account, from its trusted release.
             assert any(part.startswith(str(self.trusted_release) + "/") for part in argv), argv
@@ -218,6 +234,9 @@ class Host:
                 self.steps.append("deploy-restart exact candidate")
             else:
                 self.steps.append("deploy-restart")
+            if self.deploy_fails:  # SYRD-826: the deploy fails its gate; the board is left on the release it had
+                self.steps.append("deploy-restart failed")
+                return SimpleNamespace(returncode=1, stdout="", stderr="health gate failed")
             self.move_board(NEW)
             self._stop()
             self._start()
@@ -229,7 +248,7 @@ class Host:
 
 
 def deploy(root: Path, work: Path, *, board_unit: str, listener: str, deployed: str, board_mode: str = "ok",
-           ready_seconds: float | None = None, exact_installed: bool = False) -> dict:
+           ready_seconds: float | None = None, exact_installed: bool = False, **host_kwargs) -> dict:
     """`switchyard deploy-release porter --commit NEW` against a prepared tenant in that state."""
     import release_phase_journal_test as journal
     from scripts import team_launcher as launcher
@@ -281,7 +300,7 @@ def deploy(root: Path, work: Path, *, board_unit: str, listener: str, deployed: 
                                "deploy_ref": NEW}), encoding="utf-8")
     os.chmod(pin, 0o600)
     host = Host(tenant, work, unit_dir, releases / NEW, exact_units=board_identity is not None, board_unit=board_unit,
-                listener=listener, board_mode=board_mode)
+                listener=listener, board_mode=board_mode, **host_kwargs)
     reached: list[str] = []
     from scripts import tenant_release_deploy as deploy_module
 
@@ -346,6 +365,12 @@ def scenario(root: Path, work: Path) -> dict:
         "suspended, a board that never answers": dict(board_unit="inactive", listener="inactive", deployed=NEW,
                                                       board_mode="never", ready_seconds=2.0, exact_installed=True),
     }
+    if (root / "scripts" / "postgres_health.py").exists():  # SYRD-826's cases: only a tree that has the checks
+        cases["running, PostgreSQL upgraded under its server"] = dict(
+            board_unit="active", listener="active", deployed=OLD, postgres=("library",))
+        cases["running, rollback leaves a board that reads no database"] = dict(
+            board_unit="active", listener="active", deployed=OLD, postgres=("ok", "library"), restored_mode="nodb",
+            deploy_fails=True, ready_seconds=2.0)
     for name, kwargs in cases.items():
         case_dir = work / re.sub(r"\W+", "-", name)
         case_dir.mkdir()
@@ -421,6 +446,25 @@ def candidate(out: dict) -> None:
           f"board stopped again: {never}")
 
 
+def postgres_cases(out: dict) -> None:
+    """SYRD-826: a PostgreSQL upgraded under its running server stops the deploy before it touches anything; a rollback
+    that leaves the board unable to read its database does not say it ended as it began."""
+    mismatch = out["running, PostgreSQL upgraded under its server"]
+    check(mismatch["code"] == 1 and mismatch["steps"] == ["postgres probe"] and mismatch["listener"] == "active"
+          and mismatch["board_active"] and mismatch["serving"] == OLD and mismatch["release"] == "ready"
+          and "sudo systemctl restart postgresql" in mismatch["said"] and "undefined symbol" in mismatch["said"]
+          and "nothing of porter's was deployed, stopped or recorded" in mismatch["said"],
+          f"a server older than its installed libraries: refused before the listener stops or anything restarts, "
+          f"naming the restart: {mismatch}")
+    stranded = out["running, rollback leaves a board that reads no database"]
+    check(stranded["code"] != 0 and "restart restored board" in stranded["steps"] and stranded["board_active"]
+          and "ends as it began" not in stranded["said"] and "did NOT end as it began" in stranded["said"]
+          and "does not answer a request that reads its database" in stranded["said"]
+          and "sudo systemctl restart postgresql" in stranded["said"],
+          f"a rollback whose board answers its build but no database request: not 'ends as it began'; it says the "
+          f"board is not answering, and why: {stranded}")
+
+
 def main() -> int:
     if len(sys.argv) == 4 and sys.argv[1] == "--scenario":
         print(json.dumps(scenario(Path(sys.argv[2]), Path(sys.argv[3])), default=str))
@@ -433,6 +477,7 @@ def main() -> int:
         with tempfile.TemporaryDirectory(prefix="syrd632-before.") as tmp:
             before(run(tree_at(BEFORE, Path(tmp) / "before")))
     candidate(after)
+    postgres_cases(after)
     print(f"deploy_release_board_readiness_test: {CHECKS} checks ok")
     return 0
 

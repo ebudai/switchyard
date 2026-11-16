@@ -347,6 +347,37 @@ def _await_board(config: Any, *, opener: Callable[[str], Any] | None, clock: Cal
         sleep(BOARD_READY_POLL_SECONDS)
 
 
+def _board_reads_database(config: Any, *, opener: Callable[[str], Any] | None, wait: bool,
+                          clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep) -> str:
+    """'' once the board answers a request that reads its database (`/api/workflow`), else the last reason it did not.
+
+    `/api/build` is the board's own memory and answers even while every database request fails; that is what "ends
+    as it began" claimed on sapi, 2026-11-16, over a board that dropped every real request (SYRD-826)."""
+    import json as _json
+
+    from scripts.ticket_board.board_identity import board_opener
+    from scripts.ticket_board.phone_text import clean_text
+    from scripts import team_launcher as launcher
+
+    root = str(config.board_url or "").rstrip("/").removesuffix("/api/tickets").removesuffix("/api")
+    if not root:
+        return f"{config.project} declares no board url"
+    open_url = board_opener(config, opener) or launcher._open_board_url
+    deadline = clock() + (BOARD_READY_SECONDS if wait else 0.0)
+    while True:
+        try:
+            with open_url(root + "/api/workflow") as response:
+                answer = _json.load(response)
+            if isinstance(answer, dict) and "revision" in answer:
+                return ""
+            why = "its answer to /api/workflow is not a workflow"
+        except Exception as exc:  # noqa: BLE001 - any failure to read is "does not answer"
+            why = f"/api/workflow could not be read ({clean_text(exc, 300)})"
+        if clock() >= deadline:
+            return why
+        sleep(BOARD_READY_POLL_SECONDS)
+
+
 def _build_switchyard_deploy_release_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="switchyard deploy-release",
@@ -442,6 +473,14 @@ def switchyard_deploy_release_command(
             f"{config.project}'s release resolves to {status.target_sha or 'nothing'}, not {commit}"
             + (f": {status.resolve_error}" if status.resolve_error else "")
         )
+    # SYRD-826: a host PostgreSQL upgraded under its running server fails every fresh backend that loads plpgsql: the
+    # migration fails, and the rollback's restart leaves the board refusing every request. Asked before anything here
+    # stops, installs or restarts: the deploy stops with the one remedy instead.
+    from scripts import postgres_health
+
+    postgres = postgres_health.fresh_connection_problem(runner=runner)
+    if postgres:
+        return refuse(postgres)
     # Where the tenant was before anything here touched it, so it ends the same
     # way: a suspended tenant stays suspended and a running one keeps running.
     # Deploying is not starting -- on MEFP the operator started the whole tenant
@@ -460,6 +499,8 @@ def switchyard_deploy_release_command(
         f"switchyard: {config.project} began {began}; this deploy leaves it that way and starts no pane, "
         "window or notification delivery."
     )
+    # Ending as it began includes answering: a board that read its database before must read it after (SYRD-826).
+    board_answered = board_was_active and not _board_reads_database(config, opener=opener, wait=False)
 
     def board_back() -> list[str]:
         """Put a board this command started back down, and say if it would not go."""
@@ -479,6 +520,11 @@ def switchyard_deploy_release_command(
 
     def ended(code: int, leftovers: list[str]) -> int:
         """The lifecycle report every exit after this point ends with."""
+        unanswered = _board_reads_database(config, opener=opener, wait=True) if board_answered and not leftovers else ""
+        if unanswered:
+            postgres_now = postgres_health.fresh_connection_problem(runner=runner)
+            leftovers = [f"{config.project}'s board is running but does not answer a request that reads its database "
+                         f"({unanswered})" + (f"; {postgres_now}" if postgres_now else "")]
         if leftovers:
             for problem in leftovers:
                 print_func(f"switchyard: not restored: {problem}")

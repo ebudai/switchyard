@@ -634,6 +634,7 @@ def switchyard_status_command(
         switchyard_install_path=switchyard_install_path,
     )
     supervised = supervised_board_entries()
+    postgres_warning = _postgres_warning(runner)
     if json_output:
         payload: dict[str, Any] = {
             "projects": [_switchyard_project_status_payload(status) for status in statuses],
@@ -653,6 +654,8 @@ def switchyard_status_command(
         # SYRD-756: each project's pause switch, as its own board answers; absent where the board cannot say.
         payload["work_pauses"] = {config.project: answer for config in configs
                                   if (answer := work_pause_reader(config)) is not None}
+        if postgres_warning:
+            payload["postgres_warning"] = postgres_warning
         print_func(json.dumps(payload, indent=2))
         return 0
     rows = [("NAME", "SLUG", "STATE", "PANES", "VIEWER")]
@@ -761,7 +764,21 @@ def switchyard_status_command(
                 f"{row[1]:<{runtime_widths[1]}}  "
                 f"{row[2]:<{runtime_widths[2]}}  {row[3]}"
             )
+    if postgres_warning:
+        print_func("")
+        print_func(f"switchyard: WARNING: {postgres_warning}")
     return 0
+
+
+def _postgres_warning(runner: Callable[..., Any]) -> str:
+    """SYRD-826: whether the host's running PostgreSQL server predates its installed binary -- every board on the host
+    breaks on its next reconnect, and a deploy turns that into an outage. Read-only; '' when it cannot tell."""
+    from scripts import postgres_health
+
+    try:
+        return postgres_health.server_replaced(runner=runner)
+    except Exception:  # noqa: BLE001 - a warning must never cost the status itself
+        return ""
 
 
 def format_release_alignment(alignment: ReleaseAlignment) -> list[str]:

@@ -54,6 +54,9 @@ COMMIT_RE = re.compile(r"^[0-9a-f]{7,40}$")
 RELEASE_RE = re.compile(r"^[0-9a-f]{40}$")
 STATE_RE = re.compile(r"^[a-z_]{1,40}$")
 TICKET_RE = re.compile(r"^[A-Z][A-Z0-9]*-[0-9]+$")
+#: C0 and C1 controls and DEL, newline excepted: the notice is typed into a Director's pane (`tmux send-keys -l`), and
+#: an upstream board's title or comment must not arrive there as keys -- an escape sequence, a carriage return, a bell.
+CONTROL_CHARS = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]")
 LOGGER = logging.getLogger("ticket_board.report_closure")
 
 
@@ -194,8 +197,13 @@ def message(*, reporter: str, upstream: str, url: str, report: dict[str, Any], b
     else:
         lines.append("It closed with no commit.")
     lines.append(f"Read it: ticket-board-read --board-url {url} ticket {ticket}")
-    text = "\n".join(lines)
+    text = plain("\n".join(lines))
     return text if len(text) <= MAX_MESSAGE_CHARS else text[:MAX_MESSAGE_CHARS - 3] + "..."
+
+
+def plain(text: str) -> str:
+    """`text` without C0/C1 control characters or DEL; its newlines kept."""
+    return CONTROL_CHARS.sub("", text)
 
 
 def announce(report: dict[str, Any], *, now: datetime) -> bool:
@@ -210,27 +218,56 @@ def announce(report: dict[str, Any], *, now: datetime) -> bool:
 
 
 def record(conn: Any, *, reporter: str, upstream: str, url: str, answer: dict[str, Any], build: str,
-           now: datetime) -> dict[str, int]:
-    """Record every close in one ancestor's answer; how many were told, recorded silently, known, or unanchored."""
-    counts = {"told": 0, "recorded": 0, "already": 0, "no_anchor": 0, "skipped": 0}
+           now: datetime, log: Any = LOGGER, seen: set[tuple[str, str]] | None = None) -> dict[str, int]:
+    """Record every close in one ancestor's answer; how many were told, recorded silently, known, unanchored, skipped
+    as malformed, or refused by this board. One bad entry is skipped -- logged once per upstream ticket (`seen` carries
+    that across passes) -- and every entry after it still counts."""
+    counts = {"told": 0, "recorded": 0, "already": 0, "no_anchor": 0, "skipped": 0, "refused": 0}
+    seen = set() if seen is None else seen
+
+    def once(ticket: str, problem: str) -> None:
+        if (upstream, ticket) not in seen:
+            seen.add((upstream, ticket))
+            log.warning("%s's report status entry %r %s; skipped", upstream, ticket, problem)
+
     for report in answer.get("reports") or []:
-        if not isinstance(report, dict):
-            counts["skipped"] += 1
-            continue
-        ticket, state = str(report.get("id") or ""), str(report.get("state") or "")
-        commit = str(report.get("commit_hash") or "")
-        if not (TICKET_RE.fullmatch(ticket) and STATE_RE.fullmatch(state)) or (commit and not COMMIT_RE.fullmatch(commit)):
+        ticket = str(report.get("id") or "?")[:60] if isinstance(report, dict) else "?"
+        try:  # the whole entry: whatever one entry holds, it can cost only itself
+            counts[_record_one(conn, report, reporter=reporter, upstream=upstream, url=url, build=build, now=now)] += 1
+        except _Malformed as exc:
             counts["skipped"] += 1  # not something this board stores or says: an answer it cannot vouch for
-            continue
-        key = f"{state}#{int(report.get('reopens') or 0)}"
-        contains = report.get("release_contains")
-        text = message(reporter=reporter, upstream=upstream, url=url, report=report, build=build,
-                       contains=contains if isinstance(contains, bool) else None)
-        row = conn.execute("SELECT ticket_board.note_report_closed(%s, %s, %s, %s, %s, %s, %s) AS outcome",
-                           (upstream, ticket, key, state, commit, text, announce(report, now=now))).fetchone()
-        outcome = row["outcome"] if isinstance(row, dict) else row[0]
-        counts[outcome if outcome in counts else "skipped"] += 1
+            once(ticket, f"is malformed ({exc})")
+        except Exception as exc:  # noqa: BLE001 - autocommit: a refused statement leaves the connection usable
+            said = str(exc).strip().splitlines()[0][:200] if str(exc).strip() else ""
+            if type(exc).__module__.startswith("psycopg"):
+                counts["refused"] += 1
+                once(ticket, f"was refused by this board ({said or type(exc).__name__})")
+            else:
+                counts["skipped"] += 1
+                once(ticket, f"is malformed ({type(exc).__name__}: {said})")
     return counts
+
+
+class _Malformed(ValueError):
+    """An entry this board cannot vouch for: its id, state or commit is not one a board stores."""
+
+
+def _record_one(conn: Any, report: Any, *, reporter: str, upstream: str, url: str, build: str, now: datetime) -> str:
+    """One entry of an ancestor's answer, recorded: note_report_closed's outcome. Raises on anything it cannot use."""
+    if not isinstance(report, dict):
+        raise _Malformed("not an object")
+    ticket, state = str(report.get("id") or ""), str(report.get("state") or "")
+    commit = str(report.get("commit_hash") or "")
+    if not (TICKET_RE.fullmatch(ticket) and STATE_RE.fullmatch(state)) or (commit and not COMMIT_RE.fullmatch(commit)):
+        raise _Malformed("its id, state or commit")
+    key = f"{state}#{int(report.get('reopens') or 0)}"
+    contains = report.get("release_contains")
+    text = message(reporter=reporter, upstream=upstream, url=url, report=report, build=build,
+                   contains=contains if isinstance(contains, bool) else None)
+    row = conn.execute("SELECT ticket_board.note_report_closed(%s, %s, %s, %s, %s, %s, %s) AS outcome",
+                       (upstream, ticket, key, state, commit, text, announce(report, now=now))).fetchone()
+    outcome = row["outcome"] if isinstance(row, dict) else row[0]
+    return outcome if outcome in ("told", "recorded", "already", "no_anchor") else "skipped"
 
 
 def run(listener: Any, conn: Any, *, environ: Any = os.environ, clock: Callable[[], float] = time.monotonic,
@@ -265,7 +302,8 @@ def run(listener: Any, conn: Any, *, environ: Any = os.environ, clock: Callable[
                 try:
                     answer = fetch(link.url, token, build)
                     counts = record(conn, reporter=project, upstream=link.project, url=link.url, answer=answer,
-                                    build=build, now=datetime.now(timezone.utc))
+                                    build=build, now=datetime.now(timezone.utc), log=log,
+                                    seen=listener.__dict__.setdefault("_report_closure_entries", set()))
                     problem = ""
                     if counts["told"] or counts["recorded"]:
                         log.info("Report closes from %s: %s", link.project, counts)

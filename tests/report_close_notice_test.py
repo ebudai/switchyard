@@ -17,7 +17,11 @@ Here:
 * a close older than 30 days is recorded, not told; another project's report is never told to this one;
 * the read refuses a missing or shared credential and gives each project its own reports only;
 * an unreachable upstream tells nothing and is logged once, not per pass;
-* a listener that is not the service (a test's) never asks.
+* a listener that is not the service (a test's) never asks;
+* one bad entry in an ancestor's answer -- malformed, or refused by this board -- is skipped and logged once, and the
+  valid entries beside it and from the next ancestor are still told (Director, SYRD-827 DAT);
+* an upstream title or reason reaches the Director with no control character: no escape sequence, carriage return or
+  bell is typed into its pane; its newlines are kept.
 """
 
 from __future__ import annotations
@@ -237,6 +241,57 @@ def test_report_close_notices() -> None:
                       "four closes told in all: PGU-7 twice, PGU-8, PGU-9")
                 check(not [line for line in records.lines if line.startswith(("ERROR", "WARNING"))],
                       f"and no pass failed or warned along the way: {records.lines}")
+
+            # One bad entry is one entry: two ancestors, syrd's answer holding a malformed entry and one this board
+            # refuses (a reopen count past what a close records) beside a valid close; root2's answer a valid close.
+            chained = scratch / "registry-two"
+            chained.mkdir()
+            (chained / "sapi.json").write_text(json.dumps({"schema": schema, "slug": "sapi", "name": "sapi",
+                                                           "report_parent": {"project": "syrd", "url": "http://syrd.test",
+                                                                             "ticket_prefix": "SYRD"}}))
+            (chained / "syrd.json").write_text(json.dumps({"schema": schema, "slug": "syrd", "name": "syrd",
+                                                           "report_parent": {"project": "root2", "url": "http://root2.test",
+                                                                             "ticket_prefix": "ROOT"}}))
+            (chained / "root2.json").write_text(json.dumps({"schema": schema, "slug": "root2", "name": "root2"}))
+            second = credential.parent / "report-credentials" / "root2.env"
+            second.parent.mkdir()
+            second.write_text("TICKET_BOARD_TENANT_REPORT_TOKEN=syrdr1.sapi.root2-credential\n")
+            hostile = "Evil\x1b[31mred\r\x07 title\u009b2J end"
+            answers = {
+                "http://syrd.test": {"reports": [
+                    {"id": "syrd-40", "state": "done", "commit_hash": inside, "reopens": 0, "title": "lower-case id"},
+                    {"id": "SYRD-41", "state": "done", "commit_hash": inside, "reopens": 10 ** 10, "title": "refused"},
+                    # Shapes that fail inside the notice or its key, not in the board (Audit, round 2):
+                    {"id": "SYRD-44", "state": "cancelled", "commit_hash": "", "reopens": 0, "title": "t", "reason": 5},
+                    {"id": "SYRD-45", "state": "done", "commit_hash": inside, "reopens": "abc", "title": "t"},
+                    {"id": "SYRD-46", "state": "cancelled", "commit_hash": "", "reopens": 0, "title": "t", "reason": ["x"]},
+                    {"id": "SYRD-42", "state": "done", "commit_hash": inside, "reopens": 0, "title": "valid beside them",
+                     "release_contains": True},
+                    {"id": "SYRD-43", "state": "cancelled", "commit_hash": "", "reopens": 0, "title": hostile,
+                     "reason": "first line\x1b]0;owned\x07\nsecond line\r\x7f\u0085done"}]},
+                "http://root2.test": {"reports": [
+                    {"id": "ROOT-5", "state": "done", "commit_hash": outside, "reopens": 0, "title": "from the next ancestor",
+                     "release_contains": False}]},
+            }
+            records.lines.clear()
+            with psycopg.connect(rep.listener_url, autocommit=True) as conn:
+                two = {**environ, "SWITCHYARD_PROJECT_REGISTRY_DIR": str(chained)}
+                told = []
+                for _ in range(2):
+                    report_closure.run(listener, conn, environ=two, fetch=lambda url, token, build: answers[url])
+                    told += [m for t, m in rep.one_pass() if t == "pgu-director:0.0"]
+            warned = [line for line in records.lines if line.startswith("WARNING")]
+            check(sorted(m.split()[2] for m in told) == ["ROOT-5", "SYRD-42", "SYRD-43"],
+                  f"the valid closes beside a bad entry, and from the next ancestor, are told: {told} {records.lines}")
+            joined = "\n".join(warned)
+            check(len(warned) == 5 and "'syrd-40' is malformed" in joined and "'SYRD-41' was refused by this board" in joined
+                  and all(f"'SYRD-{n}' is malformed" in joined for n in (44, 45, 46))
+                  and not any(line.startswith("ERROR") for line in records.lines),
+                  f"each bad entry is logged once over two passes, as what it is, and no pass failed: {records.lines}")
+            cancelled = next((m for m in told if "SYRD-43" in m), "")
+            check(cancelled and not any(c in cancelled for c in "\x1b\r\x07\x7f\u009b\u0085")
+                  and "Evil[31mred title2J end" in cancelled and "first line]0;owned\nsecond linedone" in cancelled,
+                  f"an upstream title and reason arrive without control characters, newlines kept: {cancelled!r}")
 
             # The read itself.
             code, said = read_status(upstream, None)

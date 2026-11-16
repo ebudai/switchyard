@@ -44,14 +44,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER, OTHERS = 1600, (1501, 1502)
 CHECKS = 0
+SOURCE: list[tuple[Path, str]] = []  # the run's source repository and commit, made once (SYRD-820)
 
 SANDBOX = r'''
 set -u
-out=$1; repo=$2; commit=$3; runner=$4; shift 4
+out=$1; source=$2; commit=$3; runner=$4; shift 4
 home=$INVOKER_HOME
 mount -t tmpfs tmpfs /run && mkdir -p /run/out && mount --bind "$out" /run/out
+# Bound before /tmp is covered, read-only: wherever the run's source repository is, the clone below reaches it.
+mkdir -p /run/source && mount --bind "$source" /run/source && mount -o remount,bind,ro /run/source
 mount -t tmpfs tmpfs /tmp && chmod 1777 /tmp
-git clone -q --no-checkout "$repo" /tmp/tree && git -C /tmp/tree -c advice.detachedHead=false checkout -q "$commit" || exit 4
+git clone -q --no-checkout /run/source /tmp/tree && git -C /tmp/tree -c advice.detachedHead=false checkout -q "$commit" || exit 4
 mount --bind "$home" "$home" && mount -o remount,bind,ro "$home"
 cp /etc/passwd /run/passwd && cp /etc/group /run/group
 for uid in "$runner" 1501 1502; do
@@ -88,6 +91,41 @@ def check(condition: object, detail: object) -> None:
     CHECKS += 1
 
 
+def _git(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=600)
+
+
+def _holds_whole_history(source: Path, commit: str) -> bool:
+    listed = _git("-C", str(source), "rev-list", "--objects", "--missing=print", commit)
+    return (listed.returncode == 0 and not (source / "shallow").exists()
+            and not any(line.startswith("?") for line in listed.stdout.splitlines()))
+
+
+def source_repository(scratch: Path) -> tuple[Path, str]:
+    """This tree's committed HEAD and its whole history, in a bare repository of the run's own (SYRD-820).
+
+    Made before the sandbox covers anything, and bound into it read-only, so the checkout may be anywhere: the
+    sandbox's private /tmp hides one under /tmp. A shallow or partial checkout holds less than the inner suite
+    archives (runtime_switch_stall_test's commit from before SYRD-595), so what it cannot give is fetched from its
+    own remotes, and a source that is still incomplete fails here, saying so."""
+    commit = _git("-C", str(ROOT), "rev-parse", "HEAD").stdout.strip()
+    source = scratch / "source.git"
+    _git("init", "-q", "--bare", str(source))
+    _git("-C", str(source), "symbolic-ref", "HEAD", "refs/heads/sentinel")
+    _git("-C", str(source), "fetch", "-q", "--update-shallow", str(ROOT), f"{commit}:refs/heads/sentinel")
+    remotes = _git("-C", str(ROOT), "remote").stdout.split()
+    for remote in remotes:
+        if _holds_whole_history(source, commit):
+            break
+        url = _git("-C", str(ROOT), "remote", "get-url", remote).stdout.strip()
+        deepen = ["--unshallow"] if (source / "shallow").exists() else []
+        _git("-C", str(source), "fetch", "-q", *deepen, url, f"+{commit}:refs/heads/sentinel")
+    check(_holds_whole_history(source, commit),
+          f"the sentinel's source holds {commit} and its whole history: this checkout is shallow or partial, and "
+          f"none of its remotes {remotes} gave the rest")
+    return source, commit
+
+
 def sandboxed(scratch: Path, label: str, command: list[str], *, run_as: int = RUNNER) -> dict:
     """Run `command` as `run_as` (the runner by default) in the sandbox; report its status, output and each
     sentinel's fate."""
@@ -95,11 +133,10 @@ def sandboxed(scratch: Path, label: str, command: list[str], *, run_as: int = RU
     (out / "stubs").mkdir(parents=True)
     script = scratch / "sandbox.sh"
     script.write_text(SANDBOX)
-    commit = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True,
-                            check=True).stdout.strip()
+    source, commit = SOURCE[0]
     env = {**os.environ, "INVOKER_HOME": pwd.getpwuid(os.getuid()).pw_dir, "RUN_AS": str(run_as)}
     done = subprocess.run(["unshare", "--user", "--map-auto", "--map-root-user", "--mount", "--pid", "--fork",
-                           "--mount-proc", "bash", str(script), str(out), str(ROOT), commit, str(RUNNER), *command],
+                           "--mount-proc", "bash", str(script), str(out), str(source), commit, str(RUNNER), *command],
                           env=env, capture_output=True, text=True, timeout=1300)
     check(done.returncode == 0 and (out / "verdict").exists(), f"{label}: the sandbox ran: {done.stderr[-800:]}")
     fate = {}
@@ -133,6 +170,7 @@ def main() -> int:
         check(shutil.which(tool), f"{tool} is required; this suite must not silently skip")
     with tempfile.TemporaryDirectory(prefix="syrd627s.") as raw:
         scratch = Path(raw)
+        SOURCE[:] = [source_repository(scratch)]
         everyone = (RUNNER, *OTHERS)
         bare = sandboxed(scratch, "bare", ["tmux", "kill-server"])  # tmux-lint: argv-as-data
         check(bare["fate"] == {RUNNER: False, OTHERS[0]: True, OTHERS[1]: True},

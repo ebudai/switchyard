@@ -34,8 +34,6 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
-isolate_tmux_bus()  # SYRD-814: the tmux servers it starts get a user bus of their own, never the invoker's
 
 HERE = Path(__file__).resolve().parents[1]
 #: Main's commit this ticket is cut from; the before-run's tree.
@@ -779,15 +777,43 @@ def test_sentinel_contents(scratch: Path) -> None:
               f"{label}: the run exits {status}: {done.returncode} {done.stderr[-500:]}")
 
 
+def test_isolation_is_read_from_the_syntax() -> None:
+    """SYRD-820: a module-level isolate() before anything but the standard library is imported, and nothing else."""
+    import live_boundary
+
+    first = "from __future__ import annotations\nimport os, sys\nfrom pathlib import Path\n"
+    call = "import live_boundary  # noqa: E402\n\nlive_boundary.isolate()\n"
+    cases = {
+        "isolates first": (first + call + "from scripts import team_launcher\n", True),
+        "on one line": ("import live_boundary; live_boundary.isolate()\nimport scripts.x\n", True),
+        "a comment": ("# live_boundary.isolate()\nfrom scripts import team_launcher\n", False),
+        "a string": ("NOTE = 'live_boundary.isolate()'\n", False),
+        "a function": ("import live_boundary\ndef f():\n    live_boundary.isolate()\n", False),
+        "production as scripts": ("from scripts import team_launcher as tl\n" + call, False),
+        "production under another name": ("sys.path.insert(0, 'scripts')\nimport team_launcher\n" + call, False),
+        "a test helper": ("import team_launcher_test_helpers as h\n" + call, False),
+        "in a branch": ("import sys\nif sys.argv:\n    import scripts.x\n" + call, False),
+        "a relative import": ("from . import helpers\n" + call, False),
+        "import_module": ("import importlib\nimportlib.import_module('scripts.team_launcher')\n" + call, False),
+        "__import__": ("__import__('team_launcher')\n" + call, False),
+        "unparsable": ("live_boundary.isolate(\n", False),
+    }
+    wrong = {name: want for name, (source, want) in cases.items() if live_boundary.isolates_first(source) != want}
+    check(wrong == {}, f"isolation is read from the syntax: these are judged wrongly: {wrong}")
+
+
 def test_every_namespace_suite_is_isolated() -> None:
+    import live_boundary
+
     missing = []
     for path in sorted((HERE / "tests").glob("*.py")):
         text = path.read_text(encoding="utf-8", errors="replace")
-        if "--map-root-user" not in text or path.name in ("live_boundary_test.py", "live_boundary.py"):
+        # The sentinel suite runs without the boundary on purpose, to show the kills it refuses: its own sandbox
+        # maps a pid and mount namespace, covers /tmp and /run, and binds the invoking home read-only.
+        if "--map-root-user" not in text or path.name in ("live_boundary_test.py", "live_boundary.py",
+                                                           "live_boundary_sentinel_test.py"):
             continue
-        at = text.find("live_boundary.isolate()")
-        first = min((text.find(m) for m in ("\nfrom scripts", "\nimport scripts") if text.find(m) >= 0), default=len(text))
-        if at < 0 or at > first:
+        if not live_boundary.isolates_first(text):  # read from the syntax, not the text (SYRD-820)
             missing.append(path.name)
     for path in sorted((HERE / "tests").glob("*.sh")):
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -817,6 +843,10 @@ def main() -> int:
     import live_boundary
 
     live_boundary.isolate()
+    # After isolate(), as every isolating suite does: nothing but the standard library before it (SYRD-820).
+    from tmux_bus_isolation import isolate_tmux_bus
+
+    isolate_tmux_bus()  # SYRD-814: the tmux servers it starts get a user bus of their own, never the invoker's
     with tempfile.TemporaryDirectory(prefix="syrd627.") as raw:
         scratch = Path(raw)
         try:
@@ -833,6 +863,7 @@ def main() -> int:
         finally:
             subprocess.run(["unshare", "--user", "--map-auto", "--map-root-user", "chown", "-R", "-h", "0:0", str(scratch)],
                            capture_output=True, check=False)
+    test_isolation_is_read_from_the_syntax()
     test_every_namespace_suite_is_isolated()
     print(f"live_boundary_test: {CHECKS} checks ok")
     return 0

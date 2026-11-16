@@ -38,6 +38,25 @@ def test_every_declared_suite_exists() -> None:
           f"every declared suite is a suite of this tree, declared once: missing {missing}")
 
 
+def test_a_suite_isolating_in_main_imports_only_the_standard_library_first() -> None:
+    import ast
+
+    loose = {}
+    for name in sweep_requirements.ISOLATES_IN_MAIN:
+        tree = ast.parse((HERE / f"{name}.py").read_text(encoding="utf-8"))
+        imported = [alias.name for node in tree.body if isinstance(node, ast.Import) for alias in node.names]
+        imported += [node.module or "." for node in tree.body if isinstance(node, ast.ImportFrom)]
+        main = next((node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "main"), None)
+        calls = main is not None and any(isinstance(node, ast.Call) and ast.unparse(node.func) == "live_boundary.isolate"
+                                         for node in ast.walk(main))
+        extra = [n for n in imported if n.split(".")[0] not in sys.stdlib_module_names]
+        if extra or not calls:
+            loose[name] = {"module-level imports beyond the standard library": extra, "main() isolates": calls}
+    check(not loose and set(sweep_requirements.ISOLATES_IN_MAIN) <= {p.stem for p in HERE.glob("*_test.py")},
+          f"a suite declared to isolate in main() exists, imports only the standard library at module level, and "
+          f"calls isolate() in main() (SYRD-820): {loose}")
+
+
 def test_each_suite_is_planned_where_it_can_work() -> None:
     host = sweep.plan("tests/board_ui_delegation_test.py", bwrap="/usr/bin/bwrap")
     check((host.where, host.why) == ("host", "needs user namespaces"), f"a declared suite runs on the host: {host}")
@@ -58,7 +77,9 @@ def _tree(suites: dict[str, str]) -> Path:
 
 
 def test_the_host_environment_is_cold_and_traversable() -> None:
-    root = _tree({"isolating_test": "import live_boundary; live_boundary.isolate()\n", "plain_test": "pass\n"})
+    root = _tree({"isolating_test": "import live_boundary; live_boundary.isolate()\n", "plain_test": "pass\n",
+                  "mentioning_test": "# live_boundary.isolate() is what a pane run needs\npass\n",
+                  "late_test": "import scripts.team_launcher as tl\nimport live_boundary\nlive_boundary.isolate()\n"})
     scratch = sweep._scratch()
     pane = {"TICKET_BOARD_PANE_SESSION_DIR": "/live/sessions", "TICKET_BOARD_PANE_STATE_DIR": "/live/state",
             "TICKET_BOARD_SOCKET": "/live/socket", "PGU_TICKET_BOARD_PANE_TARGET": "p:0.0"}
@@ -72,6 +93,12 @@ def test_the_host_environment_is_cold_and_traversable() -> None:
               and "TICKET_BOARD_SOCKET" not in isolating,
               f"a suite that isolates itself gets no HOME, so it makes its own root, and only the live pane's two "
               f"store names, which isolate() reads and removes: {isolating}")
+        for name in ("mentioning_test", "late_test"):
+            with mock.patch.dict(os.environ, pane):
+                env = sweep.host_env(sweep.Plan(f"tests/{name}.py", "host", "x"), scratch, root)
+            check(env["HOME"] == str(scratch / "home") and not any(k.startswith("TICKET_BOARD") for k in env),
+                  f"{name}: a suite that only mentions isolate(), or calls it after a production import, is no "
+                  f"isolating suite: a disposable HOME and no live store name (SYRD-820): {env}")
         check(plain["HOME"] == str(scratch / "home") and not any(k.startswith(("TICKET_BOARD", "PGU_")) for k in plain)
               and set(plain) == {"PATH", "LANG", "PYTHONDONTWRITEBYTECODE", "HOME", "XDG_CONFIG_HOME",
                                  "XDG_STATE_HOME", "XDG_RUNTIME_DIR", "TMPDIR"},

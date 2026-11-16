@@ -40,10 +40,10 @@ import zlib
 from pathlib import Path
 
 import live_boundary  # noqa: E402
-from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
-isolate_tmux_bus()  # SYRD-814: the tmux servers it starts get a user bus of their own, never the invoker's
 
 live_boundary.isolate()  # SYRD-627: no live home, pane store or runtime directory, here or in a child
+from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
+isolate_tmux_bus()  # SYRD-814: the tmux servers it starts get a user bus of their own, never the invoker's
 
 ROOT = Path(__file__).resolve().parents[1]
 BEFORE = "3d410cadd9a81835fad9422bb9513707c4140ec9"  # main before SYRD-247's resumed implementation

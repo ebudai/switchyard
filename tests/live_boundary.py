@@ -42,6 +42,7 @@ Each refusal and each drift is printed with the responsible command and stack.
 
 from __future__ import annotations
 
+import ast
 import atexit
 import builtins
 import errno
@@ -697,6 +698,44 @@ def keep_reachable(new_root: Path | str) -> None:
             inside.parent.mkdir(parents=True, exist_ok=True)
             inside.touch()
             subprocess.run(["mount", "--bind", item, str(inside)], check=True)
+
+
+#: What a suite may import before it isolates itself: the standard library, and this module.
+_BEFORE_ISOLATE = frozenset(sys.stdlib_module_names) | {"live_boundary"}
+
+
+def _is_isolate_call(statement: ast.stmt) -> bool:
+    call = statement.value if isinstance(statement, ast.Expr) else None
+    return (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "isolate"
+            and isinstance(call.func.value, ast.Name) and call.func.value.id == "live_boundary")
+
+
+def isolates_first(source: str) -> bool:
+    """Whether a suite's source calls `live_boundary.isolate()` as a module-level statement before anything it runs
+    imports more than the standard library and this module (SYRD-820).
+
+    Read from the syntax, never the text: a mention in a comment, a string or a function body is no call, and
+    production imported under any name before the call -- `scripts.x`, a module found through a path the suite added,
+    a test helper, `importlib.import_module` or `__import__` -- has already read the live environment."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    for statement in tree.body:
+        if _is_isolate_call(statement):
+            return True
+        for node in ast.walk(statement):
+            if isinstance(node, ast.Import) and any(alias.name.split(".")[0] not in _BEFORE_ISOLATE
+                                                   for alias in node.names):
+                return False
+            if isinstance(node, ast.ImportFrom) and (
+                    node.level or (node.module or "").split(".")[0] not in _BEFORE_ISOLATE):
+                return False
+            if isinstance(node, ast.Call) and (
+                    (isinstance(node.func, ast.Name) and node.func.id == "__import__")
+                    or (isinstance(node.func, ast.Attribute) and node.func.attr == "import_module")):
+                return False
+    return False
 
 
 # --------------------------------------------------------------------------

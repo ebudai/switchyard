@@ -68,6 +68,14 @@ HOST_ONLY: dict[str, tuple[str, ...]] = {
     ),
 }
 
+#: Suites that call `live_boundary.isolate()` at the top of main() rather than at module level, each for a measured
+#: reason. A sweep treats them as isolating suites: no HOME, and the live pane's two store names (SYRD-820). Each may
+#: import only the standard library at module level; sweep_test checks it.
+ISOLATES_IN_MAIN: dict[str, str] = {
+    "live_boundary_test": "its child modes run before isolate(), to show the guard reaches a namespace child through "
+                          "sitecustomize alone",
+}
+
 #: Suites measured green alone and red only under a parallel sweep's load. A sweep retries each once, alone, before
 #: calling it red, and says it did.
 LOAD_SENSITIVE: tuple[str, ...] = (
@@ -85,3 +93,7 @@ def host_reason(suite: str) -> str:
 
 def load_sensitive(suite: str) -> bool:
     return suite.rsplit("/", 1)[-1].removesuffix(".py").removesuffix(".sh") in LOAD_SENSITIVE
+
+
+def isolates_in_main(suite: str) -> bool:
+    return suite.rsplit("/", 1)[-1].removesuffix(".py").removesuffix(".sh") in ISOLATES_IN_MAIN

@@ -10,7 +10,8 @@ A SUITE is `tests/<name>.py`, `<name>.py` or `<name>`. Each runs:
 - **on the host** when `tests/sweep_requirements.py` says the sandbox cannot give it what it needs, when bwrap is
   absent, or with --no-sandbox: still `env -i`, a temporary directory other accounts can traverse (a suite that
   drops to another uid must reach its own files), and a disposable HOME -- or none for a suite that calls
-  `live_boundary.isolate()`, which then builds its own disposable root, as it does for a run from a pane.
+  `live_boundary.isolate()` first (read from its syntax), which then builds its own disposable root, as it does
+  for a run from a pane.
 
 A suite declared load-sensitive that fails is run once more, alone, and reported as passing on retry if it does.
 Each suite's output goes to DIR/<name>.log; one line per suite is printed, then a summary. The exit status is 1 when
@@ -33,11 +34,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import live_boundary  # noqa: E402
 import sweep_requirements  # noqa: E402
 
 ROOT = HERE.parent
 PATH = "/usr/local/bin:/usr/bin:/bin"
-ISOLATING = "live_boundary.isolate()"
 LIVE_PANE_STORES = ("TICKET_BOARD_PANE_SESSION_DIR", "TICKET_BOARD_PANE_STATE_DIR")
 _alone = threading.Lock()  # a retry runs with nothing else running
 
@@ -95,7 +96,10 @@ def base_env(scratch: Path) -> dict[str, str]:
 def host_env(plan_: Plan, scratch: Path, root: Path) -> dict[str, str]:
     env = base_env(scratch)
     source = root / plan_.suite
-    if source.suffix == ".py" and ISOLATING in source.read_text(encoding="utf-8", errors="replace"):
+    # Read from its syntax: a module-level isolate() before any production import, or a suite declared to call it
+    # first in main(). One that only mentions it, or calls it later, would hold the live store names (SYRD-820).
+    text = source.read_text(encoding="utf-8", errors="replace") if source.suffix == ".py" else ""
+    if text and (live_boundary.isolates_first(text) or sweep_requirements.isolates_in_main(plan_.suite)):
         # Its own disposable root, as for a run from a pane; a fixture HOME would read as "prepared on purpose"
         # and leave its namespace children without one (SYRD-806 triage).
         env["HOME"] = ""

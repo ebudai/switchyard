@@ -34,11 +34,25 @@ host files, the system bus or a browser. `tests/sweep_requirements.py` declares
 those, with the reason, and the sweep runs them on the host instead, still cold.
 It gives a suite that calls `live_boundary.isolate()` first no HOME, so the
 suite builds its own disposable root, and the live pane's two store names, so
-its sentinel tolerates that pane's own hooks. "First" is read from the suite's
-syntax: a module-level call before anything beyond the standard library is
-imported, or a suite `ISOLATES_IN_MAIN` declares with its reason. A mention in
-a comment, or a call after a production import, does not count (SYRD-820). Every other suite gets a disposable
-HOME, and the temporary directory is one other accounts can traverse. A suite
+its sentinel tolerates that pane's own hooks. Run the sweep from the pane with
+`TICKET_BOARD_PANE_SESSION_DIR` and `TICKET_BOARD_PANE_STATE_DIR` in its
+environment: under a bare `env -i` the sentinel cannot tell that pane's own
+writes from the suite's, and fails the run as LIVE DRIFT.
+
+"First" is read from the suite's syntax, and closed (`live_boundary.isolates_first`,
+SYRD-820 and SYRD-824). Before a module-level `live_boundary.isolate()` call a suite
+may only import the standard library and `live_boundary` itself (not renamed),
+assign fresh names from literals and a short list of calls (`str`, `int`, `len`,
+`Path`, a path's `resolve`/`joinpath`, `sys.path.insert`/`append`, `os.environ`
+and `os.getenv` reads, `os.path` joins), and wrap those in `if` or `for`.
+Anything else counts as running first, so the suite is not an isolating one:
+any other call (`exec`, `runpy`, `importlib`'s spec loading included), an
+import beyond the standard library, a `def` or `class`, and a rebinding of an
+import or of `live_boundary`. A suite `ISOLATES_IN_MAIN` declares, with its
+reason, counts too. A mention in a comment or a function body does not.
+
+Every other suite gets a disposable HOME, and the temporary directory is one
+other accounts can traverse. A suite
 measured as load-sensitive is retried once, alone, and reported as passing on
 retry. The sweep never runs as root (SYRD-815).
 

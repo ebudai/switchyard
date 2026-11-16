@@ -778,7 +778,7 @@ def test_sentinel_contents(scratch: Path) -> None:
 
 
 def test_isolation_is_read_from_the_syntax() -> None:
-    """SYRD-820: a module-level isolate() before anything but the standard library is imported, and nothing else."""
+    """SYRD-820, SYRD-824: a module-level isolate() before anything but an allow-list runs, and nothing else."""
     import live_boundary
 
     first = "from __future__ import annotations\nimport os, sys\nfrom pathlib import Path\n"
@@ -797,6 +797,32 @@ def test_isolation_is_read_from_the_syntax() -> None:
         "import_module": ("import importlib\nimportlib.import_module('scripts.team_launcher')\n" + call, False),
         "__import__": ("__import__('team_launcher')\n" + call, False),
         "unparsable": ("live_boundary.isolate(\n", False),
+        # SYRD-824: closed. What a suite needs to find its tree and read its environment is allowed...
+        "a path set up": (first + "import os\nROOT = Path(__file__).resolve().parents[1]\n"
+                          "if str(ROOT) not in sys.path:\n    sys.path.insert(0, str(ROOT))\n"
+                          "for extra in (str(ROOT), str(ROOT / 'tests')):\n    if extra not in sys.path:\n"
+                          "        sys.path.append(extra)\nHOME = os.environ.get('HOME', '')\n" + call, True),
+        # ...and nothing else runs first.
+        "exec": ("exec('import scripts')\n" + call, False),
+        "runpy": ("import runpy\nrunpy.run_module('scripts.team_launcher')\n" + call, False),
+        "spec loading": ("import importlib.util\n"
+                         "spec = importlib.util.spec_from_file_location('s', 'scripts/switchyard')\n"
+                         "module = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(module)\n" + call,
+                         False),
+        "any other call": ("import os\nos.system('true')\n" + call, False),
+        "a shadowing class": ("import live_boundary\nclass live_boundary:\n    @staticmethod\n    def isolate():\n"
+                              "        pass\nlive_boundary.isolate()\n", False),
+        "a definition": ("def helper():\n    pass\n" + call, False),
+        "live_boundary rebound": ("import types\nimport live_boundary\nlive_boundary = types\n"
+                                  "live_boundary.isolate()\n", False),
+        "an import rebound": (first + "Path = print\n" + call, False),
+        "an environment write": ("import os\nos.environ['HOME'] = '/x'\n" + call, False),
+        "live_boundary aliased": ("import live_boundary as lb\nlb.isolate()\n", False),
+        "never imported": ("import sys\nlive_boundary.isolate()\n", False),
+        # An allowed call's arguments are judged too (SYRD-824 Audit).
+        "a positional argument": ("import sys\nsys.path.insert(0, __import__('scripts'))\n" + call, False),
+        "a default argument": ("import os\nX = os.environ.get('A', exec('import scripts'))\n" + call, False),
+        "a keyword argument": ("import os\nX = os.path.join('a', b=exec('import scripts'))\n" + call, False),
     }
     wrong = {name: want for name, (source, want) in cases.items() if live_boundary.isolates_first(source) != want}
     check(wrong == {}, f"isolation is read from the syntax: these are judged wrongly: {wrong}")

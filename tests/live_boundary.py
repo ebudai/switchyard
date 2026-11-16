@@ -700,8 +700,16 @@ def keep_reachable(new_root: Path | str) -> None:
             subprocess.run(["mount", "--bind", item, str(inside)], check=True)
 
 
-#: What a suite may import before it isolates itself: the standard library, and this module.
-_BEFORE_ISOLATE = frozenset(sys.stdlib_module_names) | {"live_boundary"}
+#: What may run before a suite's module-level isolate() call, and nothing else (SYRD-824). These compute or extend its
+#: import path, or read the environment; none runs code of the suite's, a helper's or the product's. Keyed by the
+#: call's dotted name, through what the suite's own standard-library imports bound.
+_PRE_ISOLATE_CALLS = frozenset({
+    "str", "int", "len", "pathlib.Path", "sys.path.insert", "sys.path.append", "os.environ.get", "os.getenv",
+    "os.path.join", "os.path.dirname", "os.path.abspath", "os.path.realpath",
+})
+#: A path's own methods, which name a path and run nothing.
+_PRE_ISOLATE_METHODS = frozenset({"resolve", "absolute", "joinpath", "with_name", "with_suffix"})
+_PRE_ISOLATE_BUILTINS = frozenset({"str", "int", "len"})
 
 
 def _is_isolate_call(statement: ast.stmt) -> bool:
@@ -710,31 +718,111 @@ def _is_isolate_call(statement: ast.stmt) -> bool:
             and isinstance(call.func.value, ast.Name) and call.func.value.id == "live_boundary")
 
 
-def isolates_first(source: str) -> bool:
-    """Whether a suite's source calls `live_boundary.isolate()` as a module-level statement before anything it runs
-    imports more than the standard library and this module (SYRD-820).
+class _BeforeIsolate:
+    """Judges each statement before a suite's isolate(): true only for one that runs nothing but the allow-list."""
 
-    Read from the syntax, never the text: a mention in a comment, a string or a function body is no call, and
-    production imported under any name before the call -- `scripts.x`, a module found through a path the suite added,
-    a test helper, `importlib.import_module` or `__import__` -- has already read the live environment."""
+    def __init__(self) -> None:
+        self.bound: dict[str, str] = {}  # a name an import bound, and what it is
+
+    def _dotted(self, node: ast.expr) -> str:
+        parts: list[str] = []
+        while isinstance(node, ast.Attribute):
+            parts.append(node.attr)
+            node = node.value
+        if not isinstance(node, ast.Name):
+            return ""
+        root = self.bound.get(node.id, node.id if node.id in _PRE_ISOLATE_BUILTINS else "")
+        return ".".join([root, *reversed(parts)]) if root else ""
+
+    def call(self, node: ast.Call) -> bool:
+        if not (all(map(self.expr, node.args)) and all(self.expr(keyword.value) for keyword in node.keywords)):
+            return False
+        if self._dotted(node.func) in _PRE_ISOLATE_CALLS:
+            return True
+        return (isinstance(node.func, ast.Attribute) and node.func.attr in _PRE_ISOLATE_METHODS
+                and self.expr(node.func.value))
+
+    def expr(self, node: ast.expr | None) -> bool:
+        if node is None or isinstance(node, (ast.Constant, ast.Name)):
+            return True
+        if isinstance(node, ast.Call):
+            return self.call(node)
+        if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+            return all(map(self.expr, node.elts))
+        if isinstance(node, (ast.BoolOp, ast.JoinedStr)):
+            return all(map(self.expr, node.values))
+        if isinstance(node, ast.Dict):
+            return all(map(self.expr, [*node.keys, *node.values]))
+        if isinstance(node, ast.BinOp):
+            return self.expr(node.left) and self.expr(node.right)
+        if isinstance(node, ast.Compare):
+            return self.expr(node.left) and all(map(self.expr, node.comparators))
+        if isinstance(node, ast.Subscript):
+            return self.expr(node.value) and self.expr(node.slice)
+        if isinstance(node, (ast.Attribute, ast.UnaryOp, ast.Starred, ast.FormattedValue)):
+            return self.expr(getattr(node, "value", None) or getattr(node, "operand", None)) and (
+                not isinstance(node, ast.FormattedValue) or self.expr(node.format_spec))
+        return False  # a lambda, a comprehension, a walrus, an await: not what a suite needs before isolate()
+
+    def target(self, node: ast.expr) -> bool:
+        if isinstance(node, (ast.Tuple, ast.List)):
+            return all(map(self.target, node.elts))
+        # A fresh name only: rebinding an import, a builtin the allow-list trusts, or live_boundary would change what
+        # the calls above, or the isolate() call itself, reach.
+        return (isinstance(node, ast.Name) and node.id not in self.bound and node.id not in _PRE_ISOLATE_BUILTINS
+                and node.id != "live_boundary")
+
+    def statement(self, node: ast.stmt) -> bool:
+        if isinstance(node, ast.Expr):
+            return isinstance(node.value, ast.Constant) or (isinstance(node.value, ast.Call) and self.call(node.value))
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "live_boundary" and alias.asname is None:
+                    self.bound["live_boundary"] = "live_boundary"
+                    continue
+                name = alias.asname or alias.name.split(".")[0]
+                if alias.name.split(".")[0] not in sys.stdlib_module_names or name == "live_boundary":
+                    return False
+                self.bound[name] = alias.name if alias.asname else name
+            return True
+        if isinstance(node, ast.ImportFrom):
+            if node.level or (node.module or "").split(".")[0] not in sys.stdlib_module_names:
+                return False
+            for alias in node.names:
+                if alias.name == "*" or (alias.asname or alias.name) == "live_boundary":
+                    return False
+                self.bound[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+            return True
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            return node.value is not None and self.expr(node.value) and all(map(self.target, targets))
+        if isinstance(node, ast.If):
+            return self.expr(node.test) and all(map(self.statement, [*node.body, *node.orelse]))
+        if isinstance(node, ast.For):
+            return (not node.orelse and self.target(node.target) and self.expr(node.iter)
+                    and all(map(self.statement, node.body)))
+        return False  # a def, a class, a with, a try, a del, ...: anything else runs first
+
+
+def isolates_first(source: str) -> bool:
+    """Whether a suite's source calls `live_boundary.isolate()` as a module-level statement before it runs anything
+    but an allow-list (SYRD-820, SYRD-824).
+
+    Read from the syntax, never the text, and closed: before the call, only standard-library imports, `import
+    live_boundary` itself, assignments to fresh names of literals and allow-listed calls (`_PRE_ISOLATE_CALLS`, a
+    path's own methods), and `if`/`for` around those. Anything else counts as running first: any other call, so
+    `exec`, `runpy` and `importlib`'s spec loading; any import beyond the standard library; any definition; and a
+    rebinding of an import or of `live_boundary`. A mention in a comment, a string or a function body is no call."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return False
+    judge = _BeforeIsolate()
     for statement in tree.body:
         if _is_isolate_call(statement):
-            return True
-        for node in ast.walk(statement):
-            if isinstance(node, ast.Import) and any(alias.name.split(".")[0] not in _BEFORE_ISOLATE
-                                                   for alias in node.names):
-                return False
-            if isinstance(node, ast.ImportFrom) and (
-                    node.level or (node.module or "").split(".")[0] not in _BEFORE_ISOLATE):
-                return False
-            if isinstance(node, ast.Call) and (
-                    (isinstance(node.func, ast.Name) and node.func.id == "__import__")
-                    or (isinstance(node.func, ast.Attribute) and node.func.attr == "import_module")):
-                return False
+            return judge.bound.get("live_boundary") == "live_boundary"
+        if not judge.statement(statement):
+            return False
     return False
 
 

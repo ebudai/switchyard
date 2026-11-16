@@ -320,7 +320,7 @@ def taught_in_double_quotes():
 
 def taught_inline_prose():
     """Free-form placeholders need a file or stdin; quote delimiters cannot safely wrap arbitrary replacement text."""
-    flags = load_guard(ROOT).PROSE_FLAGS - {"--set", "--value", "--patch-json", "--payload-json"}
+    flags = load_guard(ROOT).PROSE_FLAGS - {"--set", "--value", "--patch-json", "--payload-json", "--json"}
     names = "|".join(sorted(f[2:] for f in flags))
     return re.compile(r'--(?:' + names + r')(?:=| )\\?[\'"](?!\$\(cat <<\'EOF\')')
 
@@ -406,8 +406,9 @@ def inventory() -> None:
               for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1) if taught.search(line)]
     check(inline == [], f"every skill, guide and hint feeds arbitrary prose through a file or stdin: {inline}")
     director_skill = (ROOT / "skills/switchyard-director/SKILL.md").read_text()
-    check('--payload-json "$(cat <<\'EOF\'\n{"reason": "<what to fix, from the User\'s message>"}\nEOF\n)"'
-          in director_skill, "the User's apostrophe in a structured payload stays inside a quoted heredoc")
+    check("--reason-file - <<'EOF'  # back to implementation; Audit runs again\n<what to fix, from the User's message>\nEOF\n"
+          in director_skill and '--payload-json "$(' not in director_skill,
+          "the User's apostrophe in a payload's reason stays inside a quoted heredoc, never a command substitution")
 
     dispatch = (ROOT / "scripts/ticket_board/notification_dispatch.py").read_text()
     check('[self.directorctl_bin, "send", target, message]' in dispatch,

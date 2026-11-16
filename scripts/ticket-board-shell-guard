@@ -46,7 +46,7 @@ from dataclasses import dataclass, field, replace
 PROSE_FLAGS = frozenset({
     "--audit-prompt", "--blocked-reason", "--body", "--comment-text", "--do-this", "--implementation", "--message",
     "--note", "--rationale", "--reason", "--recommendations", "--request", "--text", "--then-choose", "--title",
-    "--you-should-see", "--set", "--value", "--patch-json", "--payload-json",
+    "--you-should-see", "--set", "--value", "--patch-json", "--payload-json", "--json",
 })
 FLAG_COMMANDS = frozenset({"ticket-board-write", "switchyard"})
 #: directorctl subcommand -> index of the first argument that is its message.
@@ -586,8 +586,8 @@ def _board_problems(command: Command, name: str, args: list[Word]) -> list[str]:
         flag, _, inline = word.plain.partition("=")
         index += 1
         stdin_flag = flag.endswith("-file") and flag[:-5] in PROSE_FLAGS
-        if flag not in PROSE_FLAGS and not stdin_flag:
-            continue
+        if (flag not in PROSE_FLAGS or flag == "--json" and name != "ticket-board-write") and not stdin_flag:
+            continue  # `switchyard ... --json` is a switch, not edit-fields' JSON: it takes no value to read
         what = f"`{name} {flag}`"
         if "=" in word.plain:
             value = word

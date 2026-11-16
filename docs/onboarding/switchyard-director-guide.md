@@ -417,25 +417,27 @@ subcommand of their own, and they exist only where the ticket's
 ```bash
 # acceptance, coded ticket: name the candidate the ticket already carries
 ticket-board-write workflow-action <id> relay_user_sign_off \
-  --payload-json "$(cat <<'EOF'
-{"reason": "User completed the steps and accepted", "commit_hash": "<the commit the ticket carries>"}
+  --payload-json '{"commit_hash": "<the commit the ticket carries>"}' --reason-file - <<'EOF'
+User completed the steps and accepted
 EOF
-)"
 # acceptance, no-code ticket (commit_exempt and no commit): the reason and NO commit_hash key;
 # an empty "commit_hash" is refused as an invalid commit
 ticket-board-write workflow-action <id> relay_user_sign_off \
-  --payload-json "$(cat <<'EOF'
-{"reason": "User accepted the recommendation in conversation"}
+  --reason-file - <<'EOF'
+User accepted the recommendation in conversation
 EOF
-)"
 # rejection, where relay_user_kick_back is listed: a board whose User still returns work,
 # not one where Send to Director hands the ticket to you
 ticket-board-write workflow-action <id> relay_user_kick_back \
-  --payload-json "$(cat <<'EOF'
-{"reason": "User reports <what failed>"}
+  --reason-file - <<'EOF'
+User reports <what failed>
 EOF
-)"
 ```
+
+A payload's prose -- its `reason` or `text` -- goes through `--reason-file -` (or `--text-file -`) fed by a
+quoted heredoc, and is merged into the payload; never inline JSON. A whole payload
+can come the same way with `--payload-json-file -`, as can `edit-fields --json-file` and
+`set-workflow-flags --patch-json-file`. A field given both in the JSON and by its own option is refused.
 
 The rejection returns the ticket along the ordinary correction path, clears the
 same sign-offs the User's own rejection clears, and notifies the implementer

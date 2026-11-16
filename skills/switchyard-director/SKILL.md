@@ -684,16 +684,19 @@ sign-off stay. You decide from there, through `workflow-action`:
 ```bash
 ticket-board-write workflow-action <id> director_return_to_uat        # back to the User (prepare or --reconfirm steps first)
 ticket-board-write workflow-action <id> director_send_to_implementer \
-  --payload-json "$(cat <<'EOF'
-{"reason": "<what to fix, from the User's message>"}
+  --reason-file - <<'EOF'  # back to implementation; Audit runs again
+<what to fix, from the User's message>
 EOF
-)"   # back to implementation; Audit runs again
 ticket-board-write workflow-action <id> director_route_feedback \
-  --payload-json "$(cat <<'EOF'
-{"reason": "<why it needs triage>"}
+  --reason-file - <<'EOF'  # to analysis
+<why it needs triage>
 EOF
-)"                  # to analysis
 ```
+
+A payload's prose -- its `reason` or `text` -- goes through `--reason-file -` (or `--text-file -`) fed by a
+quoted heredoc, and is merged into the payload; never inline JSON. A whole payload
+can come the same way with `--payload-json-file -`, as can `edit-fields --json-file` and
+`set-workflow-flags --patch-json-file`. A field given both in the JSON and by its own option is refused.
 
 Defer and cancel are available from it too.
 
@@ -708,23 +711,20 @@ declared transitions, so they are taken through `workflow-action`:
 ```bash
 # acceptance of a coded ticket: name the candidate the ticket already carries
 ticket-board-write workflow-action <id> relay_user_sign_off \
-  --payload-json "$(cat <<'EOF'
-{"reason": "<what the user reported>", "commit_hash": "<the commit the ticket carries>"}
+  --payload-json '{"commit_hash": "<the commit the ticket carries>"}' --reason-file - <<'EOF'
+<what the user reported>
 EOF
-)"
 # acceptance of a no-code ticket (commit_exempt, no commit): a reason and NO commit_hash key at all --
 # an empty "commit_hash" is refused
 ticket-board-write workflow-action <id> relay_user_sign_off \
-  --payload-json "$(cat <<'EOF'
-{"reason": "<what the user reported>"}
+  --reason-file - <<'EOF'
+<what the user reported>
 EOF
-)"
 # rejection, only where relay_user_kick_back is listed (a board whose User still returns work)
 ticket-board-write workflow-action <id> relay_user_kick_back \
-  --payload-json "$(cat <<'EOF'
-{"reason": "<what the user reported>"}
+  --reason-file - <<'EOF'
+<what the user reported>
 EOF
-)"
 ```
 
 If the acceptance relay is not listed, your workflow was declared after the

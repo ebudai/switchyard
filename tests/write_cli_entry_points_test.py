@@ -205,7 +205,7 @@ def assert_entry_points_send_the_same_writes(tmp: Path) -> int:
     refusals = {
         "no caller role": (1, CALLER_REQUIRED),
         "malformed --set": (1, "--set expects FIELD=VALUE, got 'novalue'\n"),
-        "malformed --json": (1, "invalid edit-fields --json: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)\n"),
+        "malformed --json": (1, "edit-fields --json: not valid JSON (Expecting property name enclosed in double quotes: line 1 column 2 (char 1))\n"),
     }
     for label, (rc, stderr) in refusals.items():
         entry = cases[label]

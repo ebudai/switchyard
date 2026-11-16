@@ -16,13 +16,14 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from . import board_stall, documentation_gate, read_client, workflow_relays, write_client
+    from . import board_stall, documentation_gate, read_client, workflow_relays, write_client, write_payload
 except ImportError:  # pragma: no cover - `python write_client.py` runs outside the package
     import board_stall
     import documentation_gate
     import read_client
     import workflow_relays
     import write_client
+    import write_payload
 
 #: SYRD-624: all a Librarian may write. The board refuses anything else regardless.
 LIBRARIAN_COMMANDS = frozenset({"documentation_sign_off", "documentation_no_change", "documentation_kick_back",
@@ -456,10 +457,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "verify-caller",
         help="ask the board which role this process is, over the local socket; changes nothing",
     )
-    workflow_action = subparsers.add_parser("workflow-action")
+    workflow_action = subparsers.add_parser("workflow-action", epilog=write_payload.WORKFLOW_ACTION_EPILOG,
+                                            formatter_class=argparse.RawDescriptionHelpFormatter)
     workflow_action.add_argument("ticket_id")
     workflow_action.add_argument("action")
-    workflow_action.add_argument("--payload-json", default="{}")
+    add_free_text_argument(workflow_action, "--payload-json", default="{}", help="the payload, a JSON object")
+    for field in write_payload.PAYLOAD_TEXT_FIELDS:  # one prose field, outside the JSON (SYRD-817)
+        add_free_text_argument(workflow_action, f"--{field}", default=None, help=f"the payload's {field!r} field")
     relay = subparsers.add_parser(
         "add-user-acceptance-relay",
         help=(
@@ -482,7 +486,7 @@ def _build_parser() -> argparse.ArgumentParser:
     stall.add_argument("--expected-revision", type=int, default=None, help="the revision the preview showed")
     workflow_flags = subparsers.add_parser("set-workflow-flags")
     workflow_flags.add_argument("ticket_id")
-    workflow_flags.add_argument("--patch-json", required=True)
+    add_free_text_argument(workflow_flags, "--patch-json", required=True, help="the flags to set, a JSON object")
 
     create = subparsers.add_parser("create-ticket")
     create.add_argument("--title", required=True)
@@ -929,7 +933,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     edit_fields = subparsers.add_parser("edit-fields")
     edit_fields.add_argument("ticket_id")
-    edit_fields.add_argument("--json", required=True, help="JSON object of fields accepted by the edit_fields action")
+    add_free_text_argument(edit_fields, "--json", required=True, help="the fields edit_fields may change, a JSON object")
 
     merge = subparsers.add_parser("merge")
     merge.add_argument("ticket_id")
@@ -948,6 +952,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         parser = _build_parser()
         args = parser.parse_args(argv)
+        write_payload.one_standard_input(args, parser)
         resolve_free_text_arguments(args, parser)
         command = args.command.replace("-", "_")
         if command not in {"file_report", "report_follow_up"} and not args.caller_role.strip():
@@ -1077,7 +1082,7 @@ def main(argv: list[str] | None = None) -> int:
                 notify=not args.no_notify,
             )
         elif command == "workflow_action":
-            response = client.workflow_action(args.ticket_id, args.action, json.loads(args.payload_json))
+            response = client.workflow_action(args.ticket_id, args.action, write_payload.workflow_payload(args))
         elif command == "add_user_acceptance_relay":
             if args.apply and args.expected_revision is None:
                 raise write_client.TicketBoardWriteError("--apply needs --expected-revision, from the preview")
@@ -1088,7 +1093,8 @@ def main(argv: list[str] | None = None) -> int:
             response = _set_board_stall_threshold(client, seconds=args.seconds,
                                                   apply=args.apply, expected_revision=args.expected_revision)
         elif command == "set_workflow_flags":
-            response = client.set_workflow_flags(args.ticket_id, json.loads(args.patch_json))
+            patch = write_payload.json_object(args.patch_json, "--patch-json")
+            response = client.set_workflow_flags(args.ticket_id, patch)
         elif command in {"documentation_sign_off", "documentation_no_change", "documentation_kick_back"}:
             response = _documentation_decision(client, args, command)
         elif command == "require_documentation":
@@ -1206,10 +1212,7 @@ def main(argv: list[str] | None = None) -> int:
         elif command == "add_comment":
             response = client.add_comment(args.ticket_id, text=args.text, urgent=args.urgent)
         elif command == "edit_fields":
-            patch = json.loads(args.json)
-            if not isinstance(patch, dict):
-                raise write_client.TicketBoardWriteError("edit-fields --json must be a JSON object")
-            response = client.edit_fields(args.ticket_id, patch)
+            response = client.edit_fields(args.ticket_id, write_payload.json_object(args.json, "edit-fields --json"))
         elif command == "merge":
             response = client.merge(args.ticket_id, target_id=args.target_id)
         elif command == "dismiss_notification":
@@ -1223,7 +1226,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             response = getattr(client, command)(args.ticket_id)
     except json.JSONDecodeError as exc:
-        print(f"invalid edit-fields --json: {exc}", file=sys.stderr)
+        print(f"invalid JSON: {exc}", file=sys.stderr)
         return 1
     except write_client.TicketBoardWriteError as exc:
         print(str(exc), file=sys.stderr)

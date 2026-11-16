@@ -49,8 +49,9 @@ accounted for. None takes board, ticket, comment, reason or notice text. No prog
 `scripts/ticket-board-shell-guard` is installed as the pre-tool hook of every supported runtime. It reads the
 command the model asked for and refuses it before any process starts when a board command's prose would reach a
 shell evaluation. Prose means:
-- a free-text option of `ticket-board-write` (every option `write_cli.add_free_text_argument` registers, plus
-  `--set`, `--value`, `--patch-json` and `--payload-json`) or of `switchyard` (`--reason`);
+- a free-text option of `ticket-board-write` (every option `write_cli.add_free_text_argument` registers, among them
+  `--payload-json`, `--patch-json` and `edit-fields --json`, plus `--set` and `--value`) or of `switchyard`
+  (`--reason`);
 - the message of `directorctl send` / `callback`.
 
 It is refused when it holds any of these:

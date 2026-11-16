@@ -205,24 +205,26 @@ END $$;
     return seen
 
 
-def documented_commands() -> list[tuple[str, str]]:
-    """Every `ticket-board-write` line in the relay guidance, joined across its backslashes.
+def documented_commands() -> list[tuple[str, str, str]]:
+    """Every `ticket-board-write` line in the relay guidance, joined across its backslashes, with its standard input.
 
-    Since SYRD-753 a payload is written as a quoted heredoc read through `cat`, `"$(cat <<'EOF' ... EOF\n)"`, so the
-    shell never quotes the User's words. Each such block is folded into the one argument the shell would pass.
+    A relay's reason is the User's words, so it is fed through a quoted heredoc, `--reason-file - <<'EOF' ... EOF`
+    (SYRD-817), and the shell never quotes them. Each such block's body is what the command reads on standard input.
     """
     import re
-    import shlex
 
     found = []
     for doc in (ROOT / "skills/switchyard-director/SKILL.md", ROOT / "docs/onboarding/switchyard-director-guide.md"):
-        text = doc.read_text(encoding="utf-8")
-        text = re.sub(r'"\$\(cat <<\'EOF\'\n(.*?)\nEOF\n\)"', lambda m: shlex.quote(m.group(1)), text, flags=re.S)
-        text = text.replace("\\\n", " ")
-        for line in text.splitlines():
+        text = doc.read_text(encoding="utf-8").replace("\\\n", " ")
+        lines = text.splitlines()
+        for at, line in enumerate(lines):
             line = line.strip()
             if line.startswith("ticket-board-write ") and ("relay_user" in line or "add-user-acceptance-relay" in line):
-                found.append((doc.name, line.split("  #")[0].strip()))
+                command, stdin = line.split("  #")[0].strip(), ""
+                if command.endswith("<<'EOF'"):
+                    end = lines.index("EOF", at)
+                    command, stdin = command[: -len("<<'EOF'")].strip(), "\n".join(lines[at + 1:end]) + "\n"
+                found.append((doc.name, command, stdin))
     return found
 
 
@@ -339,17 +341,29 @@ def main() -> int:
     from scripts.ticket_board import write_cli
 
     commands = documented_commands()
-    check({name for name, _ in commands} == {"SKILL.md", "switchyard-director-guide.md"} and len(commands) >= 8,
+    check({name for name, *_ in commands} == {"SKILL.md", "switchyard-director-guide.md"} and len(commands) >= 8,
           f"both documents carry the relay commands: {commands}")
-    for name, line in commands:
+    import io
+
+    from scripts.ticket_board import write_payload
+
+    for name, line, stdin in commands:
         argv = shlex.split(line.replace("<revision from the preview>", "7").replace("<revision>", "7"))[1:]
-        args = write_cli._build_parser().parse_args(argv)
+        parser = write_cli._build_parser()
+        args = parser.parse_args(argv)
+        held, sys.stdin = sys.stdin, io.StringIO(stdin)  # the heredoc, as the shell feeds it
+        try:
+            write_payload.one_standard_input(args, parser)
+            write_cli.resolve_free_text_arguments(args, parser)
+        finally:
+            sys.stdin = held
         if args.command == "workflow-action":
-            payload = json.loads(args.payload_json)
-            check(payload.get("reason"), f"{name}: every relay carries the reason: {line}")
+            payload = write_payload.workflow_payload(args)
+            check(payload.get("reason") and payload["reason"] == stdin,
+                  f"{name}: every relay carries the reason, read from its heredoc: {line}")
             if "no-code" in line or "commit_hash" not in payload:
                 check("commit_hash" not in payload, f"{name}: a no-code acceptance names no commit: {line}")
-    nocode = [line for _, line in commands if "relay_user_sign_off" in line and "commit_hash" not in line]
+    nocode = [line for _, line, _ in commands if "relay_user_sign_off" in line and "commit_hash" not in line]
     check(len(nocode) == 2, f"each document shows the no-code acceptance: {nocode}")
     print(f"relay_user_acceptance_configuration_test: {CHECKS} checks ok")
     return 0

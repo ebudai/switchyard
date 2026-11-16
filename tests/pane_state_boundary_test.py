@@ -421,6 +421,17 @@ def run(holder: object, spec: dict) -> dict:
         return json.loads(json.dumps(run_case(t, holder, spec, REACHED)))
 
 
+def test_the_recorder_tells_the_tree_from_the_host() -> None:
+    # SYRD-811: the recorder's own rule, wherever the tree is checked out -- here, as if under /var/tmp.
+    scope: dict = {"os": os}
+    exec(HOST_RECORDER.split("hits = []")[0].replace(f"TREE = {os.path.realpath(ROOT)!r}", "TREE = '/var/tmp/s811tree'"), scope)
+    of_tree = scope["of_tree"]
+    check(all(of_tree(s) for s in ("/var", "/var/tmp", "/var/tmp/", "/var/tmp/s811tree", "/var/tmp/s811tree/scripts/ticket_board/pane_state.py"))
+          and not any(of_tree(s) for s in ("/var/lib/switchyard", "/var/tmp/s811tree2", "/var/tmp/other", "/etc/passwd",
+                                           "/opt/switchyard/current", "/proc/self/stat")),
+          "the tree's own path, and each directory above it, are the tree's; every other host path is still the host's")
+
+
 def test_the_guard_itself_refuses_a_spawn_an_exec_a_lookup_and_a_connection() -> None:
     attempts = [lambda: subprocess.run(["true"]), lambda: subprocess.Popen(["true"]), lambda: os.kill(os.getpid(), 0), lambda: os.system("true"),
                 lambda: pwd.getpwuid(0), lambda: grp.getgrgid(0), lambda: socket.socket().connect(("127.0.0.1", 9)),
@@ -441,14 +452,20 @@ def test_the_guard_itself_refuses_a_spawn_an_exec_a_lookup_and_a_connection() ->
 
 #: Refuses and records any stat, lstat, open (builtin, io and os), access, listdir or scandir under the host's switchyard,
 #: /etc, /var, /opt and /proc paths, after proving it catches one of each kind it matters for (a positive control).
+#: The tree's own path, everything in it and each directory above it are the tree, not the host (SYRD-792's rule; SYRD-811:
+#: from a checkout under /var/tmp, resolving the modules' own files counted 18 "host paths" and the suite went red).
 HOST_RECORDER = (
     "import builtins, io, os, pathlib\n"
     "PREFIXES = ('/usr/local/lib/switchyard', '/etc', '/var', '/opt', '/proc')\n"
+    f"TREE = {os.path.realpath(ROOT)!r}\n"
+    "def of_tree(s):\n"
+    "    s = os.path.normpath(s)\n"
+    "    return s == TREE or s.startswith(TREE + '/') or TREE.startswith(s.rstrip('/') + '/')\n"
     "hits = []\n"
     "def guarded(real, name):\n"
     "    def f(p, *a, **k):\n"
     "        s = os.fsdecode(p) if isinstance(p, (str, bytes, os.PathLike)) else ''\n"
-    "        if s.startswith(PREFIXES):\n"
+    "        if s.startswith(PREFIXES) and not of_tree(s):\n"
     "            hits.append((name, s)); raise FileNotFoundError(2, 'refused', s)\n"
     "        return real(p, *a, **k)\n"
     "    return f\n"

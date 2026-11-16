@@ -495,6 +495,10 @@ ticket-board-write report-follow-up --ticket SYRD-673 --kind supersession \
 - **It needs the credential bound to your project.** The board's shared report token, which
   credentials held before SYRD-677, files reports but cannot follow one up. The next upgrade,
   or `sudo switchyard upgrade <project> --only upstream-report`, replaces it.
+- **When it ends, your Director is told** (SYRD-827). With the same bound credential, your
+  board's listener reads `GET /api/report-status` on each ancestor: your project's ended reports
+  there, and whether your release contains each closing commit. Each close gives your Director one
+  notice. The read changes nothing upstream, and the shared token cannot use it.
 
 #### More than one upstream board: report ancestry
 

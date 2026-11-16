@@ -49,7 +49,7 @@ from .pane_activity_gate import (
 )
 from .idle_nudges import IdleNudges
 from . import reminder_snooze
-from . import background_authorization, board_stall, blocked_pane, capacity_retry, delivery_proof, execution_lease_pass, handoff_children, publisher_pass, pull_pickup, quota_hold, replaced_delivery, review_balance, stall_episode, work_pause
+from . import background_authorization, board_stall, blocked_pane, capacity_retry, delivery_proof, execution_lease_pass, handoff_children, publisher_pass, pull_pickup, quota_hold, replaced_delivery, report_closure, review_balance, stall_episode, work_pause
 from .notification_ledger import NotificationLedger
 from .notification_activity_hold import (
     NotificationActivityHold, ActivityTrace, SELF_REMINDER_KINDS,
@@ -1133,7 +1133,7 @@ WHERE (r.definition->>'active')::boolean
                 self.process_idle_turn_end_nudges(conn)
                 self.process_idle_stall_nudges(conn)
                 self.process_serial_focus_queue_wakeups(conn)
-                pull_pickup.run(self, conn); review_balance.run(self, conn); delivery_proof.run(self, conn); replaced_delivery.run(self, conn); capacity_retry.run(self, conn); stall_episode.run(self, conn); publisher_pass.run(self, conn); board_stall.run(self, conn); handoff_children.run(self, conn); execution_lease_pass.run(self, conn)  # SYRD-539/745/565/589/594/595/625/637/636/616
+                pull_pickup.run(self, conn); review_balance.run(self, conn); delivery_proof.run(self, conn); replaced_delivery.run(self, conn); capacity_retry.run(self, conn); stall_episode.run(self, conn); publisher_pass.run(self, conn); board_stall.run(self, conn); handoff_children.run(self, conn); execution_lease_pass.run(self, conn); report_closure.run(self, conn)  # SYRD-539/745/565/589/594/595/625/637/636/616/827
                 image_handoff.run(self)  # SYRD-247: images the desktop owner handed over
                 delivered = self.process_due_notifications(conn, max_notifications=max_notifications)
                 if max_notifications is not None and self.delivered_count >= max_notifications:
@@ -1228,7 +1228,7 @@ def main(argv: list[str] | None = None) -> int:
         poll_seconds=args.poll_seconds,
         pre_send_recheck_delay_seconds=args.pre_send_recheck_delay_seconds,
     )
-    listener.image_handoffs = image_handoff.from_environment(listener.project, log=LOGGER.info)  # SYRD-247
+    listener.image_handoffs = image_handoff.from_environment(listener.project, log=LOGGER.info); listener.report_closures = True  # SYRD-247; SYRD-827: the service alone asks upstream
     # Rediscovery on every start. A restarted listener re-reads whatever the
     # hooks have written since, and says out loud which directory that is --
     # so a disagreement appears in the log at startup instead of only as

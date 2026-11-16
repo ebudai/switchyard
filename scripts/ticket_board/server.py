@@ -66,7 +66,7 @@ from .operation_role_policy import (
     TASK_ROLES,
 )
 from .peer_identity import SessionIdentity
-from . import break_glass, extension_operations, pull_queue, report_confirmation, report_follow_up, ui_delegation
+from . import break_glass, extension_operations, pull_queue, report_closure, report_confirmation, report_follow_up, ui_delegation
 from .workflow_config import DIRECTOR_IDENTIFYING_CAPABILITIES, LEGACY_ASSIGNEE_SCOPED_OPERATIONS
 
 LOGGER = logging.getLogger(__name__)
@@ -939,6 +939,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if parsed.path == "/api/build": return self.send_json({"build_id": self.server.build_id})  # SYRD-703: the build alone, at any board size
+        if parsed.path == report_closure.PATH: return report_closure.serve_status(self, parsed)  # SYRD-827: a reporter's own ended reports
         if parsed.path == "/api/board":
             payload = self.app.snapshot()
             payload.setdefault("project", getattr(self.app, "project", "pgu"))

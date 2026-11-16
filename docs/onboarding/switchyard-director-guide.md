@@ -716,6 +716,19 @@ only where the report is missing. Do not file it again by hand.
 Changing where your project reports is not a board action. It is root's
 `--only upstream-report` step, described in the board guide.
 
+**When a report ends, you are told.** Your board's notify listener asks each ancestor, about
+every 15 minutes, for the reports your project filed there that have ended. It uses the report
+credential your project already holds, and the ancestor gains no access to your board. Each close
+gives you one notice on your own board. It names the upstream ticket, its title and its final state:
+- **Done:** the commit, and whether your board's release already contains it. If not, it gives
+  `switchyard release-status <project>` and the three privileged upgrade actions.
+- **Cancelled:** the reason, from the upstream Director's latest comment.
+- Every notice ends with the `ticket-board-read --board-url ... ticket <ID>` that shows it.
+
+A report that is reopened and closed again tells you again. Nothing is told while it is open.
+A close more than 30 days old is recorded without a notice. An ancestor that cannot be reached
+is logged once, not on every pass, and tells nothing until it answers again.
+
 ## Local Qwen roles
 
 A role can run Hermes on the host's local model service (`--local-qwen`; see

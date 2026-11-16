@@ -437,7 +437,7 @@ WHERE id = %s
         if kind in {"pull_idle_capacity", "ticket_context", "delivery_proof", "background_hold", "composer_hold",
                     "background_child", "blocked_pane", "uat_question", "execution_lease",
                     "provider_quota_hold", "invalid_user_wait", "audit_return_missing",
-                    "report_follow_up", "release_available",  # SYRD-799: root's word that a release is ready
+                    "report_follow_up", "release_available", "report_closed",  # SYRD-799 release ready; SYRD-827 report ended
                     "pull_pinned_rework"}:  # SYRD-539, 540, 565, 557, 570, 583, 633, 629, 616, 644, 662, 673, 677, 736
             return target_role == "director"
         # SYRD-672: a provider account hold's notice is the Director's while that hold stands, whatever its ticket does.

@@ -12,12 +12,17 @@ panes against it, and the count is the observation. It is the same measurement
 in both directions -- with the bus reachable it must be greater than zero, or
 this host's tmux has no systemd support and there is nothing to isolate; with
 the isolation applied it must be exactly zero, and the panes must still open.
+
+Each server it starts is its own to end (SYRD-822): ending the last session left the server's socket file behind in
+the account's tmux directory on every run, so its server is killed and its socket removed however the run ends --
+finished, failed, or stopped by a runner's timeout (SIGTERM).
 """
 
 from __future__ import annotations
 
 import ast
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -85,18 +90,38 @@ class CountingBus:
         return f"unix:path={self.path}"
 
 
+#: Printed, with the path, as each server starts: the line a parent waits for (`test_a_run_leaves_no_tmux_socket_behind`).
+SOCKET_LINE = "tmux_user_bus_isolation_test: server socket "
+
+
+def _possible_sockets(environment: dict[str, str], server: str) -> set[Path]:
+    """Where a `-L` server's socket can be, for a server that never said: tmux 3.8 measured (SYRD-822) puts it under
+    $TMUX_TMPDIR only while XDG_RUNTIME_DIR is unset, else under /tmp -- and this module sets XDG_RUNTIME_DIR."""
+    return {Path(base) / f"tmux-{os.getuid()}" / server for base in (environment.get("TMUX_TMPDIR") or "/tmp", "/tmp")}
+
+
+def _end_server(base: list[str], environment: dict[str, str], server: str, socket_path: str) -> None:
+    """Kill the server if it still runs, then remove its socket: tmux 3.8 leaves the file even after kill-server."""
+    subprocess.run([*base, "kill-server"], env=environment, check=False, capture_output=True, timeout=10)
+    for path in {Path(socket_path)} if socket_path else _possible_sockets(environment, server):
+        path.unlink(missing_ok=True)
+
+
 def _open_panes(*, environment: dict[str, str], server: str, session: str) -> int:
     """Start a real tmux server of its own and open PANES panes in it.
 
-    `-L` rather than a socket path so the repository's tmux lint sees the
-    isolation it asks for; the socket lands under the private XDG_RUNTIME_DIR
-    this module is already running with.
+    `-L` rather than a socket path so the repository's tmux lint sees the isolation it asks for. The server says
+    where its socket is, and both go again when this returns or raises.
     """
     base = ["tmux", "-L", server]
-    subprocess.run(
-        [*base, "new-session", "-d", "-s", session, "sleep 30"], env=environment, check=True
-    )
+    socket_path = ""
     try:
+        subprocess.run(
+            [*base, "new-session", "-d", "-s", session, "sleep 30"], env=environment, check=True
+        )
+        socket_path = subprocess.run([*base, "display-message", "-p", "#{socket_path}"], env=environment,
+                                     check=True, capture_output=True, text=True).stdout.strip()
+        print(SOCKET_LINE + socket_path, flush=True)
         for _ in range(PANES - 1):
             subprocess.run(
                 [*base, "split-window", "-t", session, "sleep 30"], env=environment, check=True
@@ -118,7 +143,10 @@ def _open_panes(*, environment: dict[str, str], server: str, session: str) -> in
         )
         # The scope requests are made as the panes start; give the last of them
         # time to reach the socket before the count is read.
-        time.sleep(0.75)
+        try:
+            time.sleep(0.75)
+        finally:
+            _end_server(base, environment, server, socket_path)
 
 
 def test_the_isolated_environment_names_no_user_bus() -> None:
@@ -231,13 +259,65 @@ def _tmux_available() -> bool:
     return True
 
 
+def _measure_in_a_child(*, stop_when_open: bool) -> tuple[int, list[str], list[str], str]:
+    """The measurement, run as this suite's own child; optionally stopped by SIGTERM, as a runner's timeout stops it,
+    as soon as its first server says where its socket is. [exit code, sockets announced, those left, output]."""
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+    env.pop("TMUX", None)
+    child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--measure"], env=env,
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    lines: list[str] = []
+    try:
+        for line in child.stdout:  # the child ends within seconds; the timeout below bounds the rest
+            lines.append(line)
+            if stop_when_open and line.startswith(SOCKET_LINE):
+                child.send_signal(signal.SIGTERM)
+                break
+        rest, _ = child.communicate(timeout=60)
+        lines.append(rest)
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+    output = "".join(lines)
+    announced = [line[len(SOCKET_LINE):] for line in output.splitlines() if line.startswith(SOCKET_LINE)]
+    named = {str(path) for name in ("reachable", "isolated")
+             for path in _possible_sockets(env, f"syrd55-{name}-{child.pid}")}
+    left = sorted(path for path in {*announced, *named} if os.path.lexists(path))
+    for path in left:  # this test's own leftovers: end them, so even a failure leaves nothing running
+        subprocess.run(["tmux", "-S", path, "kill-server"], env=env, capture_output=True, check=False, timeout=10)
+        Path(path).unlink(missing_ok=True)
+    return child.returncode, announced, left, output
+
+
+def test_a_run_leaves_no_tmux_socket_behind() -> None:
+    if not _tmux_available():
+        return
+    code, announced, left, output = _measure_in_a_child(stop_when_open=False)
+    assert code == 0 and len(announced) == 2 and left == [], (
+        f"a finished run removes both of its sockets: rc={code} announced={announced} left={left} {output[-600:]}")
+    code, announced, left, output = _measure_in_a_child(stop_when_open=True)
+    assert code == 128 + signal.SIGTERM and len(announced) == 1 and left == [], (
+        f"a run stopped by SIGTERM mid-measurement still removes its socket: rc={code} announced={announced} "
+        f"left={left} {output[-600:]}")
+
+
+def _stop_on_sigterm(signum: int, _frame: object) -> None:
+    raise SystemExit(128 + signum)  # so every `finally` runs, as on any other exit
+
+
 def main() -> int:
+    signal.signal(signal.SIGTERM, _stop_on_sigterm)
+    if sys.argv[1:] == ["--measure"]:
+        counts_connections_to_a_stand_in_user_bus()
+        return 0
     test_the_isolated_environment_names_no_user_bus()
     test_this_process_is_already_isolated()
     test_the_suite_runner_isolates_every_suite()
     test_every_test_that_runs_tmux_isolates_the_user_bus()
     test_the_real_tmux_shell_suite_isolates_the_user_bus()
     counts_connections_to_a_stand_in_user_bus()
+    test_a_run_leaves_no_tmux_socket_behind()
     print("tmux_user_bus_isolation_test: ok")
     return 0
 

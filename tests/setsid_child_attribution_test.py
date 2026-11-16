@@ -188,6 +188,7 @@ def test_a_reused_parent_pid_is_never_the_parent() -> None:
             51: (4, 51, 950.0, 3100, Path("/tmp"), ["postgres: io worker 2"]),          # the pane's own child
             72: (30, 72, 950.0, 3050, Path("/tmp"), ["launcher"]),                      # a setsid'd launcher of 30's,
             71: (72, 71, 960.0, 3060, Path("/tmp"), ["postgres: io worker 3"]),         # and its own setsid'd child
+            91: (30, 91, 950.0, 3000, Path("/tmp"), ["postgres: io worker 4"]),         # forked in 30's own tick
         }
         for pid, (parent, session, _start, ticks, cwd, argv) in table.items():
             (proc / str(pid)).mkdir(parents=True)
@@ -205,6 +206,10 @@ def test_a_reused_parent_pid_is_never_the_parent() -> None:
         check(found == {41: None, 51: None},
               f"a child of the current work is that work, a grandchild through a session of its own too; one whose "
               f"'parent' started after it, or that is the pane's own, is reported: {found}")
+        # SYRD-804: a child forked within its parent's clock tick has the same start ticks; it is still that parent's
+        # (only a parent that started after its child is a reused pid). Here always, where a real fork lands in the
+        # same tick only sometimes.
+        check(91 not in found, f"a child started in its parent's own tick is the current work's, not reported: {found}")
 
 
 def main() -> int:

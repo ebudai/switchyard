@@ -336,7 +336,11 @@ def scenario(root: Path, full: bool) -> dict:
                                          f"-H 'Authorization: Bearer {SECRETS[9]}'")
             secret_file = scratch / f"{SECRETS[10]}.txt"  # it exists: still no proof, as an option's value
             secret_file.write_text("")
-            quiet = spawn("app", scratch, f"{sys.executable} {wrapper} --expect 10m --label 'quiet suite' -- bash -c "
+            # The wrapper by a short relative path: an existing path is kept as written, so the checkout's own path would
+            # decide how much of the line fits in a lease's 240 characters (SYRD-804: from a long checkout the masked
+            # `--config` fell past the cut). Relative to the command's directory, the line is the same from anywhere.
+            (scratch / "bounded").symlink_to(wrapper)
+            quiet = spawn("app", scratch, f"{sys.executable} ./bounded --expect 10m --label 'quiet suite' -- bash -c "
                                           f"'sleep 1000.6171' --token={secret_file} "
                                           f"--password '{SECRETS[2]} {SECRETS[3]} {SECRETS[4]}' "
                                           f"-H 'Authorization: Bearer {SECRETS[5]} {SECRETS[6]}' "
@@ -722,7 +726,7 @@ def candidate(after: dict) -> None:
     check(all(found == [] for found in after["secrets_kept"].values())
           and "bash -c [redacted]" in after["masked_commands"]
           and any("--token=[redacted]" in line and "--password [redacted]" in line and "-H [redacted]" in line
-                  and "--config [redacted]" in line for line in after["masked_commands"]),
+                  and "--config [redacted]" in line and not line.endswith("...") for line in after["masked_commands"]),
           f"no secret from argv is kept -- not in a lease, the status, a notice or the trace -- and both commands are "
           f"recorded masked: {after['secrets_kept']} {after['masked_commands']}")
     stale = after["stale"]

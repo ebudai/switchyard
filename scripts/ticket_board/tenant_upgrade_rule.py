@@ -34,6 +34,9 @@ except ImportError:  # pragma: no cover - supports direct script execution
 TENANT_UPGRADE_ACTIONS = ("preview-upgrade", "upgrade-tenant-release", "deploy-release", "upgrade-tenant")
 #: An owner name the rule may carry: a plain local account name, so nothing in it can end the JS string it is in.
 OWNER_NAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
+#: A project the rule may name: the launcher's slug rule, so nothing in it can end a comment line or a string of the
+#: rule polkitd runs as root (SYRD-830).
+PROJECT_SLUG = re.compile(r"[a-z0-9][a-z0-9_]{0,39}")
 RULE_MODE = 0o644
 
 
@@ -41,10 +44,18 @@ def rule_name(project: str) -> str:
     return f"49-{project}-tenant-upgrade.rules"
 
 
-def render(project: str, owner_user: str) -> str:
-    """The rule, with the owner and every other value written as a JSON string literal, never spliced raw."""
+def refuse_unsafe_names(project: str, owner_user: str) -> None:
+    """Refuse, before a polkit rule is written, a project or owner that could leave the comment or string it is in.
+    Every per-tenant rule polkitd runs as root is rendered behind this (SYRD-825, SYRD-830)."""
+    if not PROJECT_SLUG.fullmatch(project or ""):
+        raise ValueError(f"project {project!r} is not a project slug; no polkit rule names it")
     if not OWNER_NAME.fullmatch(owner_user or ""):
         raise ValueError(f"{project}'s owner {owner_user!r} is not a plain account name; no polkit rule names it")
+
+
+def render(project: str, owner_user: str) -> str:
+    """The rule, with the owner and every other value written as a JSON string literal, never spliced raw."""
+    refuse_unsafe_names(project, owner_user)
     actions = json.dumps([f"{privileged_actions.ACTION_NAMESPACE}.{name}" for name in TENANT_UPGRADE_ACTIONS])
     return f"""// Let {owner_user} run {project}'s own upgrade actions without a prompt (SYRD-825).
 // Only these actions, only through the root-owned privileged helper. The helper still refuses any process that

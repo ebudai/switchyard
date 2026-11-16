@@ -576,7 +576,9 @@ def test_the_seams_read_through_project_provision_and_nothing_bound() -> None:
             check(ast.unparse(node.body[first]) == CALL_TIME_IMPORT and len(own) == 2,
                   f"{name}: project_provision imported first thing (after its docstring), with the direct-script fallback, and nothing else: {own}")
         else:
-            check(own == [], f"{name}: reads nothing of project_provision and imports nothing: {own}")
+            # SYRD-830: the deploy rule refuses an unsafe project or owner through the same check as the tenant rule.
+            allowed = ["from . import tenant_upgrade_rule", "import tenant_upgrade_rule"] if name == "render_polkit_rule" else []
+            check(own == allowed, f"{name}: reads nothing of project_provision and imports nothing else: {own}")
         skip = annotation_ids(node)
         bare = sorted({x.id for x in ast.walk(node) if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Load) and (x.id in expected or x.id in KEPT) and id(x) not in skip})
         check(bare == [], f"{name}: none of them read past it: {bare}")

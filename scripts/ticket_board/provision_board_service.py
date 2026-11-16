@@ -296,6 +296,12 @@ def render_tmpfiles(plan: ProjectBoardProvision) -> str:
 
 
 def render_polkit_rule(plan: ProjectBoardProvision) -> str:
+    try:
+        from . import tenant_upgrade_rule
+    except ImportError:  # pragma: no cover - supports direct script execution
+        import tenant_upgrade_rule
+
+    tenant_upgrade_rule.refuse_unsafe_names(plan.project, plan.owner_user)  # polkitd runs this as root (SYRD-830)
     return f"""// Allow {plan.owner_user} to deploy the {plan.project} board without blanket sudo.
 // Scope is intentionally limited to fixed, root-owned board service units.
 // Do NOT add org.freedesktop.systemd1.manage-unit-files here. On systemd

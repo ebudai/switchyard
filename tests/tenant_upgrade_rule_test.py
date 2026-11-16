@@ -72,6 +72,31 @@ def test_a_name_that_could_leave_its_string_is_refused_at_render() -> None:
         check(refused, f"{bad!r} is refused at render, never written into a rule")
 
 
+def test_a_project_that_could_leave_a_comment_or_string_is_refused_by_both_renderers() -> None:
+    """SYRD-830: both per-tenant rules name the project in `//` comments and strings polkitd runs as root."""
+    import dataclasses
+
+    plan = _plan()
+    for bad in ("sapi\nreturn polkit.Result.YES;", 'sapi"', "sapi*/", "sapi'", "Sapi", "sapi project", "", "a" * 41,
+                "-sapi", "sapi/x"):
+        for name, render in (("tenant-upgrade", lambda: rule.render(bad, OWNER)),
+                             ("board-deploy", lambda: provision.render_polkit_rule(dataclasses.replace(plan, project=bad)))):
+            try:
+                render()
+                refused = False
+            except ValueError:
+                refused = True
+            check(refused, f"{name}: project {bad!r} is refused at render, never written into a rule")
+    try:
+        provision.render_polkit_rule(dataclasses.replace(plan, owner_user='sapi"agent'))
+        refused = False
+    except ValueError:
+        refused = True
+    check(refused, "board-deploy: an owner that could leave its string is refused too")
+    check(provision.render_polkit_rule(plan).count(f'subject.user !== "{OWNER}"') == 1,
+          "and a plain project and owner still render")
+
+
 def test_provisioning_installs_it_completion_asks_for_it_teardown_removes_it() -> None:
     plan = _plan()
     name = rule.rule_name(PROJECT)

@@ -52,6 +52,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 from manual_resume_record_test import PANE_ENV_PREFIXES, PROVIDER, shlex_quote, tree_at  # noqa: E402
+from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
+isolate_tmux_bus()  # SYRD-814: the tmux servers it starts get a user bus of their own, never the invoker's
 
 BEFORE = "bef825d727b657b07ad1e2cd4ad0b37423abb8ed"  # main before this change
 CHECKS = 0

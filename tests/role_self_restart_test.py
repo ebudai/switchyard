@@ -53,6 +53,8 @@ from scripts import role_self_restart as rsr  # noqa: E402
 from scripts import team_launcher as launcher  # noqa: E402
 from scripts.ticket_board import app as board_app  # noqa: E402
 from scripts.ticket_board import peer_identity  # noqa: E402
+from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
+isolate_tmux_bus()  # SYRD-814: the tmux servers it starts get a user bus of their own, never the invoker's
 
 CHECKS = 0
 #: What the seams answer for a role's recorded conversation, a conversation's resumability and a pane's process tree.
@@ -263,7 +265,7 @@ def main() -> int:
     rc, out, record = run(handoff(), [{}, {"process_pid": 200, "process_start_time": 5000}, successor])
     check(rc == 0 and record.get("state") == "complete" and record.get("successor") == [300, 5100],
           f"a live successor completes the transaction: {rc} {record}")
-    kill = ["tmux", "kill-session", "-t", "p713-director"]
+    kill = ["tmux", "kill-session", "-t", "p713-director"]  # tmux-lint: argv-as-data (the fake runner's record)
     start = ["switchyard-pane", "p713", "director", "attach-or-start"]
     check(calls.index(kill) < calls.index(start), f"the predecessor is ended before its successor starts: {calls}")
     check(record.get("provider_session") == "conversation-of-director" and "on conversation conversation-of-director"

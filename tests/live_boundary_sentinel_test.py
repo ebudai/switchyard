@@ -134,7 +134,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="syrd627s.") as raw:
         scratch = Path(raw)
         everyone = (RUNNER, *OTHERS)
-        bare = sandboxed(scratch, "bare", ["tmux", "kill-server"])
+        bare = sandboxed(scratch, "bare", ["tmux", "kill-server"])  # tmux-lint: argv-as-data
         check(bare["fate"] == {RUNNER: False, OTHERS[0]: True, OTHERS[1]: True},
               f"without the boundary, a bare tmux kill-server loses the runner's own account's server and no other: "
               f"{bare['fate']}")

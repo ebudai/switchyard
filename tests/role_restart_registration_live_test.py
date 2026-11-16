@@ -8,8 +8,9 @@ Here a role's pane runs exactly what a live pane runs: the launcher's own pane c
 `ticket-board-register-runtime` registers with the board before it execs the CLI, against the production
 `TicketBoardUnixServer` and `ProcessRoleAuthority` on a real AF_UNIX socket, where SO_PEERCRED and /proc decide which
 pane is which. Only the board's storage is in memory. The tmux server is isolated (TMUX removed, TMUX_TMPDIR
-temporary, socket asserted). The CLI is a stand-in that takes `HUP_SECONDS` to leave after its hang-up, as a real CLI
-does while it shuts down (SYRD-559 measured about three seconds on otto).
+temporary, socket asserted, and every tmux -- the test's own and, through a wrapper first on PATH, the code under
+test's -- told that directory's socket with -S). The CLI is a stand-in that takes `HUP_SECONDS` to leave after its
+hang-up, as a real CLI does while it shuts down (SYRD-559 measured about three seconds on otto).
 """
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ from __future__ import annotations
 import io
 import json
 import os
+import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -34,6 +37,10 @@ from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
 isolate_tmux_bus()
 
 CHECKS = 0
+#: Resolved before any PATH change, so neither the test nor the wrapper it writes ever runs the wrapper itself.
+REAL_TMUX = shutil.which("tmux")
+#: The private server's socket, named on every call (SYRD-219: TMUX_TMPDIR alone is not isolation). Set by `Live`.
+SOCKET: Path | None = None
 
 
 def check(condition: object, detail: object) -> None:
@@ -44,7 +51,9 @@ def check(condition: object, detail: object) -> None:
 
 
 def tmux(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["tmux", *args], capture_output=True, text=True)
+    if REAL_TMUX is None or SOCKET is None:
+        raise AssertionError("no private tmux socket to name: refusing to run tmux against whichever server answers")
+    return subprocess.run([REAL_TMUX, "-S", str(SOCKET), *args], capture_output=True, text=True)
 
 
 def wait_for(predicate, timeout: float = 10.0) -> bool:
@@ -124,10 +133,18 @@ class Live:
         os.environ["TMUX_TMPDIR"] = str(self.tmp / "tmux")
         (self.tmp / "tmux").mkdir()
         self.socket = self.tmp / "tmux" / f"tmux-{os.getuid()}" / "default"
+        # Exactly the path TMUX_TMPDIR derives, so a tmux run from inside a pane without the flag finds this server too.
+        self.socket.parent.mkdir(mode=0o700, parents=True)
+        global SOCKET
+        SOCKET = self.socket
         probe = tmux("list-sessions")
         assert probe.returncode != 0 and str(self.socket) in probe.stderr, f"not the isolated socket: {probe.stderr!r}"
         self.bindir = self.tmp / "bin"
         self.bindir.mkdir()
+        # Every bare `tmux` the launcher and the restart run reaches this private server, never an ambient one.
+        (self.bindir / "tmux").write_text(
+            f"#!/bin/sh\nexec {shlex.quote(REAL_TMUX)} -S {shlex.quote(str(self.socket))} \"$@\"\n")
+        (self.bindir / "tmux").chmod(0o755)
         self.hup = self.tmp / "hup-seconds"
         self.hup.write_text("0")
         # A Python script by the CLI's own name, so the launcher's checks find it by name. After its hang-up it takes

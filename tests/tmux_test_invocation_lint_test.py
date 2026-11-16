@@ -139,9 +139,19 @@ def _names_a_socket(literals: list[str]) -> bool:
     return any(flag in literals for flag in SOCKET_FLAGS)
 
 
-def _tmux_argv_shape(node: ast.AST) -> TmuxArgvShape | None:
+def _names_tmux(node: ast.AST) -> bool:
+    """`tmux`, a path to it, or a name that holds it (`REAL_TMUX`, `self.tmux_bin`): a test that resolves the real
+    binary by absolute path -- as a PATH wrapper needs it to -- is checked like one that names it (SYRD-814)."""
+    literal = _literal_string_value(node)
+    if literal is not None:
+        return literal == "tmux" or literal.endswith("/tmux")
+    name = node.id if isinstance(node, ast.Name) else node.attr if isinstance(node, ast.Attribute) else ""
+    return "tmux" in name.lower()
+
+
+def _tmux_argv_shape(node: ast.AST, *, concatenated: bool = False) -> TmuxArgvShape | None:
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-        left = _tmux_argv_shape(node.left)
+        left = _tmux_argv_shape(node.left, concatenated=True)
         if left is None:
             return None
         return TmuxArgvShape(
@@ -153,12 +163,21 @@ def _tmux_argv_shape(node: ast.AST) -> TmuxArgvShape | None:
     if not isinstance(node, (ast.List, ast.Tuple)) or not node.elts:
         return None
     first = node.elts[0]
-    if _literal_string_value(first) != "tmux":
+    if not _names_tmux(first):
+        return None
+    literals = _literal_string_constants(node)
+    # A name-led sequence is an argv once anything follows the name as an argument -- a string, a starred
+    # `*args`, or a list added to it (`[REAL_TMUX, *args]`, `[tmux_bin] + argv`: a helper that forwards its
+    # arguments, the shape that most needs its socket checked; Audit of SYRD-814). Only a bare pair such as
+    # `return tmux, table`, which returns a function, is not.
+    starred = any(isinstance(element, ast.Starred) for element in node.elts[1:])
+    if _literal_string_value(first) is None and not literals and not starred and not concatenated:
         return None
     return TmuxArgvShape(
         starts_with_tmux=True,
-        has_explicit_socket=_names_a_socket(_literal_string_constants(node)),
-        literal_args=tuple(_literal_string_constants(node)),
+        # `tmux -V` prints the client's version and asks no server anything.
+        has_explicit_socket=_names_a_socket(literals) or literals[-1:] == ["-V"] and len(literals) <= 2,
+        literal_args=tuple(literals),
     )
 
 
@@ -314,11 +333,23 @@ def lint_tmux_sources(
     for tree in trees:
         for path in _python_source_paths(tree.root):
             source = path.read_text(encoding="utf-8")
+            found: list[TmuxLintViolation] = []
             if tree.require_explicit_socket:
-                violations.extend(tmux_subprocess_violations(source, path))
-                violations.extend(tmux_argv_builder_violations(source, path))
-            violations.extend(forbidden_server_shutdown_violations(source, path))
+                found.extend(tmux_subprocess_violations(source, path))
+                found.extend(tmux_argv_builder_violations(source, path))
+            found.extend(forbidden_server_shutdown_violations(source, path))
+            violations.extend(without_data_argv(found, source))
     return violations
+
+
+#: A tmux argv a test hands to a boundary checker as data, never runs (SYRD-814: live_boundary's own cases).
+DATA_ARGV_MARKER = "tmux-lint: argv-as-data"
+
+
+def without_data_argv(violations: list[TmuxLintViolation], source: str) -> list[TmuxLintViolation]:
+    """The findings, less those on a line that says its tmux argv is data: that line only, never the next."""
+    lines = source.splitlines()
+    return [v for v in violations if not (0 < v.line <= len(lines) and DATA_ARGV_MARKER in lines[v.line - 1])]
 
 
 def lint_test_sources(tests_dir: Path = TESTS_DIR) -> list[TmuxLintViolation]:
@@ -502,6 +533,39 @@ def test_scripts_tmux_without_socket_is_allowed() -> None:
         script.write_text("def tmux_args(role):\n    return ['tmux', 'kill-session', '-t', role]\n", encoding="utf-8")
 
         assert lint_tmux_sources((TmuxLintTree(scripts_dir, require_explicit_socket=False),)) == []
+
+
+def test_tmux_by_path_or_by_name_needs_a_socket_too() -> None:
+    source = ("import subprocess\n"
+              "REAL_TMUX = '/usr/bin/tmux'\n"
+              "subprocess.run([REAL_TMUX, 'new-session', '-d'])\n"
+              "subprocess.run(['/usr/bin/tmux', 'ls'])\n"
+              "subprocess.run([REAL_TMUX, '-L', 'mine', 'ls'])\n"
+              "subprocess.run([REAL_TMUX, '-V'])\n"
+              "def forwards(*args):\n    return subprocess.run([REAL_TMUX, *args])\n"
+              "def forwards_tuple(*argv):\n    return subprocess.run((tmux_bin, *argv))\n"
+              "def added(argv):\n    return subprocess.run([tmux_bin] + list(argv))\n"
+              "def pinned(*args):\n    return subprocess.run([REAL_TMUX, '-L', 'mine', *args])\n"
+              "def pair():\n    return tmux, table\n")
+    with tempfile.TemporaryDirectory(prefix="tmux-lint-path.") as tmp:
+        tests_dir = Path(tmp) / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "path_test.py").write_text(source, encoding="utf-8")
+        found = lint_tmux_sources((TmuxLintTree(tests_dir, require_explicit_socket=True),))
+    assert sorted({v.line for v in found if "socket" in v.detail}) == [3, 4, 8, 10, 12], _format_violations(found)
+
+
+def test_argv_marked_as_data_is_allowed_on_its_own_line_only() -> None:
+    source = ("CASES = (\n"
+              "    (['tmux', 'kill-server'], {}),  # tmux-lint: argv-as-data\n"
+              "    (['tmux', 'kill-server'], {}),\n"
+              ")\n")
+    with tempfile.TemporaryDirectory(prefix="tmux-lint-data.") as tmp:
+        tests_dir = Path(tmp) / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "boundary_test.py").write_text(source, encoding="utf-8")
+        found = lint_tmux_sources((TmuxLintTree(tests_dir, require_explicit_socket=True),))
+    assert [v.line for v in found] == [3], _format_violations(found)
 
 
 def test_tests_do_not_use_unisolated_tmux() -> None:

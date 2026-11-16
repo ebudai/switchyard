@@ -21,6 +21,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ticket_board_awaiting_role_survives_comment_test as fixture
 from scripts.ticket_board.notify_listener import TicketBoardNotifyListener, ROLE_TO_TARGET, DirectorctlSender
 import psycopg
+from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
+isolate_tmux_bus()  # SYRD-814: the tmux servers it starts get a user bus of their own, never the invoker's
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / 'scripts/ticket_board/migrations/pgu920_syrd15_durable_awaiting_role.sql'

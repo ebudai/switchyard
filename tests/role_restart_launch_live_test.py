@@ -17,8 +17,10 @@ variables reach a pane at all; so the role's session is the server's only one, a
 3. A display slot showing the role -- a real nested attach, with a real outer client -- shows the replacement after
    the restart, as tmux itself reports it, with no `present show` step.
 
-The tmux server is isolated (TMUX removed, TMUX_TMPDIR temporary, socket asserted). The board's GETs are stood in:
-the role's registration is the process tmux says runs its pane, as its own registration would make it.
+The tmux server is isolated (TMUX removed, TMUX_TMPDIR temporary, a socket named for this run on every command --
+the launcher's own bare `tmux` reaches it through a wrapper first on PATH -- and the socket asserted). The board's
+GETs are stood in: the role's registration is the process tmux says runs its pane, as its own registration would make
+it.
 """
 
 from __future__ import annotations
@@ -26,6 +28,8 @@ from __future__ import annotations
 import io
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -53,6 +57,9 @@ CALLER = {
     "HERMES_SESSION_ID": "h", "COPILOT_CLI_VERSION": "1", "ANTIGRAVITY_LS_ADDRESS": "127.0.0.1:1",
 }
 NESTED = {"claude": ("CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION"), "codex": ("CODEX_THREAD_ID",)}
+#: Named on every command this suite runs, and by the wrapper the launcher's own bare `tmux` finds first on PATH:
+#: TMUX_TMPDIR alone is not isolation (SYRD-219), and the launcher must reach the same server as the suite.
+TMUX_SOCKET = f"s752live-{os.getpid()}"
 
 
 def check(condition: object, detail: object) -> None:
@@ -63,7 +70,21 @@ def check(condition: object, detail: object) -> None:
 
 
 def tmux(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["tmux", *args], capture_output=True, text=True)
+    return subprocess.run(["tmux", "-L", TMUX_SOCKET, *args], capture_output=True, text=True)
+
+
+def install_tmux_wrapper(bindir: Path, real: str) -> None:
+    """A `tmux` first on PATH that names this run's socket, for the product's own bare `tmux` calls.
+
+    The launcher, the restart, a display slot's nested attach and the outer client all run `tmux` with no socket flag;
+    this sends them to the suite's server. A call that already names a socket is passed through unchanged.
+    """
+    wrapper = bindir / "tmux"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        f'case "$1" in -L|-S) exec {shlex.quote(real)} "$@" ;; esac\n'
+        f'exec {shlex.quote(real)} -L {shlex.quote(TMUX_SOCKET)} "$@"\n')
+    wrapper.chmod(0o755)
 
 
 def wait_for(predicate, timeout: float = 10.0) -> bool:
@@ -85,11 +106,14 @@ class Live:
             os.environ.pop(key, None)
         os.environ["TMUX_TMPDIR"] = str(self.tmp / "tmux")
         (self.tmp / "tmux").mkdir()
-        self.socket = self.tmp / "tmux" / f"tmux-{os.getuid()}" / "default"
-        probe = tmux("list-sessions")
-        assert probe.returncode != 0 and str(self.socket) in probe.stderr, f"not the isolated socket: {probe.stderr!r}"
         self.bindir = self.tmp / "bin"
         self.bindir.mkdir()
+        real = shutil.which("tmux")  # before PATH names the wrapper
+        assert real, "tmux is required"
+        install_tmux_wrapper(self.bindir, str(Path(real).resolve()))
+        self.socket = self.tmp / "tmux" / f"tmux-{os.getuid()}" / TMUX_SOCKET
+        probe = tmux("list-sessions")
+        assert probe.returncode != 0 and str(self.socket) in probe.stderr, f"not the isolated socket: {probe.stderr!r}"
         self.failures = self.tmp / "fail-next"  # how many next starts of a stand-in fail
         for runtime, version in (("claude", "2.1.318 (Claude Code)"), ("codex", "codex-cli 0.130.0")):
             # A Python script by the runtime's own name, so its command line names it for as long as it runs: the

@@ -56,6 +56,25 @@ from scripts.ticket_board.pane_state import PaneHookStateStore  # noqa: E402
 
 TARGET = "pgu-main:0.0"
 CHECKS = 0
+#: The real binary, resolved before any PATH below puts the socket-pinning wrapper first.
+REAL_TMUX = shutil.which("tmux")
+#: This run's own server, named on every command (SYRD-219): TMUX_TMPDIR alone loses to an inherited TMUX.
+TMUX_SOCKET = f"cp634-{os.getpid()}"
+
+
+def tmux_wrapper_dir(root: Path) -> Path:
+    """A `tmux` that execs the real one with this run's `-L`, for the product code's own bare `tmux` calls.
+
+    The gate, the hooks in the pane and the launcher run `tmux` by name; without this they would find the server
+    through TMUX_TMPDIR alone, which an inherited TMUX outranks.
+    """
+    directory = root / "tmux-bin"
+    directory.mkdir(parents=True, exist_ok=True)
+    wrapper = directory / "tmux"
+    wrapper.write_text(f"#!/bin/sh\nexec {shlex.quote(str(REAL_TMUX))} -L {shlex.quote(TMUX_SOCKET)} \"$@\"\n",
+                       encoding="utf-8")
+    wrapper.chmod(0o755)
+    return directory
 
 
 def check(condition: object, detail: object) -> None:
@@ -157,15 +176,17 @@ class Pane:
         self.states = root / "state"
         self.sessions = self.home / ".local" / "state" / "pgu-ticket-board" / "pane-sessions"
         self.bin = root / "bin"
+        self.tmux_bin = tmux_wrapper_dir(root)
         for path in (self.work, self.bin):
             path.mkdir(parents=True)
         (self.bin / "copilot").symlink_to(Path(binary).resolve())
         subprocess.run(["git", "init", "-q", str(self.work)], check=True)
         self.model = serve(Model)
         self.board = serve(BoardStub)
-        self.tmux_env = {"PATH": f"{self.bin}:/usr/bin:/bin", "HOME": str(self.home), "LANG": "C.UTF-8", "SHELL": "/bin/sh",
+        self.tmux_env = {"PATH": f"{self.tmux_bin}:{self.bin}:/usr/bin:/bin", "HOME": str(self.home), "LANG": "C.UTF-8", "SHELL": "/bin/sh",
                          "TERM": "xterm-256color", "TMUX_TMPDIR": str(root)}
         os.environ["TMUX_TMPDIR"] = str(root)  # the gate's own `tmux` calls reach this server
+        os.environ["PATH"] = f"{self.tmux_bin}:{os.environ.get('PATH', '/usr/bin:/bin')}"  # ...through its -L
 
     def install_hooks(self, *extra: str) -> None:
         env = {**self.tmux_env, "TICKET_BOARD_PROJECT": "pgu", "TICKET_BOARD_PANE_STATE_DIR": str(self.states),
@@ -178,7 +199,7 @@ class Pane:
 
     def role(self, *, yolo: bool = False, copilot_home: str = ""):
         raw = {"role": "main", "cli": ["copilot"], "model": "fake-model", "effort": "high", "yolo": yolo,
-               "env": {**({"COPILOT_HOME": copilot_home} if copilot_home else {}),"PATH": f"{self.bin}:/usr/bin:/bin", "TICKET_BOARD_PROJECT": "pgu",
+               "env": {**({"COPILOT_HOME": copilot_home} if copilot_home else {}),"PATH": f"{self.tmux_bin}:{self.bin}:/usr/bin:/bin", "TICKET_BOARD_PROJECT": "pgu",
                        "TICKET_BOARD_URL": f"http://127.0.0.1:{self.board.server_port}",
                        "COPILOT_OFFLINE": "true", "COPILOT_PROVIDER_TYPE": "openai",
                        "COPILOT_PROVIDER_BASE_URL": f"http://127.0.0.1:{self.model.server_port}/v1",
@@ -186,8 +207,8 @@ class Pane:
         return launcher._role_from_json("pgu", raw, base=self.root, default_workdir=self.work)
 
     def tmux(self, *args: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(["tmux", "-f", "/dev/null", *args], capture_output=True, text=True, env=self.tmux_env,
-                              timeout=30)
+        return subprocess.run([REAL_TMUX, "-L", TMUX_SOCKET, "-f", "/dev/null", *args], capture_output=True, text=True,
+                              env=self.tmux_env, timeout=30)
 
     def launch(self, argv: list[str]) -> None:
         self.tmux("kill-server")
@@ -504,7 +525,7 @@ def run(binary: str) -> None:
         keep = os.environ.get("SWITCHYARD_E2E_KEEP")
         if keep:
             shutil.copytree(root, Path(keep) / root.name, symlinks=True, ignore_dangling_symlinks=True,
-                            ignore=shutil.ignore_patterns("pkg", "*.sock", "default"))
+                            ignore=shutil.ignore_patterns("pkg", "*.sock", "default", TMUX_SOCKET))
         shutil.rmtree(root, ignore_errors=True)
 
 

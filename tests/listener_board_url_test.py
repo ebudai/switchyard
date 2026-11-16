@@ -15,7 +15,9 @@ These cases render the units the product generates -- fresh, after an upgrade,
 and from the legacy service script -- and hand exactly the environment each
 declares to the real directorctl, via the real DirectorctlSender, which copies
 the listener's own environment. Delivery goes into a tmux server this test
-owns (TMUX stripped, socket asserted under a temp dir), never a live one.
+owns (TMUX stripped, a socket named for this run on every command -- directorctl's
+own bare `tmux` reaches it through a wrapper first on PATH -- and the socket
+asserted under a temp dir), never a live one.
 """
 
 from __future__ import annotations
@@ -54,6 +56,8 @@ from scripts.ticket_board.project_provision import (  # noqa: E402
     render_listener_unit,
     write_artifacts,
 )
+from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
+isolate_tmux_bus()  # SYRD-814: the tmux servers it starts get a user bus of their own, never the invoker's
 
 DIRECTORCTL = ROOT / "scripts" / "directorctl"
 LISTENER_SERVICE = ROOT / "scripts" / "ticket-board-notify-listener-service.sh"
@@ -61,6 +65,9 @@ PROJECT = "mefp"
 TARGET = f"{PROJECT}-ops:0.0"
 MESSAGE = "MEFP-1 is yours"
 CHECKS = 0
+#: Named on every command this suite runs, and by the wrapper directorctl's own bare `tmux` finds first on PATH:
+#: TMUX_TMPDIR alone is not isolation (SYRD-219), and directorctl must reach the same server as the suite.
+TMUX_SOCKET = f"syrd265-{os.getpid()}"
 
 
 def check(condition: object, detail: object) -> None:
@@ -188,23 +195,47 @@ def _listen_once(unit_env: dict[str, str], row) -> "lt.FakeConnection":
     return conn
 
 
+def install_tmux_wrapper(bindir: Path, real: str) -> None:
+    """A `tmux` first on PATH that names this run's socket, for directorctl's own bare `tmux` calls.
+
+    A call that already names a socket is passed through unchanged.
+    """
+    bindir.mkdir(parents=True, exist_ok=True)
+    wrapper = bindir / "tmux"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        f'case "$1" in -L|-S) exec {shlex.quote(real)} "$@" ;; esac\n'
+        f'exec {shlex.quote(real)} -L {shlex.quote(TMUX_SOCKET)} "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+
+
 def test_a_restart_onto_the_fixed_unit_delivers_the_queued_notice_exactly_once() -> None:
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Board)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     tmp = Path(tempfile.mkdtemp(prefix="syrd265-deliver."))
     received = tmp / "received"
-    host = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(tmp), "TERM": "xterm-256color",
+    system_path = "/usr/local/bin:/usr/bin:/bin"
+    real = shutil.which("tmux", path=system_path)  # before PATH names the wrapper
+    check(real, "tmux is required")
+    install_tmux_wrapper(tmp / "bin", str(Path(real).resolve()))
+    host = {"PATH": f"{tmp / 'bin'}:{system_path}", "HOME": str(tmp), "TERM": "xterm-256color",
             "TMUX_TMPDIR": str(tmp)}
     try:
         # Like an agent CLI: a submitted line visibly lands on screen, which is
         # what directorctl waits to see, and is recorded once per submission.
         pane = (f"stty -echo; while IFS= read -r line; do printf 'got: %s\\n' \"$line\"; "
                 f"printf '%s\\n' \"$line\" >> {received}; done")
-        subprocess.run(["tmux", "new-session", "-d", "-s", f"{PROJECT}-ops", "-x", "200", "-y", "20",
-                        "bash", "-c", pane], env=host, check=True)
-        sock = subprocess.run(["tmux", "display-message", "-p", "#{socket_path}"], env=host,
+        subprocess.run(["tmux", "-L", TMUX_SOCKET, "new-session", "-d", "-s", f"{PROJECT}-ops", "-x", "200",
+                        "-y", "20", "bash", "-c", pane], env=host, check=True)
+        sock = subprocess.run(["tmux", "-L", TMUX_SOCKET, "display-message", "-p", "#{socket_path}"], env=host,
                               capture_output=True, text=True).stdout.strip()
-        check(sock.startswith(str(tmp)), f"a live tmux server was reachable: {sock}")
+        check(sock == str((tmp / f"tmux-{os.getuid()}").resolve() / TMUX_SOCKET), f"a live tmux server was reachable: {sock}")
+        # And directorctl's own bare `tmux`, through the wrapper, finds this server and no other.
+        bare = subprocess.run(["sh", "-c", 'tmux display-message -p "#{socket_path}"'], env=host,
+                              capture_output=True, text=True).stdout.strip()
+        check(bare == sock, f"a bare tmux reached another server: {bare}")
 
         plan = plan_for(tmp, port=server.server_port)
         fixed = render_listener_unit(plan)
@@ -231,7 +262,7 @@ def test_a_restart_onto_the_fixed_unit_delivers_the_queued_notice_exactly_once()
         lines = [line for line in received.read_text().splitlines() if line.strip()] if received.exists() else []
         check(lines.count(MESSAGE) == 1 and len(lines) == 1, f"delivered exactly once: {lines}")
     finally:
-        subprocess.run(["tmux", "kill-server"], env=host, capture_output=True)
+        subprocess.run(["tmux", "-L", TMUX_SOCKET, "kill-server"], env=host, capture_output=True)
         server.shutdown()
         server.server_close()
         shutil.rmtree(tmp, ignore_errors=True)

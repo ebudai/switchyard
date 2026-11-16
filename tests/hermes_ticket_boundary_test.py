@@ -3,9 +3,10 @@
 
 Audit (on 8c31c512) found that a workflow apply makes a running role ephemeral without restarting it, and a
 Hermes `/clear` keeps the agent and the memory settings it started with. So the check reads what the pane's own
-process started from. Here it runs against a real tmux server of its own (`TMUX_TMPDIR`, with the user bus
-isolated) whose pane is started the way the launcher starts a Hermes role, `env ... HERMES_HOME=<home> <cli>`,
-and against that pane's real process in /proc. The homes are written by Switchyard's own config writers.
+process started from. Here it runs against a real tmux server of its own (`TMUX_TMPDIR` and a named `-L` socket,
+which a `tmux` wrapper first on PATH gives the check's own calls too, with the user bus isolated) whose pane is
+started the way the launcher starts a Hermes role, `env ... HERMES_HOME=<home> <cli>`, and against that pane's real
+process in /proc. The homes are written by Switchyard's own config writers.
 """
 
 from __future__ import annotations
@@ -29,6 +30,27 @@ from scripts import hermes_role_config  # noqa: E402
 from scripts.ticket_board import hermes_ticket_boundary as boundary  # noqa: E402
 
 CHECKS = 0
+#: The real binary, resolved before the socket-pinning wrapper is put first on PATH.
+REAL_TMUX = shutil.which("tmux") or "tmux"
+#: This run's own server, named on every command (SYRD-219): TMUX_TMPDIR alone loses to an inherited TMUX.
+TMUX_SOCKET = f"syrd693b-{os.getpid()}"
+
+
+def tmux(*args: str, **kwargs) -> subprocess.CompletedProcess:
+    return subprocess.run([REAL_TMUX, "-L", TMUX_SOCKET, *args], **kwargs)
+
+
+def tmux_wrapper_dir(root: Path) -> Path:
+    """A `tmux` that execs the real one with this run's -L: the check under test runs `tmux` by name."""
+    import shlex
+
+    directory = root / "bin"
+    directory.mkdir()
+    wrapper = directory / "tmux"
+    wrapper.write_text(f"#!/bin/sh\nexec {shlex.quote(REAL_TMUX)} -L {shlex.quote(TMUX_SOCKET)} \"$@\"\n",
+                       encoding="utf-8")
+    wrapper.chmod(0o755)
+    return directory
 
 
 def check(condition: object, detail: object) -> None:
@@ -60,7 +82,7 @@ def pane(name: str, home: Path) -> str:
     import shlex
 
     command = shlex.join(["env", "-u", "TICKET_BOARD_PANE_SESSION_ID", f"HERMES_HOME={home}", "sleep", "120"])
-    subprocess.run(["tmux", "new-session", "-d", "-s", name, command], check=True)
+    tmux("new-session", "-d", "-s", name, command, check=True)
     return f"{name}:0.0"
 
 
@@ -86,6 +108,8 @@ def test_the_check_reads_what_the_running_pane_started_from() -> None:
     os.environ.pop("TMUX", None)
     (root / "tmux").mkdir(mode=0o700)
     isolate_tmux_bus(base=root)
+    path_before = os.environ.get("PATH")
+    os.environ["PATH"] = f"{tmux_wrapper_dir(root)}:{path_before or '/usr/bin:/bin'}"
     try:
         closed = prepared(root, "closed", ephemeral=True)
         target = pane("closed", closed)
@@ -112,13 +136,17 @@ def test_the_check_reads_what_the_running_pane_started_from() -> None:
               f"a closed config written after the pane started is not what its Hermes loaded: {said}")
 
         bare = pane("bare", root)
-        subprocess.run(["tmux", "respawn-pane", "-k", "-t", bare, "sleep 120"], check=True)
+        tmux("respawn-pane", "-k", "-t", bare, "sleep 120", check=True)
         said = boundary.open_reason(bare)
         check("names no HERMES_HOME" in said, f"a pane whose start names no home is held: {said}")
         said = boundary.open_reason("nowhere:0.0")
         check(said.startswith("tmux did not say what nowhere:0.0 runs"), f"a missing pane is held: {said}")
     finally:
-        subprocess.run(["tmux", "kill-server"], capture_output=True, check=False)
+        tmux("kill-server", capture_output=True, check=False)
+        if path_before is None:
+            os.environ.pop("PATH", None)
+        else:
+            os.environ["PATH"] = path_before
         shutil.rmtree(root, ignore_errors=True)
 
 

@@ -34,6 +34,8 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
+isolate_tmux_bus()  # SYRD-814: the tmux servers it starts get a user bus of their own, never the invoker's
 
 HERE = Path(__file__).resolve().parents[1]
 #: Main's commit this ticket is cut from; the before-run's tree.
@@ -311,8 +313,8 @@ def test_tmux(scratch: Path) -> None:
 
     uid, own = os.getuid(), live_boundary.account_tmux_dir(os.getuid())
     cases = (
-        (["tmux", "kill-server"], {}, f"{own}/default"),
-        (["tmux", "kill-server"], {"TMUX_TMPDIR": "/q"}, f"/q/tmux-{uid}/default"),
+        (["tmux", "kill-server"], {}, f"{own}/default"),  # tmux-lint: argv-as-data
+        (["tmux", "kill-server"], {"TMUX_TMPDIR": "/q"}, f"/q/tmux-{uid}/default"),  # tmux-lint: argv-as-data
         (["tmux", "-L", "x", "ls"], {"TMUX": f"{own}/default,1,0"}, f"{own}/x"),
         (["tmux", "ls"], {"TMUX": f"{own}/default,1,0", "TMUX_TMPDIR": "/q"}, f"{own}/default"),
         (["tmux", "-S", "/s/t", "ls"], {"TMUX": f"{own}/default,1,0"}, "/s/t"),

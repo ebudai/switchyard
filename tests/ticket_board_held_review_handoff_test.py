@@ -24,6 +24,8 @@ from scripts.ticket_board.notify_listener import (
 )
 
 from temporary_cluster import temporary_cluster  # noqa: E402
+from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
+isolate_tmux_bus()  # SYRD-814: the tmux servers it starts get a user bus of their own, never the invoker's
 
 MIGRATION = (
     ROOT / "scripts/ticket_board/migrations/pgu922_syrd22_held_review_handoff.sql"

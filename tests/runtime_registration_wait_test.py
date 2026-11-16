@@ -61,6 +61,8 @@ if str(ROOT / "tests") not in sys.path:
 
 from scripts import presentation_controller  # noqa: E402
 from scripts import team_launcher as launcher  # noqa: E402
+from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
+isolate_tmux_bus()  # SYRD-814: the tmux servers it starts get a user bus of their own, never the invoker's
 
 #: A project and an owner account no host has: nothing this suite names can be
 #: a live tenant's (SYRD-336).
@@ -176,7 +178,7 @@ class Board:
 class OwnerTmux:
     """The owner's tmux server, answering the one question readiness asks of it."""
 
-    PROBE = ["tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_index}.#{pane_index}"]
+    PROBE = ["tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_index}.#{pane_index}"]  # tmux-lint: argv-as-data
 
     def __init__(self, targets: list[str]) -> None:
         self.targets = targets

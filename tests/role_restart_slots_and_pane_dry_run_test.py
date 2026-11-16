@@ -8,14 +8,17 @@ pane ...` changes nothing.
    one role absent; the reconnection of another role re-attaches its slot, and only the absent role's own
    reconnection is refused, naming it alone.
 2. `team-launcher syrd --dry-run pane attach-or-start audit` started a real Audit session. Here the real
-   `team-launcher` is run for every pane mode with --dry-run, on an isolated tmux server: each is refused, says so,
-   and no tmux server or session exists afterwards.
+   `team-launcher` is run for every pane mode with --dry-run, on an isolated tmux server (its socket named on every
+   tmux call, the launcher's through a wrapper first on PATH): each is refused, says so, and no tmux server or session
+   exists afterwards.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -118,8 +121,16 @@ def test_a_pane_dry_run_changes_nothing(tmp: Path) -> None:
     env["TMUX_TMPDIR"] = str(tmp / "tmux")
     (tmp / "tmux").mkdir()
     socket = tmp / "tmux" / f"tmux-{os.getuid()}" / "default"
+    # Its directory made, so a server a dry run wrongly started would come up -- and be seen -- right here.
+    socket.parent.mkdir(mode=0o700, parents=True)
+    real_tmux = shutil.which("tmux", path=env["PATH"])  # before PATH changes: the wrapper must not find itself
+    if not real_tmux:
+        raise AssertionError("no tmux binary on PATH")
     bindir = tmp / "bin"
     bindir.mkdir()
+    # Every bare `tmux` the launcher runs names this private socket (SYRD-219: TMUX_TMPDIR alone is not isolation).
+    (bindir / "tmux").write_text(f"#!/bin/sh\nexec {shlex.quote(real_tmux)} -S {shlex.quote(str(socket))} \"$@\"\n")
+    (bindir / "tmux").chmod(0o755)
     started = tmp / "cli-started"
     # Were the CLI ever run, it would say so here: a dry run must never get this far.
     (bindir / "claude").write_text(f"#!/bin/sh\ntouch {started}\nexec sleep 600\n")
@@ -131,7 +142,7 @@ def test_a_pane_dry_run_changes_nothing(tmp: Path) -> None:
                               "audit", "--config", str(path), "--skip-launcher-check", *extra],
                              capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL, timeout=60)
         said = run.stdout + run.stderr
-        sessions = subprocess.run(["tmux", "list-sessions"], capture_output=True, text=True, env=env)
+        sessions = subprocess.run([real_tmux, "-S", str(socket), "list-sessions"], capture_output=True, text=True, env=env)
         check(run.returncode != 0 and f"--dry-run is refused for `pane {mode}`" in said and "nothing was changed" in said,
               f"pane {mode} --dry-run is refused and says so (exit {run.returncode}): {said[-400:]}")
         check(sessions.returncode != 0 and not socket.exists() and not started.exists(),

@@ -13,7 +13,9 @@ This builds that shape for real and recovers through the real
 command, which prints the presentation report afterwards):
 
 * an isolated tmux server -- TMUX removed, TMUX_TMPDIR in a temporary
-  directory, the socket asserted before anything is created or killed;
+  directory, a socket named for this run on every command (the product's own
+  bare `tmux` reaches it through a wrapper first on PATH), the socket asserted
+  before anything is created or killed;
 * workers started by the real launcher start, whose real pane command runs the
   real `ticket-board-register-runtime` before exec'ing the role's CLI (a stand
   in that sleeps under the runtime's name);
@@ -35,6 +37,7 @@ import contextlib
 import json
 import os
 import pwd
+import shlex
 import shutil
 import socket
 import socketserver
@@ -54,12 +57,17 @@ if str(ROOT) not in sys.path:
 from scripts import presentation_commands  # noqa: E402
 from scripts import presentation_controller as pc  # noqa: E402
 from scripts import team_launcher as tl  # noqa: E402
+from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
+isolate_tmux_bus()  # SYRD-814: the tmux servers it starts get a user bus of their own, never the invoker's
 
 CHECKS = 0
 PROJECT = "demo"
 ROLES = {"director": "claude", "main": "codex", "audit": "claude", "ops": "claude"}
 SLOTS = {"director": 0, "main": 1, "audit": 2, "ops": 3}
 DIRECTOR = {"TICKET_BOARD_CALLER_ROLE": "director", "TICKET_BOARD_PROJECT": PROJECT}
+#: Named on every command this suite runs, and by the wrapper the product's own bare `tmux` finds first on PATH:
+#: TMUX_TMPDIR alone is not isolation (SYRD-219), and the product must reach the same server as the suite.
+TMUX_SOCKET = f"sy580-{os.getpid()}"
 
 
 def check(condition: object, detail: str) -> None:
@@ -69,7 +77,7 @@ def check(condition: object, detail: str) -> None:
 
 
 def tmux(*args: str, check_rc: bool = True) -> str:
-    proc = subprocess.run(["tmux", *args], capture_output=True, text=True)
+    proc = subprocess.run(["tmux", "-L", TMUX_SOCKET, *args], capture_output=True, text=True)
     if check_rc and proc.returncode != 0:
         raise AssertionError(f"tmux {' '.join(args)}: {proc.stderr.strip()}")
     return proc.stdout.strip()
@@ -615,14 +623,35 @@ def test_a_live_assignment_the_projection_does_not_run_is_still_refused(h: Harne
     check(frozen(h, state) == before, "nothing was started")
 
 
+def install_tmux_wrapper(bindir: Path, real: str) -> None:
+    """A `tmux` first on PATH that names this run's socket, for the product's own bare `tmux` calls.
+
+    The launcher, the display sessions' nested attach and the pane commands all run `tmux` with no socket flag; this
+    sends them to the suite's server. A call that already names a socket is passed through unchanged.
+    """
+    bindir.mkdir(parents=True, exist_ok=True)
+    wrapper = bindir / "tmux"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        f'case "$1" in -L|-S) exec {shlex.quote(real)} "$@" ;; esac\n'
+        f'exec {shlex.quote(real)} -L {shlex.quote(TMUX_SOCKET)} "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+
+
 def isolate() -> Path:
     for key in list(os.environ):
         if key.startswith(("TICKET_BOARD_", "PGU_", "SWITCHYARD_", "TMUX")):
             os.environ.pop(key)
     tmpdir = Path(tempfile.mkdtemp(prefix="sy580-tmux-", dir="/tmp"))
     os.environ["TMUX_TMPDIR"] = str(tmpdir)
-    expected = tmpdir / f"tmux-{os.getuid()}" / "default"
-    probe = subprocess.run(["tmux", "list-sessions"], capture_output=True, text=True)
+    real = shutil.which("tmux")  # before PATH names the wrapper
+    assert real, "tmux is required"
+    install_tmux_wrapper(tmpdir / "bin", str(Path(real).resolve()))
+    os.environ["PATH"] = f"{tmpdir / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}"
+    expected = tmpdir / f"tmux-{os.getuid()}" / TMUX_SOCKET
+    probe = subprocess.run(["tmux", "-L", TMUX_SOCKET, "list-sessions"], capture_output=True, text=True)
     assert probe.returncode != 0 and str(expected) in probe.stderr, (
         f"refusing to run: tmux would not use the isolated socket {expected}: {probe.stderr!r}"
     )

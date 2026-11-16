@@ -54,6 +54,8 @@ if str(ROOT) not in sys.path:
 from scripts import presentation_reconnect as reconnect  # noqa: E402
 from scripts import presentation_window_launch as window_launch  # noqa: E402
 from scripts import team_launcher as launcher  # noqa: E402
+from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
+isolate_tmux_bus()  # SYRD-814: the tmux servers it starts get a user bus of their own, never the invoker's
 
 CHECKS = 0
 FAILURES: list[str] = []

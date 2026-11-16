@@ -39,6 +39,8 @@ from scripts.ticket_board import board_skill  # noqa: E402
 
 import contained_cli  # noqa: E402
 import worker_pool_lifecycle_test as lifecycle  # noqa: E402
+from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
+isolate_tmux_bus()  # SYRD-814: the tmux servers it starts get a user bus of their own, never the invoker's
 
 PROJECT = lifecycle.PROJECT
 #: The implementer pool, on Codex: its template carries an onboarding prompt, so
@@ -342,16 +344,19 @@ def _observe(spec: dict) -> dict:
     subprocess.run(["codex", "login", "--with-api-key"], input="sk-placeholder-never-sent\n", env=env,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True, timeout=60)
     name = spec["name"]
-    subprocess.run(["tmux", "new-session", "-d", "-s", name, "-x", "160", "-y", "40", "-c", spec["cwd"], "codex"],
-                   env=env, check=True)
-    socket = subprocess.run(["tmux", "display-message", "-p", "#{socket_path}"], env=env,
+    # Named on every command, not found through TMUX_TMPDIR alone (SYRD-219); the
+    # directory stays as well, so the socket still lands under this run's tree.
+    sock = f"syrd279-{os.getpid()}"
+    subprocess.run(["tmux", "-L", sock, "new-session", "-d", "-s", name, "-x", "160", "-y", "40",
+                    "-c", spec["cwd"], "codex"], env=env, check=True)
+    socket = subprocess.run(["tmux", "-L", sock, "display-message", "-p", "#{socket_path}"], env=env,
                             capture_output=True, text=True).stdout.strip()
     assert socket.startswith(env["TMUX_TMPDIR"]), f"reached a live tmux server: {socket}"
     screen, result, header_at = "", {}, None
     try:
         for _ in range(40):
             time.sleep(0.5)
-            screen = subprocess.run(["tmux", "capture-pane", "-p", "-t", name], env=env,
+            screen = subprocess.run(["tmux", "-L", sock, "capture-pane", "-p", "-t", name], env=env,
                                     capture_output=True, text=True).stdout
             if "Trust this folder" in screen:
                 break
@@ -366,7 +371,7 @@ def _observe(spec: dict) -> dict:
             return {"observed": False}  # never reached the question; this observation proves nothing
         result = {"observed": True, "prompts": "Trust this folder" in screen}
         if spec["mode"] == "answer" and result["prompts"]:
-            subprocess.run(["tmux", "send-keys", "-t", name, "Enter"], env=env)
+            subprocess.run(["tmux", "-L", sock, "send-keys", "-t", name, "Enter"], env=env)
             trusted = False
             for _ in range(20):
                 time.sleep(0.5)
@@ -378,7 +383,7 @@ def _observe(spec: dict) -> dict:
         return result
     finally:
         # A courtesy. The containment is what guarantees nothing is left.
-        subprocess.run(["tmux", "kill-server"], env=env, capture_output=True)
+        subprocess.run(["tmux", "-L", sock, "kill-server"], env=env, capture_output=True)
 
 
 def _contained_codex(home: "contained_cli.ContainedHome", spec: dict, *, label: str) -> dict:

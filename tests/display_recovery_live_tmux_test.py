@@ -23,16 +23,18 @@ Konsole panes, and a config whose derived mapping disagrees -- then closes the
 Director's attachment, recovers through the real `presentation_action`, and
 checks what tmux itself says afterwards.
 
-The tmux server is isolated: TMUX is removed and TMUX_TMPDIR points into a
-temporary directory, and the socket path is asserted before anything is
-created or killed. A bare tmux call from a Switchyard pane otherwise drives the
-LIVE server.
+The tmux server is isolated: TMUX is removed, TMUX_TMPDIR points into a
+temporary directory, every command names this run's socket with -L (a `tmux`
+wrapper first on PATH does the same for the code under test), and the socket
+path is asserted before anything is created or killed. A bare tmux call from
+a Switchyard pane otherwise drives the LIVE server.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -47,11 +49,17 @@ for extra in (str(ROOT), str(ROOT / "scripts"), str(ROOT / "tests")):
 
 import presentation_controller as pc  # noqa: E402
 import team_launcher as tl  # noqa: E402
+from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
+isolate_tmux_bus()  # SYRD-814: the tmux servers it starts get a user bus of their own, never the invoker's
 
 CHECKS = 0
 PROJECT = "demo"
 #: What the open window was launched with: display slot -> role.
 OPENED = {0: "director", 1: "main", 2: "audit", 3: "ops"}
+#: The real binary, resolved before `isolate` puts the socket-pinning wrapper first on PATH.
+REAL_TMUX = shutil.which("tmux") or "tmux"
+#: This run's own server, named on every command (SYRD-219): TMUX_TMPDIR alone loses to an inherited TMUX.
+TMUX_SOCKET = f"sy239-{os.getpid()}"
 
 
 def check(condition: object, detail: str) -> None:
@@ -61,7 +69,7 @@ def check(condition: object, detail: str) -> None:
 
 
 def tmux(*args: str, check_rc: bool = True) -> str:
-    proc = subprocess.run(["tmux", *args], capture_output=True, text=True)
+    proc = subprocess.run([REAL_TMUX, "-L", TMUX_SOCKET, *args], capture_output=True, text=True)
     if check_rc and proc.returncode != 0:
         raise AssertionError(f"tmux {' '.join(args)}: {proc.stderr.strip()}")
     return proc.stdout.strip()
@@ -149,9 +157,20 @@ def isolate() -> Path:
     os.environ.pop("TMUX_PANE", None)
     tmpdir = Path(tempfile.mkdtemp(prefix="sy239-", dir="/tmp"))
     os.environ["TMUX_TMPDIR"] = str(tmpdir)
-    expected = tmpdir / f"tmux-{os.getuid()}" / "default"
-    # Before anything is created: tmux names the socket it would use.
-    probe = subprocess.run(["tmux", "list-sessions"], capture_output=True, text=True)
+    # The code under test -- the presentation controller, a display pane's nested
+    # attach, the printed remedy -- runs `tmux` by name. This `tmux` execs the real
+    # one with this run's -L, so all of it reaches this server and no other.
+    wrapper_dir = tmpdir / "bin"
+    wrapper_dir.mkdir()
+    wrapper = wrapper_dir / "tmux"
+    wrapper.write_text(f"#!/bin/sh\nexec {shlex.quote(REAL_TMUX)} -L {shlex.quote(TMUX_SOCKET)} \"$@\"\n",
+                       encoding="utf-8")
+    wrapper.chmod(0o755)
+    os.environ["PATH"] = f"{wrapper_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"
+    expected = tmpdir / f"tmux-{os.getuid()}" / TMUX_SOCKET
+    # Before anything is created: tmux names the socket it would use -- through
+    # the wrapper, as the code under test will call it.
+    probe = subprocess.run([str(wrapper), "list-sessions"], capture_output=True, text=True)
     assert probe.returncode != 0 and str(expected) in probe.stderr, (
         f"refusing to run: tmux would not use the isolated socket {expected}: {probe.stderr!r}"
     )

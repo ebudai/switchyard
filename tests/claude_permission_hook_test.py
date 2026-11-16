@@ -210,7 +210,8 @@ def test_the_helper_it_points_at_is_the_staged_one_not_a_copy_in_the_home() -> N
         tmp = Path(raw)
         staged = tmp / "staging"
         staged.mkdir()
-        for name in (INSTALLER_NAME, HOOK_NAME, "ticket-board-pane-idle-hook"):
+        # The shell guard too: the installer requires it beside itself since SYRD-753 (SYRD-814).
+        for name in (INSTALLER_NAME, HOOK_NAME, "ticket-board-pane-idle-hook", "ticket-board-shell-guard"):
             shutil.copy2(ROOT / "scripts" / name, staged / name)
         # Staging copies the package tree beside the entry points; without it
         # the installer cannot import its own helpers.
@@ -578,6 +579,8 @@ class _FakeSelf:
         self.activity_gate = gate.is_working
         self._activity_gate = lambda: self.activity_gate
         self.permission_prompt_grace_seconds = grace
+        # As IdleNudges starts each pass: no blocked pane reported yet (SYRD-633; SYRD-814: the fake lacked it).
+        self.blocked_panes_on_board = False
         self.logged: list[str] = []
 
         class _Logger:
@@ -766,6 +769,10 @@ def _live_tool_results(sandbox: Path, settings: Path) -> list[str]:
     return results
 
 
+#: The one variable that lets a test make a paid model call (SYRD-814).
+PAID_OPT_IN = "SWITCHYARD_TEST_PAID_CLAUDE"
+
+
 def test_the_installed_claude_stalls_without_the_hook_and_proceeds_with_it() -> None:
     """The whole ticket, against the provider that owns the behaviour.
 
@@ -774,7 +781,14 @@ def test_the_installed_claude_stalls_without_the_hook_and_proceeds_with_it() -> 
     note that the breaker cannot be overridden by a hook says it should not.
     That note is about `permissions.allow` rules and PreToolUse; measured here,
     a PermissionRequest hook does answer it.
+
+    Opt-in (SYRD-814): it runs the real `/usr/bin/claude`, which needs a signed-in account and makes a paid model call
+    -- with a live HOME, the invoking account's own. Only `SWITCHYARD_TEST_PAID_CLAUDE=1` runs it.
     """
+    if os.environ.get(PAID_OPT_IN, "").strip() != "1":
+        print(f"claude_permission_hook_test: the live Claude case is skipped: it makes a paid call; set {PAID_OPT_IN}=1 "
+              "to run it")
+        return
     check(bool(shutil.which("claude")), "the installed claude is required")
     with tempfile.TemporaryDirectory(prefix="syrd234-live.") as raw:
         tmp = Path(raw)
@@ -818,6 +832,23 @@ def test_the_installed_claude_stalls_without_the_hook_and_proceeds_with_it() -> 
         "denied" not in with_text.lower(),
         f"and the permission layer did not stop it: {with_text[:200]!r}",
     )
+
+
+def test_the_paid_case_runs_only_when_asked() -> None:
+    """SYRD-814: without the opt-in nothing reaches claude -- shown with the call replaced, so this costs nothing."""
+    global _live_tool_results
+    real, reached = _live_tool_results, []
+    _live_tool_results = lambda *args, **kwargs: reached.append(args) or []
+    saved = os.environ.pop(PAID_OPT_IN, None)
+    try:
+        test_the_installed_claude_stalls_without_the_hook_and_proceeds_with_it()
+    except AssertionError:
+        pass  # its own checks on what the replaced call returned; what matters here is whether it was reached
+    finally:
+        _live_tool_results = real
+        if saved is not None:
+            os.environ[PAID_OPT_IN] = saved
+    check(reached == [], f"no paid call is made unless {PAID_OPT_IN}=1: {len(reached)} were")
 
 
 def main() -> int:

@@ -2,10 +2,11 @@
 """SYRD-750, live: `restart-role` on a real tmux server ends the old pane process, starts one replacement, and the
 environment the launcher gives the role now -- a report link provisioned after it started -- reaches it.
 
-The tmux server is isolated (TMUX removed, TMUX_TMPDIR in a temporary directory, and its socket asserted before
-anything is created or killed); the launcher's start and reload are the real ones; the provider is a stand-in `claude`
-that only runs; the kernel's /proc is the real one. The board's GETs are stood in: the role's registration is the
-process tmux says runs its pane, as a pane's own registration would make it.
+The tmux server is isolated (TMUX removed, TMUX_TMPDIR in a temporary directory, and every tmux -- the test's own and,
+through a wrapper first on PATH, the code under test's -- told that directory's socket with -S); the launcher's start
+and reload are the real ones; the provider is a stand-in `claude` that only runs; the kernel's /proc is the real one.
+The board's GETs are stood in: the role's registration is the process tmux says runs its pane, as a pane's own
+registration would make it.
 """
 
 from __future__ import annotations
@@ -13,6 +14,8 @@ from __future__ import annotations
 import io
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -47,8 +50,21 @@ def main() -> int:
     os.environ["TMUX_TMPDIR"] = str(tmp / "tmux")
     (tmp / "tmux").mkdir()
     expected_socket = tmp / "tmux" / f"tmux-{os.getuid()}" / "default"
+    # Named on every call (SYRD-219: the directory alone is not isolation), and at exactly the path TMUX_TMPDIR
+    # derives, so a tmux the code under test runs from inside a pane still finds this server and no other.
+    expected_socket.parent.mkdir(mode=0o700, parents=True)
+    real_tmux = shutil.which("tmux")  # before PATH changes: the wrapper below must not find itself
+    if not real_tmux:
+        raise AssertionError("no tmux binary on PATH")
+
+    def tmux(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run([real_tmux, "-S", str(expected_socket), *args], capture_output=True, text=True)
+
     bindir = tmp / "bin"
     bindir.mkdir()
+    # Every bare `tmux` the launcher and the restart run reaches this private server, never an ambient one.
+    (bindir / "tmux").write_text(f"#!/bin/sh\nexec {shlex.quote(real_tmux)} -S {shlex.quote(str(expected_socket))} \"$@\"\n")
+    (bindir / "tmux").chmod(0o755)
     # A stand-in that only runs, keeping its arguments where /proc shows them.
     # Absolute paths throughout -- the interpreter and the CLI itself -- so no PATH a pane is given can change what runs.
     (bindir / "claude").write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo '2.1.318 (Claude Code)'; exit 0; fi\n"
@@ -74,10 +90,10 @@ def main() -> int:
         started = launcher.ensure_visible_role_session_for_viewer(
             role, mode="attach-or-start", session_dir=launcher.role_session_dir(config, role), pane_state_dir=panes,
             bin_user="", runner=subprocess.run)
-        socket = subprocess.run(["tmux", "display-message", "-p", "#{socket_path}"], capture_output=True, text=True).stdout.strip()
-        why = "" if started == 0 else subprocess.run(  # what tmux saw, when the start failed: the run says why
-            ["tmux", "list-panes", "-a", "-F", "#{session_name} dead=#{pane_dead} status=#{pane_dead_status} cmd=#{pane_start_command}"],
-            capture_output=True, text=True).stdout.strip()
+        socket = tmux("display-message", "-p", "#{socket_path}").stdout.strip()
+        why = "" if started == 0 else tmux(  # what tmux saw, when the start failed: the run says why
+            "list-panes", "-a", "-F", "#{session_name} dead=#{pane_dead} status=#{pane_dead_status} cmd=#{pane_start_command}",
+        ).stdout.strip()
         check(started == 0 and socket == str(expected_socket),
               f"the role started, on the isolated server only: {socket} (launcher exit {started}; {why or 'no pane'})")
         before = read_process(launcher.pane_pid_for_role(role))
@@ -132,7 +148,7 @@ def main() -> int:
                                                      opener=opener, print_func=said.append)
         after = read_process(launcher.pane_pid_for_role(config.roles[0]))
         env = role_restart.pane_environment(after.pid, "app", Path("/proc")) if after else {}
-        sessions = subprocess.run(["tmux", "list-sessions", "-F", "#{session_name}"], capture_output=True, text=True).stdout.split()
+        sessions = tmux("list-sessions", "-F", "#{session_name}").stdout.split()
         # Ended, from the kernel: gone, its pid reused, or a zombie. Under a subreaper (switchyard-bounded is one), the
         # old pane's processes outlive the tmux server that ran them as zombies until it collects them -- ended all the
         # same; only their exit status is left.
@@ -153,7 +169,7 @@ def main() -> int:
               and argv[argv.index(b"--resume") + 1] == b"conv-750",
               f"the replacement resumes the recorded conversation, so nothing of its context is lost: {argv[-4:]}")
     finally:
-        subprocess.run(["tmux", "kill-server"], capture_output=True)
+        tmux("kill-server")
     print(f"role_restart_live_tmux_test: {CHECKS} checks ok")
     return 0
 

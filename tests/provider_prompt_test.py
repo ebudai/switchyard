@@ -450,13 +450,18 @@ def observe(spec: dict) -> dict:
     subprocess.run(["codex", "login", "--with-api-key"], input="sk-placeholder-never-sent\n", env=env,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True, timeout=60)
     name = "s566"
-    subprocess.run(["tmux", "new-session", "-d", "-s", name, "-x", "160", "-y", "45", "-c", str(work),
+    # Named on every command, the product's own included: TMUX_TMPDIR alone is not isolation (SYRD-219).
+    server = f"s566-{os.getpid()}"
+    subprocess.run(["tmux", "-L", server, "new-session", "-d", "-s", name, "-x", "160", "-y", "45", "-c", str(work),
                     "unshare --user --map-root-user --net codex"], env=env, check=True)
-    socket = subprocess.run(["tmux", "display-message", "-p", "#{socket_path}"], env=env,
+    socket = subprocess.run(["tmux", "-L", server, "display-message", "-p", "#{socket_path}"], env=env,
                             capture_output=True, text=True).stdout.strip()
     assert socket.startswith(env["TMUX_TMPDIR"]), f"reached a live tmux server: {socket}"
 
     def runner(argv, **kwargs):
+        # worker_screen builds a bare `tmux ...` argv; it reaches this server and no other.
+        if list(argv[:1]) == ["tmux"]:
+            argv = ["tmux", "-L", server, *argv[1:]]
         return subprocess.run(argv, env=env, **kwargs)
 
     def screen() -> list[str]:
@@ -470,9 +475,9 @@ def observe(spec: dict) -> dict:
                   "sign_in": any("Sign in with ChatGPT" in row for row in screen())}
         for step in spec.get("steps", ()):
             if step.startswith("type:"):
-                subprocess.run(["tmux", "send-keys", "-t", name, "-l", step[5:]], env=env)
+                subprocess.run(["tmux", "-L", server, "send-keys", "-t", name, "-l", step[5:]], env=env)
             else:
-                subprocess.run(["tmux", "send-keys", "-t", name, step], env=env)
+                subprocess.run(["tmux", "-L", server, "send-keys", "-t", name, step], env=env)
             time.sleep(1)
         # /clear clears the terminal first and draws the new chat once it is up.
         for _ in range(24):
@@ -484,13 +489,13 @@ def observe(spec: dict) -> dict:
         rows = screen()
         prompt = provider_prompt.open_prompt(rows)
         result["after"] = prompt.kind if prompt else None
-        result["path"] = subprocess.run(["tmux", "display-message", "-p", "-t", name, "#{pane_current_path}"], env=env,
-                                        capture_output=True, text=True).stdout.strip()
+        result["path"] = subprocess.run(["tmux", "-L", server, "display-message", "-p", "-t", name,
+                                         "#{pane_current_path}"], env=env, capture_output=True, text=True).stdout.strip()
         result["at_prompt"] = any(row.lstrip().startswith("› ") for row in rows)
 
         return result
     finally:
-        subprocess.run(["tmux", "kill-server"], env=env, capture_output=True)
+        subprocess.run(["tmux", "-L", server, "kill-server"], env=env, capture_output=True)
 
 
 def real_codex() -> dict:

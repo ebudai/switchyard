@@ -56,6 +56,8 @@ ROLE = "app"
 #: The target the listener itself routes this role to: from the project in the
 #: environment, so the cases hold in a role pane as well as under env -i.
 from scripts.ticket_board.notify_listener import ROLE_TO_TARGET  # noqa: E402
+from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
+isolate_tmux_bus()  # SYRD-814: the tmux servers it starts get a user bus of their own, never the invoker's
 TARGET = ROLE_TO_TARGET.get(ROLE, "pgu-app:0.0")
 #: The shape of Claude Code 2.1.284's Stop input with one background subagent.
 STOP_WITH_SUBAGENT = {

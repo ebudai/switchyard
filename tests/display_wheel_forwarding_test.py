@@ -110,7 +110,8 @@ def _slot_calls(*, live: bool = True, role: str | None = "director") -> list[lis
     return recorder.calls
 
 
-MOUSE_ON = ["tmux", "set-option", "-t", "=sample-director:", "mouse", "on"]
+#: What the recorded owner is expected to send -- compared against its recorded calls, never run.
+MOUSE_ON = ["tmux", "set-option", "-t", "=sample-director:", "mouse", "on"]  # tmux-lint: argv-as-data
 
 
 def test_the_display_table_hands_the_wheel_to_the_pane() -> None:

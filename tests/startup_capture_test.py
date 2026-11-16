@@ -23,6 +23,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tests"))
+
+from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
+
+# Its panes are real: they must not ask a live user manager for scopes (SYRD-55).
+isolate_tmux_bus()
 
 from scripts import team_launcher  # noqa: E402
 from scripts import startup_capture  # noqa: E402
@@ -62,6 +68,8 @@ def main() -> int:
         os.environ["PATH"] = f"{bin_dir}:{os.environ['PATH']}"
         os.environ.pop("TMUX", None)
         os.environ["SHELL"] = "/bin/sh"
+        # The test's own calls name the same socket, by the real binary: never a server some environment points at.
+        own_tmux = [real_tmux, "-S", str(socket), "-f", "/dev/null"]
         sessions = scratch / "sessions"
         panes = scratch / "panes"
         messages: list[str] = []
@@ -77,7 +85,7 @@ def main() -> int:
                 return code, err.getvalue()
 
             def exists(r: team_launcher.RoleConfig) -> bool:
-                return subprocess.run(["tmux", "has-session", "-t", r.tmux_session], capture_output=True).returncode == 0
+                return subprocess.run([*own_tmux, "has-session", "-t", r.tmux_session], capture_output=True).returncode == 0
 
             def capture_of(r: team_launcher.RoleConfig) -> Path:
                 return startup_capture.capture_path(sessions, team_launcher.session_file_name(r.target))
@@ -88,10 +96,10 @@ def main() -> int:
                 Read from behaviour, not from `show-hooks`, which lists nothing
                 here even while the hook is armed.
                 """
-                remain = subprocess.run(["tmux", "show-window-options", "-t", r.tmux_session, "-v", "remain-on-exit"],
+                remain = subprocess.run([*own_tmux, "show-window-options", "-t", r.tmux_session, "-v", "remain-on-exit"],
                                         capture_output=True, text=True).stdout.strip()
                 size_before = capture_of(r).stat().st_size
-                pid = subprocess.run(["tmux", "display-message", "-p", "-t", r.tmux_session, "#{pane_pid}"],
+                pid = subprocess.run([*own_tmux, "display-message", "-p", "-t", r.tmux_session, "#{pane_pid}"],
                                      capture_output=True, text=True).stdout.strip()
                 os.kill(int(pid), 15)
                 for _ in range(30):
@@ -207,7 +215,7 @@ def main() -> int:
                 post_start_verifier=lambda: _detached_launch_verified(odd_role), startup_capture=True), ""
             check(code == 1 and not exists(odd_role), f"{version}: an unarmed failing start still fails, and leaves nothing")
         finally:
-            subprocess.run(["tmux", "kill-server"], capture_output=True)
+            subprocess.run([*own_tmux, "kill-server"], capture_output=True)
             for key, value in saved_env.items():
                 if value is None:
                     os.environ.pop(key, None)

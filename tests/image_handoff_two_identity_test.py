@@ -40,6 +40,8 @@ import zlib
 from pathlib import Path
 
 import live_boundary  # noqa: E402
+from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
+isolate_tmux_bus()  # SYRD-814: the tmux servers it starts get a user bus of their own, never the invoker's
 
 live_boundary.isolate()  # SYRD-627: no live home, pane store or runtime directory, here or in a child
 
@@ -52,6 +54,8 @@ RUNTIME = Path("/run/user/1000")
 GRANT = Path("/run/switchyard-desktop/1000")
 LEAF = GRANT / "switchyard-paste" / PROJECT
 TTL = 15 * 60
+#: The real binary, resolved before the tenant's PATH puts the socket-pinning wrapper first.
+REAL_TMUX = shutil.which("tmux") or "/usr/bin/tmux"
 
 failures: list[str] = []
 
@@ -174,6 +178,18 @@ def namespace(base: Path) -> dict:
     for name, text in (("wl-paste", STUB_WL_PASTE), ("loginctl", STUB_LOGINCTL)):
         (stubs / name).write_text(text)
         (stubs / name).chmod(0o755)
+    # The tenant's tmux server is named on every command (SYRD-219), and the real
+    # `directorctl send` runs `tmux` by name: this `tmux`, first on the tenant's
+    # PATH, execs the real one with the same -L, so delivery reaches this server.
+    tmux_socket = f"img-{os.getpid()}"
+    tmux_bin = base / "tmux-bin"
+    tmux_bin.mkdir(mode=0o755)
+    (tmux_bin / "tmux").write_text(f"#!/bin/sh\nexec {REAL_TMUX} -L {tmux_socket} \"$@\"\n")
+    (tmux_bin / "tmux").chmod(0o755)
+
+    def tmux(*args: str) -> list[str]:
+        return [REAL_TMUX, "-L", tmux_socket, *args]
+
     (base / "image.png").write_bytes(IMAGE)
     (base / "image.png").chmod(0o644)
 
@@ -210,7 +226,8 @@ def namespace(base: Path) -> dict:
               "SWITCHYARD_PROJECT_REGISTRY_DIR": str(registry), "PYTHONDONTWRITEBYTECODE": "1"}
     gui_env = {**common, "HOME": str(base / "home" / GUI[0]), "XDG_RUNTIME_DIR": str(RUNTIME),
                "IMAGE_FIXTURE": str(base / "image.png")}
-    tenant_env = {**common, **unit_env, "HOME": str(tenant_home), "XDG_RUNTIME_DIR": "/run/user/1019",
+    tenant_env = {**common, **unit_env, "PATH": f"{tmux_bin}:{unit_env.get('PATH', common['PATH'])}",
+                  "HOME": str(tenant_home), "XDG_RUNTIME_DIR": "/run/user/1019",
                   "TMUX_TMPDIR": str(state), "TERM": "xterm-256color",
                   "TICKET_BOARD_PANE_STATE_DIR": str(state / "pane-state")}
 
@@ -239,11 +256,11 @@ def namespace(base: Path) -> dict:
         result[label] = run
         received, opened = state / f"received-{label}", state / f"opened-{label}"
         provider = PROVIDER.replace("$RECEIVED", str(received)).replace("$OPENED", str(opened))
-        started = as_user(TENANT, ["tmux", "new-session", "-d", "-s", f"{PROJECT}-app", "-x", "220", "-y", "20",
-                                   "bash", "-c", provider], tenant_env)
+        started = as_user(TENANT, tmux("new-session", "-d", "-s", f"{PROJECT}-app", "-x", "220", "-y", "20",
+                                       "bash", "-c", provider), tenant_env)
         try:  # the tenant's tmux server ends with the pass, whatever fails in it (SYRD-815)
             run["tmux"] = started.returncode
-            socket = as_user(TENANT, ["tmux", "display-message", "-p", "#{socket_path}"], tenant_env).stdout.strip()
+            socket = as_user(TENANT, tmux("display-message", "-p", "#{socket_path}"), tenant_env).stdout.strip()
             run["tmux_socket_private"] = socket.startswith(str(state))
 
             paste = as_user(GUI, [sys.executable, "-c", "import runpy, sys; sys.argv = sys.argv[1:]; "
@@ -305,7 +322,7 @@ def namespace(base: Path) -> dict:
                               json.dumps(policy), env=gui_env, tree=tree)
                 run["withdraw"] = [second.returncode, withdraw.returncode, withdraw.stdout.strip() or withdraw.stderr[-300:]]
         finally:
-            as_user(TENANT, ["tmux", "kill-server"], tenant_env)
+            as_user(TENANT, tmux("kill-server"), tenant_env)
     return result
 
 

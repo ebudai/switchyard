@@ -66,7 +66,8 @@ SEAMS = {
     "owner_removal_refusal": {"TEARDOWN_PROTECTED_USERS": 1, "current_user_name": 1, "read_host_desktop_approval": 1, "TEARDOWN_MINIMUM_OWNER_UID": 2},
     "_owner_removal_actions": {"SwitchyardTeardownAction": 4, "_bash_action": 4},
     # SYRD-786: the desktop grant's and root's records' steps, and root's provisioning record's path.
-    "_switchyard_teardown_actions": {"SwitchyardTeardownAction": 16, "_bash_action": 2, "tenant_control_helper_path": 2, "_drop_database_command": 1,
+    # SYRD-825: one more action, removing the tenant's own upgrade-actions polkit rule.
+    "_switchyard_teardown_actions": {"SwitchyardTeardownAction": 17, "_bash_action": 2, "tenant_control_helper_path": 2, "_drop_database_command": 1,
                                      "_owner_removal_actions": 1, "privileged_provision_dir": 1, "switchyard_privileged_provision_root": 1},
     # SYRD-786: the typed slug is teardown_tenant.confirm_by_typing's, which reads the prompt itself.
     "_confirm_teardown_project": {},
@@ -450,23 +451,25 @@ def test_every_teardown_action_in_order() -> None:
         "remove tenant control data /usr/local/lib/switchyard/p367/control-grant.json",
         "remove tenant control helper /usr/local/libexec/switchyard-control-p367",
         "remove polkit rule /etc/polkit-1/rules.d/50-p367.rules",
+        "remove polkit rule /etc/polkit-1/rules.d/49-p367-tenant-upgrade.rules",  # SYRD-825
         "reload systemd manager configuration",
         "drop PostgreSQL database p367_board",
         "remove board release root /srv/p367/live",
         "remove switchyard registry entry /fixture/registry/p367.json",
         "remove root's staged tooling, provisioning record and publication grant for p367, keep its rollout journal re-owned "
-        "to root, and re-own anything else its uid or gid owns"], f"seventeen actions, in order: {labels}")
+        "to root, and re-own anything else its uid or gid owns"], f"eighteen actions, in order: {labels}")
     commands = [a.command for a in base]
-    check(commands[5:12] == [("rm", "-f", "/home/syrd367-owner/.config/systemd/user/p367-notify.service"), ("rm", "-f", "/etc/systemd/system/p367-ticket-board.service"),
+    check(commands[5:13] == [("rm", "-f", "/home/syrd367-owner/.config/systemd/user/p367-notify.service"), ("rm", "-f", "/etc/systemd/system/p367-ticket-board.service"),
                             ("rm", "-f", "/etc/tmpfiles.d/p367.conf"), ("rm", "-f", "/etc/sudoers.d/47-p367-control"),
                             ("rm", "-f", "/usr/local/lib/switchyard/p367/control-grant.json"), ("rm", "-f", "/usr/local/libexec/switchyard-control-p367"),
-                            ("rm", "-f", "/etc/polkit-1/rules.d/50-p367.rules")]
-          and commands[12] == ("systemctl", "daemon-reload") and commands[14] == ("rm", "-rf", "--", "/srv/p367/live")
-          and commands[15] == ("rm", "-f", "/fixture/registry/p367.json"), f"the exact removals: {commands}")
-    check(commands[13] == ("sudo", "-u", "postgres", "psql", "-X", "-v", "ON_ERROR_STOP=1", "postgresql:///postgres?host=/var/run/postgresql", "-c",
-                           'DROP DATABASE IF EXISTS "p367_board" WITH (FORCE);'), f"the database drop: {commands[13]}")
+                            ("rm", "-f", "/etc/polkit-1/rules.d/50-p367.rules"),
+                            ("rm", "-f", "/etc/polkit-1/rules.d/49-p367-tenant-upgrade.rules")]  # SYRD-825
+          and commands[13] == ("systemctl", "daemon-reload") and commands[15] == ("rm", "-rf", "--", "/srv/p367/live")
+          and commands[16] == ("rm", "-f", "/fixture/registry/p367.json"), f"the exact removals: {commands}")
+    check(commands[14] == ("sudo", "-u", "postgres", "psql", "-X", "-v", "ON_ERROR_STOP=1", "postgresql:///postgres?host=/var/run/postgresql", "-c",
+                           'DROP DATABASE IF EXISTS "p367_board" WITH (FORCE);'), f"the database drop: {commands[14]}")
     check(commands[2][-2:] == ("withdraw-desktop", "syrd367-owner") and commands[2][1] == "-I" and commands[2][2].endswith("teardown_tenant.py")
-          and commands[16][3:6] == ("root-records", "p367", "syrd367-owner"), f"teardown_tenant's two steps, isolated: {commands[2]} {commands[16]}")
+          and commands[17][3:6] == ("root-records", "p367", "syrd367-owner"), f"teardown_tenant's two steps, isolated: {commands[2]} {commands[17]}")
     check(commands[0] == ("bash", "-lc", "if systemctl list-unit-files --no-legend p367-ticket-board.service | grep -q .; then "
                                          "systemctl disable --now p367-ticket-board.service; fi")
           and "systemctl --user disable --now p367-notify.service || true" in commands[1][2] and "sudo -u syrd367-owner env" in commands[1][2],
@@ -477,7 +480,7 @@ def test_every_teardown_action_in_order() -> None:
                                "stop the systemd user manager and session for syrd367-owner",
                                "stop every process of syrd367-owner (its panes, agents and user manager): SIGTERM, then SIGKILL, and check none remains"]
           and full_labels[-2:] == ["remove owner home directory /home/syrd367-owner", "remove owner user account syrd367-owner"]
-          and full[-2].command == ("rm", "-rf", "--", "/home/syrd367-owner") and isinstance(full, tuple) and len(full) == 20,
+          and full[-2].command == ("rm", "-rf", "--", "/home/syrd367-owner") and isinstance(full, tuple) and len(full) == 21,
           f"linger, the session and every process first; the home and then the account last: {full_labels}")
     kept = actions_for(remove_owner_home=False, remove_owner_user=False, keep_board_data=True)
     check(len(kept) == len(base) - 1 and not any("drop PostgreSQL" in a.label for a in kept), "--keep-board-data keeps the database")
@@ -614,25 +617,25 @@ def test_the_command_guards_dry_run_confirmation_and_residue() -> None:
     # SYRD-786: a registered tenant, a board of unknown size or with tickets: no flag needed, the typed slug confirms.
     for healthy, count in ((True, 0), (False, None), (False, 3)):
         fx = Teardown(); fx.healthy, fx.count = healthy, count
-        check(fx.run() == 0 and fx.log[-3] == ("confirm", SLUG, None, False) and fx.log[-2] == ("run", 20),
-              f"registered={healthy}, tickets={count}: asked once, then the whole tenant's twenty actions: {fx.log}")
+        check(fx.run() == 0 and fx.log[-3] == ("confirm", SLUG, None, False) and fx.log[-2] == ("run", 21),
+              f"registered={healthy}, tickets={count}: asked once, then the whole tenant's twenty-one actions (SYRD-825): {fx.log}")
     fx = Teardown()
     # SYRD-786 Audit: its processes are stopped even with --keep-user, so the account is judged on every run.
-    check(fx.run(keep_user=True, keep_home=True, yes=True) == 0 and "refusal" in fx.kinds() and fx.log[-1] == ("run", 17)
+    check(fx.run(keep_user=True, keep_home=True, yes=True) == 0 and "refusal" in fx.kinds() and fx.log[-1] == ("run", 18)
           and ("confirm", SLUG, None, True) in fx.log,
-          f"--keep-user and --keep-home: the account is still judged, and seventeen actions run; --yes reaches the confirmation: {fx.log}")
+          f"--keep-user and --keep-home: the account is still judged, and eighteen actions run; --yes reaches the confirmation: {fx.log}")
     fx = Teardown(); fx.refusal = "nope"
     got = fx.run(keep_user=True, confirm="p367")
     check(isinstance(got, SystemExit) and "nope" in str(got) and "run" not in fx.kinds(), f"--keep-user does not skip a refusal: {got!r}")
     fx = Teardown()
-    check(fx.run(keep_board_data=True, confirm="p367") == 0 and fx.log[-2] == ("run", 19), "--keep-board-data keeps the database")
+    check(fx.run(keep_board_data=True, confirm="p367") == 0 and fx.log[-2] == ("run", 20), "--keep-board-data keeps the database")
     fx = Teardown()
     legacy = fx.run(confirm="p367", destroy_registered_tenant=True, drop_nonempty_board=True, remove_owner_home=True, remove_owner_user=True)
-    check(legacy == 0 and fx.log[-2] == ("run", 20), "the old flags are accepted and change nothing")
+    check(legacy == 0 and fx.log[-2] == ("run", 21), "the old flags are accepted and change nothing")
     fx = Teardown(); fx.residue = ["the account still exists: o:x:1500"]
     got = fx.run(confirm="p367")
     check(isinstance(got, SystemExit) and str(got) == ("switchyard: teardown did NOT remove all of p367; it is not safe to recreate under the same slug.\n"
-                                                       "  - the account still exists: o:x:1500") and fx.log[-2] == ("run", 20) and fx.kinds()[-1] == "residue",
+                                                       "  - the account still exists: o:x:1500") and fx.log[-2] == ("run", 21) and fx.kinds()[-1] == "residue",
           f"the account is read back after the actions: {got!r}")
     fx = Teardown()
     fx.run(dry_run=True, home_base=Path("/fixture/homes"))

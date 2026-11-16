@@ -350,6 +350,7 @@ def _switchyard_teardown_actions(
     keep_board_data: bool = False,
 ) -> tuple[SwitchyardTeardownAction, ...]:
     from scripts import team_launcher as launcher
+    from scripts.ticket_board import tenant_upgrade_rule
     from scripts import teardown_tenant
 
     owner_home = home_base / plan.owner_user
@@ -413,6 +414,11 @@ def _switchyard_teardown_actions(
         launcher.SwitchyardTeardownAction(
             f"remove polkit rule /etc/polkit-1/rules.d/{plan.polkit_name}",
             ("rm", "-f", f"/etc/polkit-1/rules.d/{plan.polkit_name}"),
+        ),
+        # The tenant's own upgrade actions (SYRD-825): its owner's grant goes with the tenant.
+        launcher.SwitchyardTeardownAction(
+            f"remove polkit rule /etc/polkit-1/rules.d/{tenant_upgrade_rule.rule_name(plan.project)}",
+            ("rm", "-f", f"/etc/polkit-1/rules.d/{tenant_upgrade_rule.rule_name(plan.project)}"),
         ),
         launcher.SwitchyardTeardownAction(
             "reload systemd manager configuration",

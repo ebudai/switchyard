@@ -1192,7 +1192,7 @@ U3_SEAMS = ("warn_if_artifact_source_checkout_is_stale", "upgrade_generated_proj
             "refresh_generated_project_runtime_artifacts", "_project_dir_from_generated_config_path",
             "_plan_data_from_config", "upgrade_switchyard_onboarding_docs", "current_user_name",
             "ensure_generated_project_board_skill", "repair_repository_policy_hooks", "record_upstream_report_link",
-            "refresh_upstream_report_credential", "refresh_registered_agent_clis")
+            "refresh_upstream_report_credential", "refresh_registered_agent_clis", "POLKIT_RULES_DIR")
 PROJECT_DIR = Path("/nonexistent/syrd349/project")
 GIVEN_SOURCE = Path("/nonexistent/syrd349/given-source")
 
@@ -1239,7 +1239,7 @@ class Artifacts:
             refresh_upstream_report_credential=lambda config, **kw: L.append(("credential", config, kw))
                 or list(self.credential_problems),
             refresh_registered_agent_clis=lambda config, **kw: L.append(("clis", config, kw)) or list(self.cli_problems),
-        )
+            POLKIT_RULES_DIR=PROJECT_DIR / "rules.d")  # SYRD-825: the tenant-upgrade rule's directory, a fixture's
 
     def kinds(self) -> list[str]:
         return [e[0] for e in self.log]
@@ -1317,8 +1317,8 @@ def test_u3_in_order_with_an_unchanged_layout() -> None:
           and art.log[8][1] is art.linked and art.log[9][1] is art.linked
           and art.log[8][2] == dict(dry_run=False, registry_dir=Path("/nonexistent/syrd349/registry"), print_func=said.append),
           f"the credential and CLIs are refreshed for the linked config: {art.log[7:]}")
-    check(result is art.linked and said == ["SYRD349 LAYOUT", "SYRD349 RUNTIME"],
-          f"U3 answers the linked config itself; the two messages are said: {result} {said}")
+    check(result is art.linked and said[:2] + said[3:] == ["SYRD349 LAYOUT", "SYRD349 RUNTIME"] and "tenant-upgrade" in said[2],
+          f"U3 answers the linked config itself; its messages, the tenant-upgrade rule's third, are said: {result} {said}")
 
 
 def test_u3_reloads_only_when_the_layout_changed_for_real() -> None:
@@ -1364,7 +1364,7 @@ def test_u3_report_problems_are_said_in_order_and_are_not_fatal() -> None:
     art = Artifacts(link_problems=["syrd349: link"], credential_problems=["syrd349: credential"],
                     cli_problems=["syrd349: cli"])
     result, said, _ = u3(art)
-    check(said[2:] == ["switchyard: syrd349: link", "switchyard: syrd349: credential", "switchyard: syrd349: cli",
+    check(said[3:] == ["switchyard: syrd349: link", "switchyard: syrd349: credential", "switchyard: syrd349: cli",
                        f"switchyard: {PROJECT} keeps the report credential it had; nothing else about this upgrade "
                        "depends on it."] and result is art.linked,
           f"link, credential, CLIs, in that order, then the upgrade goes on with the linked config: {said}")

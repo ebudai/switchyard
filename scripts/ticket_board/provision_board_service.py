@@ -331,6 +331,26 @@ polkit.addRule(function(action, subject) {{
 """
 
 
+def polkit_rule_names(plan: ProjectBoardProvision) -> tuple[str, ...]:
+    """The tenant's polkit rules: the board's deploy rule, and its own upgrade actions (SYRD-825)."""
+    try:
+        from . import tenant_upgrade_rule
+    except ImportError:  # pragma: no cover - supports direct script execution
+        import tenant_upgrade_rule
+
+    return (plan.polkit_name, tenant_upgrade_rule.rule_name(plan.project))
+
+
+def render_polkit_rules(plan: ProjectBoardProvision) -> dict[str, str]:
+    try:
+        from . import tenant_upgrade_rule
+    except ImportError:  # pragma: no cover - supports direct script execution
+        import tenant_upgrade_rule
+
+    return {plan.polkit_name: render_polkit_rule(plan),
+            tenant_upgrade_rule.rule_name(plan.project): tenant_upgrade_rule.render(plan.project, plan.owner_user)}
+
+
 def render_database_sql(plan: ProjectBoardProvision) -> str:
     try:
         from . import project_provision as provision

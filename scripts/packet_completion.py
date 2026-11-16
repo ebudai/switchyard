@@ -96,6 +96,7 @@ def privileged_packet_completion(
     says.
     """
     from scripts import team_launcher as launcher
+    from scripts.ticket_board import tenant_upgrade_rule
 
     system_active = system_unit_active or (lambda unit: launcher._system_unit_is_active(unit, runner=runner))
     owner_active = owner_unit_active or (lambda unit: launcher._owner_unit_is_active(plan, unit, runner=runner))
@@ -106,6 +107,8 @@ def privileged_packet_completion(
         (Path("/etc/systemd/system") / plan.board_unit, f"the board unit {plan.board_unit} is not installed"),
         (Path("/etc/tmpfiles.d") / plan.tmpfiles_name, f"the tmpfiles configuration {plan.tmpfiles_name} is not installed"),
         (Path("/etc/polkit-1/rules.d") / plan.polkit_name, f"the polkit rule {plan.polkit_name} is not installed"),
+        (Path("/etc/polkit-1/rules.d") / tenant_upgrade_rule.rule_name(plan.project),
+         f"the polkit rule {tenant_upgrade_rule.rule_name(plan.project)} is not installed"),
         (
             Path(plan.owner_home) / ".config" / "systemd" / "user" / plan.listener_unit,
             f"the listener unit {plan.listener_unit} is not installed for {plan.owner_user}",

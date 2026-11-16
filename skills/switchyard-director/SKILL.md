@@ -605,8 +605,9 @@ the live workflow and command help are the current operating contract;
 
 - `switchyard upgrade <project>` refreshes generated project artifacts and
   reports release drift; `--dry-run` first, always. Run as you, it cannot make
-  the checks only root can (the tenant-control sudoers rule is one) and says
-  so instead of declaring the tenant ready.
+  the checks only root can (the tenant-control sudoers rule is one): it says so
+  in a note and does not hold them against readiness, because the upgrade
+  itself (`upgrade-tenant-release`, below) makes them as root.
 - A "release ... is ready" notice comes from the host's `./install`, once per
   release, through this board: it names that release, the one you run, what
   changed, and the three commands below with the commit filled in. Nothing was

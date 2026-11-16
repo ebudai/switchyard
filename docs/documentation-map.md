@@ -39,6 +39,7 @@ running. Do not copy a transition or option from a historical ticket record.
 | Pause all work in a project (drain, or stop now) and resume it | [Director guide: pausing all work](onboarding/switchyard-director-guide.md#pausing-all-work-drain-or-stop-now); roles: [board guide: when work is paused](onboarding/switchyard-board-guide.md#when-work-is-paused) | `ticket-board-read pause`; `ticket-board-write pause-work --help`; `ticket-board-write resume-work --help` |
 | Handle provider quota or a quiet role | [Director guide: quota-safe monitoring](onboarding/switchyard-director-guide.md#after-routing-yield-quota-safe-monitoring) | `ticket-board-read holds`, `cohorts`, `leases` and `stall` |
 | Diagnose an incident | [Fresh-machine incident settings](fresh-machine-install.md#host-settings-for-diagnosing-an-incident), then the affected service guide | `switchyard status --json`; `switchyard release-status`; service journals |
+| Upgrade or deploy your own tenant without a password prompt | [Privileged actions](privileged-actions.md) | `switchyard privileged-action --help`; `switchyard upgrade <project> --dry-run` |
 | Configure desktop, clipboard or screenshots | [Desktop access](desktop-access.md) | `switchyard approve-desktop --help`; `switchyard paste-image --help` |
 | Configure User phone notifications | [User notifications](user-notifications.md) | the setup and UAT commands in that guide |
 | Change a role's agent or model | [Role runtime](role-runtime.md) | `switchyard set-role-runtime --help`; `switchyard reconcile-role-models --help` |
@@ -89,6 +90,7 @@ changes.
 | [Board service](ticket-board-service.md), [supervisor](board-supervisor.md), and [provisioning](ticket-board-project-provisioning.md) | Board installation, operation, migration and tenant artifacts |
 | [Fresh-machine install](fresh-machine-install.md) and [host dependencies](switchyard-new-host-dependencies.md) | Host preparation and installation |
 | [Role runtime](role-runtime.md), [runtime presentation](runtime-presentation.md), and [desktop access](desktop-access.md) | Agent runtime, display slots and desktop policy |
+| [Privileged actions](privileged-actions.md) | Which privileged actions a tenant runs without a prompt, for whom, and why that stays safe |
 | [User notifications](user-notifications.md) | User phone notification setup and operation |
 | [Local model service](local-model-service.md) | The opt-in host-wide local model service: approval, installation, GPU memory, idle stop, qualification and removal |
 | [SYRD-727 Hermes ticket boundary](syrd-727-hermes-ticket-boundary.md) | What "fresh" means for a Hermes role: no memory or session search, the board's check and `/new now`, continuation, recovery, rollback |

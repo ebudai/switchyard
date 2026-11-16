@@ -164,12 +164,12 @@ try:
         default_ticket_board_python,
         env_list,
         env_operation_role_map,
-        listener_board_url,
+        listener_board_url, polkit_rule_names,
         render_board_unit,
         render_canary_unit,
         render_database_sql,
         render_listener_unit,
-        render_polkit_rule,
+        render_polkit_rule, render_polkit_rules,
         render_tmpfiles,
         tenant_primary_group,
     )
@@ -338,12 +338,12 @@ except ImportError:  # pragma: no cover - supports direct script execution
         default_ticket_board_python,
         env_list,
         env_operation_role_map,
-        listener_board_url,
+        listener_board_url, polkit_rule_names,
         render_board_unit,
         render_canary_unit,
         render_database_sql,
         render_listener_unit,
-        render_polkit_rule,
+        render_polkit_rule, render_polkit_rules,
         render_tmpfiles,
         tenant_primary_group,
     )
@@ -1074,7 +1074,7 @@ def privileged_artifact_names(plan: ProjectBoardProvision) -> tuple[str, ...]:
         plan.canary_unit,
         plan.listener_unit,
         plan.tmpfiles_name,
-        plan.polkit_name,
+        *polkit_rule_names(plan),
         plan.role_control_sudoers_name,
         *((plan.tenant_control_sudoers_name, tenant_control_grant_name(plan.project))
           if plan.control_user else ()),
@@ -1104,7 +1104,7 @@ def write_artifacts(plan: ProjectBoardProvision, output_dir: Path, *, enable_own
         plan.canary_unit: render_canary_unit(plan),
         plan.listener_unit: render_listener_unit(plan),
         plan.tmpfiles_name: render_tmpfiles(plan),
-        plan.polkit_name: render_polkit_rule(plan),
+        **render_polkit_rules(plan),
         plan.role_control_sudoers_name: role_control_sudoers(plan),
         **(
             {

@@ -71,7 +71,9 @@ from scripts.ticket_board import project_provision as t  # noqa: E402,I001
 from scripts.ticket_board import provision_board_service as m  # noqa: E402
 
 CHECKS = 0
-MOVED = ('DEFAULT_SHARED_PYTHON', 'env_list', 'env_operation_role_map', 'default_ticket_board_python', 'render_board_unit', 'tenant_primary_group', 'listener_board_url', 'render_listener_unit', 'render_canary_unit', 'render_tmpfiles', 'render_polkit_rule', 'render_database_sql')
+MOVED = ('DEFAULT_SHARED_PYTHON', 'env_list', 'env_operation_role_map', 'default_ticket_board_python', 'render_board_unit', 'tenant_primary_group', 'listener_board_url', 'render_listener_unit', 'render_canary_unit', 'render_tmpfiles', 'render_polkit_rule',
+         # SYRD-825: the tenant's two polkit rules, named and rendered together.
+         'polkit_rule_names', 'render_polkit_rules', 'render_database_sql')
 #: Measured on the baseline project_provision: each moved body's call-time reads of its globals, siblings included.
 SEAMS = {
     'env_operation_role_map': {'env_list': 1},
@@ -82,7 +84,9 @@ SEAMS = {
     'render_database_sql': {'sql_identifier': 1},
 }
 #: Measured on the baseline: every project_provision definition outside the twelve that names them, and how often.
-DISPATCH = {'write_artifacts': {'render_board_unit': 1, 'render_canary_unit': 1, 'render_database_sql': 1, 'render_listener_unit': 1, 'render_polkit_rule': 1, 'render_tmpfiles': 1}, 'main': {'render_board_unit': 1, 'render_database_sql': 1, 'render_listener_unit': 1, 'render_polkit_rule': 1, 'render_tmpfiles': 1}}
+# SYRD-825: write_artifacts renders both polkit rules together; the artifact list and the operator packet name them.
+DISPATCH = {'write_artifacts': {'render_board_unit': 1, 'render_canary_unit': 1, 'render_database_sql': 1, 'render_listener_unit': 1, 'render_polkit_rules': 1, 'render_tmpfiles': 1}, 'main': {'render_board_unit': 1, 'render_database_sql': 1, 'render_listener_unit': 1, 'render_polkit_rule': 1, 'render_tmpfiles': 1},
+            'privileged_artifact_names': {'polkit_rule_names': 1}, 'render_operator_commands': {'polkit_rule_names': 1}}
 #: Measured on the baseline, by AST: every production module that imports them from project_provision, and how often.
 READERS = {'scripts/team_launcher.py': {'import render_board_unit': 1, 'import render_canary_unit': 1}}
 #: The BASELINE's own behaviour for the cases below (`gold471.py`, run on the baseline project_provision under the guard).
@@ -211,7 +215,7 @@ REACHED: set[str] = set()
 #: Measured on the candidate: what importing the module alone loads -- its package, nothing else.
 DEFAULT_MODULES_LOADED = ['scripts.ticket_board']
 #: Measured on the baseline: how many artifacts each synthetic packet has.
-PACKET_FILES = {'default': 10, 'shaped': 10, 'lean': 10, 'roles': 10}
+PACKET_FILES = {'default': 11, 'shaped': 11, 'lean': 11, 'roles': 11}  # one more since SYRD-825: the tenant's own upgrade-actions polkit rule
 
 # --- the cases, shared verbatim with `gold471.py` (which ran them on the baseline) ------------------------------------
 # A case calls one of the eleven and records the answer or the exact exception, and how many times it called each of
@@ -434,7 +438,8 @@ CALL_TIME_IMPORT = ("try:\n    from . import project_provision as provision\n"
                     "except ImportError:\n    import project_provision as provision")
 #: The defaults, as the baseline wrote them: none.
 DEFAULTS = {name: [] for name in ("env_list", "env_operation_role_map", "default_ticket_board_python", "render_board_unit", "tenant_primary_group",
-                                  "listener_board_url", "render_listener_unit", "render_canary_unit", "render_tmpfiles", "render_polkit_rule", "render_database_sql")}
+                                  "listener_board_url", "render_listener_unit", "render_canary_unit", "render_tmpfiles", "render_polkit_rule",
+                                  "polkit_rule_names", "render_polkit_rules", "render_database_sql")}
 #: team_launcher's module-level imports of them, from project_provision.
 LAUNCHER_IMPORTS = ("render_board_unit", "render_canary_unit")
 #: The packets rendered through the direct script and the package: the default plan, two the plan shapes, and one given

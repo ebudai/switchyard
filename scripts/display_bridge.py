@@ -287,12 +287,24 @@ def ensure_display_bridge(
         # The grant -- the half this process CAN read -- has already been judged
         # and is right. The rule is root's to read, so the check that remains
         # is root's, through the approved boundary rather than any widening of
-        # that file (SYRD-283). Not ready, and not refused either.
+        # that file (SYRD-283).
+        preview = root_check or f"switchyard privileged-action {config.project} preview-upgrade commit=<release commit>"
+        if dry_run:
+            # A tenant's own dry run cannot make a check only root can, so it does not hold it against readiness: it
+            # says so, and names what does make it -- the upgrade itself, which reads the rule as root and installs
+            # it if it differs. Both through the catalogued boundary, no sudo (SYRD-825).
+            upgrade = preview.replace(" preview-upgrade ", " upgrade-tenant-release ", 1)
+            print_func(
+                f"switchyard: note: {config.project}'s display bridge: {state.detail}. Its grant is correct; this "
+                f"dry run does not hold the root-only rule against readiness. The upgrade checks it as root and "
+                f"installs it if it differs: `{upgrade}`. To check it as root first, read-only: `{preview}`."
+            )
+            return True
         print_func(
             f"switchyard: {config.project}'s display bridge could not be verified from here: "
             f"{state.detail}. Its grant is correct; the sudoers rule beside it can only be "
             "checked by root. Run the same upgrade check as root through the approved "
-            f"boundary: {root_check or 'switchyard privileged-action ' + config.project + ' preview-upgrade commit=<release commit>'}. "
+            f"boundary: {preview}. "
             "This run does not declare the tenant ready. Nothing was changed."
         )
         return False

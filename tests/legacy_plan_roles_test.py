@@ -194,8 +194,9 @@ def test_otto_shaped_teardown_dry_run_lists_its_actions() -> None:
     tenant.roll_back(*OTTO_MISSING)
     code, lines, calls = tenant.teardown_dry_run()
     actions = [line for line in lines if line.strip()[:1].isdigit() and ". " in line]
-    # SYRD-786: the whole tenant by default -- twenty actions, its processes and its account among them.
-    check(code == 0 and len(actions) == 20 and "switchyard: dry-run only; no changes made" in lines
+    # SYRD-786: the whole tenant by default -- twenty-one actions (SYRD-825 added its upgrade-actions polkit rule), its
+    # processes and its account among them.
+    check(code == 0 and len(actions) == 21 and "switchyard: dry-run only; no changes made" in lines
           and any("drop PostgreSQL database otto_ticket_board" in line for line in actions)
           and any(f"remove board release root {tenant.home_base / ME / 'otto-ticketboard-live'}" in line for line in actions),
           f"teardown --dry-run of the otto-shaped tenant lists its actions, with no plan-field refusal: {code} {lines}")

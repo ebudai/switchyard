@@ -627,7 +627,8 @@ commit=<sha>` runs the upgrade's dry run as root -- the checks your own dry run
 cannot make, such as the tenant-control sudoers rule, happen there -- then
 `upgrade-tenant-release` applies it pinned to the same commit, and
 `deploy-release` deploys an approved release. The root-owned helper runs these
-only for your registered pane. What remains an operator's is host-wide:
+only for your registered pane, and none of them asks you for a password: see
+[privileged actions](../privileged-actions.md). What remains an operator's is host-wide:
 installing or selecting the shared release everyone runs. The privileged
 boundary follows that shared release, never a tenant's pin: installing a shared
 release installs its boundary. On a host whose boundary predates an action (a

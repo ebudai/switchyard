@@ -755,6 +755,12 @@ def _refresh_upgrade_artifacts(
         runner=runner,
     )
     print_func(runtime_artifacts.message)
+    # The tenant's own upgrade actions, prompt-free for its owner through the helper: the root upgrade installs the
+    # rule, and a tenant's own run says whether it can tell (SYRD-825).
+    from scripts.ticket_board import tenant_upgrade_rule
+
+    print_func(tenant_upgrade_rule.ensure(config.project, config.run_as_user or "", rules_dir=launcher.POLKIT_RULES_DIR,
+                                          dry_run=dry_run))
     project_dir = launcher._project_dir_from_generated_config_path(config_path)
     if project_dir is not None:
         onboarding_commit_git_dir = commit_git_dir

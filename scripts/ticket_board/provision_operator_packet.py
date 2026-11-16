@@ -172,6 +172,8 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
     q_canary_unit = provision.shell_quote(f"/etc/systemd/system/{plan.canary_unit}")
     q_tmpfiles = provision.shell_quote(f"/etc/tmpfiles.d/{plan.tmpfiles_name}")
     q_polkit = provision.shell_quote(f"/etc/polkit-1/rules.d/{plan.polkit_name}")
+    upgrade_rule = provision.polkit_rule_names(plan)[1]  # the tenant's own upgrade actions (SYRD-825)
+    q_upgrade_rule = provision.shell_quote(f"/etc/polkit-1/rules.d/{upgrade_rule}")
     q_role_control_sudoers = provision.shell_quote(f"/etc/sudoers.d/{plan.role_control_sudoers_name}")
     github_identity = "\n".join(
         provision.owner_github_identity_commands(
@@ -495,6 +497,7 @@ sudo install -m 0644 "$system_unit_candidate" {q_board_unit}
 sudo install -m 0644 "$canary_unit_candidate" {q_canary_unit}
 sudo install -m 0644 {provision.packet_companion(plan.tmpfiles_name)} {q_tmpfiles}
 sudo install -m 0644 {provision.packet_companion(plan.polkit_name)} {q_polkit}
+sudo install -m 0644 {provision.packet_companion(upgrade_rule)} {q_upgrade_rule}
 {install_role_control_sudoers}
 # The owner's GitHub identity, and the configuration that selects it. Without
 # the selection git offers no key at all and every push fails as though there

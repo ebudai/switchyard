@@ -172,7 +172,7 @@ REACHED: set[str] = set()
 #: Measured on the candidate: what importing the module alone loads -- its package, nothing else.
 DEFAULT_MODULES_LOADED = ['scripts.ticket_board']
 #: Measured on the baseline: how many artifacts each synthetic packet has.
-PACKET_FILES = 10
+PACKET_FILES = 11  # one more since SYRD-825: the tenant's own upgrade-actions polkit rule
 
 # --- the cases, shared verbatim with `gold465.py` (which ran them on the baseline) ------------------------------------
 # A case calls one of the moved functions and records the answer or the exact exception, and how many times it called

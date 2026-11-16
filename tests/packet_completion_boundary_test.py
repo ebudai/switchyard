@@ -54,13 +54,15 @@ SEAMS = {
     "privileged_packet_completion": {"_system_unit_is_active": 1, "_owner_unit_is_active": 1, "_board_answers": 1,
                                      "_open_board_url": 1, "PacketCompletion": 1},
 }
-PLAN = SimpleNamespace(owner_user="syrd363-owner", owner_home="/fixture/home/syrd363-owner", board_unit="p363-ticket-board.service",
+PLAN = SimpleNamespace(project="p363", owner_user="syrd363-owner", owner_home="/fixture/home/syrd363-owner", board_unit="p363-ticket-board.service",
                        tmpfiles_name="p363.conf", polkit_name="50-p363.rules", listener_unit="p363-notify-listener.service",
                        board_current="/fixture/srv/p363/current", port=8363)
 PATHS = [
     (Path("/etc/systemd/system/p363-ticket-board.service"), "the board unit p363-ticket-board.service is not installed"),
     (Path("/etc/tmpfiles.d/p363.conf"), "the tmpfiles configuration p363.conf is not installed"),
     (Path("/etc/polkit-1/rules.d/50-p363.rules"), "the polkit rule 50-p363.rules is not installed"),
+    # SYRD-825: the tenant's own upgrade actions, installed beside the deploy rule.
+    (Path("/etc/polkit-1/rules.d/49-p363-tenant-upgrade.rules"), "the polkit rule 49-p363-tenant-upgrade.rules is not installed"),
     (Path("/fixture/home/syrd363-owner/.config/systemd/user/p363-notify-listener.service"),
      "the listener unit p363-notify-listener.service is not installed for syrd363-owner"),
     (Path("/fixture/srv/p363/current/scripts/ticket-board.py"), "no board release is exported at /fixture/srv/p363/current"),
@@ -277,7 +279,7 @@ def test_the_installed_paths_are_probed_in_order_with_no_short_circuit() -> None
                      owner_unit_active=lambda unit: asked.append(("owner", unit)) or False,
                      board_answers=lambda: asked.append("board") or False)
     check(asked == [*(p for p, _ in PATHS), ("system", "p363-ticket-board.service"), ("owner", "p363-notify-listener.service"), "board"],
-          f"five paths in order, then the system unit, the listener, the board -- every one asked: {asked}")
+          f"six paths in order, then the system unit, the listener, the board -- every one asked: {asked}")
     check(isinstance(got, t.PacketCompletion) and got.problems == (
         *(f"{d} ({p})" for p, d in PATHS),
         "the board service p363-ticket-board.service is not running",

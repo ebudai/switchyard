@@ -179,8 +179,15 @@ def test_the_fix_lives_in_both_bodies_and_they_do_not_drift() -> None:
 
 def test_the_migration_sorts_after_every_migration_before_it() -> None:
     """The runner applies them in number order, so ordering is the number."""
+    from scripts.ticket_board.migration_order import number
+
+    # SYRD-810: not "it applies last", which every later migration broke (red since pgu955): every migration numbered
+    # below it applies before it, and it alone holds its number.
     names = [path.name for path in ordered_files(MIGRATION_PATH.parent)]
-    check(names[-1] == MIGRATION_PATH.name, f"it applies last: {names[-3:]}")
+    mine, own = names.index(MIGRATION_PATH.name), number(MIGRATION_PATH.name)
+    late = [name for name in names[mine + 1:] if number(name) < own]
+    check(not late and [name for name in names if number(name) == own] == [MIGRATION_PATH.name],
+          f"it applies after every migration numbered below it, alone at its number: {late}")
     body = MIGRATION_PATH.read_text()
     check(body.lstrip().startswith("--"), "it says what it is for")
     check("BEGIN;" in body and body.rstrip().endswith("COMMIT;"), "and it is one transaction")

@@ -138,7 +138,10 @@ def scenario(root: Path, work: Path, before_root: Path | None) -> dict:
             base = Path(tempfile.mkdtemp(dir=work, prefix=f"{project}."))
             (base / "board").mkdir()
             (base / "board" / "current").symlink_to(tree)
-            plan = provision.build_plan(project=project, owner_user=f"{project}-agent", board_root=base / "board")
+            # Rendered from `tree`, as the packet runs it (SYRD-700: schema, migrations and rbac.sql come from the
+            # plan's source_repo, which defaults to this checkout -- "main's tenant" was built from the candidate).
+            plan = provision.build_plan(project=project, owner_user=f"{project}-agent", board_root=base / "board",
+                                        source_repo=tree)
             plan = replace(plan, admin_database_url=url(plan.database))
             provision_dir = base / "provision"
             provision.write_artifacts(plan, provision_dir)

@@ -214,6 +214,13 @@ INSERT INTO ticket_board.tickets (
     )
 
 
+def uat_steps(base_url: str, *tickets: str) -> None:
+    """The Director's UAT steps, which every route into User Review needs (SYRD-629)."""
+    for ticket in tickets:
+        post_json(base_url, f"/api/tickets/{ticket}/actions/set_uat_instructions",
+                  {"do_this": "Open the board.", "you_should_see": "The ticket in User Review."}, caller="director")
+
+
 def post_json(
     base_url: str,
     path: str,
@@ -1124,12 +1131,8 @@ WHERE id = '{upstream_report_id}';
     )
     assert uat_audit["ticket"]["state"] == "dat", uat_audit  # type: ignore[index]
     assert uat_audit["ticket"]["assignee"] == "director", uat_audit  # type: ignore[index]
-    uat_routed = post_json(
-        base_url,
-        "/api/tickets/PGU-141/actions/route",
-        {"state": "user_review", "assignee": "user"},
-        caller="director",
-    )
+    uat_steps(base_url, "PGU-141", "PGU-143", "PGU-142")  # SYRD-629's rule, which this flow predated (SYRD-810)
+    uat_routed = post_json(base_url, "/api/tickets/PGU-141/actions/route", {"state": "user_review", "assignee": "user"}, caller="director")
     assert uat_routed["ticket"]["state"] == "user_review", uat_routed  # type: ignore[index]
     assert uat_routed["ticket"]["assignee"] == "user", uat_routed  # type: ignore[index]
     uat_reservation = json.loads(
@@ -1150,12 +1153,7 @@ WHERE id = 'PGU-141';
         "reserved_from_ticket": "<none>",
     }, uat_reservation
 
-    user_info_request = post_json(
-        base_url,
-        "/api/tickets/PGU-143/actions/route",
-        {"state": "user_review", "assignee": "user"},
-        caller="director",
-    )
+    user_info_request = post_json(base_url, "/api/tickets/PGU-143/actions/route", {"state": "user_review", "assignee": "user"}, caller="director")
     assert user_info_request["ticket"]["state"] == "user_review", user_info_request  # type: ignore[index]
     assert user_info_request["ticket"]["assignee"] == "user", user_info_request  # type: ignore[index]
     assert user_info_request["ticket"]["needs_user_signoff"] is False, user_info_request  # type: ignore[index]
@@ -2181,7 +2179,8 @@ with temporary_cluster(prefix="ticket-board-write-api-env-rbac.") as cluster:
 """
     env = {
         **os.environ,
-        "PYTHONPATH": str(ROOT),
+        # tests/ too: the child imports this module, which imports temporary_cluster from there (SYRD-810).
+        "PYTHONPATH": os.pathsep.join((str(ROOT), str(ROOT / "tests"))),
         "TICKET_BOARD_OPERATION_ALLOWED_ROLES": "route=ops,director;mark_done=ops,director;force_move=ops,director",
     }
     subprocess.run([sys.executable, "-c", script], check=True, env=env)

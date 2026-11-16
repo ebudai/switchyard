@@ -205,8 +205,10 @@ def effective_notification_kinds(schema: str) -> set[str]:
     rebuilt the list from a pre-pgu936 snapshot, dropped 'publication' and
     'triage', and broke file-bug on the live board.
     """
-    matches = re.findall(r"CHECK \(kind IN \(([^)]*)\)\)", schema)
-    assert matches, "no kind CHECK constraint found in schema.sql"
+    # The queue's own constraint, by name: other tables have a `kind` CHECK too, and the last of any kind CHECK in the
+    # file stopped being this one when they came (SYRD-810; red since fd06cac8).
+    matches = re.findall(r"ADD CONSTRAINT ticket_notification_queue_kind_check\s+CHECK \(kind IN \(([^)]*)\)\)", schema)
+    assert matches, "no ticket_notification_queue_kind_check constraint found"
     return {value.strip().strip("'") for value in matches[-1].split(",") if value.strip()}
 
 
@@ -247,6 +249,44 @@ def extract_last_function(sql: str, function_name: str) -> str:
     )
     assert matches, f"function ticket_board.{function_name} missing"
     return matches[-1].group(0).strip()
+
+
+def signature_of(definition: str) -> str:
+    """`name(type, ...)` of a CREATE OR REPLACE FUNCTION: each parameter's type, defaults dropped (SYRD-810)."""
+    definition = "\n".join(line.split("--", 1)[0] for line in definition.splitlines())
+    match = re.match(r"CREATE OR REPLACE FUNCTION ticket_board\.(\w+)\s*\((.*?)\)\s*RETURNS", definition, re.S)
+    assert match, definition[:200]
+    params = [re.split(r"\s+DEFAULT\s+|\s*=\s*", part.strip(), maxsplit=1)[0] for part in match.group(2).split(",")
+              if part.strip()]
+    return f"{match.group(1)}({', '.join(param.split(None, 1)[1] for param in params)})"
+
+
+def assert_runs_newest(schema: str, function_name: str, migration_text: str) -> None:
+    """The named migration ships the function, and what runs is the newest redefinition's body (SYRD-810).
+
+    These loops compared schema.sql's FIRST copy with one named migration. Later work redefines the functions --
+    and has edited earlier copies in place -- so each such pin broke at the next redefinition. What stays true: the
+    migration that brought the function still defines it, and schema.sql's last copy, the one a fresh install runs,
+    is the newest redefining migration's.
+    """
+    assert re.search(rf"CREATE OR REPLACE FUNCTION ticket_board\.{re.escape(function_name)}\s*\(", migration_text), function_name
+    newest = newest_redefinition(function_name)
+    assert extract_last_function(schema, function_name) == extract_last_function(
+        newest.read_text(encoding="utf-8"), function_name
+    ), f"{function_name}: schema.sql's last copy is not {newest.name}'s"
+
+
+def newest_redefinition(function_name: str) -> Path:
+    """The last migration, in the order production applies them, that defines `function_name` (SYRD-810)."""
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from scripts.ticket_board.migration_order import ordered_files
+
+    pattern = re.compile(rf"CREATE OR REPLACE FUNCTION ticket_board\.{re.escape(function_name)}\s*\(")
+    found = [path for path in ordered_files(ROOT / "scripts" / "ticket_board" / "migrations")
+             if path.suffix == ".sql" and pattern.search(path.read_text(encoding="utf-8"))]
+    assert found, f"no migration defines ticket_board.{function_name}"
+    return found[-1]
 
 
 def extract_function(sql: str, function_name: str) -> str:
@@ -359,7 +399,10 @@ def main() -> int:
     )
 
     assert_contains_all(schema, EXPECTED_STATES, "state constraint")
-    assert "'ready'" not in schema, "removed ready state must not appear in schema.sql"
+    # The removed ready state, in the tickets' own state constraint (its last definition); 'ready' is a checkout
+    # state and a JSON key elsewhere now (SYRD-540), which a whole-file search mistook for it (SYRD-810).
+    state_checks = re.findall(r"ADD CONSTRAINT tickets_state_check CHECK \(state IN \(([^)]*)\)\)", executable_schema)
+    assert state_checks and "'ready'" not in state_checks[-1], "removed ready state must not be a ticket state"
     assert "implementation must be non-empty before a ticket can enter in_progress" not in schema
     assert "create or replace function ticket_board.require_stage_owner_assignee" in executable_schema_lower
     assert "is not an owner of stage" in schema
@@ -809,15 +852,14 @@ def main() -> int:
     ).read_text(encoding="utf-8")
     assert "unresolved_turn" in unresolved_turn_migration_text
     assert "turn_continuation_lease" in unresolved_turn_migration_text
-    # SYRD-537 (pgu970) redefined it last, adding one reminder-snooze condition,
-    # so the last copy is measured against that migration.
-    reminder_snooze_migration_text = (
-        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu970_syrd537_reminder_snooze.sql"
-    ).read_text(encoding="utf-8")
-    assert extract_last_function(schema, "notify_idle_turn_end_nudges") == extract_function(
-        reminder_snooze_migration_text,
-        "notify_idle_turn_end_nudges",
-    )
+    # What runs is what the newest migration to redefine it ships: found in production's migration order, not named,
+    # so the next redefinition keeps this true (SYRD-810: pgu970 was pinned as the last, and pgu1037 is now).
+    newest = newest_redefinition("notify_idle_turn_end_nudges")
+    assert extract_last_function(schema, "notify_idle_turn_end_nudges") == extract_last_function(
+        newest.read_text(encoding="utf-8"), "notify_idle_turn_end_nudges"
+    ), f"schema.sql's last notify_idle_turn_end_nudges is not {newest.name}'s"
+    # SYRD-537's reminder snooze is still in it.
+    assert "ticket_reminders_snoozed" in extract_last_function(schema, "notify_idle_turn_end_nudges")
     # The guard, the lease and the predicates it rests on reach a live board only
     # through this migration, so the bodies it ships are the schema's bodies. A
     # partial upgrade would otherwise leave a board reporting on one definition
@@ -832,9 +874,7 @@ def main() -> int:
         "consume_turn_continuation",
         "turn_unresolved_identity",
     ):
-        assert extract_function(schema, function_name) == extract_function(
-            unresolved_turn_migration_text, function_name
-        ), function_name
+        assert_runs_newest(schema, function_name, unresolved_turn_migration_text)
     # SYRD-513 redefined ticket_turn_is_resolved (a notice still queued to the
     # owner means the ticket was never handed over); that migration now ships
     # the schema's body.
@@ -842,10 +882,11 @@ def main() -> int:
         ROOT / "scripts" / "ticket_board" / "migrations" / "pgu968_syrd513_undelivered_assignment_is_not_a_turn.sql"
     ).read_text(encoding="utf-8")
     assert "AND q.kind = 'transition'" in extract_function(undelivered_assignment_migration_text, "ticket_turn_is_resolved")
-    # SYRD-537 (pgu970) redefined it last, adding the reminder-snooze condition.
-    assert extract_function(schema, "ticket_turn_is_resolved") == extract_function(
-        reminder_snooze_migration_text, "ticket_turn_is_resolved"
-    )
+    # What runs is the newest redefinition's body (SYRD-537's pgu970 was, when this pinned it by name).
+    newest = newest_redefinition("ticket_turn_is_resolved")
+    assert extract_last_function(schema, "ticket_turn_is_resolved") == extract_last_function(
+        newest.read_text(encoding="utf-8"), "ticket_turn_is_resolved"
+    ), f"schema.sql's last ticket_turn_is_resolved is not {newest.name}'s"
     # SYRD-180: the migration is the only way this reaches a live board, so its
     # bodies are the schema's bodies -- for the executor and the recovery command
     # as much as for the two new functions, because a partial upgrade would leave
@@ -862,10 +903,13 @@ def main() -> int:
     assert "|| pg_current_xact_id()::text" not in extract_function(
         schema, "notify_ticket_owner_in_place_change"
     )
-    assert extract_function(schema, "notify_ticket_owner_in_place_change") == extract_function(
-        ticket_update_dedupe_migration_text,
-        "notify_ticket_owner_in_place_change",
-    )
+    # ... and what runs is the newest redefinition's body, which keeps that key (pgu945 was the newest once).
+    newest = newest_redefinition("notify_ticket_owner_in_place_change")
+    assert extract_last_function(schema, "notify_ticket_owner_in_place_change") == extract_last_function(
+        newest.read_text(encoding="utf-8"), "notify_ticket_owner_in_place_change"
+    ), f"schema.sql's last notify_ticket_owner_in_place_change is not {newest.name}'s"
+    assert "ticket_update:' || p_ticket_id || ':' || target_role" in extract_last_function(
+        schema, "notify_ticket_owner_in_place_change")
     # SYRD-159 second half: the versioned delivery. No function changes shape
     # here, on purpose -- a changed return type would break every historical
     # migration that recreates claim_notification -- so what the migration must
@@ -884,10 +928,7 @@ def main() -> int:
         "ack_notification",
         "discard_notification",
     ):
-        assert extract_function(schema, function_name) == extract_function(
-            versioned_delivery_migration_text,
-            function_name,
-        ), function_name
+        assert_runs_newest(schema, function_name, versioned_delivery_migration_text)
     # Both removal paths must ask the one guard, or the rule drifts between them.
     for caller in ("ack_notification", "discard_notification"):
         assert "ticket_board.notification_delivery_superseded(" in extract_function(
@@ -902,9 +943,12 @@ def main() -> int:
     assert extract_function(schema, "notify_unresolved_turn_end") == extract_function(
         staged_recovery_migration_text, "notify_unresolved_turn_end"
     )
-    assert "notify_unresolved_turn_end(jsonb, timestamptz, interval)" in (
+    # The grant names the signature that runs -- its last definition's -- whatever later migrations add to it
+    # (SYRD-810: SYRD-584 added a fourth parameter, and the three-argument pin stayed).
+    running = signature_of(extract_last_function(schema, "notify_unresolved_turn_end"))
+    assert f"GRANT EXECUTE ON FUNCTION ticket_board.{running} TO ticket_board_listener" in (
         ROOT / "scripts" / "ticket_board" / "rbac.sql"
-    ).read_text(encoding="utf-8")
+    ).read_text(encoding="utf-8"), running
     # CREATE OR REPLACE matches on parameter types, so adding the grace interval
     # OVERLOADS this function rather than replacing it -- and with a default on
     # the new parameter, a two-argument call then matches both and Postgres
@@ -946,10 +990,7 @@ def main() -> int:
         "enforce_declared_ticket_update",
         "recover_stalled_ticket",
     ):
-        assert extract_function(schema, function_name) == extract_function(
-            held_review_reconcile_migration_text,
-            function_name,
-        ), function_name
+        assert_runs_newest(schema, function_name, held_review_reconcile_migration_text)
     awaiting_role_comment_touch_migration_text = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "pgu915_awaiting_role_ignores_comment_touch.sql"
     ).read_text(encoding="utf-8")

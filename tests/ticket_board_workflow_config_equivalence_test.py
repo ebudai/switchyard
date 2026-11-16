@@ -148,7 +148,9 @@ WHERE n.nspname = 'ticket_board';
     action_roles: dict[str, list[str]] = {}
     for definition in rows:
         for match in re.finditer(
-            r"require_actor\(\s*ARRAY\[(?P<roles>.*?)\]\s*,\s*'(?P<action>[^']+)'\s*\)",
+            # The roles stop at their own bracket: `.*?` ran on past a call whose action is not a literal
+            # (`require_actor(ARRAY['director','user'], p_action)`) into the next one (SYRD-810).
+            r"require_actor\(\s*ARRAY\[(?P<roles>[^\]]*)\]\s*,\s*'(?P<action>[^']+)'\s*\)",
             definition,
             re.S,
         ):
@@ -558,6 +560,10 @@ def main() -> int:
             action: roles for action, roles in db_action_roles.items() if action in transition_actions
         }, "workflow transition RBAC must not be backed by hardcoded require_actor after Phase 4b"
         assert_no_unmodeled_owner_checks(transitions, db_action_ownership)
+        # SYRD-810 (the Director's call): one role list per named action. A blocker explanation authorizes under its
+        # own name, for the implementation owners; edit_fields keeps its own list, the Director's among them.
+        assert db_action_roles.get("set_blocked_reason") == ["main", "app", "ops", "perf", "research"], db_action_roles
+        assert "director" in db_action_roles.get("edit_fields", []), db_action_roles.get("edit_fields")
 
         terminal_states = {stage["name"] for stage in stages if stage["is_terminal"]}
         assert terminal_states == {"done", "cancelled"}

@@ -662,7 +662,7 @@ def refusal_checks(got: dict) -> None:
     check(refused(r["own_triage"][0], 400, "director " + owns + "; PGU-905 is analysis/director")
           and r["own_triage"][1]["reason"] == "",
           f"an owner and assignee outside implementation is refused: {r['own_triage']}")
-    check(r["no_capability"][0][0] != 200 and "role app cannot call edit_fields" in r["no_capability"][1],
+    check(r["no_capability"][0][0] != 200 and "role app cannot call set_blocked_reason" in r["no_capability"][1],
           f"a role the workflow no longer lets edit is refused, by the database too: {r['no_capability']}")
     check(r["not_owner"][0][0] != 200 and owns in r["not_owner"][1],
           f"a role no longer an owner of the stage is refused, by the database too: {r['not_owner']}")

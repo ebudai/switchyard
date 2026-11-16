@@ -36,7 +36,7 @@ from tmux_bus_isolation import isolate_tmux_bus
 
 isolate_tmux_bus()
 import ticket_board_write_api_test as t
-from scripts.ticket_board.migration_order import ordered_files  # noqa: E402
+from scripts.ticket_board.migration_order import number, ordered_files  # noqa: E402
 from scripts.ticket_board.workflow_config import validate
 from temporary_cluster import temporary_cluster
 
@@ -106,9 +106,9 @@ def main() -> int:
         t.create_roles(admin)
         t.psql(admin, (ROOT / "scripts/ticket_board/rbac.sql").read_text(encoding="utf-8"))
 
-        # The tail of the series in order, through the migration before the
-        # repair. Applying it over a schema that already has these functions is
-        # also the reapplication check: every one is re-runnable.
+        # The tail of the series, in order, through the migration before the repair. It is not re-applied here: a
+        # recorded migration is never run again, and re-running pgu930 over today's schema rewound its workflow
+        # validator, which then refused today's example document (SYRD-810). Today's schema already carries it.
         tail = migrations_from(
             "pgu930_syrd93_publication_requests.sql",
             through="pgu931_syrd99_superseded_reminder_grant.sql",
@@ -117,11 +117,13 @@ def main() -> int:
             "pgu930_syrd93_publication_requests.sql",
             "pgu931_syrd99_superseded_reminder_grant.sql",
         ], [path.name for path in tail]
-        for path in tail:
-            t.psql(admin, path.read_text(encoding="utf-8"))
-        # And the repair sorts after all of them, so the runner applies it last
-        # and never before the publication routing that needs it.
-        assert migration_files()[-1].name == REPAIR, migration_files()[-1].name
+        # And the repair sorts after all of them, so the runner never applies it before the publication routing that
+        # needs it: after every migration numbered below it, and alone at its number -- not "last", which every later
+        # migration broke (red since pgu933).
+        names = [path.name for path in migration_files()]
+        mine, own = names.index(REPAIR), number(REPAIR)
+        late = [name for name in names[mine + 1:] if number(name) < own]
+        assert not late and [name for name in names if number(name) == own] == [REPAIR], late
         checks += 1
 
         # The live board's state: the publication migration is installed and the

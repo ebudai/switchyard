@@ -677,10 +677,18 @@ def test_the_direct_script_and_the_package_render_the_same_packets() -> None:
 
 def test_every_answer_is_the_baselines() -> None:
     check(sorted(CASES) == sorted(GOLDEN), "every measured case is asserted, and nothing else")
+    # SYRD-810: "the schema beside the module" is whatever schema.sql holds now, so its answer is measured against
+    # that file, rendered as every text answer is -- a sha256 of the baseline's whole schema.sql broke at every
+    # migration since (red from 9acae3e3). The rule it pins: the module reads the schema.sql beside it.
+    import hashlib
+
+    beside = (ROOT / "scripts" / "ticket_board" / "schema.sql").read_text(encoding="utf-8")
+    golden = dict(GOLDEN, **{"text: the schema beside the module": {"result": {"type": "str", "value": (
+        f"TEXT {len(beside)} chars sha256:{hashlib.sha256(beside.encode()).hexdigest()[:16]}")}, "calls": {}}})
     for label, spec in CASES.items():
         for holder in (m, t):
             got = run(holder, spec)
-            check(got == GOLDEN[label], f"{label} ({holder.__name__}): the baseline's answer, every call in order: {got}")
+            check(got == golden[label], f"{label} ({holder.__name__}): the baseline's answer, every call in order: {got}")
 
 
 def test_the_rules_hold_in_the_measured_record() -> None:

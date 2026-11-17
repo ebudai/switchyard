@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any
 
 from . import background_child, session_context
+from .tmux_target import exact_tmux_target
 
 HOOK_BLOCKED = "hook_blocked"
 PERMISSION_PROMPT = "permission_prompt"
@@ -155,7 +156,7 @@ def describe(conn: Any, gate: Any, blocked: Blocked) -> str:
             for holder in blocked.holders))
     lines.append(
         f"Nothing was typed into the pane and nothing will be while its hook says blocked. Look at it first: "
-        f"`tmux capture-pane -p -t {blocked.target}`. If it shows a question, answer it there. If it shows "
+        f"`tmux capture-pane -p -t {exact_tmux_target(blocked.target)}`. If it shows a question, answer it there. If it shows "
         f"{runtime}'s ready prompt, the record is stale: give {blocked.role} a prompt "
         f"(`directorctl send {blocked.target} <message>`) so its next turn writes a fresh hook state, or restart "
         f"{blocked.role}. The held notices go out by themselves once it is released.")

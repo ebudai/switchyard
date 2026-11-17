@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from team_launcher_test_helpers import *
+from tmux_target_fakes import plain_tmux_target  # noqa: E402 - SYRD-832: the stand-ins key sessions by plain name
 from tmux_socket_cleanup import end_isolated_tmux_server, own_isolated_tmux_server  # noqa: E402 - SYRD-823
 from provider_store_fixture import agy_conversation, owned_record, transcript_for  # SYRD-638: a session as its provider files it
 
@@ -82,10 +83,10 @@ def test_stop_project_kills_only_configured_sessions_as_owner_and_is_idempotent(
                 return subprocess.CompletedProcess(args, 0)
             inner = args[4:]
             if inner[:2] == ["tmux", "has-session"]:
-                session = inner[-1]
+                session = plain_tmux_target(inner[-1])
                 return subprocess.CompletedProcess(args, 0 if session in self.existing_sessions else 1)
             if inner[:2] == ["tmux", "kill-session"]:
-                session = inner[-1]
+                session = plain_tmux_target(inner[-1])
                 self.existing_sessions.discard(session)
                 return subprocess.CompletedProcess(args, 0)
             return subprocess.CompletedProcess(args, 0)
@@ -152,13 +153,13 @@ def test_stop_project_kills_only_configured_sessions_as_owner_and_is_idempotent(
     killed_as = {call[-1]: call[2] for call in kill_calls}
     assert set(killed_as.values()) == {"otto-agent"}, killed_as
     assert [call[-1] for call in kill_calls] == [
-        "otto-viewer",
-        "otto-designer",
-        "otto-director",
-        "otto-audit",
-        "otto-ops",
-        "otto-app",
-        "otto-main",
+        "=otto-viewer:",
+        "=otto-designer:",
+        "=otto-director:",
+        "=otto-audit:",
+        "=otto-ops:",
+        "=otto-app:",
+        "=otto-main:",
     ]
     assert all(call[:4] == ["sudo", "-u", "otto-agent", "-H"] for call in kill_calls)
     assert all(call[6] == "-t" for call in kill_calls)
@@ -195,7 +196,7 @@ def test_stop_project_continues_after_failed_kill_and_reports_all_roles() -> Non
             inner = args[4:]
             if inner[:2] == ["tmux", "has-session"]:
                 return subprocess.CompletedProcess(args, 0)
-            if inner[:2] == ["tmux", "kill-session"] and inner[-1] == "otto-director":
+            if inner[:2] == ["tmux", "kill-session"] and plain_tmux_target(inner[-1]) == "otto-director":
                 return subprocess.CompletedProcess(args, 7, stderr="permission denied\n")
             return subprocess.CompletedProcess(args, 0)
 
@@ -235,7 +236,7 @@ def test_stop_project_continues_after_failed_kill_and_reports_all_roles() -> Non
         team_launcher.current_user_name = original_current_user_name
 
     kill_calls = [call for call in runner.calls if call[4:6] == ["tmux", "kill-session"]]
-    assert [call[-1] for call in kill_calls] == ["otto-viewer", "otto-designer", "otto-director", "otto-audit"]
+    assert [call[-1] for call in kill_calls] == ["=otto-viewer:", "=otto-designer:", "=otto-director:", "=otto-audit:"]
     assert output == [
         "stopped viewer: otto-viewer",
         "stopped designer: otto-designer",
@@ -278,21 +279,21 @@ def test_reload_uses_recorded_resume_uuid_when_recreating_session() -> None:
         assert state["state"] == "idle"
         assert state["source"] == "team_launcher.reload"
 
-        assert runner.calls[0] == ["tmux", "has-session", "-t", "pgu-ops"]
-        assert runner.calls[1] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_pid}"]
-        assert runner.calls[2] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_current_command}"]
+        assert runner.calls[0] == ["tmux", "has-session", "-t", "=pgu-ops:"]
+        assert runner.calls[1] == ["tmux", "display-message", "-p", "-t", "=pgu-ops:0.0", "#{pane_pid}"]
+        assert runner.calls[2] == ["tmux", "display-message", "-p", "-t", "=pgu-ops:0.0", "#{pane_current_command}"]
         # SYRD-767: the old pane's process is read before the kill, and waited for before the new session starts.
-        assert runner.calls[3] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_pid}"]
-        assert runner.calls[4] == ["tmux", "kill-session", "-t", "pgu-ops"]
+        assert runner.calls[3] == ["tmux", "display-message", "-p", "-t", "=pgu-ops:0.0", "#{pane_pid}"]
+        assert runner.calls[4] == ["tmux", "kill-session", "-t", "=pgu-ops:"]
         assert runner.calls[5][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
         assert f"codex resume {session_id}" in runner.calls[5][-1]
         assert "--continue" not in runner.calls[5][-1]
         assert "--last" not in runner.calls[5][-1]
-        assert runner.calls[6] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_pid}"]
-        assert runner.calls[7] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_current_command}"]
-        assert ["tmux", "set-option", "-t", "pgu-ops", "mouse", "on"] in runner.calls
-        assert ["tmux", "set-option", "-t", "pgu-ops", "history-limit", "200000"] in runner.calls
-        assert ["tmux", "attach", "-t", "pgu-ops"] in runner.calls
+        assert runner.calls[6] == ["tmux", "display-message", "-p", "-t", "=pgu-ops:0.0", "#{pane_pid}"]
+        assert runner.calls[7] == ["tmux", "display-message", "-p", "-t", "=pgu-ops:0.0", "#{pane_current_command}"]
+        assert ["tmux", "set-option", "-t", "=pgu-ops:", "mouse", "on"] in runner.calls
+        assert ["tmux", "set-option", "-t", "=pgu-ops:", "history-limit", "200000"] in runner.calls
+        assert ["tmux", "attach", "-t", "=pgu-ops:"] in runner.calls
 
 def test_configured_fresh_session_reload_supersedes_recorded_session_and_starts_fresh() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-fresh-session.") as tmp:
@@ -867,9 +868,9 @@ def test_reload_refuses_to_kill_session_when_live_command_mismatches_config() ->
         )
 
     assert runner.calls == [
-        ["tmux", "has-session", "-t", "pgu-ops"],
-        ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_pid}"],
-        ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_current_command}"],
+        ["tmux", "has-session", "-t", "=pgu-ops:"],
+        ["tmux", "display-message", "-p", "-t", "=pgu-ops:0.0", "#{pane_pid}"],
+        ["tmux", "display-message", "-p", "-t", "=pgu-ops:0.0", "#{pane_current_command}"],
     ]
 
 def test_reload_force_bypasses_live_command_guard() -> None:
@@ -891,10 +892,10 @@ def test_reload_force_bypasses_live_command_guard() -> None:
             == 0
         )
 
-    assert runner.calls[0] == ["tmux", "has-session", "-t", "pgu-ops"]
+    assert runner.calls[0] == ["tmux", "has-session", "-t", "=pgu-ops:"]
     # SYRD-767: the old pane's process, read so the reload can wait for it, then the kill.
-    assert runner.calls[1] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_pid}"]
-    assert runner.calls[2] == ["tmux", "kill-session", "-t", "pgu-ops"]
+    assert runner.calls[1] == ["tmux", "display-message", "-p", "-t", "=pgu-ops:0.0", "#{pane_pid}"]
+    assert runner.calls[2] == ["tmux", "kill-session", "-t", "=pgu-ops:"]
 
 def test_reload_guard_matches_cli_child_under_shell_in_real_tmux() -> None:
     if shutil.which("tmux") is None:
@@ -1024,10 +1025,10 @@ def test_stop_kills_each_migrated_role_in_its_own_tmux_server() -> None:
 
     kills = [call for call in calls if "kill-session" in call]
     killed_as = {call[-1]: call[2] for call in kills if call[:2] == ["sudo", "-u"]}
-    assert killed_as.get("otto-director") == "otto-director", killed_as
-    assert killed_as.get("otto-ops") == "otto-ops", killed_as
+    assert killed_as.get("=otto-director:") == "otto-director", killed_as
+    assert killed_as.get("=otto-ops:") == "otto-ops", killed_as
     # The viewer session is the project owner's, not any role's.
-    assert killed_as.get("otto-viewer") == "otto-agent", killed_as
+    assert killed_as.get("=otto-viewer:") == "otto-agent", killed_as
 
 def main() -> int:
     run_team_launcher_tests(globals(), first=())

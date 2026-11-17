@@ -11,7 +11,7 @@ readonly ROLES=(director main app audit ops research)
 
 if ! command -v konsole >/dev/null 2>&1; then
     echo "error: konsole not found on this host -- this script only knows how to launch konsole windows" >&2
-    echo "run manually instead: docker exec -it $CONTAINER tmux attach -t pgu-<role>" >&2
+    echo "run manually instead: docker exec -it $CONTAINER tmux attach -t =pgu-<role>" >&2
     exit 1
 fi
 
@@ -22,7 +22,7 @@ fi
 
 for role in "${ROLES[@]}"; do
     session="pgu-$role"
-    konsole --title "$session" -e bash -c "docker exec -it $CONTAINER tmux attach -t $session; exec bash" &
+    konsole --title "$session" -e bash -c "docker exec -it $CONTAINER tmux attach -t =$session; exec bash" &
 done
 
 echo "Opened ${#ROLES[@]} windows: ${ROLES[*]}"

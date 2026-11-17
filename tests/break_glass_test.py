@@ -26,6 +26,7 @@ from scripts.ticket_board import break_glass as bg, recovery_packet as rp  # noq
 
 import recovery_packet_test as rpt  # noqa: E402
 from role_runtime_test import RuntimeRunner, _write_config  # noqa: E402
+from tmux_target_fakes import plain_tmux_target  # noqa: E402
 
 CHECKS = 0
 HOLD = 4
@@ -110,9 +111,9 @@ class Tmux(RuntimeRunner):
                                         completed={"ticket": "PGU-2"})
             return subprocess.CompletedProcess(command, 0)
         if command[:2] == ["tmux", "has-session"]:
-            return subprocess.CompletedProcess(command, 0 if command[-1] in self.live else 1)
+            return subprocess.CompletedProcess(command, 0 if plain_tmux_target(command[-1]) in self.live else 1)
         if command[:2] == ["tmux", "kill-session"]:
-            self.live.discard(command[-1])
+            self.live.discard(plain_tmux_target(command[-1]))
             return subprocess.CompletedProcess(command, 0)
         return subprocess.CompletedProcess(command, 0)
 

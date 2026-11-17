@@ -79,7 +79,8 @@ def test_the_module_loads_nothing_of_switchyards_at_import() -> None:
         "print(sorted(m for m in sys.modules if m.startswith('scripts.') and m != 'scripts.tmux_viewer'))"
     )
     check(result.returncode == 0, f"it imports on its own: {result.stderr[-600:]}")
-    check(result.stdout.strip() == "[]",
+    # SYRD-832: the exact-target rule only, a stdlib leaf (and its package), and nothing else.
+    check(result.stdout.strip() == "['scripts.ticket_board', 'scripts.ticket_board.tmux_target']",
           f"and loads no other Switchyard module, the launcher least of all: {result.stdout!r}")
 
 
@@ -128,7 +129,7 @@ def test_a_hook_is_quoted_by_the_launcher_when_it_is_built() -> None:
         team_launcher._quote_command = saved
     helper = str((ROOT / "scripts" / "switchyard-viewer-layout").resolve())
     check(code == 0 and len(ran) == 1, f"one hook was installed through the runner: {ran!r}")
-    check(ran[0][:6] == ["tmux", "set-hook", "-w", "-t", "v309:0", "window-resized"]
+    check(ran[0][:6] == ["tmux", "set-hook", "-w", "-t", "=v309:0", "window-resized"]
           and "SYRD309-QUOTED" in ran[0][6] and helper in ran[0][6],
           f"the hook's command was quoted by the launcher and names the helper: {ran[0]!r}")
 

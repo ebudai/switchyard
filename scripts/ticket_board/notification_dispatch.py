@@ -12,6 +12,7 @@ from typing import Any, Callable
 from . import delivery_proof, director_capacity
 from .notification_ledger import NotificationLedger
 from .runtime_paths import directorctl_path
+from .tmux_target import exact_tmux_target
 
 DEFAULT_DIRECTORCTL_SEND_TIMEOUT_SECONDS = 10.0
 DEFAULT_DIRECTORCTL = directorctl_path(__file__)
@@ -160,7 +161,7 @@ def delivery_failure_reason(exc: BaseException, target: str) -> str:
 def tmux_target_exists(target: str, *, runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run) -> bool | None:
     try:
         proc = runner(
-            ["tmux", "has-session", "-t", target],
+            ["tmux", "has-session", "-t", exact_tmux_target(target)],
             text=True,
             capture_output=True,
             timeout=2,

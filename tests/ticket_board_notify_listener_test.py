@@ -42,7 +42,7 @@ from tmux_socket_cleanup import (
     cleanup_dead_isolated_tmux_socket,
     isolated_tmux_socket_path, own_isolated_tmux_server,
 )
-
+from tmux_target_fakes import plain_tmux_target  # SYRD-832: fake panes keyed by plain target
 LIVE_PANE_STATE_PATHS = candidate_live_pane_state_paths()
 strip_ticket_board_pane_env(os.environ)
 
@@ -367,7 +367,7 @@ def targeted_capture_runner(target: str, *outputs: str) -> Any:
     fallback = values[-1] if values else ""
 
     def runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        requested_target = str(args[args.index("-t") + 1]) if "-t" in args else ""
+        requested_target = plain_tmux_target(str(args[args.index("-t") + 1])) if "-t" in args else ""
         if requested_target != target:
             return subprocess.CompletedProcess(args, 0, stdout="")
         value = (values[0] if values else fallback) if composer_read(args) else values.pop(0) if values else fallback
@@ -382,7 +382,7 @@ def targeted_alternating_capture_runner(target: str, *prefix_outputs: str) -> An
 
     def runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         nonlocal index
-        requested_target = str(args[args.index("-t") + 1]) if "-t" in args else ""
+        requested_target = plain_tmux_target(str(args[args.index("-t") + 1])) if "-t" in args else ""
         if requested_target != target:
             return subprocess.CompletedProcess(args, 0, stdout="")
         if composer_read(args):
@@ -3738,7 +3738,7 @@ def test_live_pane_shellout_guard_rejects_real_gate_default_capture_runner() -> 
         raise AssertionError("real gate default capture runner reached no live-pane guard")
 
     assert test_name in message
-    assert guard.escapes == [["tmux", "capture-pane", "-p", "-J", "-t", "pgu-ops:0.0"]], guard.escapes
+    assert guard.escapes == [["tmux", "capture-pane", "-p", "-J", "-t", "=pgu-ops:0.0"]], guard.escapes
 
 
 def test_live_pane_shellout_guard_rejects_real_target_exists_default_runner() -> None:

@@ -41,6 +41,7 @@ import subprocess
 import time
 from pathlib import Path
 from typing import Any
+from .tmux_target import exact_tmux_target
 
 HOLD_ERROR = "work_paused"
 #: The pause's own queued notices: the resume's, and the Director's background report. The board decides whether each
@@ -161,7 +162,7 @@ def _epoch(value: Any) -> float | None:
 def _screen(gate: Any, target: str) -> list[str] | None:
     """The pane's rows down to its last drawn one: these CLIs draw from the top and leave the rest of the pane blank."""
     try:
-        capture = gate.capture_pane_runner(["tmux", "capture-pane", "-p", "-t", target],
+        capture = gate.capture_pane_runner(["tmux", "capture-pane", "-p", "-t", exact_tmux_target(target)],
                                            check=True, text=True, capture_output=True, timeout=2.0)
     except (OSError, subprocess.SubprocessError):
         return None
@@ -172,7 +173,7 @@ def _screen(gate: Any, target: str) -> list[str] | None:
 
 
 def _keys(gate: Any, target: str, *keys: str, literal: bool = False) -> None:
-    gate.capture_pane_runner(["tmux", "send-keys", "-t", target, *(["-l"] if literal else []), *keys],
+    gate.capture_pane_runner(["tmux", "send-keys", "-t", exact_tmux_target(target), *(["-l"] if literal else []), *keys],
                              check=True, text=True, capture_output=True, timeout=5.0)
 
 

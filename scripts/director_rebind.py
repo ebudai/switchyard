@@ -48,6 +48,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping
+from scripts.ticket_board.tmux_target import exact_tmux_target
 
 DIRECTOR = "director"
 SCHEMA = "switchyard.director-rebind.v1"
@@ -311,7 +312,7 @@ def _stop_old(r: Rebind) -> None:
     holders: set = set()
     if runtime_handover.session_is_live(role, runner=r.tmux_runner):
         holders = runtime_handover.pane_holders(role, runner=r.tmux_runner, handover=r.handover, recorded=recorded)
-        kill = r.tmux_runner(["tmux", "kill-session", "-t", role.tmux_session])
+        kill = r.tmux_runner(["tmux", "kill-session", "-t", exact_tmux_target(role.tmux_session)])
         if kill.returncode != 0:
             raise RuntimeError(f"could not stop {role.tmux_session} (exit {kill.returncode})")
     elif recorded is not None and r.handover.live(recorded):
@@ -484,7 +485,7 @@ def _undo(r: Rebind, *, failure: str, operator: str) -> int:
             role = _director(r.updated)
             if runtime_handover.session_is_live(role, runner=r.tmux_runner):
                 holders = runtime_handover.pane_holders(role, runner=r.tmux_runner, handover=r.handover)
-                r.tmux_runner(["tmux", "kill-session", "-t", role.tmux_session])
+                r.tmux_runner(["tmux", "kill-session", "-t", exact_tmux_target(role.tmux_session)])
                 runtime_handover.await_holders_gone(holders, role=role, replacement="nothing", handover=r.handover,
                                                     print_func=p)
         attempt("new_session", stop_attempt)

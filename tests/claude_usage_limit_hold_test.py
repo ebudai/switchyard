@@ -55,6 +55,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tmux_target_fakes import plain_tmux_target  # SYRD-832: fake panes keyed by plain target
+
 ROOT = Path(__file__).resolve().parents[1]
 #: Main's commit this ticket is cut from: the before-run's tree.
 BEFORE = "8617e0261643d996957d3f665941ed5dba1c58ea"
@@ -183,7 +185,7 @@ def scenario(root: Path) -> dict:
 
         def key_runner(argv, **_kwargs):
             keys.append(argv)
-            target = argv[argv.index("-t") + 1]
+            target = plain_tmux_target(argv[argv.index("-t") + 1])
             role = next(r for r, t in rigs.TARGETS.items() if t == target)
             if argv[-1] == "Escape" and role != "ops":  # Ops's menu ignores it: the listener must not keep pressing
                 rig.panes[role].screen = screen("after_escape")
@@ -456,7 +458,7 @@ def candidate(got: dict) -> None:
     check(shared["director_held"] == {} and shared["main_held"] == {},
           f"the Director's pane and Codex Main are never held this way: {shared}")
     menu = got["menu"]
-    check(menu["keys"] == [["pgu-app:0.0", "Escape"], ["pgu-ops:0.0", "Escape"], ["pgu-ops:0.0", "Escape"]]
+    check(menu["keys"] == [["=pgu-app:0.0", "Escape"], ["=pgu-ops:0.0", "Escape"], ["=pgu-ops:0.0", "Escape"]]
           and not menu["app_screen_menu"],
           f"held App's usage-limit menu gets one Esc, which dismisses it; held Ops's, ignoring Esc, gets two and is then "
           f"left to a person; the Director's, not held, gets nothing; never Enter or a digit: {menu}")

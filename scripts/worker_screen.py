@@ -25,6 +25,7 @@ import time
 from typing import Any, Callable
 
 from scripts.ticket_board import provider_prompt
+from scripts.ticket_board.tmux_target import exact_tmux_target
 
 #: Longest a fresh worker's screen is watched.
 WATCH_SECONDS = 20.0
@@ -43,7 +44,7 @@ def capture(target: str, runner: Callable[..., Any]) -> list[str] | None:
     screen (the rule delivery_proof.read_composer reads a composer by).
     """
     try:
-        proc = runner(["tmux", "capture-pane", "-p", "-t", target], text=True,
+        proc = runner(["tmux", "capture-pane", "-p", "-t", exact_tmux_target(target)], text=True,
                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         return None

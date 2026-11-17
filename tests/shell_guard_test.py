@@ -414,7 +414,8 @@ def inventory() -> None:
     check('[self.directorctl_bin, "send", target, message]' in dispatch,
           "a notice is handed to directorctl as argv, never as a shell string")
     directorctl = (ROOT / "scripts/directorctl").read_text()
-    check('send-keys -t "$target" -l "$payload"' in directorctl and "eval " not in directorctl,
+    # SYRD-832: the target is named exactly; exact_tmux_target only prints it, behind `=`, and evaluates nothing.
+    check('send-keys -t "$(exact_tmux_target "$target")" -l "$payload"' in directorctl and "eval " not in directorctl,
           "directorctl types a notice as literal keys and evaluates nothing")
 
 

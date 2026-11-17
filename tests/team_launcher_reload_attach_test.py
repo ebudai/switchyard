@@ -105,7 +105,7 @@ def test_detached_research_attach_checks_session_without_attaching() -> None:
             == 0
         )
 
-    assert runner.calls == [["tmux", "has-session", "-t", "pgu-research"]]
+    assert runner.calls == [["tmux", "has-session", "-t", "=pgu-research:"]]
 
 def test_pane_start_reexecs_as_owner_before_detached_tmux_or_state_work() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-pane-owner.") as tmp:
@@ -562,7 +562,7 @@ def test_attach_headless_role_to_free_slot_resumes_without_touching_neighbours()
         assert f"resume {session_id}" in new_sessions[0][-1]
         assert not any(call[:5] == ["tmux", "new-session", "-d", "-s", "porter-director"] for call in runner.calls)
         assert not any(call[:2] == ["tmux", "kill-session"] for call in runner.calls)
-        assert ["tmux", "attach", "-t", "porter-worker7"] in runner.calls
+        assert ["tmux", "attach", "-t", "=porter-worker7:"] in runner.calls
         assert messages == ["team-launcher: attached role worker7 to slot 1; refusing to relayout other panes"]
 
 def test_attach_headless_role_refuses_occupied_slot_without_mutating_config() -> None:

@@ -35,6 +35,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Sequence
+from scripts.ticket_board.tmux_target import exact_tmux_target
 
 if TYPE_CHECKING:
     from scripts.team_launcher import RoleConfig
@@ -50,15 +51,15 @@ DEFAULT_TMUX_HISTORY_LIMIT = 200_000
 
 
 def tmux_set_status_off_args(role: RoleConfig) -> list[str]:
-    return ["tmux", "set-option", "-t", role.tmux_session, "status", "off"]
+    return ["tmux", "set-option", "-t", exact_tmux_target(role.tmux_session), "status", "off"]
 
 
 def tmux_set_mouse_args(session: str) -> list[str]:
-    return ["tmux", "set-option", "-t", session, "mouse", "on"]
+    return ["tmux", "set-option", "-t", exact_tmux_target(session), "mouse", "on"]
 
 
 def tmux_set_history_limit_args(session: str) -> list[str]:
-    return ["tmux", "set-option", "-t", session, "history-limit", str(DEFAULT_TMUX_HISTORY_LIMIT)]
+    return ["tmux", "set-option", "-t", exact_tmux_target(session), "history-limit", str(DEFAULT_TMUX_HISTORY_LIMIT)]
 
 
 def configure_tmux_session_options(
@@ -74,13 +75,13 @@ def configure_tmux_session_options(
 
 
 def tmux_set_pane_border_status_off_args(role: RoleConfig) -> list[str]:
-    return ["tmux", "set-window-option", "-t", f"{role.tmux_session}:0", "pane-border-status", "off"]
+    return ["tmux", "set-window-option", "-t", exact_tmux_target(f"{role.tmux_session}:0"), "pane-border-status", "off"]
 
 
 def tmux_viewer_new_session_args(viewer_session: str, role: RoleConfig) -> list[str]:
     from scripts import team_launcher as launcher
 
-    command = launcher._quote_command(["env", "TMUX=", "tmux", "attach", "-t", role.tmux_session])
+    command = launcher._quote_command(["env", "TMUX=", "tmux", "attach", "-t", exact_tmux_target(role.tmux_session)])
     return [
         "tmux",
         "new-session",
@@ -113,7 +114,7 @@ def tmux_viewer_pin_size_args(viewer_session: str) -> list[str]:
     `tmux_viewer_unpin_size_args` once the viewer is built.
     """
     return [
-        "tmux", "resize-window", "-t", f"{viewer_session}:0",
+        "tmux", "resize-window", "-t", exact_tmux_target(f"{viewer_session}:0"),
         "-x", str(DEFAULT_VIEWER_COLUMNS), "-y", str(DEFAULT_VIEWER_ROWS),
     ]
 
@@ -127,14 +128,14 @@ def tmux_viewer_unpin_size_args(viewer_session: str) -> list[str]:
     and 3.7c: 240x80 with no client, 120x39 for a 120x40 window, 200x59 after
     it is enlarged.
     """
-    return ["tmux", "set-option", "-w", "-u", "-t", f"{viewer_session}:0", "window-size"]
+    return ["tmux", "set-option", "-w", "-u", "-t", exact_tmux_target(f"{viewer_session}:0"), "window-size"]
 
 
 def tmux_viewer_split_window_args(viewer_session: str, role: RoleConfig) -> list[str]:
     from scripts import team_launcher as launcher
 
-    command = launcher._quote_command(["env", "TMUX=", "tmux", "attach", "-t", role.tmux_session])
-    return ["tmux", "split-window", "-t", f"{viewer_session}:0", "-c", role.workdir, command]
+    command = launcher._quote_command(["env", "TMUX=", "tmux", "attach", "-t", exact_tmux_target(role.tmux_session)])
+    return ["tmux", "split-window", "-t", exact_tmux_target(f"{viewer_session}:0"), "-c", role.workdir, command]
 
 
 def _tmux_layout_checksum(layout: str) -> int:
@@ -248,7 +249,7 @@ def tmux_viewer_relayout_hook_args(viewer_session: str) -> list[str]:
     # holding two windows. It says which kind of hook this is, and it does not
     # rest on undocumented behaviour holding in another version.
     return [
-        "tmux", "set-hook", "-w", "-t", f"{viewer_session}:0",
+        "tmux", "set-hook", "-w", "-t", exact_tmux_target(f"{viewer_session}:0"),
         "window-resized", f"run-shell {shlex.quote(helper)}",
     ]
 
@@ -311,37 +312,38 @@ def tmux_viewer_select_layout_args(viewer_session: str, panes: int) -> list[str]
         "tmux",
         "select-layout",
         "-t",
-        f"{viewer_session}:0",
+        exact_tmux_target(f"{viewer_session}:0"),
         viewer_layout_string(panes, width=DEFAULT_VIEWER_COLUMNS, height=DEFAULT_VIEWER_ROWS),
     ]
 
 
 def tmux_viewer_set_status_args(viewer_session: str) -> list[str]:
-    return ["tmux", "set-option", "-t", viewer_session, "status", "on"]
+    return ["tmux", "set-option", "-t", exact_tmux_target(viewer_session), "status", "on"]
 
 
 def tmux_viewer_set_titles_args(viewer_session: str) -> list[str]:
-    return ["tmux", "set-option", "-t", viewer_session, "set-titles", "on"]
+    return ["tmux", "set-option", "-t", exact_tmux_target(viewer_session), "set-titles", "on"]
 
 
 def tmux_viewer_set_titles_string_args(viewer_session: str, title: str) -> list[str]:
-    return ["tmux", "set-option", "-t", viewer_session, "set-titles-string", title]
+    return ["tmux", "set-option", "-t", exact_tmux_target(viewer_session), "set-titles-string", title]
 
 
 def tmux_viewer_set_prefix_args(viewer_session: str) -> list[str]:
-    return ["tmux", "set-option", "-t", viewer_session, "prefix", "C-a"]
+    return ["tmux", "set-option", "-t", exact_tmux_target(viewer_session), "prefix", "C-a"]
 
 
 def tmux_viewer_set_border_status_args(viewer_session: str) -> list[str]:
-    return ["tmux", "set-window-option", "-t", f"{viewer_session}:0", "pane-border-status", "top"]
+    return ["tmux", "set-window-option", "-t", exact_tmux_target(f"{viewer_session}:0"), "pane-border-status", "top"]
 
 
 def tmux_viewer_set_border_format_args(viewer_session: str) -> list[str]:
-    return ["tmux", "set-window-option", "-t", f"{viewer_session}:0", "pane-border-format", " #{@role} "]
+    return ["tmux", "set-window-option", "-t", exact_tmux_target(f"{viewer_session}:0"), "pane-border-format", " #{@role} "]
 
 
 def tmux_viewer_set_role_arg(viewer_session: str, pane_index: int, role: str) -> list[str]:
-    return ["tmux", "set-option", "-p", "-t", f"{viewer_session}.{pane_index}", "@role", role]
+    # `session:.pane`, not `session.pane`: the exact form names the session alone, and tmux allows a dot in one (SYRD-832).
+    return ["tmux", "set-option", "-p", "-t", exact_tmux_target(f"{viewer_session}:.{pane_index}"), "@role", role]
 
 
 def launch_tmux_viewer_session(

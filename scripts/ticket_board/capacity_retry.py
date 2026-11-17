@@ -45,6 +45,7 @@ import os
 import subprocess
 from datetime import datetime, timezone
 from typing import Any
+from .tmux_target import exact_tmux_target
 
 #: Codex 0.163.0's whole line for a turn whose request found the model at capacity.
 CODEX_CAPACITY_ERROR = "■ Selected model is at capacity. Please try a different model."
@@ -76,9 +77,9 @@ def error_ends_screen(lines: list[str], cursor_y: int) -> bool:
 def _shows_error(gate: Any, target: str) -> bool:
     try:
         cursor = gate.cursor_position_runner(
-            ["tmux", "display-message", "-p", "-t", target, "#{cursor_x} #{cursor_y} #{pane_height}"],
+            ["tmux", "display-message", "-p", "-t", exact_tmux_target(target), "#{cursor_x} #{cursor_y} #{pane_height}"],
             check=True, text=True, capture_output=True, timeout=2.0)
-        capture = gate.capture_pane_runner(["tmux", "capture-pane", "-p", "-t", target],
+        capture = gate.capture_pane_runner(["tmux", "capture-pane", "-p", "-t", exact_tmux_target(target)],
                                            check=True, text=True, capture_output=True, timeout=2.0)
         cursor_y = int(cursor.stdout.split()[1])
     except (OSError, subprocess.SubprocessError, ValueError, IndexError):

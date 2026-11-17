@@ -217,8 +217,8 @@ def test_git_archive_release_directorctl_is_executable_and_delivers() -> None:
         assert result["target"] == "orbit-main:0.0"
         assert result["delivery_mode"] == "direct"
         calls = tmux_log.read_text(encoding="utf-8").splitlines()
-        assert "send-keys -t orbit-main:0.0 -l Release delivery" in calls
-        assert "send-keys -t orbit-main:0.0 Enter" in calls
+        assert "send-keys -t =orbit-main:0.0 -l Release delivery" in calls
+        assert "send-keys -t =orbit-main:0.0 Enter" in calls
 
 
 def test_service_helpers_fail_closed_without_tenant_root() -> None:

@@ -50,6 +50,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import board_stall, tool_activity
+from .tmux_target import exact_tmux_target
 
 DEFAULT_MAX_ATTEMPTS = 3
 MAX_ATTEMPTS_ENV = "TICKET_BOARD_STALL_MAX_ATTEMPTS"
@@ -77,9 +78,9 @@ def condition(gate: Any, target: str) -> str | None:
     """The last line of text the pane shows above its cursor: what the provider last said."""
     try:
         cursor = gate.cursor_position_runner(
-            ["tmux", "display-message", "-p", "-t", target, "#{cursor_x} #{cursor_y} #{pane_height}"],
+            ["tmux", "display-message", "-p", "-t", exact_tmux_target(target), "#{cursor_x} #{cursor_y} #{pane_height}"],
             check=True, text=True, capture_output=True, timeout=2.0)
-        capture = gate.capture_pane_runner(["tmux", "capture-pane", "-p", "-t", target],
+        capture = gate.capture_pane_runner(["tmux", "capture-pane", "-p", "-t", exact_tmux_target(target)],
                                            check=True, text=True, capture_output=True, timeout=2.0)
         cursor_y = int(cursor.stdout.split()[1])
     except (OSError, subprocess.SubprocessError, ValueError, IndexError):

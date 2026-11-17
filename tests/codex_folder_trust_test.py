@@ -40,6 +40,7 @@ from scripts.ticket_board import board_skill  # noqa: E402
 import contained_cli  # noqa: E402
 import worker_pool_lifecycle_test as lifecycle  # noqa: E402
 from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
+from tmux_target_fakes import plain_tmux_target  # noqa: E402 - SYRD-832: the stand-in keys sessions by plain name
 isolate_tmux_bus()  # SYRD-814: the tmux servers it starts get a user bus of their own, never the invoker's
 
 PROJECT = lifecycle.PROJECT
@@ -161,7 +162,7 @@ class Probes:
     def __call__(self, args, **_kwargs):
         command = [str(part) for part in args]
         if "has-session" in command:
-            session = command[command.index("-t") + 1].lstrip("=") if "-t" in command else ""
+            session = plain_tmux_target(command[command.index("-t") + 1]) if "-t" in command else ""
             return subprocess.CompletedProcess(command, 0 if session in self.running else 1)
         if command[-2:-1] == ["-c"] and command[-1].startswith("command -v "):
             return subprocess.CompletedProcess(command, 0, stdout="/usr/bin/codex\n")
@@ -172,7 +173,7 @@ class Probes:
         if "display-message" in command:
             # A running session shows its runtime; with no pane pid to walk, the
             # launcher's live-worker check reads the pane's current command.
-            session = command[command.index("-t") + 1].lstrip("=").split(":", 1)[0]
+            session = plain_tmux_target(command[command.index("-t") + 1]).split(":", 1)[0]
             shows = command[-1] == "#{pane_current_command}" and session in self.running
             return subprocess.CompletedProcess(command, 0 if shows else 1, stdout="codex\n" if shows else "")
         self.started.append(command)

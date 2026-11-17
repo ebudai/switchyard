@@ -323,9 +323,11 @@ def screen_status(argv: list[str], *, cwd: str, timeout: float = STATUS_PROBE_TI
         if started.returncode != 0:
             return "exited", started.stderr
 
+        # "=0:": the private server's one unnamed session, matched exactly (SYRD-832). Literal, because this file runs as
+        # `python3 -I copilot_runtime.py`, which cannot import the scripts package.
         def keys(*sequence: str) -> None:
             for key in sequence:
-                subprocess.run([*tmux, "send-keys", "-t", "0", *(["-l", key[1:]] if key.startswith("=") else [key])],
+                subprocess.run([*tmux, "send-keys", "-t", "=0:", *(["-l", key[1:]] if key.startswith("=") else [key])],
                                env=env, capture_output=True)
                 time.sleep(0.2)
 
@@ -333,7 +335,7 @@ def screen_status(argv: list[str], *, cwd: str, timeout: float = STATUS_PROBE_TI
         deadline = time.monotonic() + timeout
         try:
             while time.monotonic() < deadline:
-                shot = subprocess.run([*tmux, "capture-pane", "-p", "-t", "0"], env=env, capture_output=True, text=True)
+                shot = subprocess.run([*tmux, "capture-pane", "-p", "-t", "=0:"], env=env, capture_output=True, text=True)
                 if shot.returncode != 0:
                     return "exited", screen
                 screen = shot.stdout

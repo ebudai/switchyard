@@ -65,7 +65,8 @@ def test_the_module_loads_nothing_of_switchyards_at_import() -> None:
         "print(sorted(m for m in sys.modules if m.startswith('scripts.') and m != 'scripts.tmux_session_argv'))"
     )
     check(result.returncode == 0, f"it imports on its own: {result.stderr[-600:]}")
-    check(result.stdout.strip() == "[]",
+    # SYRD-832: tmux_target (a stdlib-only leaf that names the session exactly) and its package are the one exception.
+    check(result.stdout.strip() == "['scripts.ticket_board', 'scripts.ticket_board.tmux_target']",
           f"and loads no other Switchyard module, the launcher least of all: {result.stdout!r}")
 
 
@@ -135,7 +136,7 @@ def test_live_matching_asks_the_launcher_when_it_runs() -> None:
         fallback = tmux_session_argv.live_command_matches_role(role, runner=recorder)
     finally:
         team_launcher.pane_pid_for_role = saved
-    check(fallback is True and asked == [["tmux", "display-message", "-p", "-t", "p314:main.0",
+    check(fallback is True and asked == [["tmux", "display-message", "-p", "-t", "=p314:main.0",
                                           "#{pane_current_command}"]],
           f"without a pid it asks tmux, through the given runner only: {asked!r}")
 

@@ -85,8 +85,10 @@ def loaded_after(module: str) -> list[str]:
 def test_the_imports_point_one_way() -> None:
     check(loaded_after("scripts.launcher_env") == [], "the environment leaf loads nothing of Switchyard's")
     check(loaded_after("scripts.provider_resume") == [], "nor does provider resume")
-    check(loaded_after("scripts.role_pane_entry") == ["scripts.launcher_env", "scripts.provider_resume"],
-          "and pane entry loads only those two, never the launcher")
+    # SYRD-832: plus tmux_target, the stdlib-only leaf that names its attach target exactly, and that leaf's package.
+    check(loaded_after("scripts.role_pane_entry") == ["scripts.launcher_env", "scripts.provider_resume",
+                                                       "scripts.ticket_board", "scripts.ticket_board.tmux_target"],
+          "and pane entry loads only those two and tmux_target, never the launcher")
 
 
 def test_either_import_order_gives_one_set_of_objects() -> None:

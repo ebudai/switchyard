@@ -207,6 +207,17 @@ resolve_runtime_target() {
     runtime_target_for_role "$role"
 }
 
+# SYRD-832: tmux resolves a session target by exact name and, failing that, by prefix: with mefp-audit absent,
+# `-t mefp-audit:0.0` reached mefp-audit-2. Every target here is matched exactly (scripts/ticket_board/tmux_target.py's
+# rule): `=session:` for a bare session, `=session:window.pane`; a pane id or an already exact target is left alone.
+exact_tmux_target() {
+    case "$1" in
+        ""|=*|%*|@*|\$*|"{"*|!*|-*|:*|.*) printf '%s' "$1" ;;
+        *:*) printf '=%s' "$1" ;;
+        *) printf '=%s:' "$1" ;;
+    esac
+}
+
 role_tmux() {
     local target="$1"
     shift
@@ -233,18 +244,18 @@ role_tmux() {
 
 capture_raw_pane() {
     local target="$1"
-    role_tmux "$target" capture-pane -p -J -t "$target"
+    role_tmux "$target" capture-pane -p -J -t "$(exact_tmux_target "$target")"
 }
 
 exit_copy_mode_if_needed() {
     local target="$1"
     local in_mode
-    if ! in_mode="$(role_tmux "$target" display-message -p -t "$target" "#{pane_in_mode}" 2>/dev/null)"; then
+    if ! in_mode="$(role_tmux "$target" display-message -p -t "$(exact_tmux_target "$target")" "#{pane_in_mode}" 2>/dev/null)"; then
         return 0
     fi
     in_mode="${in_mode//$'\n'/}"
     if [ -n "$in_mode" ] && [ "$in_mode" != "0" ]; then
-        role_tmux "$target" send-keys -t "$target" -X cancel
+        role_tmux "$target" send-keys -t "$(exact_tmux_target "$target")" -X cancel
     fi
 }
 
@@ -278,7 +289,7 @@ verify_submission() {
         fi
         if [ "$attempt" -lt "$SUBMIT_VERIFY_ATTEMPTS" ]; then
             exit_copy_mode_if_needed "$target"
-            role_tmux "$target" send-keys -t "$target" Enter
+            role_tmux "$target" send-keys -t "$(exact_tmux_target "$target")" Enter
         fi
     done
 
@@ -376,11 +387,11 @@ submit_short_line() {
 
     settle_delay_ms="$(compute_settle_delay_ms "${#payload}")"
     exit_copy_mode_if_needed "$target"
-    role_tmux "$target" send-keys -t "$target" -l "$payload"
+    role_tmux "$target" send-keys -t "$(exact_tmux_target "$target")" -l "$payload"
     sleep_milliseconds "$settle_delay_ms"
     before_capture="$(capture_raw_pane "$target")"
     exit_copy_mode_if_needed "$target"
-    role_tmux "$target" send-keys -t "$target" Enter
+    role_tmux "$target" send-keys -t "$(exact_tmux_target "$target")" Enter
     verify_submission "$target" "$before_capture"
 }
 
@@ -422,9 +433,9 @@ Commands:
 
 All send/callback commands send payload and Enter separately, wait for the
 composer to settle, then verify that Enter actually submitted:
-  tmux send-keys -t <target> -l <payload>
+  tmux send-keys -t =<target> -l <payload>
   sleep $DIRECTORCTL_ENTER_DELAY   (default: 0.6, scales up for large payloads)
-  tmux send-keys -t <target> Enter
+  tmux send-keys -t =<target> Enter
 
 For payloads longer than 200 characters or containing newlines, directorctl
 does NOT paste into the codex composer. It stages the payload in a temp file
@@ -647,7 +658,7 @@ cmd_submit() {
     local target
     target="$(resolve_runtime_target "$1")"
     exit_copy_mode_if_needed "$target"
-    role_tmux "$target" send-keys -t "$target" Enter
+    role_tmux "$target" send-keys -t "$(exact_tmux_target "$target")" Enter
 }
 
 cmd_send_file() {
@@ -911,7 +922,7 @@ cmd_status() {
             continue
         fi
         seen[$session]=1
-        if role_tmux "$session" has-session -t "$session" 2>/dev/null; then
+        if role_tmux "$session" has-session -t "$(exact_tmux_target "$session")" 2>/dev/null; then
             echo "  $session: active"
             found=$((found + 1))
         else

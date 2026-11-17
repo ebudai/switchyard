@@ -54,8 +54,8 @@ def test_start_is_attach_or_start_and_never_duplicates_existing_session() -> Non
         assert not (pane_state_dir / pane_state_file_name(role.target)).exists()
 
     assert runner.calls == [
-        ["tmux", "has-session", "-t", "pgu-ops"],
-        ["tmux", "attach", "-t", "pgu-ops"],
+        ["tmux", "has-session", "-t", "=pgu-ops:"],
+        ["tmux", "attach", "-t", "=pgu-ops:"],
     ]
 
 def test_start_creates_missing_session_once_then_attaches() -> None:
@@ -85,7 +85,7 @@ def test_start_creates_missing_session_once_then_attaches() -> None:
         assert state["source"] == "team_launcher.start"
         assert isinstance(state["updated_at"], float)
 
-    assert runner.calls[0] == ["tmux", "has-session", "-t", "pgu-ops"]
+    assert runner.calls[0] == ["tmux", "has-session", "-t", "=pgu-ops:"]
     assert runner.calls[1][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
     assert runner.calls[1][5:7] == ["-c", str(_pgu_project_root())]
     assert runner.calls[1][7:9] == ["-n", "ops"]
@@ -97,11 +97,11 @@ def test_start_creates_missing_session_once_then_attaches() -> None:
     assert "--dangerously-bypass-hook-trust" in runner.calls[1][-1]
     assert "--reasoning-effort" not in runner.calls[1][-1]
     assert " resume " not in f" {runner.calls[1][-1]} "
-    assert runner.calls[2] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_pid}"]
-    assert runner.calls[3] == ["tmux", "display-message", "-p", "-t", "pgu-ops:0.0", "#{pane_current_command}"]
-    assert ["tmux", "set-option", "-t", "pgu-ops", "mouse", "on"] in runner.calls
-    assert ["tmux", "set-option", "-t", "pgu-ops", "history-limit", "200000"] in runner.calls
-    assert ["tmux", "attach", "-t", "pgu-ops"] in runner.calls
+    assert runner.calls[2] == ["tmux", "display-message", "-p", "-t", "=pgu-ops:0.0", "#{pane_pid}"]
+    assert runner.calls[3] == ["tmux", "display-message", "-p", "-t", "=pgu-ops:0.0", "#{pane_current_command}"]
+    assert ["tmux", "set-option", "-t", "=pgu-ops:", "mouse", "on"] in runner.calls
+    assert ["tmux", "set-option", "-t", "=pgu-ops:", "history-limit", "200000"] in runner.calls
+    assert ["tmux", "attach", "-t", "=pgu-ops:"] in runner.calls
 
 def test_tmux_new_session_names_window_for_every_role() -> None:
     config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})

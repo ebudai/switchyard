@@ -48,6 +48,7 @@ import tempfile
 import time
 from pathlib import Path
 from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
+from tmux_target_fakes import plain_tmux_target  # noqa: E402 - SYRD-832: the stand-in keys sessions by plain name
 isolate_tmux_bus()  # SYRD-814: the tmux servers it starts get a user bus of their own, never the invoker's
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -143,12 +144,12 @@ def scenario(root: Path, work: Path) -> dict:
             if args[:1] != ["tmux"]:
                 raise AssertionError(f"refused: {args}")
             if args[1] == "has-session":
-                return subprocess.CompletedProcess(args, 0 if args[3] in self.live else 1, "", "")
+                return subprocess.CompletedProcess(args, 0 if plain_tmux_target(args[3]) in self.live else 1, "", "")
             if args[1] == "new-session":
                 if not (self.dies and "resume" in args[-1] or self.dies and "--conversation" in args[-1]):
                     self.live.add(args[args.index("-s") + 1])
             if args[1] == "kill-session":
-                self.live.discard(args[3])
+                self.live.discard(plain_tmux_target(args[3]))
             return subprocess.CompletedProcess(args, 0, "", "")
 
         def started(self) -> list[str]:

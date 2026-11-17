@@ -26,6 +26,7 @@ import shlex
 import subprocess
 from pathlib import Path
 from typing import Callable
+from .tmux_target import exact_tmux_target
 
 TICKET_BOUNDARY_MARK = (
     "# switchyard-ticket-boundary: closed (SYRD-693): Hermes memory, user profile, memory provider and "
@@ -67,7 +68,7 @@ def open_reason(target: str, *, runner: Callable[..., subprocess.CompletedProces
                 proc: Path = Path("/proc")) -> str:
     """"" when the Hermes in `target` started with its ticket boundary closed; otherwise why it may not be cleared."""
     try:
-        shown = runner(["tmux", "display-message", "-p", "-t", target, "#{pane_pid}\t#{pane_start_command}"],
+        shown = runner(["tmux", "display-message", "-p", "-t", exact_tmux_target(target), "#{pane_pid}\t#{pane_start_command}"],
                        text=True, capture_output=True, timeout=2, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return f"tmux did not say what {target} runs ({exc})"

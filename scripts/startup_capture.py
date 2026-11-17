@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from scripts.ticket_board.tmux_target import exact_tmux_target
 
 #: Lines of the dead pane kept, and the most of the file ever read back.
 CAPTURE_LINES = 40
@@ -70,14 +71,14 @@ def arm_args(session: str, path: Path | None) -> list[str]:
     # Targets as `<session>:`, its current window and pane: a runner that makes every target exact (`=<session>`)
     # leaves that a session, where a bare `=<session>` would be looked up as a window's name (SYRD-767).
     return [
-        ";", "set-window-option", "-t", f"{session}:", "remain-on-exit", "on",
-        ";", "set-hook", "-t", f"{session}:", "pane-died", hook,
+        ";", "set-window-option", "-t", exact_tmux_target(f"{session}:"), "remain-on-exit", "on",
+        ";", "set-hook", "-t", exact_tmux_target(f"{session}:"), "pane-died", hook,
     ]
 
 
 def disarm_args(session: str) -> list[str]:
-    return ["tmux", "set-hook", "-u", "-t", f"{session}:", "pane-died",
-            ";", "set-window-option", "-u", "-t", f"{session}:", "remain-on-exit"]
+    return ["tmux", "set-hook", "-u", "-t", exact_tmux_target(f"{session}:"), "pane-died",
+            ";", "set-window-option", "-u", "-t", exact_tmux_target(f"{session}:"), "remain-on-exit"]
 
 
 #: What `ticket-board-register-runtime` prints when the board refuses a pane, before the pane closes.

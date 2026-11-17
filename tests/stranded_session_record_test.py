@@ -34,6 +34,7 @@ import tarfile
 import tempfile
 import time
 from pathlib import Path
+from tmux_target_fakes import plain_tmux_target  # SYRD-832: the stand-in keys sessions by plain name
 
 ROOT = Path(__file__).resolve().parents[1]
 BEFORE = "a025c35befb42bbff0b2b17e3f67888f46996daa"  # main before SYRD-569
@@ -107,11 +108,11 @@ def scenario(root: Path, work: Path) -> dict:
             if args[:1] != ["tmux"]:
                 raise AssertionError(f"refused: {args}")
             if args[1] == "has-session":
-                return subprocess.CompletedProcess(args, 0 if args[3] in self.live else 1, "", "")
+                return subprocess.CompletedProcess(args, 0 if plain_tmux_target(args[3]) in self.live else 1, "", "")
             if args[1] == "new-session":
                 self.live.add(args[args.index("-s") + 1])
             if args[1] == "kill-session":
-                self.live.discard(args[3])
+                self.live.discard(plain_tmux_target(args[3]))
             return subprocess.CompletedProcess(args, 0, "", "")
 
         def started(self) -> list[str]:

@@ -214,7 +214,7 @@ def test_notification_probes_follow_exact_installed_role_map() -> None:
     assert notify_listener.tmux_target_exists("syrd-app:0.0", runner=runner) is True
     assert backend.calls == [[
         "sudo", "-n", "-u", "syrd-app", "/usr/bin/tmux",
-        "has-session", "-t", "syrd-app:0.0",
+        "has-session", "-t", "=syrd-app:0.0",
     ]]
 
 
@@ -358,7 +358,7 @@ def test_directorctl_capture_uses_role_map_and_refuses_foreign_target() -> None:
         assert mapped.returncode == 0, mapped.stderr
         assert mapped.stdout.strip() == "mapped pane"
         assert log.read_text(encoding="utf-8").splitlines() == [
-            "sudo:-n -u custom-app tmux capture-pane -p -J -t syrd-app:0.0"
+            "sudo:-n -u custom-app tmux capture-pane -p -J -t =syrd-app:0.0"
         ]
 
         before = log.read_text(encoding="utf-8")

@@ -1087,7 +1087,7 @@ def test_the_upgrade_then_launch_sequence_keeps_the_same_worker_processes() -> N
         f"main and ops are presented as they are: {launch['kept']}",
     )
     check(
-        launch["kills"] == [f"{PROJECT}-director"],
+        launch["kills"] == [f"={PROJECT}-director:"],  # SYRD-832: the exact session, never a prefix
         "and only the role that is genuinely stale is ended, so SYRD-191's rule "
         f"that a missing record is stale is untouched: {launch['kills']}",
     )

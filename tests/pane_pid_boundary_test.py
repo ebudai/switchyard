@@ -56,31 +56,32 @@ DISPATCH = {}
 #: The production modules that read `launcher.pane_pid_for_role`, and how often (measured on the baseline).
 READERS = {'live_role_runtime': 2, 'role_identity_cutover': 3, 'tmux_session_argv': 1}
 #: The BASELINE's own behaviour for the cases below (`gold409.py`, run on the baseline launcher under the guard).
+#: SYRD-832: every -t is now the exact form the product builds (`=p409-worker:0.0`); nothing else changed.
 GOLDEN = {
-    'a pid': {'answer': 4242, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', 'p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
-    'surrounding whitespace': {'answer': 17, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', 'p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
-    'exit 1': {'answer': 0, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', 'p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
-    'exit 255': {'answer': 0, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', 'p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
-    'a signal exit': {'answer': 0, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', 'p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
-    'empty output': {'answer': 0, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', 'p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
-    'malformed output': {'answer': 0, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', 'p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
-    'two numbers': {'answer': 0, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', 'p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
-    'no output at all': {'answer': 0, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', 'p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
-    'bytes output': {'answer': 0, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', 'p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
-    'an int output': {'answer': 42, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', 'p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
-    'a negative value': {'answer': -5, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', 'p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
-    'zero': {'answer': 0, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', 'p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
-    'a plus sign': {'answer': 7, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', 'p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
-    'an underscore': {'answer': 1000, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', 'p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
-    'a unicode digit': {'answer': 3, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', 'p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
-    'a float': {'answer': 0, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', 'p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
-    'a target with spaces': {'answer': 8, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', 'p 409:main.1', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
-    'separator controls around it': {'answer': 42, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', 'p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
-    'output that cannot be read as text': {'answer': {'raised': 'RuntimeError', 'message': 'this output has no text'}, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', 'p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
-    'the runner raises OSError': {'answer': {'raised': 'OSError', 'message': 'no such file'}, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', 'p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
-    'the runner raises FileNotFoundError': {'answer': {'raised': 'FileNotFoundError', 'message': 'not installed'}, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', 'p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
-    'the runner raises ValueError': {'answer': {'raised': 'ValueError', 'message': 'bad argument'}, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', 'p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
-    'argv': ['tmux', 'display-message', '-p', '-t', 'p409-worker:0.0', '#{pane_pid}'],
+    'a pid': {'answer': 4242, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', '=p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
+    'surrounding whitespace': {'answer': 17, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', '=p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
+    'exit 1': {'answer': 0, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', '=p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
+    'exit 255': {'answer': 0, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', '=p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
+    'a signal exit': {'answer': 0, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', '=p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
+    'empty output': {'answer': 0, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', '=p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
+    'malformed output': {'answer': 0, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', '=p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
+    'two numbers': {'answer': 0, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', '=p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
+    'no output at all': {'answer': 0, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', '=p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
+    'bytes output': {'answer': 0, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', '=p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
+    'an int output': {'answer': 42, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', '=p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
+    'a negative value': {'answer': -5, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', '=p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
+    'zero': {'answer': 0, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', '=p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
+    'a plus sign': {'answer': 7, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', '=p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
+    'an underscore': {'answer': 1000, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', '=p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
+    'a unicode digit': {'answer': 3, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', '=p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
+    'a float': {'answer': 0, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', '=p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
+    'a target with spaces': {'answer': 8, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', '=p 409:main.1', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
+    'separator controls around it': {'answer': 42, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', '=p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
+    'output that cannot be read as text': {'answer': {'raised': 'RuntimeError', 'message': 'this output has no text'}, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', '=p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
+    'the runner raises OSError': {'answer': {'raised': 'OSError', 'message': 'no such file'}, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', '=p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
+    'the runner raises FileNotFoundError': {'answer': {'raised': 'FileNotFoundError', 'message': 'not installed'}, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', '=p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
+    'the runner raises ValueError': {'answer': {'raised': 'ValueError', 'message': 'bad argument'}, 'calls': [['tmux_pane_pid_args', 'ROLE'], ['runner', ['tmux', 'display-message', '-p', '-t', '=p409-worker:0.0', '#{pane_pid}'], {'stderr': 'DEVNULL', 'stdout': 'PIPE', 'text': True}]]},
+    'argv': ['tmux', 'display-message', '-p', '-t', '=p409-worker:0.0', '#{pane_pid}'],
 }
 REACHED: set[str] = set()
 
@@ -241,7 +242,8 @@ def test_the_guard_itself_refuses_a_spawn_a_signal_a_lookup_and_a_connection() -
 def test_the_module_loads_nothing_of_switchyards_at_import() -> None:
     result = python("import sys, scripts.pane_pid as m; "
                     "print(sorted(n for n in sys.modules if n.startswith('scripts.') and n != m.__name__))")
-    check(result.returncode == 0 and result.stdout.strip() == "[]",
+    # SYRD-832: tmux_target (a stdlib-only leaf that names the pane exactly) and its package are the one exception.
+    check(result.returncode == 0 and result.stdout.strip() == "['scripts.ticket_board', 'scripts.ticket_board.tmux_target']",
           f"it imports on its own and loads nothing else of Switchyard's: {result.stdout}{result.stderr[-400:]}")
 
 
@@ -279,7 +281,9 @@ def test_the_seam_reads_through_the_launcher_and_nothing_bound() -> None:
     check([ast.unparse(h.type) for h in ast.walk(pid) if isinstance(h, ast.ExceptHandler)] == ["ValueError"], "only a ValueError is answered by 0")
     top = [ast.unparse(n) for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
     tc = [ast.unparse(n) for n in tree.body if isinstance(n, ast.If)]
-    check(top == ["from __future__ import annotations", "import subprocess", "from typing import TYPE_CHECKING, Any, Callable"]
+    # SYRD-832: tmux_target is a stdlib-only leaf that names the pane exactly; it is the one Switchyard import allowed.
+    check(top == ["from __future__ import annotations", "import subprocess", "from typing import TYPE_CHECKING, Any, Callable",
+                  "from scripts.ticket_board.tmux_target import exact_tmux_target"]
           and tc == ["if TYPE_CHECKING:\n    from scripts.team_launcher import RoleConfig"],
           f"only the standard library at the top, and the annotation's type under TYPE_CHECKING: {top} {tc}")
     check([n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef, ast.Assign))] == list(MOVED), "the two in the launcher's order, and nothing else")

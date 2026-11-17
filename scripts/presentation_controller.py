@@ -97,6 +97,7 @@ from scripts.presentation_window_visibility import (
     external_presentation_clients,
     unmapped_presentation_message,
 )
+from scripts.ticket_board.tmux_target import exact_tmux_target
 
 
 def _exact_tmux_runner(
@@ -597,13 +598,13 @@ def _proxy_attached(
     """
     pane = _exact_tmux_target(f"{display_session_name(config.project, slot)}:0.0")
     dead = runner(
-        ["tmux", "display-message", "-p", "-t", pane, "#{pane_dead}"],
+        ["tmux", "display-message", "-p", "-t", exact_tmux_target(pane), "#{pane_dead}"],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
     )
     if dead.returncode != 0 or str(getattr(dead, "stdout", "") or "").strip() != "0":
         return False
     tty = runner(
-        ["tmux", "display-message", "-p", "-t", pane, "#{pane_tty}"],
+        ["tmux", "display-message", "-p", "-t", exact_tmux_target(pane), "#{pane_tty}"],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
     )
     pane_tty = str(getattr(tty, "stdout", "") or "").strip()

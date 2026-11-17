@@ -45,6 +45,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import host_state_guard  # noqa: E402  - before any production module: no host state (SYRD-818)
+from tmux_target_fakes import plain_tmux_target  # noqa: E402 - SYRD-832: the stand-in keys sessions by plain name
 
 host_state_guard.install()
 # A role's git template comes from the tenant-control tree: the run's own, never this host's (SYRD-818).
@@ -163,7 +164,7 @@ def main() -> int:
                 if args[:1] != ["tmux"] or args[1] in ("send-keys", "paste-buffer", "load-buffer", "set-buffer"):
                     raise AssertionError(f"refused: {args}")
                 if args[1] == "has-session":
-                    return subprocess.CompletedProcess(args, 0 if args[3] in self.live else 1, "", "")
+                    return subprocess.CompletedProcess(args, 0 if plain_tmux_target(args[3]) in self.live else 1, "", "")
                 if args[1] == "new-session":
                     self.live.add(args[args.index("-s") + 1])
                 return subprocess.CompletedProcess(args, 0, "", "")

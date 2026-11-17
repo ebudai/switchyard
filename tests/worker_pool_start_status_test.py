@@ -36,6 +36,7 @@ from scripts import team_launcher, worker_pool  # noqa: E402
 from scripts.ticket_board import board_skill  # noqa: E402
 
 import worker_pool_lifecycle_test as lifecycle  # noqa: E402
+from tmux_target_fakes import plain_tmux_target  # noqa: E402 - SYRD-832: the stand-in keys sessions by plain name
 
 PROJECT = lifecycle.PROJECT
 POOL = lifecycle.POOL
@@ -79,11 +80,11 @@ class Host:
     def runner(self, args, **_kwargs):
         command = [str(part) for part in args]
         if "has-session" in command:
-            session = command[command.index("-t") + 1].lstrip("=") if "-t" in command else ""
+            session = plain_tmux_target(command[command.index("-t") + 1]) if "-t" in command else ""
             return subprocess.CompletedProcess(command, 0 if session in self.running else 1)
         if "kill-session" in command:
             self.killed.append(command)
-            session = command[command.index("-t") + 1].lstrip("=")
+            session = plain_tmux_target(command[command.index("-t") + 1])
             self.running.discard(session)
             return subprocess.CompletedProcess(command, 0)
         if command[-2:-1] == ["-c"] and command[-1].startswith("command -v "):
@@ -95,7 +96,7 @@ class Host:
         if "display-message" in command:
             # A running session shows its runtime. With no pane pid to walk, the
             # launcher's live-worker check reads the pane's current command.
-            session = command[command.index("-t") + 1].lstrip("=").split(":", 1)[0]
+            session = plain_tmux_target(command[command.index("-t") + 1]).split(":", 1)[0]
             shows = command[-1] == "#{pane_current_command}" and session in self.running
             return subprocess.CompletedProcess(command, 0 if shows else 1, stdout="hermes\n" if shows else "")
         # Anything else is the pane start itself, and a start that worked

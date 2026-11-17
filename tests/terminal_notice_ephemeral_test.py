@@ -45,6 +45,8 @@ import threading
 import time
 from pathlib import Path
 
+from tmux_target_fakes import plain_tmux_target  # SYRD-832: fake panes keyed by plain target
+
 ROOT = Path(__file__).resolve().parents[1]
 #: Main's commit this ticket is cut from: the before-run's tree.
 BEFORE = "6d96bacb790f12b9a887e946ba659ee24404e736"
@@ -126,7 +128,7 @@ def scenario(root: Path) -> dict:
             store.write(target, "idle", source="hermes.post_llm_call", now=time.time() - 120)
 
         def tmux(argv, **_kwargs):
-            target = argv[argv.index("-t") + 1] if "-t" in argv else ""
+            target = plain_tmux_target(argv[argv.index("-t") + 1]) if "-t" in argv else ""
             if target in gone:
                 raise subprocess.CalledProcessError(1, argv, "", f"can't find pane: {target}")
             pane = panes.get(target)

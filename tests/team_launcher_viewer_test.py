@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 import live_boundary; live_boundary.isolate(); import host_state_guard; host_state_guard.install()  # noqa: E402,E702 - SYRD-627 (live-home pane stores), SYRD-818 (no host state), within the line budget
-from team_launcher_test_helpers import *; from provider_store_fixture import owned_record, session_line, transcript_for  # noqa: E702 - SYRD-638 (a session as its provider files it), within the line budget
+from team_launcher_test_helpers import *; from provider_store_fixture import owned_record, session_line, transcript_for; from tmux_target_fakes import plain_tmux_target  # noqa: E702 - SYRD-638 (a session as its provider files it), SYRD-832 (stand-ins key sessions by plain name), within the line budget
 
 def test_viewer_session_argument_is_required_and_has_no_global_default() -> None:
     signature = inspect.signature(team_launcher.launch_tmux_viewer_session)
@@ -32,7 +32,7 @@ class OwnerScopedTmuxRunner(FakeRunner):
     def _target_session(args: list[str]) -> str:
         if "-t" not in args:
             return ""
-        target = args[args.index("-t") + 1]
+        target = plain_tmux_target(args[args.index("-t") + 1])
         return target.split(":", 1)[0].split(".", 1)[0]
 
     def __call__(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -71,7 +71,7 @@ class OwnerScopedTmuxRunner(FakeRunner):
             return subprocess.CompletedProcess(args, 0)
         if command == "new-session":
             nested = shlex.split(str(inner[-1]))
-            nested_target = nested[nested.index("-t") + 1]
+            nested_target = plain_tmux_target(nested[nested.index("-t") + 1])
             self.nested_attach_targets.append(nested_target)
             if nested_target not in sessions:
                 return subprocess.CompletedProcess(args, 1)
@@ -79,7 +79,7 @@ class OwnerScopedTmuxRunner(FakeRunner):
             return subprocess.CompletedProcess(args, 0)
         if command == "split-window":
             nested = shlex.split(str(inner[-1]))
-            nested_target = nested[nested.index("-t") + 1]
+            nested_target = plain_tmux_target(nested[nested.index("-t") + 1])
             self.nested_attach_targets.append(nested_target)
             if target_session not in sessions or nested_target not in sessions:
                 return subprocess.CompletedProcess(args, 1)
@@ -189,24 +189,24 @@ def test_viewer_layout_starts_role_sessions_and_additive_viewer() -> None:
         if call[:2] == ["tmux", "new-session"] and call[call.index("-s") + 1] == "porter-viewer"
     ]
     assert len(viewer_new_sessions) == 1
-    assert "env TMUX= tmux attach -t porter-designer" in viewer_new_sessions[0][-1]
+    assert "env TMUX= tmux attach -t =porter-designer:" in viewer_new_sessions[0][-1]
     viewer_splits = [call for call in runner.calls if call[:2] == ["tmux", "split-window"]]
     assert len(viewer_splits) == 5
     for session in role_sessions:
-        assert ["tmux", "set-option", "-t", session, "mouse", "on"] in runner.calls
-        assert ["tmux", "set-option", "-t", session, "history-limit", "200000"] in runner.calls
-        assert ["tmux", "set-option", "-t", session, "status", "off"] in runner.calls
-        assert ["tmux", "set-window-option", "-t", f"{session}:0", "pane-border-status", "off"] in runner.calls
-    assert ["tmux", "set-option", "-t", "porter-viewer", "mouse", "on"] in runner.calls
-    assert ["tmux", "set-option", "-t", "porter-viewer", "history-limit", "200000"] in runner.calls
-    assert ["tmux", "set-option", "-t", "porter-viewer", "status", "on"] in runner.calls
-    assert ["tmux", "set-option", "-t", "porter-viewer", "set-titles", "on"] in runner.calls
-    assert ["tmux", "set-option", "-t", "porter-viewer", "set-titles-string", "porter"] in runner.calls
-    assert ["tmux", "set-option", "-t", "porter-viewer", "prefix", "C-a"] in runner.calls
-    assert ["tmux", "set-window-option", "-t", "porter-viewer:0", "pane-border-status", "top"] in runner.calls
-    assert ["tmux", "set-window-option", "-t", "porter-viewer:0", "pane-border-format", " #{@role} "] in runner.calls
+        assert ["tmux", "set-option", "-t", f"={session}:", "mouse", "on"] in runner.calls
+        assert ["tmux", "set-option", "-t", f"={session}:", "history-limit", "200000"] in runner.calls
+        assert ["tmux", "set-option", "-t", f"={session}:", "status", "off"] in runner.calls
+        assert ["tmux", "set-window-option", "-t", f"={session}:0", "pane-border-status", "off"] in runner.calls
+    assert ["tmux", "set-option", "-t", "=porter-viewer:", "mouse", "on"] in runner.calls
+    assert ["tmux", "set-option", "-t", "=porter-viewer:", "history-limit", "200000"] in runner.calls
+    assert ["tmux", "set-option", "-t", "=porter-viewer:", "status", "on"] in runner.calls
+    assert ["tmux", "set-option", "-t", "=porter-viewer:", "set-titles", "on"] in runner.calls
+    assert ["tmux", "set-option", "-t", "=porter-viewer:", "set-titles-string", "porter"] in runner.calls
+    assert ["tmux", "set-option", "-t", "=porter-viewer:", "prefix", "C-a"] in runner.calls
+    assert ["tmux", "set-window-option", "-t", "=porter-viewer:0", "pane-border-status", "top"] in runner.calls
+    assert ["tmux", "set-window-option", "-t", "=porter-viewer:0", "pane-border-format", " #{@role} "] in runner.calls
     assert [call for call in runner.calls if call[:4] == ["tmux", "set-option", "-p", "-t"]] == [
-        ["tmux", "set-option", "-p", "-t", f"porter-viewer.{index}", "@role", role]
+        ["tmux", "set-option", "-p", "-t", f"=porter-viewer:.{index}", "@role", role]
         for index, role in enumerate(["designer", "director", "audit", "ops", "app", "main"])
     ]
     assert not any(call[:2] == ["env", "QT_QPA_PLATFORM=wayland"] for call in runner.calls)
@@ -260,11 +260,11 @@ def test_project_scoped_viewer_sessions_allow_two_projects_and_same_project_repl
         )
 
     kill_calls = [call for call in runner.calls if call[:2] == ["tmux", "kill-session"]]
-    assert [call[-1] for call in kill_calls] == ["porter-viewer"]
+    assert [call[-1] for call in kill_calls] == ["=porter-viewer:"]
     assert "porter-viewer" in runner.existing_sessions
     assert "otto-viewer" in runner.existing_sessions
-    assert ["tmux", "set-option", "-t", "porter-viewer", "set-titles-string", "porter"] in runner.calls
-    assert ["tmux", "set-option", "-t", "otto-viewer", "set-titles-string", "otto"] in runner.calls
+    assert ["tmux", "set-option", "-t", "=porter-viewer:", "set-titles-string", "porter"] in runner.calls
+    assert ["tmux", "set-option", "-t", "=otto-viewer:", "set-titles-string", "otto"] in runner.calls
 
 def test_viewer_window_title_uses_project_name_and_survives_attach_cycle_options() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-viewer-title.") as tmp:
@@ -291,8 +291,8 @@ def test_viewer_window_title_uses_project_name_and_survives_attach_cycle_options
             == 0
         )
 
-    assert ["tmux", "set-option", "-t", "otto-viewer", "set-titles", "on"] in runner.calls
-    assert ["tmux", "set-option", "-t", "otto-viewer", "set-titles-string", "Otto Scheduler"] in runner.calls
+    assert ["tmux", "set-option", "-t", "=otto-viewer:", "set-titles", "on"] in runner.calls
+    assert ["tmux", "set-option", "-t", "=otto-viewer:", "set-titles-string", "Otto Scheduler"] in runner.calls
 
 def test_project_scoped_viewer_ignores_legacy_global_viewer_session() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-viewer-legacy.") as tmp:
@@ -318,7 +318,7 @@ def test_project_scoped_viewer_ignores_legacy_global_viewer_session() -> None:
 
     assert "viewer" in runner.existing_sessions
     assert "porter-viewer" in runner.existing_sessions
-    assert ["tmux", "kill-session", "-t", "viewer"] not in runner.calls
+    assert ["tmux", "kill-session", "-t", "=viewer:"] not in runner.calls
 
 def test_viewer_visible_start_verifies_cli_before_reporting_success() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-viewer-visible.") as tmp:
@@ -345,8 +345,8 @@ def test_viewer_visible_start_verifies_cli_before_reporting_success() -> None:
         assert state["state"] == "idle"
         assert state["source"] == "team_launcher.start"
         assert runner.calls[1][:5] == ["tmux", "new-session", "-d", "-s", "porter-app"]
-        assert runner.calls[2] == ["tmux", "display-message", "-p", "-t", "porter-app:0.0", "#{pane_pid}"]
-        assert runner.calls[3] == ["tmux", "display-message", "-p", "-t", "porter-app:0.0", "#{pane_current_command}"]
+        assert runner.calls[2] == ["tmux", "display-message", "-p", "-t", "=porter-app:0.0", "#{pane_pid}"]
+        assert runner.calls[3] == ["tmux", "display-message", "-p", "-t", "=porter-app:0.0", "#{pane_current_command}"]
         assert "did not leave a live" not in stderr.getvalue()
 
 def test_viewer_visible_start_fails_when_cli_exits_immediately() -> None:
@@ -390,7 +390,7 @@ def test_viewer_visible_start_fails_when_cli_exits_immediately() -> None:
         assert not (pane_state_dir / pane_state_file_name(role.target)).exists()
 
     assert any(call[:5] == ["tmux", "new-session", "-d", "-s", "pgu-app"] for call in runner.calls)
-    assert ["tmux", "has-session", "-t", "pgu-app"] in runner.calls
+    assert ["tmux", "has-session", "-t", "=pgu-app:"] in runner.calls
     assert "role app did not leave a live pgu-app session" in stderr.getvalue()
 
 def test_viewer_pane_death_does_not_change_role_targets_in_real_tmux() -> None:

@@ -42,6 +42,8 @@ import threading
 import time
 from pathlib import Path
 
+from tmux_target_fakes import plain_tmux_target  # SYRD-832: fake panes keyed by plain target
+
 ROOT = Path(__file__).resolve().parents[1]
 BEFORE = "0b3e2c66"  # main before SYRD-583
 PANE_ENV_PREFIXES = ("TICKET_BOARD_", "PGU_TICKET_BOARD_", "DIRECTORCTL")
@@ -216,7 +218,7 @@ def scenario(root: Path, full: bool) -> dict:
             raise AssertionError("the provider did not start the job")
 
         def tmux(argv, **_kwargs):
-            target = argv[argv.index("-t") + 1] if "-t" in argv else ""
+            target = plain_tmux_target(argv[argv.index("-t") + 1]) if "-t" in argv else ""
             if target not in targets.values():
                 raise AssertionError(f"no fake pane for {target!r}: {argv}")
             if argv[:2] == ["tmux", "capture-pane"]:

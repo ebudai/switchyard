@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
+from .tmux_target import exact_tmux_target
 
 
 DEFAULT_BUSY_REQUEUE_SECONDS = 1.0
@@ -597,7 +598,7 @@ class PaneActivityGate:
 
         try:
             proc = self.capture_pane_runner(
-                ["tmux", "capture-pane", "-p", "-J", "-t", target],
+                ["tmux", "capture-pane", "-p", "-J", "-t", exact_tmux_target(target)],
                 check=True,
                 text=True,
                 capture_output=True,
@@ -635,7 +636,7 @@ class PaneActivityGate:
 
         try:
             proc = self.capture_pane_runner(
-                ["tmux", "capture-pane", "-p", "-J", "-t", target],
+                ["tmux", "capture-pane", "-p", "-J", "-t", exact_tmux_target(target)],
                 check=True,
                 text=True,
                 capture_output=True,
@@ -662,7 +663,7 @@ class PaneActivityGate:
         self._open_prompt_by_target.pop(target, None)
         try:
             proc = self.cursor_position_runner(
-                ["tmux", "display-message", "-p", "-t", target, "#{cursor_x} #{cursor_y} #{pane_height}"],
+                ["tmux", "display-message", "-p", "-t", exact_tmux_target(target), "#{cursor_x} #{cursor_y} #{pane_height}"],
                 check=True,
                 text=True,
                 capture_output=True,
@@ -688,7 +689,7 @@ class PaneActivityGate:
 
         try:
             capture = self.capture_pane_runner(
-                ["tmux", "capture-pane", "-p", "-t", target],
+                ["tmux", "capture-pane", "-p", "-t", exact_tmux_target(target)],
                 check=True, text=True, capture_output=True, timeout=2.0,
             )
         except (OSError, subprocess.SubprocessError):
@@ -737,7 +738,7 @@ class PaneActivityGate:
     def _pane_pid(self, target: str) -> int | None:
         try:
             proc = self.pane_pid_runner(
-                ["tmux", "display-message", "-p", "-t", target, "#{pane_pid}"],
+                ["tmux", "display-message", "-p", "-t", exact_tmux_target(target), "#{pane_pid}"],
                 check=True,
                 text=True,
                 capture_output=True,

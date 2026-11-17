@@ -28,6 +28,7 @@ import subprocess
 from typing import Any
 
 from . import pane_composer
+from .tmux_target import exact_tmux_target
 
 #: How long a submitted notice's receipt is watched before it is reported missed.
 RECEIPT_HORIZON_SECONDS = 900.0
@@ -62,10 +63,10 @@ def read_composer(gate: Any, target: str) -> str | None:
     if cursor_runner is None or capture_runner is None:
         return None
     try:
-        cursor = cursor_runner(["tmux", "display-message", "-p", "-t", target, "#{cursor_x} #{cursor_y}"],
+        cursor = cursor_runner(["tmux", "display-message", "-p", "-t", exact_tmux_target(target), "#{cursor_x} #{cursor_y}"],
                                check=True, text=True, capture_output=True, timeout=2.0)
         x, y = (int(part) for part in str(cursor.stdout).split()[:2])
-        capture = capture_runner(["tmux", "capture-pane", "-p", "-t", target],
+        capture = capture_runner(["tmux", "capture-pane", "-p", "-t", exact_tmux_target(target)],
                                  check=True, text=True, capture_output=True, timeout=2.0)
     except (OSError, subprocess.SubprocessError, ValueError):
         return None

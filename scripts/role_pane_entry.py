@@ -41,6 +41,7 @@ from scripts.provider_resume import (
     clear_unverified_resume_for_role,
     prepare_hermes_home_for_role,
 )
+from scripts.ticket_board.tmux_target import exact_tmux_target
 
 if TYPE_CHECKING:
     from scripts.team_launcher import ProjectConfig, RoleConfig
@@ -114,7 +115,7 @@ def tmux_new_session_args(
 
 
 def tmux_attach_args(role: RoleConfig) -> list[str]:
-    return ["tmux", "attach", "-t", role.tmux_session]
+    return ["tmux", "attach", "-t", exact_tmux_target(role.tmux_session)]
 
 
 def desktop_reload_is_safe(role: RoleConfig, pane_state_dir: Path) -> bool:

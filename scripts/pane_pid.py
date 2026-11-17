@@ -20,13 +20,14 @@ from __future__ import annotations
 
 import subprocess
 from typing import TYPE_CHECKING, Any, Callable
+from scripts.ticket_board.tmux_target import exact_tmux_target
 
 if TYPE_CHECKING:
     from scripts.team_launcher import RoleConfig
 
 
 def tmux_pane_pid_args(role: RoleConfig) -> list[str]:
-    return ["tmux", "display-message", "-p", "-t", role.target, "#{pane_pid}"]
+    return ["tmux", "display-message", "-p", "-t", exact_tmux_target(role.target), "#{pane_pid}"]
 
 
 def pane_pid_for_role(

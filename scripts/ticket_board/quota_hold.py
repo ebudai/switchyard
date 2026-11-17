@@ -34,6 +34,7 @@ import subprocess
 from typing import Any
 
 from . import provider_prompt, provider_quota, provider_refusal
+from .tmux_target import exact_tmux_target
 
 GRACE_ENV = "TICKET_BOARD_QUOTA_HOLD_GRACE_SECONDS"
 RECHECK_ENV = "TICKET_BOARD_QUOTA_HOLD_RECHECK_SECONDS"
@@ -66,9 +67,9 @@ def _seconds(name: str, default: float) -> float:
 def _codex_screen(gate: Any, target: str) -> dict[str, Any] | None:
     try:
         cursor = gate.cursor_position_runner(
-            ["tmux", "display-message", "-p", "-t", target, "#{cursor_x} #{cursor_y} #{pane_height}"],
+            ["tmux", "display-message", "-p", "-t", exact_tmux_target(target), "#{cursor_x} #{cursor_y} #{pane_height}"],
             check=True, text=True, capture_output=True, timeout=2.0)
-        capture = gate.capture_pane_runner(["tmux", "capture-pane", "-p", "-t", target],
+        capture = gate.capture_pane_runner(["tmux", "capture-pane", "-p", "-t", exact_tmux_target(target)],
                                            check=True, text=True, capture_output=True, timeout=2.0)
         cursor_y = int(cursor.stdout.split()[1])
     except (OSError, subprocess.SubprocessError, ValueError, IndexError):
@@ -280,7 +281,7 @@ def _dismiss_usage_menus(listener: Any, conn: Any, gate: Any, registrations: dic
         if target is None or presses.get(held["id"], 0) >= MENU_PRESSES or provider_refusal.typing_held(listener, conn, held["role"]):
             continue  # SYRD-756: a paused role's pane is pressed nothing
         try:
-            capture = gate.capture_pane_runner(["tmux", "capture-pane", "-p", "-t", target],
+            capture = gate.capture_pane_runner(["tmux", "capture-pane", "-p", "-t", exact_tmux_target(target)],
                                                check=True, text=True, capture_output=True, timeout=2.0)
         except (OSError, subprocess.SubprocessError):
             continue
@@ -290,7 +291,7 @@ def _dismiss_usage_menus(listener: Any, conn: Any, gate: Any, registrations: dic
         presses[held["id"]] = presses.get(held["id"], 0) + 1
         listener.logger.info("Pressing Esc on %s's usage-limit menu (hold %s): its provider is out of quota",
                              held["role"], held["id"])
-        press(["tmux", "send-keys", "-t", target, "Escape"], check=True, text=True, capture_output=True, timeout=2.0)
+        press(["tmux", "send-keys", "-t", exact_tmux_target(target), "Escape"], check=True, text=True, capture_output=True, timeout=2.0)
 
 
 #: Director notices whose only cause, while a role's provider is held, is that

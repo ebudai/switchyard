@@ -29,6 +29,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from scripts import worker_admission as wa  # noqa: E402
+from tmux_target_fakes import plain_tmux_target  # noqa: E402 - SYRD-832: the stand-in keys sessions by plain name
 
 CHECKS = 0
 ME = pwd.getpwuid(os.getuid()).pw_name
@@ -179,7 +180,7 @@ class Host:
     def __call__(self, args, **kwargs):
         args = list(args)
         if "has-session" in args:
-            session = args[args.index("-t") + 1].lstrip("=")
+            session = plain_tmux_target(args[args.index("-t") + 1])
             if self.vanish_after is not None and any(session.endswith(f"-{role}") for role in self.core):
                 self.vanish_after -= 1
                 if self.vanish_after < 0:
@@ -187,7 +188,7 @@ class Host:
             return subprocess.CompletedProcess(args, 0 if any(session.endswith(f"-{role}") for role in self.live | self.core)
                                                else 1)
         if "kill-session" in args:
-            session = args[args.index("-t") + 1].lstrip("=")
+            session = plain_tmux_target(args[args.index("-t") + 1])
             with self.lock:
                 self.killed.append(session)
                 self.live -= {role for role in self.live if session.endswith(f"-{role}")}

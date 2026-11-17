@@ -166,12 +166,12 @@ def test_start_resumes_recorded_session_when_recreating_missing_pane() -> None:
         assert state["state"] == "idle"
         assert state["source"] == "team_launcher.start"
 
-    assert runner.calls[0] == ["tmux", "has-session", "-t", "pgu-ops"]
+    assert runner.calls[0] == ["tmux", "has-session", "-t", "=pgu-ops:"]
     assert runner.calls[1][:5] == ["tmux", "new-session", "-d", "-s", "pgu-ops"]
     assert f"codex resume {session_id}" in runner.calls[1][-1]
     # resume verified via pane inspection -> no fresh fallback, then attach
-    assert ["tmux", "kill-session", "-t", "pgu-ops"] not in runner.calls
-    assert runner.calls[-1] == ["tmux", "attach", "-t", "pgu-ops"]
+    assert ["tmux", "kill-session", "-t", "=pgu-ops:"] not in runner.calls
+    assert runner.calls[-1] == ["tmux", "attach", "-t", "=pgu-ops:"]
 
 def test_seed_session_dir_from_legacy_sources_copies_valid_records_once() -> None:
     config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
@@ -308,7 +308,7 @@ def test_start_runs_research_detached_before_opening_visible_layout() -> None:
                                                                         config_dir=layout_output.parent)
         assert process_launcher.calls[0]["kwargs"]["start_new_session"] is True
         assert not any(call == konsole_launch_args(layout_output, window_title="pgu") for call in runner.calls)
-        assert ["tmux", "attach", "-t", "pgu-research"] not in runner.calls
+        assert ["tmux", "attach", "-t", "=pgu-research:"] not in runner.calls
 
 def test_plain_shared_checkout_git_runs_as_owner_when_launcher_user_differs() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-owner-git.") as tmp:

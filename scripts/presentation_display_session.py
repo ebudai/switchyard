@@ -16,6 +16,7 @@ from typing import Any, Callable, Mapping
 
 from scripts import team_launcher
 from scripts.presentation_runtime_assignments import _exact_tmux_target
+from scripts.ticket_board.tmux_target import exact_tmux_target
 
 DIRECTOR_ROLE = "director"
 #: The key table a display slot's clients are put in: one that has no bindings,
@@ -387,9 +388,9 @@ def display_slot_terminal_title_commands(
     target = _exact_tmux_target(f"{session}:")
     title = _terminal_title_text(team_launcher.project_window_title(config))
     return (
-        ["tmux", "set-option", "-t", target, "set-titles", "on"],
+        ["tmux", "set-option", "-t", exact_tmux_target(target), "set-titles", "on"],
         [
-            "tmux", "set-option", "-t", target, "set-titles-string",
+            "tmux", "set-option", "-t", exact_tmux_target(target), "set-titles-string",
             f"{title}{SPLIT_TITLE_ESCAPE}{_terminal_title_text(split_title)}",
         ],
     )

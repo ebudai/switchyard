@@ -30,6 +30,7 @@ import hashlib
 import json
 import subprocess
 from typing import Any
+from .tmux_target import exact_tmux_target
 
 #: Codex's own words when it refuses for cybersecurity, as its binary carries them (codex-cli 0.166.0, 2026-11-07).
 CODEX_REFUSAL_LINES = (
@@ -87,11 +88,11 @@ def codex_refusal(rows: list[str], cursor_y: int, history: list[str]) -> dict[st
 def _codex_screen(gate: Any, target: str) -> dict[str, Any] | None:
     try:
         cursor = gate.cursor_position_runner(
-            ["tmux", "display-message", "-p", "-t", target, "#{cursor_x} #{cursor_y} #{pane_height}"],
+            ["tmux", "display-message", "-p", "-t", exact_tmux_target(target), "#{cursor_x} #{cursor_y} #{pane_height}"],
             check=True, text=True, capture_output=True, timeout=2.0)
-        rows = gate.capture_pane_runner(["tmux", "capture-pane", "-p", "-t", target],
+        rows = gate.capture_pane_runner(["tmux", "capture-pane", "-p", "-t", exact_tmux_target(target)],
                                         check=True, text=True, capture_output=True, timeout=2.0).stdout.splitlines()
-        history = gate.capture_pane_runner(["tmux", "capture-pane", "-p", "-J", "-S", "-", "-t", target],
+        history = gate.capture_pane_runner(["tmux", "capture-pane", "-p", "-J", "-S", "-", "-t", exact_tmux_target(target)],
                                            check=True, text=True, capture_output=True, timeout=2.0).stdout.splitlines()
         cursor_y = int(cursor.stdout.split()[1])
     except (OSError, subprocess.SubprocessError, ValueError, IndexError, AttributeError):

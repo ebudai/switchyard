@@ -38,6 +38,8 @@ import threading
 import time
 from pathlib import Path
 
+from tmux_target_fakes import plain_tmux_target  # SYRD-832: fake panes keyed by plain target
+
 ROOT = Path(__file__).resolve().parents[1]
 BEFORE = "d57749b2302b0ae3a2b1a04b7f63cbe8543b5c84"  # main before SYRD-589
 PANE_ENV_PREFIXES = ("TICKET_BOARD_", "PGU_TICKET_BOARD_", "DIRECTORCTL")
@@ -88,7 +90,7 @@ class Pane:
 
 def fake_tmux(panes: dict[str, Pane]):
     def tmux(argv, **_kwargs):
-        target = argv[argv.index("-t") + 1] if "-t" in argv else ""
+        target = plain_tmux_target(argv[argv.index("-t") + 1]) if "-t" in argv else ""
         pane = panes.get(target)
         if pane is None:
             raise subprocess.CalledProcessError(1, argv, "", f"can't find pane: {target}")

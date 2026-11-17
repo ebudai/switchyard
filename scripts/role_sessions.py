@@ -31,6 +31,7 @@ import sys
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
+from scripts.ticket_board.tmux_target import exact_tmux_target
 
 if TYPE_CHECKING:
     from scripts.team_launcher import ProjectConfig, RoleConfig
@@ -55,11 +56,11 @@ def _uses_fresh_session_per_ticket(role: RoleConfig) -> bool:
 
 
 def tmux_has_session_by_name_args(session: str) -> list[str]:
-    return ["tmux", "has-session", "-t", session]
+    return ["tmux", "has-session", "-t", exact_tmux_target(session)]
 
 
 def tmux_kill_session_by_name_args(session: str) -> list[str]:
-    return ["tmux", "kill-session", "-t", session]
+    return ["tmux", "kill-session", "-t", exact_tmux_target(session)]
 
 
 def _disarm_startup_capture(

@@ -43,6 +43,8 @@ import threading
 import time
 from pathlib import Path
 
+from tmux_target_fakes import plain_tmux_target  # SYRD-832: fake panes keyed by plain target
+
 ROOT = Path(__file__).resolve().parents[1]
 BEFORE = "457a84cf"  # main before SYRD-633
 PANE_ENV_PREFIXES = ("TICKET_BOARD_", "PGU_TICKET_BOARD_", "DIRECTORCTL")
@@ -203,7 +205,7 @@ def scenario(root: Path, full: bool) -> dict:
 
         def tmux(argv, **_kwargs):
             tmux_calls.append(list(argv))
-            target = argv[argv.index("-t") + 1] if "-t" in argv else ""
+            target = plain_tmux_target(argv[argv.index("-t") + 1]) if "-t" in argv else ""
             if target not in targets.values():
                 raise AssertionError(f"no fake pane for {target!r}: {argv}")
             if argv[:2] == ["tmux", "capture-pane"]:  # Claude at its empty ready prompt: no question on screen
@@ -654,7 +656,7 @@ def candidate(after: dict) -> None:
           and "left running by a finished turn, started for PGU-627, which is now done (unassigned)" in message
           and f"`kill -TERM -- -{past['vm_pgid']}`" in message and f"never the provider (pid {past['provider']})" in message
           and "Its screen shows its empty ready prompt and no question" in message
-          and "`tmux capture-pane -p -t pgu-app:0.0`" in message and "`directorctl send pgu-app:0.0 <message>`" in message
+          and "`tmux capture-pane -p -t =pgu-app:0.0`" in message and "`directorctl send pgu-app:0.0 <message>`" in message
           and "Nothing was typed into the pane" in message,
           f"past the bound the Director is told once: source, age, notice, child, its ticket, and the safe recovery: {past['told']}")
     check(past["director_sent"] == alerts and [f[:2] for f in past["fate"]] == [["PGU-629", "send"]],

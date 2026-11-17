@@ -256,9 +256,9 @@ def test_launch_project_warns_when_session_exists_but_pane_is_not_live() -> None
     assert not any("attached to running pane for ops" in message for message in messages)
     assert not any("opened a new window attached to running" in message for message in messages)
     assert any("warning: switchyard: session record missing for ops (porter-ops:0.0)" in message for message in messages)
-    assert ["tmux", "has-session", "-t", "porter-ops"] in runner.calls
-    assert ["tmux", "display-message", "-p", "-t", "porter-ops:0.0", "#{pane_pid}"] in runner.calls
-    assert ["tmux", "display-message", "-p", "-t", "porter-ops:0.0", "#{pane_current_command}"] in runner.calls
+    assert ["tmux", "has-session", "-t", "=porter-ops:"] in runner.calls
+    assert ["tmux", "display-message", "-p", "-t", "=porter-ops:0.0", "#{pane_pid}"] in runner.calls
+    assert ["tmux", "display-message", "-p", "-t", "=porter-ops:0.0", "#{pane_current_command}"] in runner.calls
 
 
 def test_running_project_roles_rejects_dead_pane_in_live_tmux_session() -> None:

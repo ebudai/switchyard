@@ -28,6 +28,8 @@ import threading
 import time
 from pathlib import Path
 
+from tmux_target_fakes import plain_tmux_target  # SYRD-832: fake panes keyed by plain target
+
 ROOT = Path(__file__).resolve().parents[1]
 BEFORE = "98ec343f24696c985a08a5eebbbc6114b23e51eb"  # main before SYRD-565
 PANE_ENV_PREFIXES = ("TICKET_BOARD_", "PGU_TICKET_BOARD_", "DIRECTORCTL")
@@ -87,7 +89,7 @@ def scenario(root: Path) -> dict:
             store.write(target, "idle", source="claude.Stop", now=time.time() - 120)
 
         def tmux(argv, **_kwargs):
-            target = argv[argv.index("-t") + 1] if "-t" in argv else ""
+            target = plain_tmux_target(argv[argv.index("-t") + 1]) if "-t" in argv else ""
             pane = panes.get(target)
             if pane is None:
                 raise AssertionError(f"no fake pane for {target!r}: {argv}")
@@ -487,7 +489,7 @@ def main() -> int:
           f"the composer is read as it holds text, never a placeholder or residue: {reads}")
     # The shipped submit, once, for real: Enter on the target, and nothing typed.
     pressed_for_real = real_directorctl_submit()
-    check(pressed_for_real == ["send-keys -t pgu-ops:0.0 Enter"],
+    check(pressed_for_real == ["send-keys -t =pgu-ops:0.0 Enter"],
           f"directorctl submit presses Enter on the target and types nothing: {pressed_for_real}")
     # Grants and copy parity last: they must not stand in for a behaviour check under mutation.
     if os.environ.get("SYRD565_MUTATION_SKIP_COPY_PARITY") != "1":

@@ -55,6 +55,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from scripts import director_rebind as dr
+from scripts.ticket_board.tmux_target import exact_tmux_target
 
 #: Runtimes whose fresh interactive session takes its first instruction as a command-line argument.
 FIRST_INSTRUCTION = {"claude": lambda cli, text: [cli, text], "codex": lambda cli, text: [cli, text]}
@@ -370,7 +371,7 @@ def run(config: Any, p: dict, *, operator: str, reason: str, admin: Any, get: Ca
             if state in TERMINAL:
                 outcome, by = state, "board"
                 break
-            if tmux_runner(["tmux", "has-session", "-t", session], stdout=subprocess.DEVNULL,
+            if tmux_runner(["tmux", "has-session", "-t", exact_tmux_target(session)], stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL).returncode != 0:
                 outcome, by = "aborted", "session_ended"
                 break
@@ -383,7 +384,7 @@ def run(config: Any, p: dict, *, operator: str, reason: str, admin: Any, get: Ca
     finally:
         if previous is not None:
             signal.signal(signal.SIGTERM, previous)
-        stopped = tmux_runner(["tmux", "kill-session", "-t", session], stdout=subprocess.DEVNULL,
+        stopped = tmux_runner(["tmux", "kill-session", "-t", exact_tmux_target(session)], stdout=subprocess.DEVNULL,
                               stderr=subprocess.DEVNULL).returncode
         # The whole scratch goes with the role, as the project account: the credential copy, the packet copy and
         # the token (already gone from disk if the pane started).

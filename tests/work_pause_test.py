@@ -34,6 +34,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from tmux_target_fakes import plain_tmux_target  # SYRD-832: fake panes keyed by plain target
+
 ROOT = Path(__file__).resolve().parents[1]
 CHECKS = 0
 FIXTURE = json.loads((ROOT / "tests/fixtures/syrd756_interrupt_screens.json").read_text())
@@ -88,7 +90,7 @@ def fake_tmux(panes: dict[str, Pane]):
 
     def tmux(argv, **_kwargs):
         argv = list(argv)
-        target = argv[argv.index("-t") + 1] if "-t" in argv else ""
+        target = plain_tmux_target(argv[argv.index("-t") + 1]) if "-t" in argv else ""
         pane = by_target.get(target)
         if pane is None:
             raise subprocess.CalledProcessError(1, argv, "", f"can't find pane: {target}")

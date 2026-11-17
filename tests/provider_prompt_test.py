@@ -36,6 +36,8 @@ import live_boundary  # noqa: E402
 
 live_boundary.isolate()  # SYRD-627: no live home, pane store or runtime directory, here or in a child
 
+from tmux_target_fakes import plain_tmux_target  # SYRD-832: fake panes keyed by plain target
+
 ROOT = Path(__file__).resolve().parents[1]
 BEFORE = "774d365fd99998359a55c81136b6b12b9b17c2b3"  # main before SYRD-566
 PANE_ENV_PREFIXES = ("TICKET_BOARD_", "PGU_TICKET_BOARD_", "DIRECTORCTL")
@@ -68,7 +70,7 @@ def fake_tmux(screens: dict[str, dict], typed: list | None = None):
 
     def tmux(argv, **_kwargs):
         argv = [str(part) for part in argv]
-        target = argv[argv.index("-t") + 1] if "-t" in argv else ""
+        target = plain_tmux_target(argv[argv.index("-t") + 1]) if "-t" in argv else ""
         screen = screens.get(target)
         if screen is None:
             raise AssertionError(f"no fake pane for {target!r}: {argv}")

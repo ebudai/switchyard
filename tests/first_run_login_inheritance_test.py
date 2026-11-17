@@ -44,6 +44,7 @@ if str(ROOT / "tests") not in sys.path:
     sys.path.insert(0, str(ROOT / "tests"))
 
 from owned_home import contained  # noqa: E402
+from tmux_target_fakes import plain_tmux_target  # noqa: E402
 from team_launcher_test_helpers import (  # noqa: E402
     FirstRunAuthRunner,
     _mark_first_run_setup_complete,
@@ -514,7 +515,7 @@ class SessionRunner:
         self.calls.append(command)
         if "kill-session" in command:
             session = command[-1]
-            if session in self.unkillable:
+            if plain_tmux_target(session) in self.unkillable:
                 return subprocess.CompletedProcess(command, 1, stdout="", stderr="no such session\n")
             self.killed.append(session)
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
@@ -726,7 +727,7 @@ def test_a_runtime_started_against_older_state_is_restarted_not_presented() -> N
     check(kept == [], f"not one of them is presented as it is: {[r.role for r in kept]}")
     check(unreconciled == set(), f"and each was actually ended: {unreconciled}")
     check(
-        sorted(runner.killed) == sorted(f"otto-{role}" for role, _cli in UAT_ROLES),
+        sorted(runner.killed) == sorted(f"=otto-{role}:" for role, _cli in UAT_ROLES),
         f"every stale session ends so the launch starts it again: {runner.killed}",
     )
     check(
@@ -1005,7 +1006,7 @@ def test_an_ordinary_launch_reconciles_running_roles_end_to_end() -> None:
             if "display-message" in command:
                 target = command[command.index("-t") + 1] if "-t" in command else ""
                 return subprocess.CompletedProcess(
-                    command, 0, stdout=f"{live.get(target, 'fish')}\n", stderr=""
+                    command, 0, stdout=f"{live.get(plain_tmux_target(target), 'fish')}\n", stderr=""
                 )
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
@@ -1024,7 +1025,7 @@ def test_an_ordinary_launch_reconciles_running_roles_end_to_end() -> None:
         check(result == 0, f"the launch completes: {result} {said}")
         check(
             any(
-                "kill-session" in " ".join(command) and role.tmux_session in command
+                "kill-session" in " ".join(command) and f"={role.tmux_session}:" in command
                 for command in calls
                 for role in config.roles
             ),
@@ -1058,7 +1059,7 @@ def test_an_ordinary_launch_reconciles_running_roles_end_to_end() -> None:
         check(result == 0, f"the second launch completes too: {result}")
         check(
             not any(
-                "kill-session" in " ".join(command) and role.tmux_session in command
+                "kill-session" in " ".join(command) and f"={role.tmux_session}:" in command
                 for command in calls
                 for role in config.roles
             ),

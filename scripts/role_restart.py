@@ -211,6 +211,29 @@ def _me() -> int:
     return os.getpid()
 
 
+#: SYRD-833: Codex's code mode runs its one tool, JavaScript in a V8 isolate, in this helper (measured, Codex 0.166:
+#: `/usr/lib/openai-codex/bin/codex-code-mode-host`, comm `codex-code-mode`). The isolate's shell commands run as
+#: children of the Codex process itself, so the helper is this command's sibling, never its ancestor -- and it is that
+#: CLI's own, ending with it.
+CODEX_CODE_MODE_HOST = "codex-code-mode-host"
+
+
+def _argv0(pid: int, proc_root: Path) -> str:
+    """The program `pid` runs, by its command line's first word, without its directory; '' when unreadable."""
+    try:
+        return os.path.basename((proc_root / str(pid) / "cmdline").read_bytes().split(b"\0", 1)[0].decode())
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def _codex_code_mode_host(pid: int, table: dict[int, tuple[int, int, str]], mine: set[int], proc_root: Path) -> bool:
+    """Whether `pid` is Codex's own code-mode host, started by the Codex process that runs this command: only that
+    program, and only as a child of one of this command's own ancestors that is Codex. Its children are not it."""
+    parent = table[pid][0] if pid in table else 0
+    return (parent in mine and _argv0(pid, proc_root) == CODEX_CODE_MODE_HOST
+            and "codex" in (_name(parent, proc_root), _argv0(parent, proc_root)))
+
+
 def other_work(pane_pid: int, proc_root: Path) -> list[int]:
     """The pane's live processes that are neither this command nor what runs it (its ancestors -- the pane's CLI and
     the shell its tool started) nor this command's own children: work the pane's end would kill.
@@ -219,7 +242,10 @@ def other_work(pane_pid: int, proc_root: Path) -> list[int]:
     `tail` of `switchyard restart-role ... | tail`, which ends with it, before the turn does (SYRD-801: a Claude Code
     Director's restart of itself named its own pipeline as work besides it). Its session is its own when the session's
     leader is one of this command's ancestors below the pane's root; a command in the pane's own session -- typed at a
-    shell that is the pane -- shares it with the pane's other work, and is given nothing for it."""
+    shell that is the pane -- shares it with the pane's other work, and is given nothing for it.
+
+    Nor Codex's code-mode host, when the Codex that runs this command started it (SYRD-833: a Codex Director's restart
+    of itself named its own `codex-code-mode` as work besides it): the CLI's own helper, not a job of the pane's."""
     table = _table(proc_root)
     mine, pid = set(), _me()
     while pid in table and pid not in mine:
@@ -230,7 +256,8 @@ def other_work(pane_pid: int, proc_root: Path) -> list[int]:
     session = _session(_me(), proc_root)
     line = {p for p in tree if _session(p, proc_root) == session} \
         if session in mine and session in tree and session != pane_pid else set()
-    return sorted(p for p in tree if p not in mine and p not in below and p not in line)
+    return sorted(p for p in tree if p not in mine and p not in below and p not in line
+                  and not _codex_code_mode_host(p, table, mine, proc_root))
 
 
 def _name(pid: int, proc_root: Path) -> str:

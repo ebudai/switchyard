@@ -373,7 +373,8 @@ These reshape the running team rather than a ticket, so they belong to you:
   the operator, as root (`sudo switchyard restart-role ...`), may run it. Run it for
   your own role last, as the end of your turn (your own busy turn is expected, and
   so is the rest of the command line you run it in, such as a `| tail` or an
-  `&` job on that line, which the restart ends; a
+  `&` job on that line, which the restart ends, and your agent CLI's own helper
+  for that turn, such as Codex's code-mode host (`codex-code-mode`); a
   background command still running in your pane refuses it, named process by
   process): a successor outside your pane does the restart. Run it as it is; clear no environment first. It keeps your
   pane's identity and your agent CLI's own variables out of the launch, reconnects the

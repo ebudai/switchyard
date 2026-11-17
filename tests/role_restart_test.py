@@ -60,9 +60,10 @@ class Kernel:
         self.root = root
 
     def spawn(self, pid: int, start: int, env: dict[str, str] | None = None, comm: str = "claude", ppid: int = 1,
-              state: str = "S", sid: int = 0) -> None:
+              state: str = "S", sid: int = 0, cmdline: str = "") -> None:
         d = self.root / str(pid)
         d.mkdir(parents=True, exist_ok=True)
+        (d / "cmdline").write_bytes(cmdline.replace(" ", "\0").encode() + (b"\0" if cmdline else b""))
         fields = [state, str(ppid), "0", str(sid)] + ["0"] * 15 + [str(start)] + ["0"] * 5
         (d / "stat").write_text(f"{pid} ({comm}) {' '.join(fields)}\n")
         (d / "environ").write_bytes(b"\0".join(f"{k}={v}".encode() for k, v in (env or {}).items()) + b"\0")
@@ -508,6 +509,94 @@ def test_the_directors_own_turn_is_no_refusal_but_other_work_is() -> None:
         rig.busy = True
         check(rig.run() == 1 and rig.reloads == [] and any("is working" in s for s in rig.said),
               f"another role's live turn still refuses: {rig.said}")
+
+
+HOST = "/usr/lib/openai-codex/bin/codex-code-mode-host"
+
+
+def test_codexs_own_code_mode_host_is_no_work_besides_it() -> None:
+    """SYRD-833: Codex's code mode runs its JavaScript tool in `codex-code-mode-host`, a child of the Codex process that
+    also runs the tool's commands: a sibling of this command. It is the CLI's own, and only it is given anything."""
+    def case(*extra, cli="codex"):
+        with project() as (config, path, kernel, base):
+            rig = Rig(config, path, kernel, base, role="director")
+            in_own_pane(rig)
+            if cli != "codex":
+                kernel.spawn(4101, 501, comm=cli, ppid=4100)
+            rig.busy = True
+            for pid, comm, ppid, cmdline in extra:
+                kernel.spawn(pid, 600 + pid % 100, comm=comm, ppid=ppid, cmdline=cmdline)
+            return rig.run(), rig
+    code, rig = case((4109, "codex-code-mode", 4101, HOST))
+    check(code == 0 and rig.armed == ["director"] and not any("work besides" in s for s in rig.said),
+          f"the code-mode host the Codex running this command started is its own turn: the successor is armed: {rig.said}")
+    code, rig = case((4109, "codex-code-mode", 4101, HOST), (4110, "pytest", 4101, "pytest -q"))
+    check(code == 1 and rig.armed == [] and any("runs work besides this command (pid 4110 pytest)" in s for s in rig.said),
+          f"a real job beside it is still work, and named alone: {rig.said}")
+    code, rig = case((4111, "bash", 4100, "bash"), (4109, "codex-code-mode", 4111, HOST))
+    check(code == 1 and any("(pid 4109 codex-code-mode, 4111 bash)" in s for s in rig.said),
+          f"one under another process, not this command's Codex, is work: {rig.said}")
+    # Another Codex in the pane -- a background `codex exec` -- with its own code-mode host: that Codex is not the one
+    # running this command, so neither it nor its host is this turn.
+    code, rig = case((4120, "codex", 4100, "codex exec --json"), (4121, "codex-code-mode", 4120, HOST))
+    check(code == 1 and any("(pid 4120 codex, 4121 codex-code-mode)" in s for s in rig.said),
+          f"another Codex's host is that Codex's work, not this command's turn: {rig.said}")
+    code, rig = case((4109, "codex-code-mode", 4101, HOST), cli="claude")
+    check(code == 1 and any("(pid 4109 codex-code-mode)" in s for s in rig.said),
+          f"nor under a CLI that is not Codex: {rig.said}")
+    code, rig = case((4109, "codex-code-mode", 4101, "/usr/bin/sleep 600"))
+    check(code == 1 and any("(pid 4109 codex-code-mode)" in s for s in rig.said),
+          f"a process only named like it, running another program, is work: {rig.said}")
+    code, rig = case((4109, "codex-code-mode", 4101, HOST), (4112, "sleep", 4109, "sleep 600"))
+    check(code == 1 and any("(pid 4112 sleep)" in s for s in rig.said),
+          f"and the host's own children are not it: {rig.said}")
+
+
+def test_a_real_codex_code_mode_turn_is_no_work_besides_it() -> None:
+    """SYRD-833, measured: real Codex 0.166 (offline, a stand-in Responses API) as a pane's root runs `look.py` through
+    its code mode's `exec` tool. The command is a child of Codex in a session of its own; `codex-code-mode-host`, the
+    isolate's process, is its sibling in the pane's session, and other_work finds nothing -- where it named the host."""
+    import glob
+    import shutil
+
+    missing = [name for name, ok in (("Codex", shutil.which("codex")), ("tmux", shutil.which("tmux")),
+                                     ("unshare", shutil.which("unshare"))) if not ok]
+    if not missing and subprocess.run(["unshare", "-rn", "true"], capture_output=True).returncode != 0:
+        missing.append("an unprivileged user namespace")
+    if missing:
+        print(f"role_restart_test: the real Codex probe is skipped: no {', '.join(missing)}")
+        return
+    kit = ROOT / "tests" / "fixtures" / "syrd833_codex_code_mode"
+
+    def leftovers(raw: str) -> set[str]:
+        """What a run could leave: its socket directory, a Codex daemon's socket directory, and any process naming
+        this run's own directory (its tmux server, its stand-in API, a Codex app-server it daemonised)."""
+        found = {f"dir {path}" for path in glob.glob("/tmp/s833.*") + glob.glob("/tmp/codex-daemon-*")}
+        ps = subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True, text=True).stdout
+        mine = os.getpid()
+        return found | {f"process {line.strip()[:160]}" for line in ps.splitlines()
+                        if raw in line and int(line.split(None, 1)[0]) != mine}
+
+    before = set(glob.glob("/tmp/s833.*") + glob.glob("/tmp/codex-daemon-*"))
+    with tempfile.TemporaryDirectory(prefix="syrd833.") as raw:
+        out = Path(raw) / "out"
+        command = Path(raw) / "command.txt"
+        command.write_text(f"python3 {kit / 'look.py'} {out / 'look.json'} {ROOT}\n")
+        subprocess.run(["bash", str(kit / "probe.sh"), str(out), str(command)], capture_output=True, text=True,
+                       timeout=200, env={"PATH": "/usr/bin:/bin", "HOME": raw, "LANG": "C.UTF-8"})
+        look = json.loads((out / "look.json").read_text()) if (out / "look.json").exists() else {}
+        left = {item for item in leftovers(raw) if not item.startswith("dir ") or item[4:] not in before}
+    tree = {row["pid"]: row for row in look.get("tree", [])}
+    pane = tree.get(look.get("pane"), {})
+    hosts = [row for row in tree.values() if row["comm"] == "codex-code-mode"]
+    check(pane.get("comm") == "codex" and len(hosts) == 1 and hosts[0]["ppid"] == pane.get("pid")
+          and hosts[0]["sid"] == pane.get("sid") and HOST.rsplit("/", 1)[1] in hosts[0]["cmdline"],
+          f"Codex's code mode runs its isolate in codex-code-mode-host, Codex's child in the pane's session: {look}")
+    me = tree.get(look.get("me"), {})
+    check(me.get("ppid") == pane.get("pid") and me.get("sid") == me.get("pid"),
+          f"the tool's command is Codex's child too, in a session of its own -- the host's sibling: {look}")
+    check(look.get("other_work") == [], f"and other_work finds nothing besides it: {look.get('other_work')}")
+    check(not left, f"and the probe leaves nothing behind: no socket directory, tmux server, API or daemon: {left}")
 
 
 def test_success_is_said_only_once_the_old_pane_has_ended() -> None:

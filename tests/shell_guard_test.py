@@ -716,11 +716,19 @@ def board_reach_decisions(base: Path) -> None:
         (folder / f"deep{i}.sh").write_text(f"source deep{i + 1}.sh\n" if i < 6 else unsafe)
     check(bool(guard.problems_in("bash deep0.sh", cwd=str(folder))),
           "static board reach is followed beyond the inline-shell nesting bound")
+    # In a user namespace that does not map root (tests/sweep.py's bwrap sandbox), root's files show as the
+    # overflow uid: the guard cannot prove a package script root-only there, and rightly refuses its exception.
+    root_visible = os.lstat("/").st_uid == 0
     for name in ("xdg-open", "checkupdates", "gitk", "pgmcrater"):
-        if shutil.which(name):
+        tool = shutil.which(name)
+        if not tool:
+            print(f"shell_guard_test: {name} unavailable; PATH-tool case not exercised")
+        elif root_visible:
             check(not guard.problems_in(name), f"the real unrelated PATH tool is allowed by command name: {name}")
         else:
-            print(f"shell_guard_test: {name} unavailable; PATH-tool case not exercised")
+            check(not guard._immutable_system_script(tool),
+                  f"a package script whose owner this namespace cannot see never receives the exception: {name}")
+            print(f"shell_guard_test: root is unmapped here; {name} allowed-by-name case not exercised")
     check(not guard._immutable_system_script(str(folder / "child.sh")),
           "a role-writable script never receives the immutable package-path exception")
     (folder / "safe.sh").write_text("printf safe\n")

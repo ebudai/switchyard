@@ -97,7 +97,7 @@ so it has no relay. `switchyard paste-image` still works there.
 
 ## Evidence
 
-**`tests/pane_window_ctrl_v_test.py`, 87 checks.**
+**`tests/pane_window_ctrl_v_test.py`** (it prints its check count when it passes).
 
 The setup:
 - **A tab** is a real pty running the shipped `switchyard-pane-window` with the arguments the product's own layout
@@ -144,4 +144,4 @@ reads the clipboard.
 
 **`tests/team_launcher_pane_commands_test.py`:** the legacy layout's pane command carries `--paste-project`.
 
-**Mutants:** 44, each applied alone to a copy of this tree, are all killed by assertions; see the ticket comment.
+**Mutants:** each applied alone to a copy of this tree, all killed by assertions; the ticket comment lists them.

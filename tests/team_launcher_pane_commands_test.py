@@ -137,9 +137,10 @@ def test_visible_layout_command_stays_owner_wrapped_without_forcing_pane_state_d
         # SYRD-122: the wrapper is told what to call its split before it is
         # told what to run, because Konsole's layout file has no key for a
         # split's title. SYRD-139: two names, not one -- the window is the
-        # project's and the split is the role's.
-        assert argv[1:5] == ["--window-title", "porter", "--title", "Ops"], argv
-        assert argv[5:] == team_launcher.pane_command_args(
+        # project's and the split is the role's. SYRD-834: and which project the
+        # tab belongs to, so its Ctrl-V can hand that project an image.
+        assert argv[1:7] == ["--window-title", "porter", "--title", "Ops", "--paste-project", "porter"], argv
+        assert argv[7:] == team_launcher.pane_command_args(
             "porter",
             role,
             config_path=config_path,

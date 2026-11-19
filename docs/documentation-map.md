@@ -41,6 +41,7 @@ running. Do not copy a transition or option from a historical ticket record.
 | Diagnose an incident | [Fresh-machine incident settings](fresh-machine-install.md#host-settings-for-diagnosing-an-incident), then the affected service guide | `switchyard status --json`; `switchyard release-status`; service journals |
 | Upgrade or deploy your own tenant without a password prompt | [Privileged actions](privileged-actions.md) | `switchyard privileged-action --help`; `switchyard upgrade <project> --dry-run` |
 | Configure desktop, clipboard or screenshots | [Desktop access](desktop-access.md) | `switchyard approve-desktop --help`; `switchyard paste-image --help` |
+| Give a role a copied image (Ctrl-V in its presentation tab, or a command) | [Desktop access: handing over one image](desktop-access.md#handing-over-one-image) | `switchyard paste-image --help` |
 | Configure User phone notifications | [User notifications](user-notifications.md) | the setup and UAT commands in that guide |
 | Change a role's agent or model | [Role runtime](role-runtime.md) | `switchyard set-role-runtime --help`; `switchyard reconcile-role-models --help` |
 | Install, qualify or stop the host's local model service, or see what holds the GPU | [Local model service](local-model-service.md) | `switchyard local-model --help`; `switchyard local-model status` |

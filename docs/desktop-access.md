@@ -396,9 +396,10 @@ variables without granting GUI access.
 
 ## Handing over one image
 
-On a compositor with no data-control protocol, such as GNOME's Mutter, no
-provider in a role pane can read the desktop clipboard even with this grant.
-The desktop owner can still hand one image to a role:
+No provider in a role pane can read the desktop clipboard, even with this
+grant: the security-context socket withholds the data-control protocol (see the
+table above), and a compositor such as GNOME's Mutter offers none at all. The
+desktop owner can still hand one image to a role:
 
 ```sh
 switchyard paste-image <project> <role>
@@ -412,6 +413,19 @@ each file, and write nothing. The project's listener tells the role where the
 image is once its pane is idle. This GUI-owned service removes the image 15
 minutes after the copy, and revoking the grant removes anything still there.
 See [syrd-247-image-handoff.md](syrd-247-image-handoff.md).
+
+The same handover is also on Ctrl-V in the project's presentation window
+(SYRD-834). Each tab's program runs as the GUI owner, so with an image copied,
+Ctrl-V in a role's tab writes it to the same directory through the same checks
+and pastes its path into that pane, where the CLI attaches it (Hermes attaches
+it when you press Enter). No listener notice is involved, and the image is
+still removed 15 minutes after the copy. Text or nothing on the clipboard
+leaves Ctrl-V to the CLI; Ctrl+Shift+V pastes text as before. If the handover
+is refused or fails, the split's header says why for a few seconds and the pane
+gets nothing. Only keys typed into that tab reach it, and a headless project's
+tabs have no relay. A presentation window keeps the tab program it opened with,
+so reopen windows opened before an upgrade to pick this up; the roles need no
+reload. See [syrd-834-ctrl-v-hands-over-an-image.md](syrd-834-ctrl-v-hands-over-an-image.md).
 
 ## Existing projects, reapplication and rollback
 
@@ -447,9 +461,13 @@ uses the actual new-project/configuration path and executes a harmless first rol
 process to verify its environment; account creation, board services and GUI
 installation are fixtures there. Existing launcher tests explicitly choose
 headless mode when desktop access is irrelevant.
+`python3 tests/pane_window_ctrl_v_test.py` runs a presentation tab's Ctrl-V
+relay in real ptys, with the attach and the clipboard handover stood in.
 
-Live acceptance is separate: after approved deployment, copy a known screenshot,
-reload only an idle affected Codex role, and verify Ctrl+V creates an image
-attachment without the X11 timeout. `wl-paste` alone does not satisfy acceptance.
+Live acceptance is separate: after approved deployment, reopen the project's
+presentation window, copy a known screenshot, press Ctrl+V in a role's tab, and
+verify the CLI attaches the image (`[Image #N]` in Claude Code or Codex). A
+role's own clipboard read is withheld by design, so Ctrl+V in a pane outside a
+presentation tab is not the check. `wl-paste` alone does not satisfy acceptance.
 Do not inspect unrelated clipboard data. Verify again after a naturally occurring
 GUI login/socket recreation, without logging out working roles just for a test.

@@ -213,6 +213,21 @@ def _write_new(path: Path, data: bytes) -> None:
         os.close(fd)
 
 
+def _owner_and_tenant(project: str, *, uid: int | None, home: Path | None) -> tuple[pwd.struct_passwd, int]:
+    """The caller, proven to be `project`'s approved desktop owner, and the tenant's uid."""
+    uid = os.geteuid() if uid is None else uid
+    me = pwd.getpwuid(uid)
+    policy = approved_policy(project, uid=uid, home=Path(me.pw_dir) if home is None else home)
+    return me, pwd.getpwnam(policy["tenant_user"]).pw_uid
+
+
+def _read_image(board: Clipboard, mime: str, max_bytes: int) -> bytes:
+    payload = board.read(mime, max_bytes=max_bytes)
+    if not payload:
+        raise PasteImageError("switchyard: the clipboard's image was empty; nothing was written.")
+    return payload
+
+
 def deposit(
     project: str,
     role: str,
@@ -231,18 +246,13 @@ def deposit(
         raise PasteImageError(f"switchyard: {project!r} is not a project name.")
     if not ROLE_NAME.fullmatch(role):
         raise PasteImageError(f"switchyard: {role!r} is not a role name.")
-    uid = os.geteuid() if uid is None else uid
-    me = pwd.getpwuid(uid)
-    policy = approved_policy(project, uid=uid, home=Path(me.pw_dir) if home is None else home)
-    tenant_uid = pwd.getpwnam(policy["tenant_user"]).pw_uid
+    me, tenant_uid = _owner_and_tenant(project, uid=uid, home=home)
     # The owner's grant directory, outside its runtime: the tenant may traverse it and nothing else (SYRD-791).
     runtime = grant_dir_for(me)
 
     board = clipboard or Clipboard()
     mime = chosen_image_type(board.types())
-    payload = board.read(mime, max_bytes=max_bytes)
-    if not payload:
-        raise PasteImageError("switchyard: the clipboard's image was empty; nothing was written.")
+    payload = _read_image(board, mime, max_bytes)
 
     leaf = desktop.prepare_handoff_dir(runtime, project, tenant_uid)
     desktop.sweep_handoffs(runtime, project)
@@ -281,6 +291,68 @@ def deposit(
             f"behind: {exc}"
         ) from exc
     return {**record, "manifest": str(manifest), "path": str(image)}
+
+
+def pane_handoff_offered(project: str, *, uid: int | None = None, home: Path | None = None) -> bool:
+    """Whether this account installed a desktop policy for `project`, as GUI owner of another account's tenant.
+
+    What makes a presentation tab's Ctrl-V hand an image over (SYRD-834). A headless project has no policy, and a
+    project that runs as this account has none naming another tenant, so their tabs leave Ctrl-V alone. Only the file
+    names are read here: whether the policy holds is `pane_image`'s question, and a refusal is reported in the tab.
+    """
+    uid = os.geteuid() if uid is None else uid
+    home = Path(pwd.getpwuid(uid).pw_dir) if home is None else home
+    pattern = re.compile(rf"switchyard-desktop-{uid}-(\d+)-{re.escape(project)}\.json")
+    try:
+        names = os.listdir(home / ".config" / "switchyard" / "desktop-access")
+    except OSError:
+        return False
+    return any(match and int(match.group(1)) != uid for match in map(pattern.fullmatch, names))
+
+
+def pane_image(
+    project: str,
+    *,
+    clipboard: Clipboard | None = None,
+    uid: int | None = None,
+    home: Path | None = None,
+    grant_dir_for: Callable[[Any], Path] = desktop.grant_dir_for,
+    grant: Callable[[Path, int, str], Any] = desktop.grant,
+    token: Callable[[], str] = lambda: secrets.token_hex(16),
+    max_bytes: int = MAX_IMAGE_BYTES,
+) -> Path | None:
+    """For Ctrl-V in one of `project`'s presentation tabs: the clipboard's image, handed over; None when it has none.
+
+    The same proof, the same reader and the same directory as `deposit` -- the caller must be the project's approved
+    desktop owner, and the image lands in the grant directory, readable by the tenant and by nobody else (SYRD-791).
+    What differs is the delivery. The tab types the image's path into its own pane, which is the role on screen
+    there, so no role is named and no manifest is written: the listener has nobody left to tell. The owner's access
+    service removes the image `desktop.HANDOFF_TTL_SECONDS` after the copy, as it removes every handoff (SYRD-834).
+
+    Text or nothing on the clipboard is not a refusal: that Ctrl-V belongs to the CLI, as it always has.
+    """
+    if not PROJECT_NAME.fullmatch(project):
+        raise PasteImageError(f"switchyard: {project!r} is not a project name.")
+    me, tenant_uid = _owner_and_tenant(project, uid=uid, home=home)
+    runtime = grant_dir_for(me)
+    board = clipboard or Clipboard()
+    offered = board.types()
+    if not any(entry in IMAGE_TYPES for entry in offered):
+        return None
+    mime = chosen_image_type(offered)
+    payload = _read_image(board, mime, max_bytes)
+    leaf = desktop.prepare_handoff_dir(runtime, project, tenant_uid)
+    desktop.sweep_handoffs(runtime, project)
+    image = leaf / f"paste-{token()}.{IMAGE_TYPES[mime]}"
+    try:
+        _write_new(image, payload)
+        grant(image, tenant_uid, "r--")
+    except Exception as exc:
+        image.unlink(missing_ok=True)
+        raise PasteImageError(
+            f"switchyard: the image could not be handed to {project}, and nothing was left behind: {exc}"
+        ) from exc
+    return image
 
 
 def main(argv: Sequence[str] | None = None, *, print_func: Callable[[str], None] = print) -> int:

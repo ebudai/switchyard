@@ -114,6 +114,7 @@ def presentation_layout_payload(
             ),
             title=title,
             window_title=window_title,
+            paste_project=project,
         )
         # The desktop account's own directory, not this process's. Under a
         # privileged invocation `Path.home()` is root's, and the tab recorded

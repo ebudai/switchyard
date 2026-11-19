@@ -891,7 +891,7 @@ while paused the board, the listener, every pane and every conversation stay up,
 Every set, change and resume is recorded with who and when. A set or a change also needs a reason; a resume's reason
 is optional, and one left out reads "no reason given". Only you and the User may do them; the User has the
 same two switches and the resume on the board page. Your pane is exempt whoever set it, so you can still coordinate.
-A person typing into any pane still works, and so does an image the User pastes to a role (`switchyard paste-image`),
+A person typing into any pane still works, and so does an image the User pastes to a role (`switchyard paste-image`, or Ctrl-V in its tab),
 which is the User's own message. The Publisher keeps publishing: audited work still lands on main.
 
 While paused, stall, idle-owner and lease clocks do not run: the time spent paused is not counted, so resuming fires

@@ -67,8 +67,12 @@ def pane_split_title(config: ProjectConfig, role: RoleConfig) -> str:
     return role.presentation_label or role_display_name(role) or launcher.project_window_title(config)
 
 
+#: The Ctrl-V relay a pane window runs its attach through, shipped beside it (SYRD-834).
+PANE_RELAY_NAME = "switchyard_pane_relay.py"
+
+
 def inert_pane_command(
-    program: Path, args: Sequence[str], *, title: str = "", window_title: str = ""
+    program: Path, args: Sequence[str], *, title: str = "", window_title: str = "", paste_project: str = ""
 ) -> str:
     """Wrap a pane's client so its terminal never falls back to a shell.
 
@@ -81,13 +85,20 @@ def inert_pane_command(
     file has no key for either (SYRD-122, SYRD-139): the split's own name, and
     the window name every split reports identically so the title bar stops
     following focus.
+
+    With the project named, the tab's Ctrl-V hands the clipboard's image to the role on screen there, when the
+    desktop owner approved that project's desktop policy (SYRD-834). It is named only to a pane window that ships
+    the relay: the desktop half builds this command with its own release and runs the tenant's pane window, and an
+    older one would take the flag for the command to run, leaving every tab dead.
     """
     from scripts import team_launcher as launcher
 
     window_args = ["--window-title", window_title] if window_title.strip() else []
     title_args = ["--title", title] if title.strip() else []
+    relays = paste_project.strip() and Path(program).with_name(PANE_RELAY_NAME).is_file()
+    paste_args = ["--paste-project", paste_project] if relays else []
     # Konsole's own splitter, not a shell's: see `_konsole_quote`.
-    return launcher._konsole_command([str(program), *window_args, *title_args, *args])
+    return launcher._konsole_command([str(program), *window_args, *title_args, *paste_args, *args])
 
 
 def materialize_layout(
@@ -146,6 +157,7 @@ def materialize_layout(
                 ),
                 title=launcher.pane_split_title(config, role),
                 window_title=launcher.project_window_title(config),
+                paste_project=config.project,
             )
             leaf["WorkingDirectory"] = role.workdir
         # Konsole 26.08.1 does not read this key -- its layout parser knows

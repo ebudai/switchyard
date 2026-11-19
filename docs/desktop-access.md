@@ -413,6 +413,15 @@ image is once its pane is idle. This GUI-owned service removes the image 15
 minutes after the copy, and revoking the grant removes anything still there.
 See [syrd-247-image-handoff.md](syrd-247-image-handoff.md).
 
+Since this grant withholds the clipboard from roles on every compositor
+(SYRD-791), the same handover is also on Ctrl-V in the project's presentation
+window. Each tab's program runs as the GUI owner, so with an image copied,
+Ctrl-V in a role's tab writes it to the same directory through the same checks
+and pastes its path into that pane, where the CLI attaches it. Text or nothing
+on the clipboard leaves Ctrl-V to the CLI; Ctrl+Shift+V pastes text as before.
+Only keys typed into that tab reach it, and a headless project's tabs have no
+relay. See [syrd-834-ctrl-v-hands-over-an-image.md](syrd-834-ctrl-v-hands-over-an-image.md).
+
 ## Existing projects, reapplication and rollback
 
 `switchyard upgrade` installs the same policy/service and verifies readiness

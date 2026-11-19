@@ -33,10 +33,12 @@ set -u
 
 title=""
 window_title=""
+paste_project=""
 while [ "$#" -ge 2 ]; do
     case "$1" in
         --title) title="$2"; shift 2 ;;
         --window-title) window_title="$2"; shift 2 ;;
+        --paste-project) paste_project="$2"; shift 2 ;;
         *) break ;;
     esac
 done
@@ -71,7 +73,16 @@ name_this_pane
 sleep 0.3
 name_this_pane
 
-"$@"
+# Ctrl-V hands the clipboard's image to the role on screen here (SYRD-834). Role panes cannot read the desktop
+# owner's clipboard (SYRD-791); this program runs as that owner, and only this tab's keys reach it. The relay sits
+# between the terminal and the attach and passes every other byte through; for a project with no approved desktop
+# policy it runs the attach itself, unchanged. Without it, or without the system Python, the attach runs as before.
+relay="$(dirname -- "$0")/switchyard_pane_relay.py"
+if [ -n "$paste_project" ] && [ -x /usr/bin/python3 ] && [ -f "$relay" ]; then
+    /usr/bin/python3 -I "$relay" --project "$paste_project" --title "$title" -- "$@"
+else
+    "$@"
+fi
 status=$?
 
 printf '\n'

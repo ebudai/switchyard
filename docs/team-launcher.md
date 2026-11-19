@@ -407,6 +407,11 @@ input to; the same is true of a role whose worktree failed to prepare, and of th
 display-slot proxies, which have always ended this way. A pane that cannot run
 is a dead tab, never a prompt.
 
+The program also relays the tab's keys when the desktop owner approved the
+project's desktop policy: Ctrl-V with an image copied hands that image to the
+project and pastes its path into the pane, and every other byte passes through
+(SYRD-834, [syrd-834-ctrl-v-hands-over-an-image.md](syrd-834-ctrl-v-hands-over-an-image.md)).
+
 **The window is the process, not what a process's arguments mention.** A
 privileged launch reaches the desktop account through `sudo -u <user> -- env -i
 ... konsole ...`, and `sudo` stays as the parent to relay the exit status. Its

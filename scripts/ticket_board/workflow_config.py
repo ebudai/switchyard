@@ -128,6 +128,7 @@ RESERVED_FLAGS = {
     "assignee",
     "parent_id",
     "origin_project",
+    "test_tier", "test_tier_reason",  # SYRD-836: the Director's test tier lives in workflow_flags
     "external_source_ref",
     "blocked_reason",
     "implementation",

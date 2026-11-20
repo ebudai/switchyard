@@ -6,7 +6,7 @@ import logging
 import subprocess
 from typing import Any, Callable
 
-from . import context_continuation, hermes_ticket_boundary, session_context
+from . import context_continuation, hermes_ticket_boundary, session_context, test_tier
 from .notification_ledger import NotificationLedger
 
 #: What each supported CLI is told, in its own composer, to start the next
@@ -155,7 +155,8 @@ class NotificationSessionClear:
 
     def announced(self, conn: Any, ticket_id: str, target_role: str, kind: str, message: str) -> str:
         """The notice as it is delivered: a cleared session is told its role first (SYRD-788), and a continued
-        ticket's hand-off says so first (SYRD-626)."""
+        ticket's hand-off says so first (SYRD-626). A hand-off says the ticket's test tier after it (SYRD-836)."""
+        message = test_tier.handoff(conn, ticket_id, kind, message)
         if (ticket_id, target_role) in self.cleared:
             self.cleared.discard((ticket_id, target_role))
             if cleared_preface(target_role):

@@ -66,7 +66,7 @@ from .operation_role_policy import (
     TASK_ROLES,
 )
 from .peer_identity import SessionIdentity
-from . import break_glass, extension_operations, pull_queue, report_closure, report_confirmation, report_follow_up, ui_delegation
+from . import break_glass, extension_operations, pull_queue, report_closure, report_confirmation, report_follow_up, test_tier, ui_delegation
 from .workflow_config import DIRECTOR_IDENTIFYING_CAPABILITIES, LEGACY_ASSIGNEE_SCOPED_OPERATIONS
 
 LOGGER = logging.getLogger(__name__)
@@ -405,7 +405,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         parent_id = str(payload.get("parent_id", "")).strip().upper()
         commit_hash = str(payload.get("commit_hash", ""))
         commit_exempt = bool(payload.get("commit_exempt", False))
-        regression = bool(payload.get("regression", False))
+        regression, tier = bool(payload.get("regression", False)), test_tier.create_patch(payload, caller_role)  # SYRD-836
         comment_text = str(payload.get("comment_text", "")).strip()
         if not comment_text and isinstance(payload.get("comment"), dict):
             comment = payload["comment"]  # type: ignore[assignment]
@@ -467,7 +467,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 needs_user_signoff=bool(payload.get("needs_user_signoff", False)),
                 needs_audit=bool(payload.get("needs_audit", True)),
                 needs_inspection=bool(payload.get("needs_inspection", False)),
-                regression=regression,
+                regression=regression, test_tier=tier,
                 blocked_by=payload.get("blocked_by"),  # type: ignore[arg-type]
                 blocked_reason=str(payload.get("blocked_reason", "")),
                 notification_source_role=self.notification_source_role("create_ticket", caller_role),
@@ -495,7 +495,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             inspector_signoff=bool(payload.get("inspector_signoff", False)),
             needs_user_signoff=bool(payload.get("needs_user_signoff", False)),
             user_signoff=bool(payload.get("user_signoff", False)),
-            regression=regression,
+            regression=regression, test_tier=tier,
             comments=comments,
             blocked_reason=str(payload.get("blocked_reason", "")),
             commit_hash=commit_hash,

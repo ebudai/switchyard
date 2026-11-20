@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import attachment_store, audit_return, commit_cache, extension_operations, new_asset_files, peer_identity, ui_delegation, workflow_locking
+from . import attachment_store, audit_return, commit_cache, extension_operations, new_asset_files, peer_identity, test_tier, ui_delegation, workflow_locking
 from .commit_cache import COMMIT_REFRESH_TIMEOUT_SECONDS, PUBLISHABLE_REF, PUBLISHED_REF_NAMESPACE
 from .commit_repos import commit_git_dirs_for_project
 from .image_asset_policy import (  # re-exported: callers import these from the app
@@ -515,7 +515,7 @@ WHERE (r.definition->>'active')::boolean
         needs_user_signoff: bool,
         needs_audit: bool = True,
         needs_inspection: bool = False,
-        regression: bool = False,
+        regression: bool = False, test_tier: dict[str, Any] | None = None,
         blocked_by: list[str] | None = None,
         blocked_reason: str = "",
         state: str = "analysis",
@@ -544,7 +544,7 @@ WHERE (r.definition->>'active')::boolean
             inspector_signoff=False,
             needs_user_signoff=needs_user_signoff,
             user_signoff=False,
-            regression=regression,
+            regression=regression, test_tier=test_tier,
             comments=[],
             blocked_reason=blocked_reason,
             commit_hash="",
@@ -577,14 +577,13 @@ WHERE (r.definition->>'active')::boolean
         inspector_signoff: bool = False,
         needs_user_signoff: bool,
         user_signoff: bool,
-        regression: bool = False,
+        regression: bool = False, test_tier: dict[str, Any] | None = None,
         comments: list[dict[str, Any]],
         parent_id: str = "",
         blocked_reason: str = "",
         commit_hash: str = "",
         commit_exempt: bool = False,
-        created: str | None = None,
-        updated: str | None = None,
+        created: str | None = None, updated: str | None = None,
         notification_source_role: str | None = None,
         caller_role: str | None = None,
     ) -> dict[str, Any]:
@@ -604,14 +603,13 @@ WHERE (r.definition->>'active')::boolean
             inspector_signoff=inspector_signoff,
             needs_user_signoff=needs_user_signoff,
             user_signoff=user_signoff,
-            regression=regression,
+            regression=regression, test_tier=test_tier,
             comments=comments,
             parent_id=parent_id,
             blocked_reason=blocked_reason,
             commit_hash=commit_hash,
             commit_exempt=commit_exempt,
-            created=created,
-            updated=updated,
+            created=created, updated=updated,
             notification_source_role=notification_source_role,
             caller_role=caller_role,
         )
@@ -1111,7 +1109,7 @@ ORDER BY rank;
             "manually_controlled": bool(row["manually_controlled"]),
             "commit_hash": str(row["commit_hash"] or ""),
             "commit_exempt": bool(row["commit_exempt"]),
-            "workflow_flags": dict(row.get("workflow_flags") or {}),
+            "workflow_flags": dict(row.get("workflow_flags") or {}), **test_tier.fields(row.get("workflow_flags")),
             "created": require_text(row["created_text"], "created"),
             "updated": require_text(row["updated_text"], "updated"),
             "active_work_highlight": bool(row["active_work_highlight"]),
@@ -1218,14 +1216,13 @@ ORDER BY rank;
         inspector_signoff: bool = False,
         needs_user_signoff: bool,
         user_signoff: bool,
-        regression: bool = False,
+        regression: bool = False, test_tier: dict[str, Any] | None = None,
         comments: list[dict[str, Any]],
         parent_id: str = "",
         blocked_reason: str = "",
         commit_hash: str = "",
         commit_exempt: bool = False,
-        created: str | None = None,
-        updated: str | None = None,
+        created: str | None = None, updated: str | None = None,
         notification_source_role: str | None = None,
         caller_role: str | None = None,
     ) -> dict[str, Any]:
@@ -1286,6 +1283,8 @@ ORDER BY rank;
                     self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps({"needs_inspection": True})))
                 if regression:
                     self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps({"regression": True})))
+                if test_tier:  # SYRD-836: the Director's, through the gate write that checks and records it
+                    self._pg_call(conn, "SELECT ticket_board.set_declared_flags(%s,%s::jsonb)", (ticket_id, json.dumps(test_tier)))
                 if create_state != state:
                     raise ValueError(f"invalid create state: {state}; allowed: draft, analysis, backlog")
                 if attachment_patch:

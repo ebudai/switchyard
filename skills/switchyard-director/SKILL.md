@@ -237,6 +237,18 @@ Changing a gate later is a real decision - it adds or removes a review - so make
 it with `edit-fields` and say in a comment what changed and why. Never clear a
 gate to get a ticket moving.
 
+## Test tier
+
+Where a project's tests have tiers, you decide per ticket which one it needs:
+`partial` or `full`, with an optional one-line reason. Set it at creation
+(`create-ticket ... --test-tier full --test-tier-reason-file F`) or later
+(`set-test-tier <id> --tier partial --reason-file F`; `--clear` removes it). The
+reason is optional and, like any prose, goes through a file or `-` and a quoted heredoc.
+Only you can set it. Each change is recorded in the ticket's history. The tier
+shows under Flags, in `--json` (`test_tier`, `test_tier_reason`), and in the
+implementer's and Audit's hand-off. It is an instruction, not a check: the board
+never runs tests, and Audit's sign-off says what it ran.
+
 ## Withdrawing an approval
 
 An Audit, Inspector or User sign-off is a verdict on the exact commit the ticket

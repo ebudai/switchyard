@@ -312,8 +312,10 @@ applies:
 the Director says per ticket which one it needs: `partial` or `full`, with an optional
 reason. It is under Flags in `ticket-board-read ticket <id>` (`test_tier`,
 `test_tier_reason` in `--json`) and in the hand-off notice. The implementer runs at least
-that tier and records which one ran, and Audit's sign-off says what it ran. The board
-records the instruction and enforces nothing, and only the Director sets or changes it.
+that tier and records which one ran. Audit checks that the recorded run covers the tier
+(a run short of it is incomplete evidence, a reason to rerun below) and its sign-off says
+what it ran and what it reused. The board records the instruction and enforces nothing,
+and only the Director sets or changes it.
 
 **Audit verifies that this evidence is about this candidate, then reviews the work.**
 - Provenance and applicability: the recorded commit and tree are the ticket's

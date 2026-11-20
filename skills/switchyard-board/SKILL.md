@@ -352,8 +352,11 @@ environment and tool versions the result depends on, the outcomes, and where
 each red suite fails on the base and on the candidate.
 
 If the Director set the ticket's test tier (`partial` or `full`, under Flags;
-`test_tier` in `--json`; also said in your hand-off), run at least that tier and
-say which one ran. It is the Director's instruction; the board does not enforce it.
+`test_tier` in `--json`; also said in your hand-off), the implementer runs at
+least that tier and says which one ran. A reviewer checks that the recorded run
+covers it (a run short of the tier is incomplete evidence) and says in its
+sign-off what it ran and what it reused. It is the Director's instruction; the
+board does not enforce it.
 
 A reviewer (Audit, or the director at final sign-off) does not rerun that
 complete suite merely because the ticket entered their stage. The default is:

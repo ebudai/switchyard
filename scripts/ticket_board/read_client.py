@@ -244,6 +244,7 @@ def format_ticket(ticket: dict[str, Any]) -> str:
         f"  audit_signoff: {bool(ticket.get('audit_signoff', False))}",
         f"  manually_controlled: {bool(ticket.get('manually_controlled', False))}",
         f"  regression: {bool(ticket.get('regression', False))}",
+        *format_test_tier(ticket),
         f"  commit_hash: {ticket.get('commit_hash', '') or '(none)'}",
         "",
         "Blockers:",
@@ -268,6 +269,14 @@ def format_ticket(ticket: dict[str, Any]) -> str:
         *format_comments(ticket),
     ]
     return "\n".join(lines)
+
+
+def format_test_tier(ticket: dict[str, Any]) -> list[str]:
+    """The Director's test tier for this ticket (SYRD-836), under Flags. A board older than the field reads as not set."""
+    flags = ticket.get("workflow_flags") if isinstance(ticket.get("workflow_flags"), dict) else {}
+    tier = ticket.get("test_tier", flags.get("test_tier")) or ""
+    reason = ticket.get("test_tier_reason", flags.get("test_tier_reason")) or "" if tier else ""
+    return [f"  test_tier: {tier or '(not set)'}", f"  test_tier_reason: {reason or '(none)'}"]
 
 
 def format_user_wait(ticket: dict[str, Any]) -> list[str]:

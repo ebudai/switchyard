@@ -351,6 +351,10 @@ candidate commit and tree, the base, the commands or suite manifest, the
 environment and tool versions the result depends on, the outcomes, and where
 each red suite fails on the base and on the candidate.
 
+If the Director set the ticket's test tier (`partial` or `full`, under Flags;
+`test_tier` in `--json`; also said in your hand-off), run at least that tier and
+say which one ran. It is the Director's instruction; the board does not enforce it.
+
 A reviewer (Audit, or the director at final sign-off) does not rerun that
 complete suite merely because the ticket entered their stage. The default is:
 

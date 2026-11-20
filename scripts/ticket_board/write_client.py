@@ -671,7 +671,7 @@ class TicketBoardWriteClient(ProviderAccountHoldWrites, TicketRepairWrites, Work
         needs_inspection: bool = False,
         needs_audit: bool = True,
         needs_user_signoff: bool = False,
-        comment_text: str = "",
+        comment_text: str = "", test_tier: str | None = None, test_tier_reason: str = "",
         caller_role: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -687,7 +687,7 @@ class TicketBoardWriteClient(ProviderAccountHoldWrites, TicketRepairWrites, Work
             "audit_prompt": audit_prompt,
             "needs_inspection": needs_inspection,
             "needs_audit": needs_audit,
-            "needs_user_signoff": needs_user_signoff,
+            "needs_user_signoff": needs_user_signoff, **({"test_tier": test_tier, "test_tier_reason": test_tier_reason} if test_tier else {}),
         }
         # Only an assignee the caller chose is sent: an omitted one lets the
         # board place the ticket, an explicit one is a request (SYRD-521).

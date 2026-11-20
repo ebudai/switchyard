@@ -53,6 +53,10 @@ Replace its project and absolute onboarding path when creating a tenant.
 - `flags`: boolean gate/signoff definitions. Existing flag columns retain their
   meaning; additional flags live in `tickets.workflow_flags`. Protected ticket
   fields cannot be repurposed as flags. Signoffs never default to approved.
+  `test_tier` and `test_tier_reason` are reserved too: they hold the
+  Director's per-ticket test tier (SYRD-836), set with the same Director-only
+  gate write (`set-test-tier`, or `set-workflow-flags` with
+  `{"test_tier": "partial"|"full"|null, "test_tier_reason": "..."}`).
 - `transitions`: from/to/action, label, allowed actors, owner scope, primitive,
   commit/reason requirements and explicit signoff reset list. Primitives are
   move, approve, return, and reopen. A no-code implementation submission must

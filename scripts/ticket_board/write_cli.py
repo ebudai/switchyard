@@ -16,11 +16,12 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from . import board_stall, documentation_gate, read_client, workflow_relays, write_client, write_payload
+    from . import board_stall, documentation_gate, read_client, test_tier, workflow_relays, write_client, write_payload
 except ImportError:  # pragma: no cover - `python write_client.py` runs outside the package
     import board_stall
     import documentation_gate
     import read_client
+    import test_tier
     import workflow_relays
     import write_client
     import write_payload
@@ -487,6 +488,7 @@ def _build_parser() -> argparse.ArgumentParser:
     workflow_flags = subparsers.add_parser("set-workflow-flags")
     workflow_flags.add_argument("ticket_id")
     add_free_text_argument(workflow_flags, "--patch-json", required=True, help="the flags to set, a JSON object")
+    test_tier.add_parser(subparsers, add_free_text_argument)  # SYRD-836
 
     create = subparsers.add_parser("create-ticket")
     create.add_argument("--title", required=True)
@@ -504,6 +506,7 @@ def _build_parser() -> argparse.ArgumentParser:
     create.add_argument("--needs-inspection", action="store_true")
     create.add_argument("--needs-audit", action=argparse.BooleanOptionalAction, default=True)
     create.add_argument("--needs-user-signoff", action="store_true")
+    test_tier.add_create_arguments(create, add_free_text_argument)  # SYRD-836
 
     file_bug = subparsers.add_parser("file-bug")
     file_bug.add_argument("--title", required=True)
@@ -1003,6 +1006,7 @@ def main(argv: list[str] | None = None) -> int:
                 needs_audit=args.needs_audit,
                 needs_user_signoff=args.needs_user_signoff,
                 comment_text=args.comment_text,
+                **test_tier.create_fields(args),
             )
         elif command == "file_bug":
             response = client.file_bug(
@@ -1097,6 +1101,8 @@ def main(argv: list[str] | None = None) -> int:
             response = client.set_workflow_flags(args.ticket_id, patch)
         elif command in {"documentation_sign_off", "documentation_no_change", "documentation_kick_back"}:
             response = _documentation_decision(client, args, command)
+        elif command == "set_test_tier":
+            response = client.set_workflow_flags(args.ticket_id, test_tier.set_patch(args))
         elif command == "require_documentation":
             response = client.set_workflow_flags(args.ticket_id, {documentation_gate.GATE: not args.off})
         elif command == "submit_to_audit":

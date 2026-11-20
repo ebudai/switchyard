@@ -308,6 +308,13 @@ applies:
 - the outcomes, and for every suite that is red, a comparison of where it fails on the
   base and on the candidate.
 
+**A ticket's test tier, when the Director set one.** Where a project's tests have tiers,
+the Director says per ticket which one it needs: `partial` or `full`, with an optional
+reason. It is under Flags in `ticket-board-read ticket <id>` (`test_tier`,
+`test_tier_reason` in `--json`) and in the hand-off notice. The implementer runs at least
+that tier and records which one ran, and Audit's sign-off says what it ran. The board
+records the instruction and enforces nothing, and only the Director sets or changes it.
+
 **Audit verifies that this evidence is about this candidate, then reviews the work.**
 - Provenance and applicability: the recorded commit and tree are the ticket's
   candidate, the base is the one the candidate sits on, the run was complete, bounded

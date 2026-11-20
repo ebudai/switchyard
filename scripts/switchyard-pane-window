@@ -79,7 +79,7 @@ name_this_pane
 # policy it runs the attach itself, unchanged. Without it, or without the system Python, the attach runs as before.
 relay="$(dirname -- "$0")/switchyard_pane_relay.py"
 if [ -n "$paste_project" ] && [ -x /usr/bin/python3 ] && [ -f "$relay" ]; then
-    /usr/bin/python3 -I "$relay" --project "$paste_project" --title "$title" -- "$@"
+    /usr/bin/python3 -I -B "$relay" --project "$paste_project" --title "$title" -- "$@"
 else
     "$@"
 fi

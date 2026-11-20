@@ -79,6 +79,9 @@ run, which would leave every tab dead.
   killed after 3 s.
 - **SYRD-791.** No role gains clipboard or compositor access. The relay runs as the desktop owner, acts only for its
   own tab's project, and writes only through `pane_image` into the grant directory.
+- **SYRD-711.** The relay leaves no bytecode in a release. It sets `sys.dont_write_bytecode` before it can import
+  `paste_image` or `desktop_access` from the tree, and both the pane window and the handover start it with
+  `python3 -I -B` (SYRD-839).
 
 ## What each CLI does with a pasted image path
 

@@ -43,6 +43,10 @@ import time
 import tty
 from pathlib import Path
 
+# The handover imports paste_image and desktop_access from the tree: never leave their bytecode behind in a release
+# (SYRD-711). Its own process is started with -B as well.
+sys.dont_write_bytecode = True
+
 CTRL_V = 0x16
 #: What a bracketed paste starts and ends with, from the terminal and to the pane alike.
 PASTE_START = b"\x1b[200~"
@@ -299,7 +303,7 @@ class Relay:
                 self.to_child += item
 
     def _start_handover(self) -> None:
-        argv = [sys.executable, "-I", str(Path(__file__).resolve()), "--hand-over", self.project]
+        argv = [sys.executable, "-I", "-B", str(Path(__file__).resolve()), "--hand-over", self.project]
         try:
             self.handover = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                              stderr=subprocess.DEVNULL)

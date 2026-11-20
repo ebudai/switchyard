@@ -333,6 +333,16 @@ your correction. So judge it by its misroutes and corrections, which the board r
 against each decision, not by how much it routes, and run `scripts/router_canary.py`
 before trusting a new model (SYRD-599).
 
+**Say which test tier a ticket needs, when the project's tests have tiers.** A ticket's
+test tier is `partial` or `full`, with an optional one-line reason, and only you set it: at
+creation (`ticket-board-write create-ticket ... --test-tier full --test-tier-reason-file F`)
+or later (`ticket-board-write set-test-tier <id> --tier partial|full [--reason-file F]`, or
+`--clear`). Like any prose, the reason goes through a file or `-` fed by a quoted heredoc.
+Each change is a comment in the ticket's history and a field-audit record. The implementer
+and Audit see it under Flags in `ticket-board-read ticket <id>`, as `test_tier` and
+`test_tier_reason` in `--json`, and in their hand-off notice. The board enforces nothing;
+it is your instruction, and Audit's sign-off reports what it ran.
+
 **Ask for documentation review when people will read about the change.** A project may run
 an optional documentation gate, decided by a Librarian or by you, chosen at `switchyard new`
 (off by default) or later with `switchyard documentation-gate <project> enable`. Turn a
@@ -407,7 +417,8 @@ again), `director_route_feedback` (reason; to analysis), defer or cancel from
 there. **Accept** with a note in the box posts the note as the User's comment,
 in the same write as the acceptance, and your notice for the accepted ticket
 ends "the User accepted it, with a note: ..." (its first 4,000 characters; the
-comment has all of it). It is usually a small follow-up: act on it while closing.
+comment has all of it), followed only by "Test tier: ..." when the ticket has a
+test tier. It is usually a small follow-up: act on it while closing.
 
 **Relay the User's UAT result, do not override it.** The User reports UAT in
 conversation and has no pane to act from, and the User's own sign-off and

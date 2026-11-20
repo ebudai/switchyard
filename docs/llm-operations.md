@@ -89,6 +89,8 @@ and dashes in CLI subcommands.
   candidate, decisions and gates. Neither reruns the complete suite merely
   because the ticket entered its stage: a rerun needs a named reason the result
   could differ, recorded on the ticket first (board guide, “Test evidence”).
+  When the Director set a test tier (`partial` | `full`, under Flags and in the
+  hand-off), the implementer's run covers at least that tier and says which ran.
 - Workflows, examples and configuration consumed by programs are product
   inputs, not prose. A documentation role reviews them but does not edit them.
 - Commit and publish from the checkout that actually contains the candidate.

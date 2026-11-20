@@ -9,6 +9,11 @@ current instructions shows the Director's latest explicit UAT request, if one
 can be identified, or says plainly that the Director must prepare the steps.
 Markdown links in that text open their http or https target; any other link,
 and anything inside code, stays the text it is (SYRD-729).
+
+Accept takes what is in the box too: it is posted as the User's comment by the
+acceptance itself, in the same write, and the Director's notice for the
+accepted ticket carries it (SYRD-838). A refusal of any of the three is said
+in the panel, and the box keeps what was typed.
 """
 
 SCRIPT_UAT = r"""
@@ -155,6 +160,9 @@ SCRIPT_UAT = r"""
     // ticket_board.ask_director's own limit on a question (SYRD-629).
     const UAT_QUESTION_MAX = 4000;
 
+    // The last refusal of each ticket's panel, kept across the redraw that follows it (SYRD-838).
+    const uatRefusals = new Map();
+
     const UAT_ASK = { operation: 'ask_director', label: 'Ask Director', mode: 'direct',
                       fields: [{ name: 'question', kind: 'text', label: 'Your question', required: true }],
                       question: 'Send your question to the Director?',
@@ -253,7 +261,7 @@ SCRIPT_UAT = r"""
       const message = document.createElement('textarea');
       message.className = 'uat-message-input';
       message.setAttribute('data-uat-message', '');
-      message.placeholder = 'Ask a question, or say what you saw.';
+      message.placeholder = 'Ask a question, say what you saw, or leave a note for the Director with Accept.';
       if (draftFields) {
         bindDetailDraftField(draftFields, message, 'uatMessage', '');
       }
@@ -269,22 +277,58 @@ SCRIPT_UAT = r"""
         const length = text().length;
         limit.hidden = length <= UAT_QUESTION_MAX;
         limit.textContent = limit.hidden ? '' : `This is ${length.toLocaleString('en-US')} characters. Ask Director `
-          + `takes ${UAT_QUESTION_MAX.toLocaleString('en-US')} at most; Send to Director takes all of it.`;
+          + `takes ${UAT_QUESTION_MAX.toLocaleString('en-US')} at most; Accept and Send to Director take all of it.`;
       };
       message.addEventListener('input', measure);
       panel.appendChild(limit);
+      // Why the last decision was refused: nothing happened, and what was typed is still in the box.
+      const refusal = document.createElement('div');
+      refusal.className = 'uat-refusal';
+      refusal.setAttribute('data-uat-refusal', '');
+      refusal.setAttribute('role', 'alert');
+      // Said as the panel names the decision, and without the database's trace of where it failed.
+      const refused = (label, failure) => {
+        const why = `${label} refused: ${String(failure).split(/\s+CONTEXT:/)[0]}`;
+        uatRefusals.set(ticket.id, why);
+        refusal.textContent = why;
+        refusal.hidden = false;
+      };
+      refusal.textContent = uatRefusals.get(ticket.id) || '';
+      refusal.hidden = !refusal.textContent;
+      panel.appendChild(refusal);
       const actions = document.createElement('div');
       actions.className = 'uat-actions';
       actions.setAttribute('data-uat-actions', '');
       const presets = (name) => (text() ? { [name]: text() } : {});
       // Done: the message was sent, so the box is empty again.
-      const sent = async (op, values) => {
-        await performBoardUiAction(ticket, op, values);
+      const sent = async (label, op, values) => {
+        await performBoardUiAction(ticket, op, values, {
+          refused: (failure) => refused(label, failure),
+          done: () => {
+            uatRefusals.delete(ticket.id);
+            refusal.hidden = true;
+          },
+        });
         markDetailDraftFieldsSaved(ticket.id, { uatMessage: '' });
+      };
+      // Accept with a note: the note is the acceptance's own text, so it is posted as the User's comment by the same
+      // write, or nothing is (SYRD-838). An action that already asks for text is given the note as that text.
+      const accepting = (accept) => {
+        const note = text();
+        if (!note) {
+          return sent('Accept', accept, {});
+        }
+        const fields = accept.fields || [];
+        return sent('Accept', {
+          ...accept,
+          question: `${accept.question || 'Accept this ticket?'} Your note will be posted as a comment for the Director.`,
+          fields: fields.some((field) => field.name === 'text') ? fields
+            : [...fields, { name: 'text', kind: 'fixed', label: 'Your note', value: note }],
+        }, { text: note });
       };
       actions.appendChild(uatButton('Ask Director', 'uat-ask', async () => {
         if (limit.hidden) {
-          await sent(UAT_ASK, presets('question'));
+          await sent('Ask Director', UAT_ASK, presets('question'));
         }
       }));
       panel.appendChild(actions);
@@ -292,13 +336,14 @@ SCRIPT_UAT = r"""
       queueMicrotask(measure);
       uatDecisions(ticket).then(({ accept, send }) => {
         if (accept) {
-          const button = uatButton('Accept', 'primary uat-accept', () => performBoardUiAction(ticket, accept, {}));
+          const button = uatButton('Accept', 'primary uat-accept', () => accepting(accept));
           button.setAttribute('data-uat-decision', 'accept');
           actions.appendChild(button);
         }
         if (send) {
           const field = (send.fields || []).find((candidate) => candidate.kind !== 'fixed');
-          const button = uatButton('Send to Director', 'uat-send', () => sent(send, field ? presets(field.name) : {}));
+          const button = uatButton('Send to Director', 'uat-send',
+            () => sent('Send to Director', send, field ? presets(field.name) : {}));
           button.setAttribute('data-uat-decision', 'send');
           actions.appendChild(button);
         }
@@ -337,6 +382,7 @@ STYLE_UAT = """
     .uat-message-input { display: block; width: 100%; min-height: 3.2em; max-height: 50vh; box-sizing: border-box; }
     .uat-message > .uat-part-text, .uat-thread .uat-part-text { max-height: 40vh; overflow-y: auto; }
     .uat-limit { color: var(--warn); font-size: 0.85rem; margin: 4px 0; }
+    .uat-refusal { color: var(--warn); font-weight: 600; margin: 4px 0; overflow-wrap: anywhere; }
     .uat-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
     .board-ui-next { margin: 6px 0; font-weight: 600; }
 """

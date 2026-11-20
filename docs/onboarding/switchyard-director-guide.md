@@ -404,7 +404,10 @@ Director** moves the ticket, with the User's message, to `user_feedback` --
 yours, nothing reassigned, commit and Audit sign-off kept -- and you take
 `director_return_to_uat`, `director_send_to_implementer` (reason; Audit runs
 again), `director_route_feedback` (reason; to analysis), defer or cancel from
-there.
+there. **Accept** with a note in the box posts the note as the User's comment,
+in the same write as the acceptance, and your notice for the accepted ticket
+ends "the User accepted it, with a note: ..." (its first 4,000 characters; the
+comment has all of it). It is usually a small follow-up: act on it while closing.
 
 **Relay the User's UAT result, do not override it.** The User reports UAT in
 conversation and has no pane to act from, and the User's own sign-off and

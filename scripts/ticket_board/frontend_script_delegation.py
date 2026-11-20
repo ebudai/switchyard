@@ -229,7 +229,9 @@ SCRIPT_DELEGATION = r"""
       });
     }
 
-    async function performBoardUiAction(ticket, op, presets = {}) {
+    // `hooks.refused(message)` hears a refusal, and `hooks.done()` the success, before the board reloads, so whoever
+    // asked can say so where the User is looking (SYRD-838).
+    async function performBoardUiAction(ticket, op, presets = {}, hooks = {}) {
       const decision = await openBoardUiDialog(ticket, op, presets);
       if (!decision) {
         throw new Error(`${op.label} was not confirmed.`);
@@ -246,11 +248,13 @@ SCRIPT_DELEGATION = r"""
         }
         const result = await postTicketAction(path, decision.payload, 'user', options);
         setCreateStatus(`${op.label}: done for ${ticket.id}.`);
+        if (hooks.done) hooks.done();
         await requestBoardReload();
         return result;
       } catch (failure) {
         // Refused: say why, and replace what may be a stale view.
         setCreateStatus(`${op.label} refused: ${failure.message}`, true);
+        if (hooks.refused) hooks.refused(failure.message);
         await requestBoardReload();
         throw failure;
       }

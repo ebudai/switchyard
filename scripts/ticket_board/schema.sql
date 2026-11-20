@@ -1354,6 +1354,7 @@ DECLARE
     current_assignee text;
     message text;
     recommendation text;
+    note text;
 BEGIN
     IF current_setting('ticket_board.suppress_create_notify', true) = 'on' THEN
         RETURN NULL;
@@ -1416,6 +1417,33 @@ BEGIN
             LIMIT 1;
             IF recommendation IS NOT NULL THEN
                 message := message || ': ' || recommendation;
+            END IF;
+        END IF;
+        -- SYRD-838: a note the User typed with an acceptance is for the Director, who acts on it while closing
+        -- the ticket, so it rides in the notice that hands the ticket over. It is the User's comment written by
+        -- this same acceptance -- Accept carries it as the action's own text -- and only an approval out of the
+        -- User's review counts, so a message sent back with the ticket, or a comment from before, is never one.
+        -- A long note is cut in the notice; the comment keeps all of it.
+        IF (ticket_board.declared_workflow() IS NULL AND OLD.state = 'user_review' AND NEW.user_signoff)
+           OR EXISTS (
+               SELECT FROM jsonb_array_elements(ticket_board.declared_workflow()->'stages') AS s,
+                           jsonb_array_elements(ticket_board.declared_workflow()->'transitions') AS x
+               WHERE s->>'name' = OLD.state AND s->>'kind' = 'review' AND s->'owners' ? 'user'
+                 AND x->>'from' = OLD.state AND x->>'to' = NEW.state AND x->>'primitive' = 'approve'
+                 AND x->>'action' = current_setting('ticket_board.workflow_action', true)) THEN
+            SELECT btrim(c.text)
+            INTO note
+            FROM ticket_board.ticket_comments AS c
+            WHERE c.ticket_id = NEW.id
+              AND c.who = 'user'
+              AND btrim(c.text) <> ''
+              AND c.xmin = pg_current_xact_id()::xid
+            ORDER BY c.position DESC
+            LIMIT 1;
+            IF note IS NOT NULL THEN
+                message := message || ': the User accepted it, with a note: '
+                    || CASE WHEN char_length(note) <= 4000 THEN note
+                            ELSE left(note, 4000) || ' ... (the whole note is the User''s comment on the ticket)' END;
             END IF;
         END IF;
 

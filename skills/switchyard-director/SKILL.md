@@ -677,6 +677,12 @@ comment, the ticket stays in User Review, and you get one notice
 (`uat_question`). Answer with an ordinary comment on the ticket -- the panel shows
 your replies beneath the question.
 
+The User can also **Accept** with a note in the box. The note is posted as the
+User's comment by the acceptance itself, and the notice that hands you the
+accepted ticket ends "the User accepted it, with a note: ..." (its first 4,000
+characters; the comment has all of it). Such a note is usually a small
+follow-up: act on it while closing -- file it, or say on the ticket why not.
+
 Where the workflow declares it (the shipped one does, and pgu1002 moved boards
 of the shipped shape to it), the User's **Send to Director** takes a short
 message and moves the ticket to `user_feedback`, "Director reviewing the User's

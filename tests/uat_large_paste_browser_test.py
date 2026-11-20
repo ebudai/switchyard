@@ -470,7 +470,7 @@ def candidate(got: dict) -> None:
         check(seen["sent block"] is not None and seen["sent block"] <= height * 0.4 + 1 and seen["sent scrolls"]
               and seen["sent fits"], f"{device}: the sent message shows in a bounded, scrolling block: {seen['sent block']}")
         check(seen["limit"] == f"This is {len(BIG):,} characters. Ask Director takes 4,000 at most; "
-              "Send to Director takes all of it.", f"{device}: a question too long says so: {seen['limit']}")
+              "Accept and Send to Director take all of it.", f"{device}: a question too long says so: {seen['limit']}")
         check(seen["too long"] == {"dialog": 0, "asked": [], "text kept": True} and seen["limit in view"]
               and seen["limit spoken"], f"{device}: before anything is sent, in view, the text kept: {seen['too long']} "
               f"{seen['limit in view']} {seen['limit spoken']}")

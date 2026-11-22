@@ -174,7 +174,9 @@ ticket must first pass every gate it owes.
 Where a Publisher is enabled, Audit approval hands the exact candidate to a
 mechanical compare-and-swap publication step. Roles do not push the integration
 branch in parallel. A non-fast-forward candidate returns to its producer; an
-operational publication failure escalates to the Director.
+operational publication failure escalates to the Director. Where the research
+stage also runs, a findings commit the Director accepts (`publish-finding`) goes
+through the same step and on to Done; a stale one returns to the research role.
 
 ## Refusals and recovery
 

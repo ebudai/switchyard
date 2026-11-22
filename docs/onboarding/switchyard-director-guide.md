@@ -376,7 +376,9 @@ cannot fast-forward goes back to its implementer, with every sign-off cleared. A
 credential, policy, target, journal or helper failure lands in `publication_failed` for
 you, with the exact diagnostic: fix it, then `publication_retry`, or
 `publication_kick_back` to the implementer. It never rebases, merges, edits, force-pushes
-or waives a gate (SYRD-625).
+or waives a gate (SYRD-625). A research finding you accept with `publish-finding` goes
+through the same stage and on to Done; see **Research spikes** for its own return and
+kick-back.
 
 Only the Publisher moves the integration branch. A main it did not move lands in
 `publication_failed` as `provenance`. That covers a role's push, a ref alias, a rewind,
@@ -801,7 +803,7 @@ researcher to rebase and resubmit. Anything the Publisher cannot fix comes to
 you in `publication_failed`. There, `workflow-action PGU-123 publication_retry`
 tries again, and
 `finding-publication-kick-back PGU-123 --reason-file why.md` returns it to the
-researcher. The ordinary `publication-kick-back` is refused for a finding. A
+researcher. The ordinary `publication_kick_back` is refused for a finding. A
 no-commit finding closes with `close-on-finding` as before. Findings take no
 documentation review.
 

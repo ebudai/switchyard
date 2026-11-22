@@ -241,7 +241,12 @@ the project runs the plan gate)
     sign-off cleared, with the exact diagnostic;
   - `publication_escalate` — to `publication_failed`, the Director's, for anything else,
     including a main the Publisher did not move (`provenance`).
-- Nobody else can take those three moves. You never publish main yourself.
+- Where the project also runs the research stage, a finding the Director accepts with
+  `publish-finding` enters the same stage from triage, and the Publisher has two moves
+  of its own for it: `finding_published` — on to Done, with no Final Sign-Off — and
+  `finding_publication_return` — back to the research role, for example when main
+  advanced. An escalated finding goes to `publication_failed` like any other ticket.
+- Nobody else can take those moves. You never publish main yourself.
   `switchyard-publish-candidate` publishes your candidate ref and nothing else. It refuses
   a ref that is the branch the remote's HEAD names, a symbolic ref, or the target of one,
   and a commit already on that branch. Its push runs no hook of your worktree's. If the
@@ -271,7 +276,9 @@ the project runs the plan gate)
   guide's **Scoping from a plan**.
 - `director-dat-sign-off` / `director-dat-kick-back`
 - `publication_retry` / `publication_kick_back` — from `publication_failed`: back to the
-  Publisher, or to the implementer with every sign-off cleared (`workflow-action`)
+  Publisher, or to the implementer with every sign-off cleared (`workflow-action`). A
+  finding's way back is `finding-publication-kick-back`; `publication_kick_back` is
+  refused for it.
 - `set-blockers`, `release-external-blocker`, `set-manually-controlled`, `edit-fields`
 - `release-draft` — draft → analysis
 - `force-move` / `override-move` — last resort; **always narrate in a comment**

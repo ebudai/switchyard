@@ -658,6 +658,9 @@ Anything else lands in `publication_failed` with the exact diagnostic and the
 repairs it tried: a credential, a hook or branch protection, the publication
 target, the journal, sign-offs or size review. Fix the cause, then send the
 ticket back with `publication_retry`, or return it with `publication_kick_back`.
+A research finding accepted with `publish-finding` passes through the same
+stage and goes on to Done; its return is `finding-publication-kick-back`, and
+`publication_kick_back` is refused for it.
 
 A main the Publisher did not move is `provenance`: a role's push, an alias, a
 rewind, or the candidate already on main. It names the commits nobody

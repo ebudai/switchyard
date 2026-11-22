@@ -96,6 +96,12 @@ re-plan is due. Detail the next milestone then, and list the one after it. Until
 the next milestone is detailed, tickets for its deliverables are refused
 Implementation.
 
+**The plan on the board page.** **Plan**, beside the board's Show switches,
+shows the approved plan as the board reads it: its commit and file, each
+milestone (marked when it is not detailed yet, or due a re-plan), its
+deliverables with their tickets counted by stage, and the unplanned tickets
+apart. Each ticket's view says the deliverable it serves.
+
 ## Audit's plan checklist
 
 Audit reviews a plan ticket's candidate as a whole document, not as a diff.

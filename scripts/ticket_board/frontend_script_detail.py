@@ -304,6 +304,13 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         queueLine.textContent = queueText;
         meta.appendChild(queueLine);
       }
+      const planText = planScopeText(ticket);  // SYRD-850: the deliverable it serves, or why it is unplanned
+      if (planText) {
+        const planLine = document.createElement('div');
+        planLine.className = 'detail-plan-scope';
+        planLine.textContent = planText;
+        meta.appendChild(planLine);
+      }
       const sizeText = sizeReviewText(ticket.size_review);
       if (sizeText) {
         const sizeLine = document.createElement('div');

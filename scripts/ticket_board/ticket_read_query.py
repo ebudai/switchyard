@@ -73,6 +73,9 @@ def select_ticket_rows(conn: Any, ticket_id: str | None = None) -> list[dict[str
                      "THEN ticket_board.user_wait_status(t.id) END" if present.get("user_wait") else "NULL::jsonb")
     # SYRD-673: where Audit's kick-back would return it; asked only of a ticket in a stage that kick-back
     # leaves, which the subquery reads from the workflow once per query.
+    # SYRD-850: the deliverable a ticket serves, or why it is unplanned; read only on a board running the plan gate.
+    from .plan_view import scope_sql as plan_scope_sql
+
     audit_return_sql = ("CASE WHEN t.state = ANY(ARRAY(SELECT x->>'from' FROM jsonb_array_elements("
                         "ticket_board.declared_workflow()->'transitions') x WHERE ticket_board.audit_return_transition(x))) "
                         "THEN ticket_board.audit_return_status(t.id) END" if present.get("audit_return") else "NULL::jsonb")
@@ -293,6 +296,7 @@ SELECT
     {uat_sql} AS uat,
     {user_wait_sql} AS user_wait,
     {audit_return_sql} AS audit_return,
+    {plan_scope_sql(workflow)} AS plan_scope,
     COALESCE(
         (SELECT array_agg(b.blocker_ticket_id ORDER BY b.position)
          FROM ticket_board.ticket_blockers b

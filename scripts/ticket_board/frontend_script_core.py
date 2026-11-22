@@ -779,7 +779,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-
 
     function columnTickets(columnKey) {
       return state.tickets
-        .filter((ticket) => ticket.state === columnKey)
+        .filter((ticket) => ticket.state === columnKey && planTicketShown(ticket))  // SYRD-850: the deliverable filter
         .sort(compareTicketsWithActiveWorkFirst);
     }
 

@@ -828,6 +828,14 @@ ticket-board-write set-deliverable PGU-124 --unplanned-reason-file why.md
 
 Unplanned tickets stay allowed, and are counted apart in the plan's status.
 
+**On the board page.** The ticket view says which deliverable a ticket serves,
+or that it is unplanned and why. **Deliverable**, beside the Show switches,
+keeps the board to one deliverable's tickets, or to the unplanned ones. **Plan**
+shows the approved plan: its commit and file, each milestone's deliverables
+with their tickets counted by stage, the unplanned tickets apart, and which
+milestones are due a re-plan. `GET /api/plan` answers the same. A board without
+the gate shows none of this.
+
 **Scope changes.** When the work you need fits no deliverable, do not add it to
 the plan yourself. Raise a scope change:
 

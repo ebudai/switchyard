@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from . import (audit_return, break_glass, blocker_explanation, blocker_review, cohort_ops, provider_hold_ops, context_continuation, director_notice, documentation_candidate, execution_lease_ops, pull_queue, reminder_snooze,
-               plan_candidate, recovery_packet, reopen_restore, report_intake, research_finding, router_role, size_review, uat_instructions, ui_delegation,
+               plan_candidate, plan_view, recovery_packet, reopen_restore, report_intake, research_finding, router_role, size_review, uat_instructions, ui_delegation,
                user_events, user_wait, work_pause_ops)
 
 OPERATIONS = (reminder_snooze.OPERATIONS | size_review.OPERATIONS | report_intake.OPERATIONS
@@ -95,12 +95,14 @@ def ticket_fields(row: Any) -> dict[str, Any]:
     or why it is not valid and the repair -- null when it waits on nobody of the
     kind (SYRD-662); audit_return is where Audit's kick-back would return it, or
     why it would be refused and the repair -- null outside the stage that
-    kick-back leaves (SYRD-673).
+    kick-back leaves (SYRD-673); plan_scope is the deliverable it serves, or why it
+    is unplanned, on a board running the plan gate, null otherwise (SYRD-850).
     """
     return {"reminder_snooze": row.get("reminder_snooze"), "size_review": row.get("size_review"),
             "serial_queue": row.get("serial_queue"), "privileged_jobs": row.get("privileged_jobs") or [],
             "routing": row.get("routing"), "context_continuation": row.get("context_continuation"),
-            "uat": row.get("uat"), "user_wait": row.get("user_wait"), "audit_return": row.get("audit_return")}
+            "uat": row.get("uat"), "user_wait": row.get("user_wait"), "audit_return": row.get("audit_return"),
+            "plan_scope": row.get("plan_scope")}
 
 
 def reservation_fields(app: Any) -> dict[str, Any]:
@@ -167,6 +169,7 @@ READ_ROUTES = {
     work_pause_ops.PATH: work_pause_ops.status,  # SYRD-756: the pause, read-only
     recovery_packet.PATH: recovery_packet.serve,  # SYRD-737: a safety hold's recovery packet, read-only
     break_glass.PATH: break_glass.status,  # SYRD-739: the newest break-glass grants, never a token
+    plan_view.PATH: plan_view.status,  # SYRD-850: the plan gate's plan, read-only; none without the gate
 }
 
 

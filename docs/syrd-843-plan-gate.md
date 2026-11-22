@@ -140,9 +140,9 @@ All of it applies only where the declared workflow has the `plan` policy.
     checklist, and adopting the gate on an existing project;
   - the Director guide and skill, the Librarian guide, the launcher guide and
     the documentation map.
-- **Board UI.** The deliverable on the ticket view and a plan view are a
-  successor ticket for app, as the Director's comment allows. `plan_status()`
-  is its read.
+- **Board UI.** The deliverable on the ticket view, a deliverable filter and a
+  plan view came in SYRD-850 (`docs/syrd-850-plan-board-view.md`), which reads
+  `plan_status()` through `GET /api/plan`.
 
 ## Tests
 

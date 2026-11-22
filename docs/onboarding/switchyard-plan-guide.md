@@ -76,14 +76,17 @@ commit**, the commit the last plan ticket was closed on, and nowhere else.
 
 A plan ticket carries the `plan_change` gate. The Director creates one
 (`ticket-board-write create-ticket --plan`, or `plan-ticket <id>`), or a scope
-change opens one for you. You work it in Implementation like any ticket:
+change opens one for you. A plan ticket needs no deliverable and is not unplanned: it
+changes the plan itself. Marking it turns on its User sign-off gate; leave its Audit gate
+on too (the default), because the board does not add Audit for you. You work it in
+Implementation like any ticket:
 
 - its candidate changes the plan file and, where a ruling belongs on record, the
   decision log, and nothing else. The board refuses any other change, and a
   plan whose index is missing or malformed;
 - Audit reviews the **whole plan** against the checklist below;
-- the User approves it in User Review. The board refuses to close a plan ticket
-  the User did not accept;
+- the User approves it in User Review (after the Director's DAT, where the project
+  runs it). The board refuses to close a plan ticket the User did not accept;
 - the Director signs it off and closes it. The commit it is closed on becomes
   the approved plan.
 
@@ -105,7 +108,9 @@ Refuse it unless:
 - [ ] there is no history, status or ruling in the plan (rulings are in the
       decision log);
 - [ ] it is within the size limit (1,500 lines unless the project chose another).
-      The board flags a plan over the limit on any candidate.
+      The board flags a plan over the limit on any candidate that changes the plan
+      file, a plan ticket's included; a plan no candidate changes is the approved one,
+      measured when it was approved.
 
 ## Adopting the plan gate on an existing project
 
@@ -116,8 +121,13 @@ project's choosing:
    `docs/archive/implementation-plan-2026-11.md`), unchanged. It is history.
 2. Turn the gate on: `switchyard plan-gate <project> enable --owner designer`
    (or `--runtime <cli>` for a new Designer).
-3. The plan owner writes a new plan for the **remaining work only**, in the three
-   levels, with its index, through the first plan ticket. Rulings the old plan
-   carried move to the decision log.
-4. Once that plan ticket is closed, the Director names a deliverable, or
+3. The Director creates the first plan ticket (`ticket-board-write create-ticket
+   --plan`) and routes it to the plan owner, who writes a new plan for the
+   **remaining work only**, in the three levels, with its index. Rulings the old
+   plan carried move to the decision log.
+4. Until that plan ticket is closed there is no approved plan, so no deliverable
+   can be named: a ticket routed into Implementation meanwhile is marked unplanned
+   with a reason. Tickets already in Implementation, and work a review sends back
+   there, are not checked again.
+5. Once that plan ticket is closed, the Director names a deliverable, or
    `unplanned` with a reason, on each open ticket before routing it.

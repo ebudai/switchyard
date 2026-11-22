@@ -840,14 +840,18 @@ and PGU-125 waits on it as a blocker. A research finding that changes what is
 needed is a scope change too.
 
 **Plan tickets.** `create-ticket --plan` or `plan-ticket <id>` marks one; it
-needs the User's acceptance before you close it, and its candidate may change
-only the plan and the decision log. When it is closed, its commit's index is the
-approved plan. When every ticket of a milestone's deliverables is Done or
-cancelled, you and the plan owner are told once that a re-plan is due.
+names no deliverable, needs the User's acceptance before you close it, and its
+candidate may change only the plan and the decision log. Marking it turns on
+its User sign-off gate, not Audit's: leave `needs_audit` on (the default), since
+Audit's review of the whole plan is the point of the gate. When it is closed,
+its commit's index is the approved plan. When every ticket of a milestone's
+deliverables is Done or cancelled, you and the plan owner are told once that a
+re-plan is due.
 
 **Findings.** A non-plan ticket whose candidate changes the plan file, and any
-candidate whose plan is over the size limit, is flagged once on the ticket (for
-Audit) and to you. The submission itself is not refused; Audit kicks it back.
+candidate that changes the plan file and leaves it over the size limit, is
+flagged once on the ticket (for Audit) and to you. The submission itself is not
+refused; Audit kicks it back.
 
 ### Adopting the plan gate on an existing project
 

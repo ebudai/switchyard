@@ -47,6 +47,7 @@ notifies the assignee; never comment merely to inspect.
 | Director | `switchyard-board`, then `switchyard-director` after the exact role check | Coordinates, routes and recovers; cannot grant itself approval |
 | Librarian | `switchyard-board`, then `switchyard-librarian` after the exact role check | One ticket; one of three documentation decisions; documents only |
 | Research role (Researcher, or the implementer the project named) | `switchyard-board`, the Researcher's onboarding prompt, and `docs/onboarding/switchyard-researcher-guide.md` | One research ticket; one finding (a commit of only the ticket's findings file, or a no-commit reason) or a hand-back |
+| Plan owner (the designer, or the role the plan gate named) | `switchyard-board`, and `docs/onboarding/switchyard-plan-guide.md` | Plan tickets only: a candidate that changes only the plan file and the decision log, with a valid `plan-index` block |
 | User | Board UI and the workflow's User actions | Acceptance belongs to the human; it is never an ordinary role dependency |
 | Publisher | Workflow and listener implementation | Mechanical actor with no pane or model; no role impersonates it |
 
@@ -155,6 +156,12 @@ its owner. The awaited role acting clears a role wait; merely replying may not.
 - Where the research stage runs, Audit reviews a finding's evidence, not its
   style: `research-sign-off` hands it to the Director in triage,
   `research-kick-back` returns it to the research role with what is missing.
+- Where the plan gate runs, Audit reviews a plan ticket (its `plan_change` gate
+  on) as a whole plan against the checklist in
+  `docs/onboarding/switchyard-plan-guide.md`, with the ordinary sign-off and
+  kick-back. A non-plan candidate that changes the plan file is a kick-back:
+  plan changes go through a plan ticket. The Director never edits the plan; work
+  it does not cover is a `request-scope-change`.
 - The Director verifies evidence and integration identity but does not write
   product code or self-approve.
 

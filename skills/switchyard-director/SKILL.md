@@ -213,8 +213,9 @@ approves. You scope tickets from it and **never edit it**. The rules are in
   extends a plan ticket for the owner, and the ticket waits on it.
 - A plan ticket (`create-ticket --plan`, `plan-ticket <id>`) needs the User's
   acceptance before you close it; its closing commit becomes the approved plan.
-- A non-plan candidate that edits the plan, and a plan over its size limit, are
-  flagged to you once; Audit kicks them back.
+  Leave its Audit gate on: marking it does not add Audit.
+- A non-plan candidate that edits the plan, and a candidate that leaves the plan
+  over its size limit, are flagged to you once; Audit kicks them back.
 
 ## Research spikes, when the project runs the research stage
 

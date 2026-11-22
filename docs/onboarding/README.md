@@ -34,6 +34,13 @@ any particular project.
    research and keeping its evidence, the two forms of finding, handing back a question
    that cannot be researched as written, and what is never the researcher's.
 
+6. **[switchyard-plan-guide.md](switchyard-plan-guide.md)** — *the implementation plan*,
+   for projects that run the optional plan gate. The plan owner (the designer, or the role
+   the gate named) reads it in full; Audit reads its checklist, and Directors read how
+   tickets are scoped from it. It covers the three levels, the `plan-index` block the board
+   reads, what never goes in the plan, plan tickets, Audit's plan checklist, and adopting
+   the gate on an existing project.
+
 ## Start here if you are new
 
 For one specific task, the Switchyard source checkout's

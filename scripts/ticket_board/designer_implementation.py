@@ -28,8 +28,8 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from scripts.ticket_board.role_kinds import IMPLEMENTER, has_kind
-from scripts.ticket_board.workflow_config import NAME, validate
+from .role_kinds import IMPLEMENTER, has_kind
+from .workflow_config import NAME, validate
 
 DESIGNER_ROLE = "designer"
 

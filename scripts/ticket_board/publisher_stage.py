@@ -163,7 +163,7 @@ def canonical_publisher_returns(cfg: dict[str, Any]) -> dict[str, Any]:
 
 def with_publisher(document: dict[str, Any]) -> dict[str, Any]:
     """`document` with the Publisher between Audit and what Audit approved into. Raises ValueError, changing nothing."""
-    from scripts.ticket_board.workflow_config import DIRECTOR_ROLE, parking_stage_names, validate
+    from .workflow_config import DIRECTOR_ROLE, parking_stage_names, validate
 
     cfg = validate(copy.deepcopy(document))
     if publication_stage(cfg) is not None:
@@ -211,7 +211,7 @@ def with_publisher(document: dict[str, Any]) -> dict[str, Any]:
 
 def without_publisher(document: dict[str, Any]) -> dict[str, Any]:
     """`document` without the Publisher's stages: Audit approves where it did before; the role stays, inactive."""
-    from scripts.ticket_board.workflow_config import validate
+    from .workflow_config import validate
 
     cfg = validate(copy.deepcopy(document))
     if publication_stage(cfg) is None:
@@ -237,7 +237,7 @@ def without_publisher(document: dict[str, Any]) -> dict[str, Any]:
 def _recompose_research(cfg: dict[str, Any]) -> dict[str, Any]:
     """The research stage's moves for a board with (or without) the Publisher: a finding with a commit reaches main
     through it (SYRD-849)."""
-    from scripts.ticket_board.research_stage import recompose_research
+    from .research_stage import recompose_research
 
     return recompose_research(cfg)
 
@@ -251,7 +251,7 @@ def validate_publisher(cfg: dict[str, Any], need: Callable[[bool, str], None]) -
              "invalid publisher: it is a system actor with no model, runtime, pane, session, prompt or capability")
         need(not any(PUBLISHER_ROLE in s["owners"] and s["name"] != PUBLICATION_STAGE for s in cfg["stages"]),
              "invalid publisher: it owns the publication stage and nothing else")
-        from scripts.ticket_board.research_stage import PUBLISHER_FINDING_ACTIONS
+        from .research_stage import PUBLISHER_FINDING_ACTIONS
 
         need(not any((PUBLISHER_ROLE in t["actors"] or t.get("relays_decision_of") == PUBLISHER_ROLE)
                      and t["action"] not in PUBLISHER_ACTIONS + PUBLISHER_FINDING_ACTIONS for t in cfg["transitions"]),

@@ -147,9 +147,9 @@ def with_plan_gate(document: dict[str, Any], *, owner: str | None = None, design
                    max_lines: int = DEFAULT_MAX_LINES) -> dict[str, Any]:
     """`document` with the plan gate, owned by the existing `owner` or a new detached Designer (`designer` =
     `{"runtime", "template_role", "slot"}`), one of the two. Raises ValueError, changing nothing, when it cannot."""
-    from scripts.ticket_board.designer_implementation import with_designer_implementation
-    from scripts.ticket_board.role_kinds import IMPLEMENTER, has_kind
-    from scripts.ticket_board.workflow_config import RUNTIMES, validate
+    from .designer_implementation import with_designer_implementation
+    from .role_kinds import IMPLEMENTER, has_kind
+    from .workflow_config import RUNTIMES, validate
 
     cfg = validate(copy.deepcopy(document))
     if policy(cfg) is not None:
@@ -206,7 +206,7 @@ def with_plan_gate(document: dict[str, Any], *, owner: str | None = None, design
 
 def without_plan_gate(document: dict[str, Any]) -> dict[str, Any]:
     """`document` without the plan gate. The plan owner keeps its roles; the designer's routing scope goes."""
-    from scripts.ticket_board.workflow_config import validate
+    from .workflow_config import validate
 
     cfg = validate(copy.deepcopy(document))
     if policy(cfg) is None:
@@ -221,7 +221,7 @@ def without_plan_gate(document: dict[str, Any]) -> dict[str, Any]:
 
 def validate_plan_gate(cfg: dict[str, Any], need: Callable[[bool, str], None]) -> None:
     """The gate's shape, wherever it is declared."""
-    from scripts.ticket_board.role_kinds import IMPLEMENTER, has_kind
+    from .role_kinds import IMPLEMENTER, has_kind
 
     value = cfg.get(POLICY_KEY)
     if value is None:

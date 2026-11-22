@@ -259,7 +259,7 @@ def with_documentation_gate(document: dict[str, Any], *, librarian: dict[str, An
     `librarian` is `{"runtime": <cli>, "template_role": <role or None>, "slot": <display slot or None>}`, a missing
     slot meaning the background. Raises ValueError, changing nothing, when the gate cannot be added safely.
     """
-    from scripts.ticket_board.workflow_config import DIRECTOR_ROLE, RUNTIMES, parking_stage_names, validate
+    from .workflow_config import DIRECTOR_ROLE, RUNTIMES, parking_stage_names, validate
 
     cfg = validate(copy.deepcopy(document))
     if documentation_stage(cfg) is not None:
@@ -334,7 +334,7 @@ def with_documentation_gate(document: dict[str, Any], *, librarian: dict[str, An
 
 def without_documentation_gate(document: dict[str, Any]) -> dict[str, Any]:
     """`document` without the gate: submissions go where they went before; a Librarian stays, inactive."""
-    from scripts.ticket_board.workflow_config import validate
+    from .workflow_config import validate
 
     cfg = validate(copy.deepcopy(document))
     stage = documentation_stage(cfg)

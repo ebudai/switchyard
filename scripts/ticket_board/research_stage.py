@@ -224,7 +224,7 @@ def _audit(cfg: dict[str, Any]) -> dict[str, Any] | None:
 
 def _routes(cfg: dict[str, Any], impl: str) -> list[dict[str, Any]]:
     """The Director's ordinary routes into Implementation: moves from an owned, non-review stage before it."""
-    from scripts.ticket_board.workflow_config import DIRECTOR_ROLE, parking_stage_names
+    from .workflow_config import DIRECTOR_ROLE, parking_stage_names
 
     stages = {s["name"]: s for s in cfg["stages"]}
     parking = parking_stage_names(cfg)
@@ -255,7 +255,7 @@ def _finished(cfg: dict[str, Any], triage: str) -> str:
 
 def _director_exits(cfg: dict[str, Any], source: str, impl: str) -> list[dict[str, Any]]:
     """Implementation's Director-only exits to parking or a terminal stage, out of `source` instead."""
-    from scripts.ticket_board.workflow_config import DIRECTOR_ROLE, parking_stage_names
+    from .workflow_config import DIRECTOR_ROLE, parking_stage_names
 
     stages = {s["name"]: s for s in cfg["stages"]}
     parking = parking_stage_names(cfg)
@@ -267,7 +267,7 @@ def _director_exits(cfg: dict[str, Any], source: str, impl: str) -> list[dict[st
 def _composed(cfg: dict[str, Any], owner: str, triage: str, finished: str, audit: dict[str, Any] | None,
               impl: str) -> list[dict[str, Any]]:
     """Every transition the stage declares, as composed: what validate_research_stage holds them to."""
-    from scripts.ticket_board.workflow_config import DIRECTOR_ROLE
+    from .workflow_config import DIRECTOR_ROLE
 
     director = [DIRECTOR_ROLE]
     after = REVIEW_STAGE if audit is not None else triage
@@ -340,7 +340,7 @@ def with_research_stage(document: dict[str, Any], *, role: str | None = None,
     `researcher` is `{"runtime": <cli>, "template_role": <role or None>, "slot": <display slot or None>}`. Exactly
     one of the two is given. Raises ValueError, changing nothing, when the stage cannot be added safely.
     """
-    from scripts.ticket_board.workflow_config import RUNTIMES, validate
+    from .workflow_config import RUNTIMES, validate
 
     cfg = validate(copy.deepcopy(document))
     if research_stage(cfg) is not None or review_stage(cfg) is not None:
@@ -431,7 +431,7 @@ def with_research_stage(document: dict[str, Any], *, role: str | None = None,
 
 def without_research_stage(document: dict[str, Any]) -> dict[str, Any]:
     """`document` without the stage: everything composed is removed; a Researcher stays, inactive."""
-    from scripts.ticket_board.workflow_config import validate
+    from .workflow_config import validate
 
     cfg = validate(copy.deepcopy(document))
     if research_stage(cfg) is None:

@@ -36,6 +36,7 @@ HOST_ONLY: dict[str, tuple[str, ...]] = {
         "project_state_acl_boundary_test",
         "projection_identity_test",
         "release_bytecode_boundary_test",
+        "release_layout_imports_test",
         "release_status_cross_account_test",
         "release_status_trampoline_test",
         "root_owner_from_record_test",

@@ -18,6 +18,10 @@ taken through Audit, DAT, User Review and Final Sign-Off and closed on its integ
 - **without the gate,** nothing new: the same board after the gate is turned off (its records still there), and a
   board that never ran it: `{"plan": null}`, `plan_scope` null, the controls hidden, no plan line, every ticket shown.
 
+- **markup in plan text is text** (SYRD-851): after a re-plan whose M2 and D2.1 titles carry an `<img onerror>`, and an
+  unplanned reason that does, the filter, the ticket view and the plan view show each string literally, the page holds
+  no element made from it, and its handler never runs.
+
 Main runs first, from a git archive: it has no `/api/plan`, no `plan_scope` and none of the page's plan elements.
 """
 
@@ -52,10 +56,20 @@ SCOPED = {
     "PGU-920": ("D1.1", None, "cancel"),
     "PGU-921": ("D2.1", None, "app"),
     "PGU-922": ("D2.1", None, ""),
-    "PGU-930": (None, OPS_REASON, "main"),
+    "PGU-930": (None, OPS_REASON, "ops"),
     "PGU-931": (None, "A report from another project.", "cancel"),
 }
 TICKETS = [*SCOPED, "PGU-940", "PGU-911"]
+#: SYRD-851: markup in plan text, from the plan index (a re-plan's titles) and from the board (a reason). Rendered as
+#: markup it would add an <img> whose failed load counts itself; shown as text it adds nothing.
+IMG = '<img src="x" class="plan-851" onerror="window.__plan851 = (window.__plan851 || 0) + 1">'
+HOSTILE_M2, HOSTILE_D21, HOSTILE_REASON = f"Ingest {IMG}", f"Reader {IMG}", f"Logs {IMG}"
+HOSTILE_PLAN = [MILESTONES[0], {**MILESTONES[1], "title": HOSTILE_M2,
+                                "deliverables": [{"id": "D2.1", "title": HOSTILE_D21}, MILESTONES[1]["deliverables"][1]]},
+                MILESTONES[2]]
+HOSTILE_TICKET = "PGU-932"
+#: What the page holds that the markup would have made, and how often its handler ran.
+MADE = "() => ({ imgs: document.querySelectorAll('img.plan-851, img[src=\"x\"]').length, ran: window.__plan851 || 0 })"
 CARDS = "() => Array.from(document.querySelectorAll('#board .card-id')).map((e) => e.textContent.trim()).sort()"
 CONTROLS = """() => {
   const controls = document.getElementById('planControls');
@@ -166,6 +180,58 @@ def browse(base: str, devices: dict, *, gated: bool) -> dict:
     return seen
 
 
+def browse_hostile(base: str, devices: dict) -> dict:
+    """SYRD-851: the re-planned board's markup-bearing text in the filter, the ticket view and the plan view."""
+    from playwright.sync_api import sync_playwright
+
+    seen: dict = {}
+    with sync_playwright() as playwright:
+        launch: dict = {"headless": True}
+        if Path("/opt/google/chrome/chrome").is_file():
+            launch["executable_path"] = "/opt/google/chrome/chrome"
+        browser = playwright.chromium.launch(**launch)
+        for device, options in devices.items():
+            page = browser.new_context(**options).new_page()
+            out: dict = {"made": []}
+            try:
+                page.goto(base + "/", wait_until="domcontentloaded")
+                page.locator(".card-id", has_text=HOSTILE_TICKET).first.wait_for(state="attached", timeout=20000)
+                page.wait_for_function("() => !document.getElementById('planControls') || "
+                                       "!document.getElementById('planControls').hidden", timeout=20000)
+                if page.evaluate("!document.getElementById('planControls')"):
+                    out["absent"] = True
+                    seen[device] = out
+                    continue
+                page.wait_for_function("() => Array.from(document.getElementById('planFilterInput').options)"
+                                       ".some((o) => o.value === 'D2.1' && o.textContent.startsWith('D2.1 Reader'))", timeout=20000)
+                out["option"] = page.evaluate("() => { const o = Array.from(document.getElementById('planFilterInput')"
+                                              ".options).find((x) => x.value === 'D2.1'); "
+                                              "return [o.textContent, o.parentElement.label, o.children.length]; }")
+                out["made"].append(page.evaluate(MADE))
+                out["detail"] = {}
+                for ticket in ("PGU-921", HOSTILE_TICKET):
+                    page.locator(".card", has=page.locator(".card-id", has_text=ticket)).first.dispatch_event("click")
+                    page.locator("#detailOverlay:not([hidden])").wait_for(timeout=10000)
+                    page.wait_for_timeout(500)  # a failed image load would have run its handler by now
+                    out["detail"][ticket] = page.evaluate(
+                        "() => Array.from(document.querySelectorAll('#detailContent .detail-plan-scope')).map((e) => e.textContent)")
+                    out["made"].append(page.evaluate(MADE))
+                    page.keyboard.press("Escape")
+                    page.locator("#detailOverlay").wait_for(state="hidden", timeout=10000)
+                page.click("#planViewBtn")
+                page.locator("#planOverlay:not([hidden])").wait_for(timeout=10000)
+                page.wait_for_timeout(500)
+                out["view"] = page.evaluate("""() => [
+                  document.querySelector('#planContent [data-milestone="M2"] .plan-milestone-head strong').textContent,
+                  document.querySelector('#planContent [data-deliverable="D2.1"] button').textContent]""")
+                out["made"].append(page.evaluate(MADE))
+            except Exception as error:  # noqa: BLE001 - a page that fails is a result
+                out["failed"] = f"{type(error).__name__}: {str(error)[:600]}"
+            seen[device] = out
+        browser.close()
+    return seen
+
+
 def scenario(root: Path, prefix: str, before_plan_gate: Path) -> dict:
     for extra in (str(root), str(root / "tests")):
         if extra not in sys.path:
@@ -217,6 +283,21 @@ def scenario(root: Path, prefix: str, before_plan_gate: Path) -> dict:
                         "board_scope": {t: board[t].get("plan_scope", "absent") for t in TICKETS}}
 
             out["gated"] = {**answers(), "page": browse(f.board.base, devices, gated=True)}
+            # SYRD-851: a re-plan whose titles carry markup, and an unplanned reason that does.
+            replan = "PGU-912"
+            f.seed(replan, "A re-plan")
+            assert f.act(replan, "set_workflow_flags", "director", plan_change=True, needs_user_signoff=True) == "ok"
+            assert f.act(replan, "route", "director", state="in_progress", assignee="main") == "ok"
+            refiles = {pgt.PLAN: pgt.plan_text(HOSTILE_PLAN), pgt.LOG: files[pgt.LOG] + "2026-11-23: M2 renamed.\n"}
+            regood = f.candidate(replan, refiles, parent=landed)
+            relanded = f.store.commit([landed], refiles, f"{replan}: integrated")
+            f.store.publish("main", relanded)
+            said = pgt.plan_ticket_to_done(f, replan, regood, close_on=relanded)
+            assert said == "ok", said
+            f.seed(HOSTILE_TICKET, "Unplanned, with markup in its reason")
+            assert f.act(HOSTILE_TICKET, "set_ticket_deliverable", "director", unplanned_reason=HOSTILE_REASON) == "ok"
+            out["hostile_status"] = json.loads(f.board.sql("SELECT ticket_board.plan_status()::text;"))
+            out["hostile"] = browse_hostile(f.board.base, devices)
             off = pg.without_plan_gate(f.board.app.workflow_configuration())
             f.board.app.apply_workflow(off, expected_revision=f.board.app.workflow_document()["revision"],
                                        dry_run=False, caller_role="director")
@@ -296,6 +377,25 @@ def nothing_new(seen: dict, side: str) -> None:
     check(seen["page"]["errors"] == [], f"{side}: no page errors: {seen['page']['errors']}")
 
 
+def hostile(got: dict) -> None:
+    """SYRD-851: markup in plan text is shown as text, in the filter, the ticket view and the plan view."""
+    m2 = got["hostile_status"]["milestones"][1]
+    check(m2["title"] == HOSTILE_M2 and m2["deliverables"][0]["title"] == HOSTILE_D21,
+          f"the re-plan's titles carry the markup: {m2}")
+    for device in ("desktop", "phone"):
+        page = got["hostile"][device]
+        worked(page, f"markup, {device}")
+        check(page["option"] == [f"D2.1 {HOSTILE_D21}", f"M2 {HOSTILE_M2}", 0],
+              f"markup, {device}: the filter shows the titles literally: {page['option']}")
+        check(page["detail"] == {"PGU-921": [f"Deliverable: D2.1 {HOSTILE_D21}, of milestone M2 ({HOSTILE_M2})"],
+                                 HOSTILE_TICKET: [f"Unplanned: {HOSTILE_REASON}"]},
+              f"markup, {device}: the ticket view shows the titles and the reason literally: {page['detail']}")
+        check(page["view"] == [f"M2 {HOSTILE_M2}", f"D2.1 {HOSTILE_D21}"],
+              f"markup, {device}: the plan view shows the titles literally: {page['view']}")
+        check(page["made"] == [{"imgs": 0, "ran": 0}] * 4,
+              f"markup, {device}: no element was made from it and its handler never ran: {page['made']}")
+
+
 def candidate(got: dict) -> None:
     gated, status = got["gated"], got["sql"]
     check(gated["plan_status"] == 200 and gated["plan"] == {"plan": status},
@@ -340,10 +440,12 @@ def candidate(got: dict) -> None:
               f"{device}: a deliverable in the plan view opens the board filtered to it: {page['after_view']}")
         check(page["escape_closes"] is True, f"{device}: Escape closes the plan view")
     check(gated["page"]["errors"] == [], f"no page errors: {gated['page']['errors']}")
-    check(int(got["off_rows"]) == len(SCOPED), f"turned off, the records stay: {got['off_rows']}")
+    hostile(got)
+    check(int(got["off_rows"]) == len(SCOPED) + 1, f"turned off, the records stay: {got['off_rows']}")
     nothing_new(got["off"], "the gate turned off")
     for device in ("desktop", "phone"):
-        check(got["off"]["page"][device]["cards"][""] == shown, f"turned off, {device}: every ticket shows")
+        check(got["off"]["page"][device]["cards"][""] == sorted([*shown, HOSTILE_TICKET]),
+              f"turned off, {device}: every ticket shows: {got['off']['page'][device]['cards']}")
     nothing_new(got["plain"], "a board that never ran the gate")
 
 

@@ -74,26 +74,38 @@ def configured_workflow() -> dict[str, Any]:
     }
 
 
+def plan_gated_workflow() -> dict[str, Any]:
+    """SYRD-850: the same workflow with the plan gate's policy, so the query reads each ticket's deliverable."""
+    return {**configured_workflow(),
+            "plan": {"owner": "main", "file": "docs/implementation-plan.md", "decision_log": "docs/decision-log.md",
+                     "max_lines": 1500}}
+
+
 def test_legacy_and_configured_sql_bytes_and_parameters() -> None:
     # SYRD-537 added the reminder_snooze column, SYRD-541 size_review, SYRD-568 the serial_queue CTE and
     # column, SYRD-113 privileged_jobs; hashes measured from the new SQL.
+    # SYRD-851 re-pin: stale since SYRD-595 (e986c496), whose change and those of SYRD-599, 626, 629, 662, 673, 697
+    # and 850 each altered this SQL on purpose without re-measuring it; measured again from main's e62f8efd.
     expected = {
-        False: "0e1aba6bca59dbd7e28198871d178cbe17ae6c8baffbe0eca1eb1584fc700cb4",
-        True: "4dd1f94ac58c35567c770551a05c8543ad37fe78b014d352d4f7cbf90a5dd299",
+        "legacy": "005f5e066bd7d8e52829ba23851e0ca5f56ecd3a1409321de6b225eb22803aff",
+        "configured": "f6a00bc7b05f4d9f65d3aa4b4c484ece1056337952e64f7bc9974820a9935a75",
+        "plan": "3e6dff37dd9e328555a0e71668daf8074fb622a011f36666d571d64bd73b6060",
     }
-    for workflow in (None, configured_workflow()):
+    for name, workflow in (("legacy", None), ("configured", configured_workflow()), ("plan", plan_gated_workflow())):
         conn = ReadOnlyConnection(workflow)
         assert select_ticket_rows(conn) == [
             {"id": "SYRD-1", "state": "in_progress", "updated": "2026-01-01"}
         ]
         sql, params = conn.ticket_queries()[0]
         assert params == ()
-        assert hashlib.sha256(sql.encode()).hexdigest() == expected[bool(workflow)]
+        assert hashlib.sha256(sql.encode()).hexdigest() == expected[name], (name, hashlib.sha256(sql.encode()).hexdigest())
         if workflow:
             assert "'director''s review'" in sql
             assert "'done'" not in sql
         else:
             assert "scoped.state IN ('analysis', 'in_progress', 'inspection', 'audit', 'dat', 'director_review')" in sql
+        # SYRD-850: the deliverable is read only on a board that runs the plan gate.
+        assert ("FROM ticket_board.ticket_deliverables td WHERE td.ticket_id = t.id" in sql) == (name == "plan"), name
         assert select_ticket_rows(conn, "SYRD-1")
         assert conn.ticket_queries()[-1][1] == ("SYRD-1",)
         assert "WHERE t.id = %s" in conn.ticket_queries()[-1][0]

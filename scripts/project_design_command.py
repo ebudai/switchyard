@@ -71,6 +71,10 @@ def design_project_command(
     librarian_runtime: str | None = None,
     librarian_model: str | None = None,
     librarian_effort: str | None = None,
+    research_role: str | None = None,
+    researcher_runtime: str | None = None,
+    researcher_model: str | None = None,
+    researcher_effort: str | None = None,
     input_func: Callable[[str], str] = input,
     print_func: Callable[[str], None] = print,
 ) -> int:
@@ -177,6 +181,21 @@ def design_project_command(
         path=target_artifact,
         role_names=[*resolved_implementer_roles, *resolved_audit_roles, "director", "designer"],
     )
+    # The research stage likewise (SYRD-842): an implementer that researches, or a new Researcher.
+    if research_role and (researcher_runtime or researcher_model or researcher_effort):
+        raise SystemExit("team-launcher: --research-role names an implementer that researches; --researcher-* "
+                         "declares a new Researcher instead; give one or the other")
+    if (researcher_model or researcher_effort) and not researcher_runtime:
+        raise SystemExit("team-launcher: --researcher-model and --researcher-effort need --researcher-runtime")
+    from scripts import research_onboarding
+
+    research = research_onboarding.artifact_research(
+        {"stage": "role", "role": research_role} if research_role else
+        {"stage": "researcher", "runtime": researcher_runtime, "model": researcher_model or "",
+         "effort": researcher_effort or ""} if researcher_runtime else None,
+        path=target_artifact, role_names=[*resolved_implementer_roles, *resolved_audit_roles, "director", "designer"],
+        implementers=resolved_implementer_roles,
+    )
     artifact = launcher.ProjectDesignArtifact(
         project=project_slug,
         project_name=resolved_project_name,
@@ -202,6 +221,7 @@ def design_project_command(
         capability_grants=grants,
         router=router,
         documentation=documentation,
+        research=research,
     )
     target_design_document.parent.mkdir(parents=True, exist_ok=True)
     target_design_document.write_text(launcher._project_design_markdown(project_slug, title=title, body=body), encoding="utf-8")

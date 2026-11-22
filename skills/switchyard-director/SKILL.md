@@ -196,6 +196,25 @@ you. It is a usability tool, not a delegate: everything else stays yours.
 - `scripts/router_canary.py seed|report|finish` measures it on bounded
   fixtures, priced with your corrections and implementers' interruptions.
 
+## Research spikes, when the project runs the research stage
+
+A project may run an optional **research stage**: a question answered with
+evidence, reviewed by Audit when the ticket keeps `needs_audit`, and handed back
+to you. The full guide is the "Research spikes" section of
+`docs/onboarding/switchyard-director-guide.md`.
+
+- Turn it on with `switchyard research-stage <project> enable --role <role>` or
+  `--runtime <cli>` for a new Researcher; `disable` once Research is empty.
+- A research ticket states the question, a timebox and what a usable answer looks
+  like: `ticket-board-write research-brief <id> --question-file ... --timebox 4h
+  --usable-answer-file ...` (or `create-ticket --research`). Then
+  `start-research <id>`. The board refuses Research without the brief, and the
+  ordinary route into Implementation for a ticket carrying `needs_research`.
+- The finding comes back to triage, named in your notice: `close-on-finding`
+  with your decision, `return-finding` with what is missing, or file the tickets
+  it justifies yourself. Nothing is filed for you, and a research ticket never
+  reaches User Review. A passed timebox is said once; the board stops nothing.
+
 ## Documentation review, when the project runs the gate
 
 A project may run an optional **documentation gate**: a

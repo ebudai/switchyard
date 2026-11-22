@@ -102,8 +102,10 @@ def test_enter_on_router_off_is_reviewed_and_then_confirmed() -> None:
     questions = asked(result)
     check(any(q.startswith("Router (optional)") for q in questions), f"Router is offered: {questions}")
     router_at = next(i for i, q in enumerate(questions) if q.startswith("Router (optional)"))
-    # SYRD-624: the documentation gate's menu follows Router; the confirmation is still the last question.
-    check(questions[router_at + 1:] == ["Documentation gate (optional) [off]: ", PROCEED],
+    # SYRD-624: the documentation gate's menu follows Router, SYRD-842 the research stage's; the confirmation is
+    # still the last question.
+    check(questions[router_at + 1:] == ["Documentation gate (optional) [off]: ", "Research stage (optional) [off]: ",
+                                        PROCEED],
           f"Router, then the documentation gate, and the only question after them is the confirmation: {questions[router_at:]}")
     review = said_before(result, PROCEED)
     check("switchyard: roles to create:" in review, f"the roles are reviewed before the question: {review[-6:]}")

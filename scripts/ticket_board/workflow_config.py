@@ -8,6 +8,7 @@ import re
 from typing import Any
 
 from .documentation_gate import audit_documentation_return, validate_documentation_gate
+from .research_stage import validate_research_stage
 from .publisher_stage import validate_publisher
 from .router_role import router_holds, validate_router
 from .user_wait import validate_user_waits
@@ -440,15 +441,10 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
         set(cfg)
         <= {
             "schema", "roles", "stages", "transitions", "flags",
-            "reassign",
-            "queue",
-            "project",
-            "remove_stages",
-            "migrations",
-            "reservation",
-            "scheduling",
+            "reassign", "queue", "project", "remove_stages", "migrations", "reservation", "scheduling",
             "user_waits",  # SYRD-662
             "board_stall",  # SYRD-724
+            "research",  # SYRD-842
         },
         "unknown workflow configuration field",
     )
@@ -1103,6 +1099,7 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
     validate_user_waits(cfg, need)  # SYRD-662
     validate_board_stall(cfg, need)  # SYRD-724
     validate_role_kinds(cfg, need)  # SYRD-678
+    validate_research_stage(cfg, need)  # SYRD-842
     return cfg
 
 

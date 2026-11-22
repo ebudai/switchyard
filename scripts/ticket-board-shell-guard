@@ -41,12 +41,12 @@ import stat
 import sys
 from dataclasses import dataclass, field, replace
 
-#: The free-text options of `ticket-board-write` (write_cli.add_free_text_argument; tests/shell_guard_test.py
-#: pins this to the parser), with the structured options that can carry prose, and `switchyard`'s `--reason`.
+#: ticket-board-write's free-text options (pinned by tests/shell_guard_test.py), prose options, switchyard's --reason.
 PROSE_FLAGS = frozenset({
     "--audit-prompt", "--blocked-reason", "--body", "--comment-text", "--do-this", "--implementation", "--message",
-    "--note", "--rationale", "--reason", "--recommendations", "--request", "--text", "--then-choose", "--title",
-    "--you-should-see", "--set", "--value", "--patch-json", "--payload-json", "--json", "--test-tier-reason",
+    "--note", "--rationale", "--reason", "--recommendations", "--request", "--text", "--then-choose", "--title", "--set",
+    "--you-should-see", "--value", "--patch-json", "--payload-json", "--json", "--test-tier-reason", "--question",
+    "--usable-answer",
 })
 FLAG_COMMANDS = frozenset({"ticket-board-write", "switchyard"})
 #: directorctl subcommand -> index of the first argument that is its message.

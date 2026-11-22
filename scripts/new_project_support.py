@@ -154,6 +154,7 @@ def _write_initial_switchyard_project_artifact(
     agy_credential_source_origin: str = "unset",
     router: Sequence[tuple[str, str]] = (),
     documentation: Sequence[tuple[str, str]] = (),
+    research: Sequence[tuple[str, str]] = (),
 ) -> None:
     from scripts import team_launcher as launcher
 
@@ -197,6 +198,7 @@ def _write_initial_switchyard_project_artifact(
         },
         router=tuple(router),
         documentation=tuple(documentation),
+        research=tuple(research),
     )
     # As root, the owner's files by descriptor from the owner's root. The design document only where nothing is
     # at its name: a link left there is not "missing" and is never written through (SYRD-611).

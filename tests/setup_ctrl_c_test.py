@@ -243,7 +243,7 @@ def new_aborted_at(stage: str | None, *, before_choices: bool = False) -> tuple[
             "include_audit", "include_designer", "owner_shell", "owner_user", "project_dir",
             "resolved_agy_credential_source", "resolved_project_name", "runner", "selected_audit_roles",
             "selected_desktop_policy", "selected_implementer_roles", "selected_role_clis", "selected_role_efforts",
-            "selected_role_models", "selected_router", "selected_documentation", "upstream_report")},
+            "selected_role_models", "selected_router", "selected_documentation", "selected_research", "upstream_report")},
             resolved_slug="test13", stages=Stages(stage))
 
     def interrupted(**_kwargs):

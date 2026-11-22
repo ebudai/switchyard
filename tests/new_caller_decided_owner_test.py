@@ -173,7 +173,9 @@ def inner(root: Path, work: Path, mode: str) -> dict:
             return SimpleNamespace(effective_source_repo=release, precheck_plan=None,
                                    selected_role_clis=kwargs["selected_role_clis"],
                                    selected_router=kwargs["selected_router"],
-                                   selected_documentation=kwargs["selected_documentation"], worktree_branch="main")
+                                   selected_documentation=kwargs["selected_documentation"],
+                                   # SYRD-842's record; the before-run's tree, main's, has none to hand on.
+                                   selected_research=kwargs.get("selected_research", ()), worktree_branch="main")
 
         def accounts(**kwargs):  # P2: the artifact in `.switchyard`, both handed to the owner, who then rewrites it
             if kwargs["from_artifact"] is None:

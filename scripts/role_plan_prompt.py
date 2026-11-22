@@ -228,6 +228,15 @@ def _prompt_switchyard_role_plan(
     )
     if documentation is not None:
         plan.append(documentation)
+    # The research stage, likewise optional and off by default (SYRD-842).
+    from scripts import research_onboarding
+
+    research = research_onboarding.prompt_research(
+        implementers, runner=catalog_runner, owner_args=owner_args, unverified_because=unverified_because,
+        input_func=input_func, print_func=print_func,
+    )
+    if research is not None:
+        plan.append(research)
     return tuple(plan)
 
 
@@ -244,7 +253,7 @@ def _prompt_switchyard_role_choices(
         for selection in launcher._prompt_switchyard_role_plan(
             input_func=input_func, print_func=print_func
         )
-        if selection.role not in ("router", "librarian", "documentation-gate")
+        if selection.role not in ("router", "librarian", "documentation-gate", "researcher", "research-stage")
     )
 
 

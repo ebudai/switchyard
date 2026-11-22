@@ -16,11 +16,12 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from . import board_stall, documentation_gate, read_client, test_tier, workflow_relays, write_client, write_payload
+    from . import board_stall, documentation_gate, read_client, stage_cli, test_tier, workflow_relays, write_client, write_payload
 except ImportError:  # pragma: no cover - `python write_client.py` runs outside the package
     import board_stall
     import documentation_gate
     import read_client
+    import stage_cli
     import test_tier
     import workflow_relays
     import write_client
@@ -29,22 +30,6 @@ except ImportError:  # pragma: no cover - `python write_client.py` runs outside 
 #: SYRD-624: all a Librarian may write. The board refuses anything else regardless.
 LIBRARIAN_COMMANDS = frozenset({"documentation_sign_off", "documentation_no_change", "documentation_kick_back",
                                 "add_comment", "verify_caller"})
-
-
-def _documentation_decision(client: Any, args: argparse.Namespace, command: str) -> dict[str, Any]:
-    """SYRD-624: one documentation decision, as the declared transition it is."""
-    action = getattr(documentation_gate, {"documentation_sign_off": "SIGN_OFF", "documentation_no_change": "NO_CHANGE",
-                                          "documentation_kick_back": "KICK_BACK"}[command])
-    if command != "documentation_sign_off":
-        return client.workflow_action(args.ticket_id, action, {"reason": args.reason})
-    ref = (args.ref or "").strip()
-    if not ref:  # the ticket's documentation ref for this role, derived exactly as the board derives it
-        ticket = read_client.TicketBoardReadClient(args.board_url).get_ticket(args.ticket_id)
-        ref = documentation_gate.candidate_ref(args.caller_role, args.ticket_id, str(ticket.get("commit_hash") or ""))
-    payload = {"commit_hash": args.commit_hash, "ref": ref}
-    if args.note:
-        payload["text"] = args.note
-    return client.workflow_action(args.ticket_id, action, payload)
 
 
 def _add_user_acceptance_relay(client: Any, *, apply: bool, expected_revision: int | None) -> dict[str, Any]:
@@ -489,6 +474,7 @@ def _build_parser() -> argparse.ArgumentParser:
     workflow_flags.add_argument("ticket_id")
     add_free_text_argument(workflow_flags, "--patch-json", required=True, help="the flags to set, a JSON object")
     test_tier.add_parser(subparsers, add_free_text_argument)  # SYRD-836
+    stage_cli.add_research_parsers(subparsers, add_free_text_argument)  # SYRD-842
 
     create = subparsers.add_parser("create-ticket")
     create.add_argument("--title", required=True)
@@ -507,6 +493,7 @@ def _build_parser() -> argparse.ArgumentParser:
     create.add_argument("--needs-audit", action=argparse.BooleanOptionalAction, default=True)
     create.add_argument("--needs-user-signoff", action="store_true")
     test_tier.add_create_arguments(create, add_free_text_argument)  # SYRD-836
+    stage_cli.add_create_arguments(create, add_free_text_argument)  # SYRD-842
 
     file_bug = subparsers.add_parser("file-bug")
     file_bug.add_argument("--title", required=True)
@@ -991,6 +978,7 @@ def main(argv: list[str] | None = None) -> int:
         if command == "verify_caller":
             response = client.verify_caller()
         elif command == "create_ticket":
+            stage_cli.check_create(args)  # SYRD-842: a research ticket's brief, whole, before anything is created
             response = client.create_ticket(
                 title=args.title,
                 body=args.body,
@@ -1008,6 +996,7 @@ def main(argv: list[str] | None = None) -> int:
                 comment_text=args.comment_text,
                 **test_tier.create_fields(args),
             )
+            response = stage_cli.after_create(client, args, response)
         elif command == "file_bug":
             response = client.file_bug(
                 title=args.title,
@@ -1100,7 +1089,9 @@ def main(argv: list[str] | None = None) -> int:
             patch = write_payload.json_object(args.patch_json, "--patch-json")
             response = client.set_workflow_flags(args.ticket_id, patch)
         elif command in {"documentation_sign_off", "documentation_no_change", "documentation_kick_back"}:
-            response = _documentation_decision(client, args, command)
+            response = stage_cli.documentation_decision(client, args, command)
+        elif command in stage_cli.RESEARCH_COMMANDS:  # SYRD-842
+            response = stage_cli.research_command(client, args, command)
         elif command == "set_test_tier":
             response = client.set_workflow_flags(args.ticket_id, test_tier.set_patch(args))
         elif command == "require_documentation":

@@ -64,6 +64,8 @@ SWITCHYARD_ONBOARDING_DOC_NAMES = (
     # SYRD-624: the optional Librarian's onboarding, copied into every project so a
     # project that later turns the documentation gate on already has it.
     "switchyard-librarian-guide.md",
+    # SYRD-842: the optional Researcher's, likewise.
+    "switchyard-researcher-guide.md",
 )
 
 

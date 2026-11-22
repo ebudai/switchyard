@@ -1936,6 +1936,26 @@ six are taken (SYRD-781); its runtime goes through the same agent CLI checks. Of
 `switchyard documentation-gate --help`; [SYRD-624](syrd-624-documentation-gate.md)
 is historical design and rollout evidence.
 
+**The research stage is a choice here too, off by default (SYRD-842).** After the
+documentation gate, `new` asks `Research stage (optional)`: off; one of the
+project's implementers by name, which creates no role and no session; or
+`researcher`, a new Researcher whose runtime, model and effort are asked the way
+every role's are. `new` prints the choice before anything is created. It is
+recorded as `project.research = {"stage": "role", "role": <implementer>}` or
+`{"stage": "researcher", "runtime": ..., "model": ..., "effort": ...}`; no field,
+or `{"stage": "off"}`, means off. Noninteractively, `team-launcher <project>
+design --research-role <implementer>` or `--researcher-runtime <cli>
+[--researcher-model M] [--researcher-effort E]` records it. The project starts with
+a declared workflow carrying the stage, added by the same `with_research_stage`
+that `switchyard research-stage <project> enable` uses, after Router and the
+documentation gate. A Researcher takes the next free display slot like the
+Librarian, and its runtime goes through the same agent CLI checks; `switchyard
+upgrade` never turns the stage on. The current procedure is the
+[Director guide](onboarding/switchyard-director-guide.md#research-spikes-the-optional-research-stage),
+the [Researcher guide](onboarding/switchyard-researcher-guide.md) and
+`switchyard research-stage --help`; [SYRD-842](syrd-842-research-stage.md) is
+historical design and rollout evidence.
+
 `switchyard add-role <project> <role> --cli <cli>` adds another implementer role
 after provisioning. `switchyard add-role <project> <role> --audit --cli <cli>`
 adds an auditor role instead. Auditor additions widen the Audit stage owners,

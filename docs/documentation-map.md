@@ -32,7 +32,8 @@ running. Do not copy a transition or option from a historical ticket record.
 | Recover a role, pane or display | [Role runtime](role-runtime.md), [runtime presentation](runtime-presentation.md), and [launcher](team-launcher.md) | `switchyard status --json`; `switchyard attach`, `recover-display`, `set-role-runtime` or `start --help` |
 | Upgrade a tenant | [Launcher: upgrading](team-launcher.md#upgrading-a-tenant) | `switchyard upgrade --dry-run <project>`; `switchyard release-status <project>` |
 | Operate or recover a board service | [Board service](ticket-board-service.md) and [board supervisor](board-supervisor.md) | `switchyard release-status`; the service and supervisor status commands in those guides |
-| Configure routing or review gates | [Board guide](onboarding/switchyard-board-guide.md) | `switchyard router-role`, `documentation-gate`, `publisher`, and `design-stage --help` |
+| Configure routing or review gates | [Board guide](onboarding/switchyard-board-guide.md) | `switchyard router-role`, `documentation-gate`, `publisher`, `research-stage`, and `design-stage --help` |
+| Run a research spike: a question, an evidence-reviewed finding, back to the Director | [Director guide: research spikes](onboarding/switchyard-director-guide.md#research-spikes-the-optional-research-stage), and the [Researcher guide](onboarding/switchyard-researcher-guide.md) | `switchyard research-stage --help`; `ticket-board-write research-brief --help` |
 | File a report to an upstream board, or several | [Board guide: report ancestry](onboarding/switchyard-board-guide.md#more-than-one-upstream-board-report-ancestry) | `ticket-board-read report-ancestors`; `ticket-board-write file-report --help` |
 | Publish approved work | [Board guide: Publisher](onboarding/switchyard-board-guide.md#who-may-do-what) and [board service: publishing](ticket-board-service.md#publishing-a-push-by-the-implementer) | `switchyard publisher --help`; the ticket and publication comment |
 | Prepare User acceptance | [Director guide: routing and holding](onboarding/switchyard-director-guide.md#routing-and-holding) | `ticket-board-write uat-instructions --help` and the ticket's User Review action |
@@ -81,7 +82,7 @@ changes.
 | Surface | Scope |
 |---|---|
 | [`README.md`](../README.md) | Installation, version selection and the generated top-level command list |
-| [`docs/onboarding/`](onboarding/README.md) | Project-agnostic onboarding copied into new projects; board, Director, Librarian and methodology guides |
+| [`docs/onboarding/`](onboarding/README.md) | Project-agnostic onboarding copied into new projects; board, Director, Librarian, Researcher and methodology guides |
 | [`skills/switchyard-board/SKILL.md`](../skills/switchyard-board/SKILL.md) | Shared role authority, board operations, evidence and wait handling |
 | [`skills/switchyard-director/SKILL.md`](../skills/switchyard-director/SKILL.md) | Director-only controls and recovery procedures |
 | [`skills/switchyard-librarian/SKILL.md`](../skills/switchyard-librarian/SKILL.md) | Librarian-only documentation decision contract |

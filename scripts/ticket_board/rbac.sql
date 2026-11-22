@@ -729,4 +729,15 @@ REVOKE ALL ON FUNCTION ticket_board.record_blocked_slot_release(text) FROM PUBLI
 REVOKE ALL ON FUNCTION ticket_board.record_blocked_slot_release_for_ticket() FROM PUBLIC;
 REVOKE ALL ON FUNCTION ticket_board.record_blocked_slot_release_for_blocker() FROM PUBLIC;
 
+-- SYRD-842: the research brief is the Director's write through the service; the listener's timebox pass and hand-off line.
+REVOKE ALL ON ticket_board.ticket_research_briefs FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.set_research_brief(text, text, integer, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.note_research_timeboxes(timestamptz) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ticket_board.ticket_research_handoff(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ticket_board.set_research_brief(text, text, integer, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.note_research_timeboxes(timestamptz) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.ticket_research_handoff(text) TO ticket_board_listener;
+REVOKE ALL ON FUNCTION ticket_board.research_timebox_notice_is_current(jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ticket_board.research_timebox_notice_is_current(jsonb) TO ticket_board_listener;
+
 COMMIT;

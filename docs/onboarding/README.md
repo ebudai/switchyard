@@ -28,6 +28,12 @@ any particular project.
    what a documentation commit does to the exact candidate and its sign-offs, when to
    return a ticket, and what is never the Librarian's.
 
+5. **[switchyard-researcher-guide.md](switchyard-researcher-guide.md)** — *research
+   spikes*, for projects that run the optional research stage. The research role reads it
+   in full; Directors and Audit read its sections for them. It covers the brief, doing the
+   research and keeping its evidence, the two forms of finding, handing back a question
+   that cannot be researched as written, and what is never the researcher's.
+
 ## Start here if you are new
 
 For one specific task, the Switchyard source checkout's

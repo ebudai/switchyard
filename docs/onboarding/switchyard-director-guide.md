@@ -723,6 +723,81 @@ cannot also claim pulled work. This section and
 procedure; [SYRD-678](../syrd-678-designer-implementer.md) is historical
 design and rollout evidence.
 
+## Research spikes: the optional research stage
+
+Some work cannot be planned until something is found out: a format to
+reverse-engineer, a tool to evaluate, a corpus to measure. The optional
+research stage runs that spike on the board, with a question, a finding whose
+evidence is reviewed, and the finding handed back to you. Turn it on once per
+project:
+
+```bash
+switchyard research-stage <project> enable --role main --dry-run   # an existing role researches
+switchyard research-stage <project> enable --runtime claude [--template-role audit]   # a new Researcher
+switchyard research-stage <project> disable   # refused while a ticket is in Research or its review
+```
+
+`--runtime` declares a detached `researcher` role on that agent CLI, copying
+its template's model and effort (as the Librarian and Router are declared);
+`--research-directory` changes where findings files go (default
+`docs/research`). `switchyard new` offers the same choice, off by default.
+
+**When to use it.** Use a research ticket when the answer decides what to
+build, and nobody can say yet what the answer is. Do not use it for work whose
+deliverable is code; that is an ordinary ticket.
+
+**Writing the question.** A research ticket states three things, and the board
+refuses a ticket into Research without them:
+
+- **the question**: one question, answerable from evidence ("Which encoding do
+  the 2019 archives use?"), not a topic ("look into the archives");
+- **a timebox**: how long the spike may run before you hear about it
+  (`90m`, `4h`, `2d`; 15 minutes to 30 days);
+- **what a usable answer looks like**: the form and detail that would let you
+  decide ("the encoding's name and one sample decoded with it").
+
+```bash
+ticket-board-write create-ticket --title ... --body-file body.md --research \
+    --question-file question.md --timebox 4h --usable-answer-file answer.md
+ticket-board-write research-brief PGU-123 --question-file question.md --timebox 4h \
+    --usable-answer-file answer.md   # an existing ticket
+ticket-board-write start-research PGU-123
+```
+
+The brief turns the ticket's `needs_research` gate on, and is recorded as your
+comment; rewriting it replaces it. A ticket carrying the gate is not routed
+into Implementation; start it with `start-research`, or turn the gate off
+(`set-workflow-flags PGU-123 --patch-json '{"needs_research": false}'`) to
+implement it as an ordinary ticket.
+
+**What comes back.** The research role submits one finding: a findings commit
+that changes only the ticket's own file (`docs/research/PGU-123.md`), checked by
+the board before anything moves, or, when nothing is worth keeping, a
+no-commit submission whose reason is the finding. Either way it names the
+question, the evidence, the answer, its confidence and a recommendation. If the
+ticket keeps `needs_audit` (the default), Audit reviews the finding's evidence:
+whether every claim is backed by what was run or cited, not style. Audit may
+return it to the researcher with what is missing. The finding then comes back
+to you in triage, and your notice names it. Decide:
+
+```bash
+ticket-board-write close-on-finding PGU-123 --reason-file decision.md   # Done, on the finding
+ticket-board-write return-finding PGU-123 --reason-file missing.md      # back to the researcher
+```
+
+or file the implementation tickets the finding justifies, each linking the
+research ticket, and then close it. Nothing is filed automatically. A research
+ticket never reaches User Review.
+
+**Other paths.** The researcher hands a question it cannot research as written
+back to you with `research-hand-back`; rewrite the brief and start it again.
+When the research needs something only the User has, `await-user` works in
+Research. When the timebox passes with no finding, you are told once for that
+round. The board stops nothing; wait, return it, or put it down.
+This section and `switchyard research-stage --help` are the current
+procedure; [SYRD-842](../syrd-842-research-stage.md) is historical design and
+rollout evidence.
+
 ## Reports to other boards
 
 Your project files reports to its **report parent**: the board root declared for it, and

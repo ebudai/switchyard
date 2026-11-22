@@ -231,6 +231,13 @@ def new_project_command(
             plan, documentation=documentation, role_clis=role_clis, repository=effective_repository,
             print_func=print_func,
         )
+    # And the research stage, after both (SYRD-842).
+    research = getattr(design_artifact, "research", ()) if design_artifact is not None else ()
+    if research:
+        from scripts import research_onboarding
+
+        plan = research_onboarding.plan_with_research_stage(
+            plan, research=research, role_clis=role_clis, repository=effective_repository, print_func=print_func)
     launcher.precheck_new_project(
         plan,
         source_repo=effective_source_repo,
@@ -354,6 +361,8 @@ def new_project_command(
     if documentation:
         documentation_onboarding.record_librarian_runtime(config_path, from_artifact, documentation=documentation,
                                                           owner_user=plan.owner_user)
+    if research:
+        research_onboarding.record_researcher_runtime(config_path, research=research, owner_user=plan.owner_user)
     commands_path = artifact_dir / "operator-commands.sh"
     # The complete role-isolation handoff -- accounts, ownership, runtime,
     # tooling AND credential seeding -- is written beside the other artifacts, so

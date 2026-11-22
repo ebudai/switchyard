@@ -40,16 +40,17 @@ with a factor and a constant. Here the formula is:
   `"clean_seconds"` in a `mutate` plan file, and no clean run happens.
 - **Recorded:** each suite record now carries the deadline it ran under (`"timeout"`).
 
-**A clean run that fails, hangs or leaves processes gives no baseline,** and every mutant is `inconclusive` with the
+**A clean run that fails or leaves processes behind gives no baseline,** and every mutant is `inconclusive` with the
 reason. A suite that fails on the clean tree would otherwise "kill" every mutant (mutation tools refuse to run in this
-case for the same reason). The clean run is unmodified code, so its only bound is `CLEAN_RUN_SECONDS` (an hour),
-which stops a clean suite that never returns. A whole-run budget, when given, covers the clean runs too.
+case for the same reason). The clean run has no deadline (SYRD-846, below). A caller may cap it with
+`clean_run_seconds=`, and a whole-run budget, when given, covers the clean runs too. A clean run past either is
+refused the same way.
 
 **An explicit deadline still overrides the scaling:** `case_seconds=`, `--case-seconds` or
 `SWITCHYARD_BOUNDED_CASE_SECONDS`. No clean run is needed then.
 
-**`run`, one command,** has nothing to measure. It takes `--case-seconds`, or `--clean-seconds S` (the same formula),
-and otherwise keeps `DEFAULT_CASE_SECONDS` (300 s) as the hang deadline of an unmeasured command.
+**`run`, one command,** has nothing to measure. It takes `--case-seconds`, or `--clean-seconds S` (the same formula,
+for automatic hang protection). With neither, it has no deadline (SYRD-846, below).
 
 **A looping mutant is still stopped** at its scaled deadline, and recorded as `inconclusive`, never as a kill or a
 pass.
@@ -92,8 +93,8 @@ The board's 15-minute long-command notice to the Director is unchanged: it repor
   - clean runs of 30, 219, 400 and 0.3 s give deadlines of 300, 2,190, 4,000 and 60 s, each measured once;
   - each suite gets its own deadline, and `clean_seconds` skips the clean run;
   - an explicit deadline (argument or environment) overrides the scaling, with no clean run.
-- **No baseline:** a suite red on the clean tree runs no mutant and makes every one inconclusive. A hung clean run is
-  bounded by `CLEAN_RUN_SECONDS`.
+- **No baseline:** a suite red on the clean tree runs no mutant and makes every one inconclusive. (SYRD-846 replaced
+  the hour's bound on a hung clean run with no default cap.)
 - **Real processes:**
   - a mutant that loops forever is stopped at its scaled deadline (a 1.5 s floor in the test) and recorded as
     inconclusive, and never reaches the kill decision;
@@ -104,3 +105,41 @@ The board's 15-minute long-command notice to the Director is unchanged: it repor
 - **Text:** the docstring and the methodology no longer state 540 s, and both say how to run a long plan.
 
 The existing `tests/bounded_run_test.py` (SYRD-403) passes unchanged.
+
+## SYRD-846: the last fixed caps, and two pinned branches
+
+The Director's rule since SYRD-845 is that the only acceptable hang protection is protection that scales with the run.
+Two fixed caps were left, and both are gone:
+- **The clean run has no default cap.** `CLEAN_RUN_SECONDS` is now None. The clean run is the unmodified candidate, so
+  a hang there is a real defect in the code under review, not a mutant artefact. A caller may still give a cap with
+  `clean_run_seconds=`.
+- **`run` with nothing measured has no deadline.** `DEFAULT_CASE_SECONDS` is now None. `--clean-seconds` keeps the
+  scaled deadline (automatic hang protection), and `--case-seconds` is still the deadline itself. The help, the module
+  docstring and the methodology say which to pass.
+- **The backstop** for a run with no deadline is the board's long-command lease. It tells the Director about any
+  command under a role's pane still running after 15 minutes, with a handle to interrupt it, and it stops nothing by
+  itself.
+- **`run_bounded(timeout=None)`** (or an infinite timeout) waits for the command however long it takes, and cleans up
+  the same way. A clean run with no cap records `"timeout": null`.
+
+Two branches had no test, and a mutant of each survived SYRD-845's suite:
+- **The Director's mutant** gave every suite the first suite's measured deadline. A measured plan now has a fast suite
+  first and a slow one after it, through the stubbed `run_bounded`. Each suite's recorded deadline must follow its own
+  clean run (60, 300 and 90 s for clean runs of 2, 30 and 9 s), and the slow suite must not be cut off.
+- **Audit's M3** dropped the refusal when the clean run leaves processes behind. A clean run that reports a group still
+  present after cleanup (`leftover_group`, as `run_bounded` reports one it could not stop) must run no mutant, and
+  every mutant must be inconclusive with "left processes behind".
+
+**Tests**, in `tests/bounded_run_scaled_deadline_test.py`:
+- **Main first,** loaded from git at `410f9359`:
+  - main refuses a two-hour clean suite at its hour, with every mutant inconclusive;
+  - main's `run` with nothing measured stops at 300 s.
+- **No clean-run cap by default:** a five-hour clean run, faked, completes and scales to 50 hours per case.
+- **Caps that still apply:** a given `clean_run_seconds` still applies, and so does a whole-run budget.
+- **Unmeasured `run`:** it runs with no deadline and keeps the command's exit code. A measured one keeps its scaled
+  deadline, and an explicit one wins.
+- **Each suite gets its own measured deadline,** and a clean run that leaves processes refuses the plan.
+- **The real looping mutant** is still stopped at its scaled deadline.
+- **Text:** no fixed cap is stated in the docstring or the methodology, and both say how an unmeasured run is protected.
+- **`tests/residual_processes_boundary_test.py`:** its comment no longer cites a bounded_run default; the 300 s there is
+  that suite's own bound on a sub-second probe.

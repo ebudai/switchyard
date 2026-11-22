@@ -13,7 +13,8 @@ This module is the reusable fix. Import it from a scratch runner
 
 * `run_bounded(argv, timeout=...)` runs one command in a new session and
   process group, and returns within `timeout` + 2 x `grace` plus polling
-  slack.
+  slack. `timeout=None` gives it no deadline: it returns when the command
+  ends, and its cleanup is the same.
   - **Files, not pipes:** stdin, stdout and stderr are temporary files. A
     child that never reads its input cannot block the runner before the
     deadline starts, and a child left behind cannot hold output open.
@@ -40,8 +41,12 @@ This module is the reusable fix. Import it from a scratch runner
   outlived cleanup. `mutate` exits 0 when every mutant was killed, 1 when any
   survived, and 2 when any was inconclusive.
 
-Limits (SYRD-845). The deadlines stop a hang, never a long but legitimate
-run:
+Limits (SYRD-845, SYRD-846). The only deadlines are hang protection that
+scales with the run; none stops a long but legitimate run. Anything left
+running is still reported: the board tells the Director about a command
+under a role's pane still running after 15 minutes, with a handle to
+interrupt it, and stops nothing itself. That lease is the backstop for a
+run with no deadline.
 - **No whole-run budget by default.** A plan runs until every mutant has a
   result, however long the scoped plan takes. A caller that wants a budget
   asks for one: `total_seconds=`, `--total-seconds` or
@@ -59,15 +64,19 @@ run:
   jitter on a sub-second suite and a loaded host. A caller that already
   measured the clean runs passes `clean_seconds=` (or `"clean_seconds"` in a
   plan file) instead.
-- **A clean run that fails, hangs or leaves processes** gives no deadline
-  and no baseline: every mutant is `inconclusive`, because a red suite would
-  "kill" every mutant. The clean run itself stops only a suite that never
-  returns, at `CLEAN_RUN_SECONDS` (an hour).
+- **A clean run that fails or leaves processes** gives no deadline and no
+  baseline: every mutant is `inconclusive`, because a red suite would "kill"
+  every mutant. The clean run is the unmodified candidate, so it has no
+  deadline by default (`CLEAN_RUN_SECONDS` is None): a hang there is a defect
+  in the code under review, for the lease to report. A caller may still cap
+  it with `clean_run_seconds=`, and a clean run past that cap is refused the
+  same way.
 - **An explicit deadline overrides the scaling:** `case_seconds=`,
   `--case-seconds` or `SWITCHYARD_BOUNDED_CASE_SECONDS`.
-- **`run`, one command with nothing measured,** gets `--case-seconds`, or
-  ten times `--clean-seconds` (at least the floor), or else
-  `DEFAULT_CASE_SECONDS` (300s).
+- **`run`, one command,** gets `--case-seconds`, or ten times
+  `--clean-seconds` (at least the floor). Pass `--clean-seconds` for
+  automatic hang protection. With neither, it has no deadline
+  (`DEFAULT_CASE_SECONDS` is None), and the lease is the backstop.
 
 Descendants that leave the group. A process that leaves the process group
 on purpose (`setsid`, `start_new_session=True`) is not reached by the group
@@ -101,15 +110,17 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
-#: The hang deadline of a command with nothing measured: `run` given no --case-seconds or --clean-seconds.
-DEFAULT_CASE_SECONDS = 300.0
+#: The deadline of a command with nothing measured (`run` given no --case-seconds or --clean-seconds): none
+#: (SYRD-846). The board's long-command lease reports it after 15 minutes; nothing stops it.
+DEFAULT_CASE_SECONDS: float | None = None
 #: No whole-run budget unless the caller asks for one (SYRD-845).
 DEFAULT_TOTAL_SECONDS: float | None = None
 #: A mutation case's hang deadline: its suite's clean runtime times the factor, but at least the floor (SYRD-845).
 CASE_TIMEOUT_FACTOR = 10.0
 CASE_TIMEOUT_FLOOR_SECONDS = 60.0
-#: The clean run is unmodified code: this stops only a clean suite that never returns.
-CLEAN_RUN_SECONDS = 3600.0
+#: The clean run's cap: none by default (SYRD-846). It is the unmodified candidate, so a hang there is a defect in
+#: the code under review, which the board's long-command lease reports. A caller may still give one.
+CLEAN_RUN_SECONDS: float | None = None
 DEFAULT_GRACE_SECONDS = 5.0
 DEFAULT_OUTPUT_LIMIT = 64 * 1024
 
@@ -148,7 +159,8 @@ class Outcome:
     status: str
     returncode: int | None
     seconds: float
-    timeout: float
+    #: the deadline it ran under; None for none
+    timeout: float | None
     stdout: str
     stderr: str
     reason: str = ""
@@ -299,7 +311,7 @@ def _cleanup(proc: subprocess.Popen, *, stop_group: bool, before: set[int], swee
 def run_bounded(
     argv: Sequence[str],
     *,
-    timeout: float,
+    timeout: float | None,
     cwd: str | os.PathLike | None = None,
     env: Mapping[str, str] | None = None,
     input_text: str | None = None,
@@ -307,7 +319,12 @@ def run_bounded(
     grace: float = DEFAULT_GRACE_SECONDS,
     output_limit: int = DEFAULT_OUTPUT_LIMIT,
 ) -> Outcome:
-    """Run `argv` in its own process group; return within `timeout` + 2 x `grace` (plus polling slack)."""
+    """Run `argv` in its own process group; return within `timeout` + 2 x `grace` (plus polling slack).
+
+    `timeout` None, or infinite, is no deadline: the call returns when the command ends.
+    """
+    if timeout is not None and math.isinf(timeout):
+        timeout = None
     started = time.monotonic()
     sweep = _become_subreaper() and _own_children() is not None
     before = (_own_children() or set()) if sweep else set()
@@ -331,7 +348,7 @@ def run_bounded(
         status, returncode, reason = TIMEOUT, None, ""
         try:
             try:
-                proc.wait(timeout=timeout)
+                proc.wait(timeout=timeout)  # None waits for the command, however long it takes
                 status, returncode = COMPLETED, proc.returncode
             except subprocess.TimeoutExpired:
                 reason = f"no result within {timeout:g}s; process group {proc.pid} stopped"
@@ -376,8 +393,9 @@ class Deadline:
     def expired(self) -> bool:
         return self.remaining() <= 0.0
 
-    def case_timeout(self, case_seconds: float) -> float:
-        return min(float(case_seconds), self.remaining())
+    def case_timeout(self, case_seconds: float | None) -> float:
+        """The case's deadline, never past what the run has left; infinite when neither sets one."""
+        return min(math.inf if case_seconds is None else float(case_seconds), self.remaining())
 
 
 @dataclass(frozen=True)
@@ -434,7 +452,7 @@ def run_mutation_plan(
     clean_seconds: Sequence[float] | None = None,
     timeout_factor: float = CASE_TIMEOUT_FACTOR,
     floor_seconds: float = CASE_TIMEOUT_FLOOR_SECONDS,
-    clean_run_seconds: float = CLEAN_RUN_SECONDS,
+    clean_run_seconds: float | None = CLEAN_RUN_SECONDS,
 ) -> list[MutantResult]:
     """Run every suite against every mutant, in order, stopping a mutant's suites at its first kill.
 
@@ -487,7 +505,8 @@ def _clean_deadlines(root, suites, deadline, env, killed_when, grace, factor, fl
         budget = deadline.case_timeout(clean_run_seconds)
         if budget <= 0:
             return cases, f"the whole-run budget of {deadline.seconds:g}s was spent on the clean runs"
-        outcome = run_bounded(argv, timeout=budget, cwd=root, env=env, label=f"clean :: {command}", grace=grace)
+        outcome = run_bounded(argv, timeout=None if math.isinf(budget) else budget, cwd=root, env=env,
+                              label=f"clean :: {command}", grace=grace)
         if outcome.timed_out:
             return cases, f"the clean run of {command} did not finish: {outcome.reason}"
         if not outcome.clean:
@@ -537,8 +556,9 @@ def summarize(results: Sequence[MutantResult]) -> tuple[str, int]:
 # -- command line ---------------------------------------------------------------------------------------------------
 def _cli_run(args: argparse.Namespace) -> int:
     clean = getattr(args, "clean_seconds", None)  # a caller's own Namespace may predate it
+    explicit = configured_optional(args.case_seconds, "SWITCHYARD_BOUNDED_CASE_SECONDS")
     measured = DEFAULT_CASE_SECONDS if clean is None else scaled_case_seconds(clean)
-    timeout = configured_seconds(args.case_seconds, "SWITCHYARD_BOUNDED_CASE_SECONDS", measured)
+    timeout = measured if explicit is None else explicit
     outcome = run_bounded(args.command, timeout=timeout, label=" ".join(args.command))
     sys.stdout.write(outcome.stdout)
     sys.stderr.write(outcome.stderr)
@@ -568,10 +588,12 @@ def _cli_mutate(args: argparse.Namespace) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Bounded execution for mutation and adversarial test runs.")
     sub = parser.add_subparsers(dest="verb", required=True)
-    run = sub.add_parser("run", help="run one command with a deadline; exit 124 on timeout, like timeout(1)")
+    run = sub.add_parser("run", help="run one command, bounded and cleaned up; exit 124 on timeout, like timeout(1)")
     run.add_argument("--case-seconds", type=float, default=None, help="the deadline itself")
     run.add_argument("--clean-seconds", type=float, default=None,
-                     help="the command's measured clean runtime: the deadline is ten times it, at least 60s")
+                     help="the command's measured clean runtime, for automatic hang protection: the deadline is ten "
+                          "times it, at least 60s. With neither option there is no deadline; the board's "
+                          "long-command lease reports a command still running after 15 minutes")
     run.add_argument("command", nargs=argparse.REMAINDER)
     mutate = sub.add_parser("mutate", help="run a JSON mutation plan; one JSON line per mutant, then a summary")
     mutate.add_argument("plan")

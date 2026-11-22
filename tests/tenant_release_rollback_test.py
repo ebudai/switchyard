@@ -411,6 +411,22 @@ def note_reads(tree: Path) -> dict:
                 rollback.os.lstat = real_lstat
         finally:
             rollback.os.open = real_open
+        # Whose the note is (SYRD-859): no chown without root, so the opened file's fstat reports the owner. Root's
+        # own (uid 0) is accepted, which shows the seam alone refuses nothing; another account's is refused.
+        real_fstat = rollback.os.fstat
+
+        def owned_by(uid: int):
+            def fstat(descriptor):
+                info = real_fstat(descriptor)
+                return os.stat_result((*info[:4], uid, *info[5:10]))
+            return fstat
+
+        for label, uid in (("owned by root", 0), ("owned by another account", os.getuid() + 4242)):
+            rollback.os.fstat = owned_by(uid)
+            try:
+                out[label] = rollback.previous_release_problem(note, current=B, commit=A)
+            finally:
+                rollback.os.fstat = real_fstat
         os.chmod(note, 0o620)
         out["group writable"] = rollback.previous_release_problem(note, current=B, commit=A)
         # A FIFO at the note's path: opening it to read used to wait for a writer before any check (Audit, SYRD-858).
@@ -571,6 +587,9 @@ def main() -> int:
           f"a link to that same note is refused, never followed (SYRD-858): {notes}")
     check(notes["swapped"] and "holds no note" in notes["swapped"],
           f"a link swapped in after a look at the path is refused by the read itself (SYRD-858): {notes}")
+    check(notes["owned by root"] == "", f"a note root owns is root's record (SYRD-859): {notes}")
+    check(notes["owned by another account"] and "holds no note" in notes["owned by another account"],
+          f"a note another account owns is not root's record, and is refused (SYRD-859): {notes}")
     check(notes["group writable"] and "holds no note" in notes["group writable"],
           f"a note others could write is not root's record: {notes}")
     check(notes["nofollow"] is True, f"every open of the note refuses to follow a link: {notes}")

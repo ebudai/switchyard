@@ -46,6 +46,7 @@ notifies the assignee; never comment merely to inspect.
 | Implementer, Audit, Inspector and ordinary roles | `switchyard-board` skill | Only actions published for the role and ticket |
 | Director | `switchyard-board`, then `switchyard-director` after the exact role check | Coordinates, routes and recovers; cannot grant itself approval |
 | Librarian | `switchyard-board`, then `switchyard-librarian` after the exact role check | One ticket; one of three documentation decisions; documents only |
+| Research role (Researcher, or the implementer the project named) | `switchyard-board`, the Researcher's onboarding prompt, and `docs/onboarding/switchyard-researcher-guide.md` | One research ticket; one finding (a commit of only the ticket's findings file, or a no-commit reason) or a hand-back |
 | User | Board UI and the workflow's User actions | Acceptance belongs to the human; it is never an ordinary role dependency |
 | Publisher | Workflow and listener implementation | Mechanical actor with no pane or model; no role impersonates it |
 
@@ -151,6 +152,9 @@ its owner. The awaited role acting clears a role wait; merely replying may not.
 - The Librarian either approves unchanged with a reason, publishes one
   documentation-only child of the exact candidate and signs off, or returns
   concrete findings.
+- Where the research stage runs, Audit reviews a finding's evidence, not its
+  style: `research-sign-off` hands it to the Director in triage,
+  `research-kick-back` returns it to the research role with what is missing.
 - The Director verifies evidence and integration identity but does not write
   product code or self-approve.
 

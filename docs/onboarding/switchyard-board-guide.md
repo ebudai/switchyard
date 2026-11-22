@@ -76,6 +76,8 @@ available for the built-in `pgu` board.
 | `draft` | Draft | — |
 | `backlog` | Backlog | — |
 | `analysis` | Triage | director |
+| `research` | Research | the research role: a Researcher or a named implementer (optional) |
+| `research_review` | Research review | audit (optional) |
 | `in_progress` | Implementation | implementers |
 | `documentation` | Documentation | librarian or director (optional) |
 | `inspection` | Inspection | inspector |
@@ -103,6 +105,12 @@ ticket there when the user needs to answer a question.
 | `audit` | `needs_audit` | `dat` |
 | `dat` | `needs_user_signoff` | `director_review` |
 | `user_review` | `needs_user_signoff` | `director_review` |
+| `research_review` | `needs_audit` | `analysis` |
+
+`research` and `research_review` exist only where the project runs the optional
+research stage (`switchyard research-stage`), and `research_review` only where it
+also runs Audit. `research` has no entry gate: the Director starts a research ticket
+with `start-research` once its brief is written. See `switchyard-researcher-guide.md`.
 
 Set those flags when you **create** the ticket (`--needs-audit`, `--needs-inspection`,
 `--needs-user-signoff`). The director can adjust gate flags later with `edit-fields`;
@@ -155,6 +163,10 @@ system working, not a bug to route around.
   nothing moves, unless the ticket passed Documentation with the revision you reviewed
   and that stage and owner still take work. `audit_return.documentation` says where it
   goes, or why not. When in doubt, use `audit-kick-back`.
+- `research-sign-off` / `research-kick-back` — where the project runs the research stage:
+  research_review → analysis, when every claim in the finding is backed by what was run or
+  cited; or → research, with what is missing as the required `--reason`. You review the
+  finding's evidence, not its style.
 - `file-bug` — create a defect ticket without going through the director. The new ticket
   is linked to the source ticket and lands in `analysis`.
 - Audit **cannot** re-assign or route. It is a gate, not an implementer, and it is
@@ -181,6 +193,20 @@ system working, not a bug to route around.
 - The Librarian holds nothing else: no routing, publication beyond its documentation ref,
   merge or acceptance. See `switchyard-librarian-guide.md`.
 
+**Research role** (a Researcher, or the implementer the project named; only where the
+project runs the research stage)
+- A ticket enters `research` only by the Director's `start-research`, after its brief —
+  the question, a timebox and what a usable answer looks like — is written.
+- `submit-finding` — research → research_review (or → analysis without Audit), with
+  `--commit`: a findings commit that adds or edits only the ticket's own file under the
+  research directory (`docs/research/<ID>.md` by default)
+- `submit-finding-without-commit` — the same move, for a finding with nothing to keep; the
+  required `--reason` is the finding
+- `research-hand-back` — research → analysis, when the question cannot be researched as
+  written
+- A Researcher holds nothing else: no routing, implementation, follow-up tickets or
+  publication beyond its findings ref. See `switchyard-researcher-guide.md`.
+
 **Publisher** (a system actor with no pane, model or session; only where the project runs it)
 - The `publication` stage follows Audit: every approval out of Audit enters it. The
   board's listener publishes the exact approved candidate to the integration branch, as
@@ -206,6 +232,10 @@ system working, not a bug to route around.
 - `defer` — → backlog
 - `cancel` — → cancelled
 - `mark-done` — director_review → done (with `--commit-hash`)
+- `research-brief` / `start-research` — where the project runs the research stage: write
+  a ticket's brief (also `create-ticket --research`), then analysis → research.
+  `return-finding` sends a finding back to the research role; `close-on-finding` closes the
+  ticket as Done on it. A research ticket never enters User Review.
 - `director-dat-sign-off` / `director-dat-kick-back`
 - `publication_retry` / `publication_kick_back` — from `publication_failed`: back to the
   Publisher, or to the implementer with every sign-off cleared (`workflow-action`)

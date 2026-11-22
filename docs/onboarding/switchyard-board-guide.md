@@ -315,7 +315,9 @@ reason. It is under Flags in `ticket-board-read ticket <id>` (`test_tier`,
 that tier and records which one ran. Audit checks that the recorded run covers the tier
 (a run short of it is incomplete evidence, a reason to rerun below) and its sign-off says
 what it ran and what it reused. The board records the instruction and enforces nothing,
-and only the Director sets or changes it.
+and only the Director sets or changes it. The tier also sets how wide a reviewer's own
+mutation run may go: `partial`, or no tier, keeps it to what the ticket changed (the
+mutation rule below); `full` lets the reviewer run the wider plan.
 
 **Audit verifies that this evidence is about this candidate, then reviews the work.**
 - Provenance and applicability: the recorded commit and tree are the ticket's
@@ -368,6 +370,25 @@ When the reason concerns one area, rerun the suites for that area, not everythin
 | **Flaky test**: a test failed once and passed on retry, or results differ between runs | A valid reason, for that test: rerun it enough times to tell flaky from broken, and record the counts. A complete rerun answers nothing more. |
 | **Baseline-equivalent failures**: suites red on both base and candidate, with matching failure points recorded | Reuse. The comparison is the evidence. Failure points that were not compared are a valid reason to rerun those suites on both sides. |
 | **Security finding**: a trust boundary, permission or secret path the evidence does not exercise | A valid reason: an untested risk. Add or run the test that exercises that boundary, and kick back if it is missing. |
+
+**Mutation testing: mutate what the ticket changed.** A reviewer's mutants are focused
+checks like any other, so they are scoped the same way:
+- **Mutants go on the change.** Put them on the lines and behaviours the candidate adds
+  or changes, chosen from the risk you see. Run them against the tests covering that
+  area: the ticket's own suites and the suites that exercise the changed modules. Never
+  run them against the whole corpus.
+- **A few semantic mutants beat hundreds of syntactic ones.** On an ordinary ticket, a
+  reviewer's own mutation work is a handful of mutants that each answer a review
+  question. Reuse the implementer's recorded mutants rather than regenerating them; your
+  own are the ones nobody tried.
+- **Scope, not time.** The rule is about what the mutants target, not how long the run
+  takes: a long run is fine when the scoped area needs it. It is bounded like any run
+  (`switchyard-bounded`, with `--expect` for one that legitimately runs long), which stops
+  a mutant that never ends, not a long but legitimate run.
+- **A whole-corpus run is the exception:** the ticket's test tier is `full`, the project
+  asks for one, or it is a milestone-boundary test-integrity pass
+  (`adversarial-collaborative-methodology.md`, "Coverage chasing").
+- **A survivor is still a finding**, whatever the run's size.
 
 This is not trusting conclusions. Read the source, act on any failing or
 contradictory evidence, and verify focused claims yourself. A bare "tests pass" with

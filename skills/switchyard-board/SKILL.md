@@ -356,7 +356,9 @@ If the Director set the ticket's test tier (`partial` or `full`, under Flags;
 least that tier and says which one ran. A reviewer checks that the recorded run
 covers it (a run short of the tier is incomplete evidence) and says in its
 sign-off what it ran and what it reused. It is the Director's instruction; the
-board does not enforce it.
+board does not enforce it. The tier also sets how wide a reviewer's own mutation
+run may go: `partial`, or no tier, keeps it to what the ticket changed (below);
+`full` lets the reviewer run the wider plan.
 
 A reviewer (Audit, or the director at final sign-off) does not rerun that
 complete suite merely because the ticket entered their stage. The default is:
@@ -392,6 +394,23 @@ failing or contradictory evidence. The onboarding board guide's "Test evidence"
 section has worked examples: unchanged candidates, rebases, Librarian commits,
 migration or runtime changes, flaky tests, baseline-equivalent failures and
 security findings.
+
+### Mutation testing: mutate what the ticket changed
+
+- **Mutants go on the change.** Put them on the lines and behaviours the
+  candidate adds or changes, chosen from the risk you see, and run them against
+  the tests covering that area: the ticket's own suites and the suites that
+  exercise the changed modules. Never run them against the whole corpus.
+- **A few semantic mutants beat hundreds of syntactic ones.** On an ordinary
+  ticket your own mutation work is a handful of mutants, each answering a
+  review question. Reuse the implementer's recorded mutants rather than
+  regenerating them; yours are the ones nobody tried.
+- **Scope, not time.** This limits what the mutants target, not how long the
+  run takes: a long run is fine when the scoped area needs it. Bound it as
+  above, declaring a long one with `--expect`.
+- **A whole-corpus run is the exception:** the ticket's test tier is `full`,
+  the project asks for one, or it is a milestone-boundary test-integrity pass.
+- **A survivor is a finding**, whatever the run's size.
 
 Audit's kick-back returns the work to its substantive origin: the implementer
 or designer who produced it, never the Librarian whose documentation commit

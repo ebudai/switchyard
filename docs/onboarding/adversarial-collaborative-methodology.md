@@ -577,6 +577,8 @@ Test coverage as a metric creates a perverse incentive for LLMs to write tests t
 
 Consider mutation testing at major milestone boundaries as an alternative signal: "can you break the code in a way no existing test catches?" This is adversarial in the same spirit as design review and harder to game.
 
+Between milestones, mutate what the ticket changed. A reviewer's mutants go on the lines and behaviours the candidate adds or changes, chosen from the risk the reviewer sees, and run against the tests covering that area: the ticket's own suites and the suites that exercise the changed modules, never the whole corpus. A few semantic mutants beat hundreds of syntactic ones: on an ordinary ticket, a handful that each answer a review question, with the implementer's recorded mutants reused rather than regenerated. A whole-corpus run is the exception: a milestone-boundary test-integrity pass, a ticket whose test tier is `full`, or a project that asks for one. The rule is about what the mutants target, not how long the run takes; a long run is fine when the scoped area needs it. A survivor is a finding, whatever the run's size.
+
 Bound every mutation or adversarial run. A mutant can turn a loop into one that never ends, and an unbounded runner then holds its implementer indefinitely: in this project one ran for over six hours before anyone noticed. Run each case and each whole run through `tests/bounded_run.py` (`run_bounded`, `run_mutation_plan`, or `python3 tests/bounded_run.py run|mutate`).
 - **Deadlines:** it gives each case a deadline and each run a total budget, 300s and 540s by default, based on measured runtimes.
 - **Cleanup:** at a deadline it stops the case's whole process group, and it sweeps any descendant that left the group.

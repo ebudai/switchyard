@@ -91,6 +91,11 @@ and dashes in CLI subcommands.
   could differ, recorded on the ticket first (board guide, “Test evidence”).
   When the Director set a test tier (`partial` | `full`, under Flags and in the
   hand-off), the implementer's run covers at least that tier and says which ran.
+- A reviewer's mutants go on what the ticket changed and run against the tests
+  covering that area, never the whole corpus: a few semantic mutants, each
+  answering a review question, with recorded mutants reused. That limits scope,
+  not how long the run takes. A whole-corpus run is for test tier `full`, a
+  project that asks for one, or a milestone pass (board guide, “Test evidence”).
 - Workflows, examples and configuration consumed by programs are product
   inputs, not prose. A documentation role reviews them but does not edit them.
 - Commit and publish from the checkout that actually contains the candidate.

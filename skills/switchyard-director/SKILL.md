@@ -577,6 +577,15 @@ reused; a Librarian commit of prose nothing executes needs no rerun. After a
 merge commit, a short integration smoke check is enough unless the merge
 needed real resolution or pulled in changed dependencies.
 
+**Your own mutants go on the change.** Put them on the lines and behaviours
+the candidate adds or changes and run them against the tests covering that
+area, never the whole corpus: a few semantic mutants beat hundreds of syntactic
+ones, so a handful, each answering a question you have, with the recorded
+mutants reused rather than regenerated. That limits scope, not how long the run
+takes. A whole-corpus run is for a ticket whose test tier is `full`, a project
+that asks for one, or a milestone test-integrity pass. A survivor is a finding,
+whatever the run's size.
+
 **Report which is which.** Say what you ran yourself and what you reused,
 naming the commit and tree the reused result covers. "The implementer's run at
 <sha>, verified by Audit, covers this tree, and I ran the focused X check

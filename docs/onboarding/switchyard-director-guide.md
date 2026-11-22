@@ -115,7 +115,7 @@ At Final Sign-Off, for example:
 the ticket claims to fix and confirm the suite catches it. Choose a different mutation
 than the implementer and audit used — the point is to test what *nobody thought of*.
 
-Three rules make mutation testing honest:
+Four rules make mutation testing honest:
 
 1. **Confirm the mutation applied** (`git diff --numstat`) before believing the result. A
    failed edit looks exactly like a passing test.
@@ -127,6 +127,16 @@ Three rules make mutation testing honest:
 4. **Clear `__pycache__` after restoring a mutated file.** A same-second mtime makes Python
    load the stale module, which produces both false failures and false survivors — the two
    ways a mutation run can lie to you.
+
+**Keep your mutants to what the ticket changed.** They go on the lines and behaviours the
+candidate adds or changes, and run against the tests covering that area: the ticket's own
+suites and the suites that exercise the changed modules, never the whole corpus. On an
+ordinary ticket a few semantic mutants beat hundreds of syntactic ones: a handful, each
+answering a review question, with the implementer's and Audit's recorded mutants reused
+rather than regenerated. The limit is on scope, not on time: a long run is fine when the
+scoped area needs it. A whole-corpus run is the exception, for a ticket whose test tier is
+`full`, a project that asks for one, or a milestone-boundary test-integrity pass. A
+survivor is a finding, whatever the run's size.
 
 **Beware tests that cannot fail, and tests that fail only for non-reasons.** Both look
 green and both cover nothing. An assertion on the layout of a generated string will fail

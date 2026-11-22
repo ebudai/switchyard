@@ -787,6 +787,10 @@ ticket-board-write close-on-finding PGU-123 --reason-file decision.md   # Done, 
 ticket-board-write return-finding PGU-123 --reason-file missing.md      # back to the researcher
 ```
 
+or file the implementation tickets the finding justifies, each linking the
+research ticket, and then close it. Nothing is filed automatically. A research
+ticket never reaches User Review.
+
 **A finding with a commit, where the project runs the Publisher.** The findings
 file is a project document, so it reaches main like any approved candidate.
 Accept it with `publish-finding` instead of `close-on-finding`, which the board
@@ -807,9 +811,11 @@ researcher. The ordinary `publication_kick_back` is refused for a finding. A
 no-commit finding closes with `close-on-finding` as before. Findings take no
 documentation review.
 
-or file the implementation tickets the finding justifies, each linking the
-research ticket, and then close it. Nothing is filed automatically. A research
-ticket never reaches User Review.
+A finding stays one in publication only through its own moves, an escalation
+and `publication_retry`. Deferring it, turning its `needs_research` off, or
+moving it into publication any other way (a force-move included) makes it an
+ordinary ticket to the Publisher, which then asks for every gate a code
+candidate needs.
 
 **Other paths.** The researcher hands a question it cannot research as written
 back to you with `research-hand-back`; rewrite the brief and start it again.

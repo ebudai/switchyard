@@ -63,6 +63,8 @@ class ProjectDesignArtifact:
     #: The research stage's record (SYRD-842): `(("stage", "role"), ("role", <implementer>))`, or the Researcher's
     #: stage, runtime, model and effort; empty is off, which is what every earlier artifact means.
     research: tuple[tuple[str, str], ...] = ()
+    #: The plan gate's record (SYRD-843): `(("owner", <role>),)`; empty is off, what every earlier artifact means.
+    plan: tuple[tuple[str, str], ...] = ()
     #: The roles that run as Hermes on the host's local model service (SYRD-692); empty is none, which is what
     #: every earlier artifact means. Their runtime must be hermes; the profile comes from the service's record.
     local_qwen_roles: tuple[str, ...] = ()
@@ -98,6 +100,7 @@ def project_design_artifact_payload(artifact: ProjectDesignArtifact) -> dict[str
             **({"router": {"enabled": True, **dict(artifact.router)}} if artifact.router else {}),
             **({"documentation": dict(artifact.documentation)} if artifact.documentation else {}),
             **({"research": dict(artifact.research)} if artifact.research else {}),
+            **({"plan": dict(artifact.plan)} if artifact.plan else {}),
             **({"local_qwen_roles": list(artifact.local_qwen_roles)} if artifact.local_qwen_roles else {}),
             "push_policy": artifact.push_policy,
             "gates": artifact.gates,

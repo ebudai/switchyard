@@ -477,6 +477,11 @@ WHERE id = %s
         # SYRD-616: a role is told its own command was interrupted, whatever its ticket has done since.
         if kind == "execution_lease_interrupted":
             return target_role != "director"
+        # SYRD-843: a plan finding is the Director's; a milestone's re-plan notice is the Director's and the plan owner's.
+        if kind == "plan_finding":
+            return target_role == "director"
+        if kind == "plan_milestone_complete":
+            return True
         # SYRD-842: a research timebox notice is the Director's, while its ticket is still in that round of Research.
         if kind == "research_timebox":
             row = conn.execute("SELECT ticket_board.research_timebox_notice_is_current(%s::jsonb) AS current",

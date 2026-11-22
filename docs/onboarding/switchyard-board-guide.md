@@ -112,6 +112,14 @@ research stage (`switchyard research-stage`), and `research_review` only where i
 also runs Audit. `research` has no entry gate: the Director starts a research ticket
 with `start-research` once its brief is written. See `switchyard-researcher-guide.md`.
 
+The optional **plan gate** (`switchyard plan-gate`) adds no stage. It adds the
+`plan_change` gate, which marks a **plan ticket**: the only kind of ticket whose
+candidate may change the project's implementation plan. A plan ticket takes the ordinary
+path (the plan owner implements it, Audit reviews it, the User approves it, the Director
+closes it), and the board refuses to close one the User did not accept. On a plan-gated
+board, every other ticket enters Implementation only once it names a deliverable of the
+approved plan, or is marked unplanned with a reason. See `switchyard-plan-guide.md`.
+
 Set those flags when you **create** the ticket (`--needs-audit`, `--needs-inspection`,
 `--needs-user-signoff`). The director can adjust gate flags later with `edit-fields`;
 other roles are restricted.
@@ -167,6 +175,11 @@ system working, not a bug to route around.
   research_review → analysis, when every claim in the finding is backed by what was run or
   cited; or → research, with what is missing as the required `--reason`. You review the
   finding's evidence, not its style.
+- Where the project runs the plan gate, a plan ticket (its `plan_change` gate on) is
+  reviewed with the ordinary `audit-sign-off` / `audit-kick-back`, but as a **whole plan**,
+  not a diff, against the plan checklist in `switchyard-plan-guide.md`. A plan finding on
+  any other ticket (a board comment saying its candidate changes the plan file) is a
+  kick-back: plan changes go through a plan ticket.
 - `file-bug` — create a defect ticket without going through the director. The new ticket
   is linked to the source ticket and lands in `analysis`.
 - Audit **cannot** re-assign or route. It is a gate, not an implementer, and it is
@@ -207,6 +220,15 @@ project runs the research stage)
 - A Researcher holds nothing else: no routing, implementation, follow-up tickets or
   publication beyond its findings ref. See `switchyard-researcher-guide.md`.
 
+**Plan owner** (the designer, or the implementer `switchyard plan-gate` named; only where
+the project runs the plan gate)
+- Works plan tickets in Implementation with the implementer moves above. A plan ticket's
+  candidate changes the plan file and, where a ruling belongs on record, the decision log,
+  and nothing else, and its plan holds one valid `plan-index` block; the board refuses the
+  submission otherwise.
+- When every ticket of a milestone's deliverables is Done or cancelled, the board tells the
+  plan owner and the Director once that a re-plan is due. See `switchyard-plan-guide.md`.
+
 **Publisher** (a system actor with no pane, model or session; only where the project runs it)
 - The `publication` stage follows Audit: every approval out of Audit enters it. The
   board's listener publishes the exact approved candidate to the integration branch, as
@@ -236,6 +258,12 @@ project runs the research stage)
   a ticket's brief (also `create-ticket --research`), then analysis → research.
   `return-finding` sends a finding back to the research role; `close-on-finding` closes the
   ticket as Done on it. A research ticket never enters User Review.
+- `set-deliverable` / `request-scope-change` / `plan-ticket` — where the project runs the
+  plan gate: name the deliverable a ticket serves, or that it is unplanned and why (also
+  `create-ticket --deliverable` or `--unplanned-reason-file`); open or extend a plan ticket
+  for work the plan does not cover, with the waiting ticket blocked on it; mark a plan
+  ticket (also `create-ticket --plan`). The Director never edits the plan. See the Director
+  guide's **Scoping from a plan**.
 - `director-dat-sign-off` / `director-dat-kick-back`
 - `publication_retry` / `publication_kick_back` — from `publication_failed`: back to the
   Publisher, or to the implementer with every sign-off cleared (`workflow-action`)

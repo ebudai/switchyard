@@ -1,7 +1,7 @@
 """Write client calls kept beside write_client.py, so that file does not grow past its size limit.
 
 Provider account holds (SYRD-672), the restore of a mistaken reopen (SYRD-746), the pause switch (SYRD-756) and the
-research brief (SYRD-842).
+research brief (SYRD-842), and the plan gate's deliverable and scope change (SYRD-843).
 """
 
 from __future__ import annotations
@@ -47,3 +47,14 @@ class TicketRepairWrites:
         return self._ticket_action(ticket_id, "set_research_brief",
                                    {"question": question, "timebox": timebox, "usable_answer": usable_answer},
                                    caller_role=caller_role)
+
+    def set_ticket_deliverable(self, ticket_id: str, *, deliverable: str = "", unplanned_reason: str = "",
+                               caller_role: str | None = None) -> dict[str, Any]:
+        """The approved plan's deliverable a ticket serves, or unplanned with a reason (SYRD-843)."""
+        return self._ticket_action(ticket_id, "set_ticket_deliverable",
+                                   {"deliverable": deliverable, "unplanned_reason": unplanned_reason},
+                                   caller_role=caller_role)
+
+    def request_scope_change(self, ticket_id: str, *, reason: str, caller_role: str | None = None) -> dict[str, Any]:
+        """A plan ticket for the plan owner, which the ticket then waits on: the Director never edits the plan (SYRD-843)."""
+        return self._ticket_action(ticket_id, "request_scope_change", {"reason": reason}, caller_role=caller_role)

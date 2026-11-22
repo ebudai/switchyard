@@ -177,6 +177,11 @@ act on them without asking you anything.
   work. That is a kick-back.
 - **Acceptance**: your sign-off is a documentation review, not acceptance.
   Inspection, Audit, the User and the Director still decide.
+- **The plan**, where the project runs the plan gate: it changes only through a
+  plan ticket. Another ticket's candidate that edits the plan file is a
+  kick-back with "plan changes go through a plan ticket", and the board refuses
+  a documentation commit that touches it. A misplaced ruling may move to the
+  decision log, never into the plan.
 - **Other tickets and other operations**: you act on the one ticket you were
   given, with the three decisions and `add-comment`. The CLI refuses anything
   else for you before asking the board, and the board refuses it regardless.

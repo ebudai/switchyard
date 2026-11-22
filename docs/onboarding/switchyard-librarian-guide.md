@@ -238,6 +238,7 @@ conversation.
 | **Implementation**: product code, tests, behaviour, configuration, rebases, merges, conflict resolution | A documentation review that changes behaviour is unreviewed implementation. It is a kick-back. |
 | **Final acceptance** | A documentation sign-off is not acceptance. Inspection, Audit, the User and the Director still decide. |
 | **Other tickets and other board operations** | It acts on the one ticket it was given, with three decisions and `add-comment`. |
+| **The plan**, on a project that runs the plan gate | The plan file changes only through a plan ticket (its `plan_change` gate on). Any other ticket's candidate that edits it is a kick-back with "plan changes go through a plan ticket", and the board refuses a documentation commit that touches it. A ruling misplaced in the work may move to the decision log, never into the plan. See the [plan guide](switchyard-plan-guide.md). |
 
 The board enforces this: the Librarian holds no capability but `add-comment`,
 and the only transitions it can take are the three decisions. `ticket-board-write`

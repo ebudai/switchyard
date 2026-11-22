@@ -66,6 +66,8 @@ SWITCHYARD_ONBOARDING_DOC_NAMES = (
     "switchyard-librarian-guide.md",
     # SYRD-842: the optional Researcher's, likewise.
     "switchyard-researcher-guide.md",
+    # SYRD-843: the plan gate's guide, for the plan owner, Audit and the Director.
+    "switchyard-plan-guide.md",
 )
 
 

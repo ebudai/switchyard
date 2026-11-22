@@ -140,6 +140,7 @@ def switchyard_new_command(
     selected_router = new_project_choices.selected_router
     selected_documentation = new_project_choices.selected_documentation
     selected_research = new_project_choices.selected_research
+    selected_plan = new_project_choices.selected_plan
     stages = new_project_choices.stages
     upstream_report = new_project_choices.upstream_report
     new_project_preflight = launcher._check_new_project_preflight(
@@ -203,6 +204,7 @@ def switchyard_new_command(
         selected_audit_roles=selected_audit_roles,
         selected_desktop_policy=selected_desktop_policy,
         selected_implementer_roles=selected_implementer_roles,
+        selected_plan=selected_plan,
         selected_role_efforts=selected_role_efforts,
         selected_role_models=selected_role_models,
         stages=stages,

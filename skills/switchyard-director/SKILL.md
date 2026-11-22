@@ -196,6 +196,29 @@ you. It is a usability tool, not a delegate: everything else stays yours.
 - `scripts/router_canary.py seed|report|finish` measures it on bounded
   fixtures, priced with your corrections and implementers' interruptions.
 
+## Scoping from the plan, when the project runs the plan gate
+
+A project may run an optional **plan gate**: one owner for the implementation
+plan, changed only through plan tickets that Audit reviews and the User
+approves. You scope tickets from it and **never edit it**. The rules are in
+`docs/onboarding/switchyard-plan-guide.md`.
+
+- Every ticket you route into Implementation names its deliverable
+  (`ticket-board-write set-deliverable <id> --deliverable D1.2`, or
+  `create-ticket --deliverable`), or is unplanned with a reason
+  (`--unplanned-reason-file`). The board refuses the route otherwise, and refuses
+  a deliverable of a milestone that is not detailed yet: a re-plan is due.
+- Work the plan does not cover is a scope change, never your edit:
+  `ticket-board-write request-scope-change <id> --reason-file ...` opens or
+  extends a plan ticket for the owner, and the ticket waits on it.
+- A plan ticket (`create-ticket --plan`, `plan-ticket <id>`) needs the User's
+  acceptance and Audit's sign-off before you close it (marking it turns both
+  gates on); its closing commit becomes the approved plan.
+- A non-plan candidate that edits the plan, and any candidate at which the plan
+  is over its size limit, are flagged to you once per commit; Audit kicks them back.
+- Only your route into Implementation needs a deliverable; work sent back there
+  (a kick-back, the Publisher's return, the User's feedback) is never refused for it.
+
 ## Research spikes, when the project runs the research stage
 
 A project may run an optional **research stage**: a question answered with

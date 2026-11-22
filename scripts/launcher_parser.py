@@ -121,6 +121,8 @@ def _build_parser() -> argparse.ArgumentParser:
                                                      "this runtime")
     parser.add_argument("--researcher-model", help="design: the Researcher's model, with --researcher-runtime")
     parser.add_argument("--researcher-effort", help="design: the Researcher's effort, with --researcher-runtime")
+    parser.add_argument("--plan-owner", help="design: turn the optional plan gate on, the plan owned by this role "
+                                             "(the designer or an implementer; default: off)")
     parser.add_argument("--execute", action="store_true", help="execute new-project provisioning after precheck")
     parser.add_argument("--runtime-user", help="local user whose lingering /run/user/<uid> runtime should be provisioned")
     parser.add_argument("--launcher-repo", type=Path, help="launcher checkout to update or verify (default: this script's repo)")

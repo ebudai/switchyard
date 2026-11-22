@@ -238,6 +238,13 @@ def new_project_command(
 
         plan = research_onboarding.plan_with_research_stage(
             plan, research=research, role_clis=role_clis, repository=effective_repository, print_func=print_func)
+    # And the plan gate, after them all (SYRD-843).
+    plan_gate = getattr(design_artifact, "plan", ()) if design_artifact is not None else ()
+    if plan_gate:
+        from scripts import plan_onboarding
+
+        plan = plan_onboarding.plan_with_plan_gate(
+            plan, gate=plan_gate, role_clis=role_clis, repository=effective_repository, print_func=print_func)
     launcher.precheck_new_project(
         plan,
         source_repo=effective_source_repo,

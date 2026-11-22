@@ -75,6 +75,7 @@ def design_project_command(
     researcher_runtime: str | None = None,
     researcher_model: str | None = None,
     researcher_effort: str | None = None,
+    plan_owner: str | None = None,
     input_func: Callable[[str], str] = input,
     print_func: Callable[[str], None] = print,
 ) -> int:
@@ -196,6 +197,11 @@ def design_project_command(
         path=target_artifact, role_names=[*resolved_implementer_roles, *resolved_audit_roles, "director", "designer"],
         implementers=resolved_implementer_roles,
     )
+    # And the plan gate (SYRD-843): the role that owns the plan, the designer or an implementer.
+    from scripts import plan_onboarding
+
+    plan = plan_onboarding.artifact_plan({"owner": plan_owner} if plan_owner else None, path=target_artifact,
+                                         owners=["designer", *resolved_implementer_roles])
     artifact = launcher.ProjectDesignArtifact(
         project=project_slug,
         project_name=resolved_project_name,
@@ -222,6 +228,7 @@ def design_project_command(
         router=router,
         documentation=documentation,
         research=research,
+        plan=plan,
     )
     target_design_document.parent.mkdir(parents=True, exist_ok=True)
     target_design_document.write_text(launcher._project_design_markdown(project_slug, title=title, body=body), encoding="utf-8")

@@ -475,6 +475,7 @@ def _build_parser() -> argparse.ArgumentParser:
     add_free_text_argument(workflow_flags, "--patch-json", required=True, help="the flags to set, a JSON object")
     test_tier.add_parser(subparsers, add_free_text_argument)  # SYRD-836
     stage_cli.add_research_parsers(subparsers, add_free_text_argument)  # SYRD-842
+    stage_cli.add_plan_parsers(subparsers, add_free_text_argument)  # SYRD-843
 
     create = subparsers.add_parser("create-ticket")
     create.add_argument("--title", required=True)
@@ -1092,6 +1093,8 @@ def main(argv: list[str] | None = None) -> int:
             response = stage_cli.documentation_decision(client, args, command)
         elif command in stage_cli.RESEARCH_COMMANDS:  # SYRD-842
             response = stage_cli.research_command(client, args, command)
+        elif command in stage_cli.PLAN_COMMANDS:  # SYRD-843
+            response = stage_cli.plan_command(client, args, command)
         elif command == "set_test_tier":
             response = client.set_workflow_flags(args.ticket_id, test_tier.set_patch(args))
         elif command == "require_documentation":

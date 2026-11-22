@@ -237,6 +237,13 @@ def _prompt_switchyard_role_plan(
     )
     if research is not None:
         plan.append(research)
+    # The plan gate, likewise optional and off by default: owned by the designer, or an implementer (SYRD-843).
+    from scripts import plan_onboarding
+
+    gate = plan_onboarding.prompt_plan([entry.role for entry in plan if entry.role == "designer"] + list(implementers),
+                                       input_func=input_func, print_func=print_func)
+    if gate is not None:
+        plan.append(gate)
     return tuple(plan)
 
 
@@ -253,7 +260,8 @@ def _prompt_switchyard_role_choices(
         for selection in launcher._prompt_switchyard_role_plan(
             input_func=input_func, print_func=print_func
         )
-        if selection.role not in ("router", "librarian", "documentation-gate", "researcher", "research-stage")
+        if selection.role not in ("router", "librarian", "documentation-gate", "researcher", "research-stage",
+                                  "plan-gate")
     )
 
 

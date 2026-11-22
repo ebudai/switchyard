@@ -46,7 +46,7 @@ PROSE_FLAGS = frozenset({
     "--audit-prompt", "--blocked-reason", "--body", "--comment-text", "--do-this", "--implementation", "--message",
     "--note", "--rationale", "--reason", "--recommendations", "--request", "--text", "--then-choose", "--title", "--set",
     "--you-should-see", "--value", "--patch-json", "--payload-json", "--json", "--test-tier-reason", "--question",
-    "--usable-answer",
+    "--usable-answer", "--unplanned-reason",
 })
 FLAG_COMMANDS = frozenset({"ticket-board-write", "switchyard"})
 #: directorctl subcommand -> index of the first argument that is its message.

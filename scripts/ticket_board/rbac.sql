@@ -740,4 +740,13 @@ GRANT EXECUTE ON FUNCTION ticket_board.ticket_research_handoff(text) TO ticket_b
 REVOKE ALL ON FUNCTION ticket_board.research_timebox_notice_is_current(jsonb) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION ticket_board.research_timebox_notice_is_current(jsonb) TO ticket_board_listener;
 
+-- SYRD-843: the plan gate. The service records indexes and findings, and makes the Director's writes; it reads the plan.
+REVOKE ALL ON ticket_board.plan_indexes, ticket_board.plan_approvals, ticket_board.ticket_deliverables,
+    ticket_board.plan_milestone_notices, ticket_board.plan_findings FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ticket_board.record_plan_index(text, text, jsonb, integer) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.set_ticket_deliverable(text, text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.request_scope_change(text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.note_plan_finding(text, text, text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.plan_status() TO ticket_board_service, ticket_board_listener;
+
 COMMIT;

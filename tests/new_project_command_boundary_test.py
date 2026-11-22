@@ -576,7 +576,8 @@ def test_the_seams_read_through_the_launcher_and_nothing_bound() -> None:
         nested = {"new_project_command": ["from scripts.desktop_access import validate_policy", "from scripts.workflow_launcher import assign_projection_owner",
                                           "from scripts import router_onboarding", "from scripts import root_packet",
                                           "from scripts import owner_writes", "from scripts import documentation_onboarding",
-                                          "from scripts import hermes_local_profile", "from scripts import research_onboarding"]}
+                                          "from scripts import hermes_local_profile", "from scripts import research_onboarding",
+                                          "from scripts import plan_onboarding"]}  # SYRD-843 adds the plan gate's
         check(imports[:1] == (["from scripts import team_launcher as launcher"] if expected else [])
               and sorted(imports[1:] if expected else imports) == sorted(nested.get(name, []))
               and (not expected or ast.unparse(node.body[first]) == imports[0]),

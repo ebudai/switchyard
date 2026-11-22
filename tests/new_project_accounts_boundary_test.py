@@ -60,7 +60,7 @@ PARAMETERS = ("from_artifact", "output_dir", "home_base", "git_init", "print_fun
 FROM_P0 = ("agy_source_origin", "artifact_path", "design_document", "director_onboarding", "include_audit",
            "include_designer", "owner_shell", "owner_user", "project_dir", "resolved_agy_credential_source",
            "resolved_project_name", "resolved_slug", "runner", "selected_audit_roles", "selected_desktop_policy",
-           "selected_implementer_roles", "selected_role_efforts", "selected_role_models", "stages")
+           "selected_implementer_roles", "selected_plan", "selected_role_efforts", "selected_role_models", "stages")  # SYRD-843: + selected_plan
 FROM_P1 = ("effective_source_repo", "precheck_plan", "selected_role_clis", "selected_router", "selected_documentation", "selected_research", "worktree_branch")  # SYRD-599: Router, as P1 settled it; SYRD-624: the documentation gate
 OWNER = "syrd371-agent"
 
@@ -167,7 +167,7 @@ def inputs(tmp: Path, world: World, said: list, **overrides: object) -> dict:
                   runner=lambda *a, **k: None, selected_audit_roles=("audit",), selected_desktop_policy={"mode": "headless"},
                   selected_implementer_roles=("main",), selected_role_efforts={"main": "high"},
                   selected_role_models={"main": "opus"}, selected_router=(("runtime", "claude"),),
-                  selected_documentation=(("gate", "director"),), selected_research=(),
+                  selected_documentation=(("gate", "director"),), selected_research=(), selected_plan=(),
                   stages=Stages(world.log),
                   effective_source_repo=tmp / "source", precheck_plan=SimpleNamespace(service_user="s371-board"),
                   selected_role_clis=(("director", "claude"), ("main", "codex")), worktree_branch="trunk")
@@ -404,7 +404,7 @@ def test_the_fresh_branch() -> None:
         world, said = World(tmp), []
         # SYRD-842: a research stage chosen, so the record handed to the artifact is a real one, not the empty tuple.
         values = inputs(tmp, world, said, resolved_agy_credential_source="hostuser",
-                        selected_research=(("stage", "role"), ("role", "main")))
+                        selected_research=(("stage", "role"), ("role", "main")), selected_plan=(("owner", "main"),))
         run(world, values)
         check(world.names()[5:] == ["agy-state", "agy-seed", "onboarding", "artifact-write", "chown-files", "docs", "git-init", "policy"],
               f"onboarding, the artifact, ownership, documents, git, then the policy: {world.names()}")
@@ -416,7 +416,7 @@ def test_the_fresh_branch() -> None:
         written = next(e[1] for e in world.log if e[0] == "artifact-write")
         identity = dict(implementer_roles="selected_implementer_roles", role_clis="selected_role_clis", role_models="selected_role_models",
                         role_efforts="selected_role_efforts", audit_roles="selected_audit_roles", router="selected_router",
-                        documentation="selected_documentation", research="selected_research")
+                        documentation="selected_documentation", research="selected_research", plan="selected_plan")
         check(all(written[k] is values[v] for k, v in identity.items()), "roles, models, efforts and audit roles, the very objects")
         check(written == dict(project_name=values["resolved_project_name"], slug="s371", owner_user=OWNER, project_dir=tmp / "project",
                               artifact_path=values["artifact_path"], design_document=values["design_document"], owner_shell="fish",
@@ -426,7 +426,8 @@ def test_the_fresh_branch() -> None:
                               agy_credential_source="hostuser", agy_credential_source_origin="host",
                               router=values["selected_router"],  # SYRD-599: Router, as P0 chose it
                               documentation=values["selected_documentation"],  # SYRD-624: and the documentation gate
-                              research=values["selected_research"]),  # SYRD-842: and the research stage
+                              research=values["selected_research"],  # SYRD-842: and the research stage
+                              plan=values["selected_plan"]),  # SYRD-843: and the plan gate
               f"and every other field of the initial artifact: {written}")
         check(next(e[1] for e in world.log if e[0] == "chown-files") == dict(owner_user=OWNER, project_dir=tmp / "project", runner=values["runner"]),
               "the project's files given to the owner")

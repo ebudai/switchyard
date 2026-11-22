@@ -78,6 +78,7 @@ def main(argv: list[str] | None = None) -> int:
             researcher_runtime=args.researcher_runtime,
             researcher_model=args.researcher_model,
             researcher_effort=args.researcher_effort,
+            plan_owner=args.plan_owner,
         )
     if args.command == "new":
         return launcher.new_project_command(

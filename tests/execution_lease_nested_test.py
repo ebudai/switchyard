@@ -26,6 +26,7 @@ own is a provider tool's command.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import signal
@@ -462,6 +463,64 @@ def test_a_stage_that_escapes_while_its_command_runs_stays_recorded() -> None:
                   "the lease holds its command and its escaped stage")
         finally:
             stop(proc, "840.4")
+
+
+def test_a_stage_two_levels_deep_is_recorded_on_the_top_lease_and_kept_when_both_above_it_die() -> None:
+    """SAPI-128's shape (SYRD-841): the bounded command A started a check stage B in a session of its own, and B
+    started git's detached maintenance C in another. C is folded into the top lease, A's, not into B, which holds no
+    lease of its own: once A and B die and C runs on out of the pane's tree, A's lease still holds C."""
+    with tempfile.TemporaryDirectory(prefix="s841.") as tmp:
+        state, ready = Path(tmp) / "state", Path(tmp) / "ready"
+        state.mkdir()
+        b_script = ("import os, subprocess, sys, time\n"
+                    "subprocess.Popen(['sleep', '841.3'], start_new_session=True)\n"
+                    "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+                    "time.sleep(840)\n")
+        a_script = ("import subprocess, sys, time\n"
+                    f"subprocess.Popen([sys.executable, '-c', {b_script!r}, sys.argv[1]], start_new_session=True)\n"
+                    "time.sleep(840)\n")
+        proc = tool_command([sys.executable, "-c", a_script, str(ready)], state)
+        board, b = Board(), 0
+        try:
+            check(wait_until(lambda: ready.exists() and ready.read_text().strip() and sleeping("841.3"), 20),
+                  "A started B, and B started C")
+            b, c = int(ready.read_text()), sleeping("841.3")[0]
+            sessions = {who: stat_of(pid)[3] for who, pid in (("A", proc.pid), ("B", b), ("C", c))}
+            check(len(set(sessions.values())) == 3 and stat_of(c)[1] == str(b) and stat_of(b)[1] == str(proc.pid),
+                  f"three sessions, each started from inside the one above: {sessions}")
+            role_pass(board, state, observe_seconds=3600)
+            check(len(board.leases) == 1, f"one lease for the whole command: {sorted(board.leases)}")
+            row = next(iter(board.leases.values()))
+            check(row["pid"] == proc.pid, f"the lease is the top command's, A's: {row['pid']} vs {proc.pid}")
+            recorded = row["evidence"][-1].get("folded") or []
+            check(sorted(recorded) == sorted([[b, execution_lease.start_ticks(b)], [c, execution_lease.start_ticks(c)]]),
+                  f"A's lease records both B and the two-deep C by identity: {recorded}")
+
+            os.kill(proc.pid, signal.SIGKILL)
+            proc.wait(timeout=5)
+            os.kill(b, signal.SIGKILL)
+            under_pane = nl.descendant_work_sample(os.getpid(), list(read_process_table())).pids
+            check(wait_until(lambda: lp._exited(PROC, b), 3) and not lp._exited(PROC, c) and c not in under_pane,
+                  "A and B are dead, and C runs on, reparented out of the pane's tree")
+            role_pass(board, state, observe_seconds=3600)
+            check(not board.ended and row["ended_at"] is None,
+                  f"A's lease stays open while the two-deep C runs: {board.ended}")
+            check(lp.lease_sessions(row, list(read_process_table()), PROC) == [c],
+                  f"what A's lease still holds is C: {lp.lease_sessions(row, list(read_process_table()), PROC)}")
+
+            row["interrupt"] = {"stage": "requested", "requested_by": "director", "reason": "SYRD-841", "stage_at": None}
+            fake = SimpleNamespace(activity_gate=Gate(state).is_working,
+                                   activity_hold=SimpleNamespace(_terminal_states=lambda: {"done"}),
+                                   logger=SimpleNamespace(warning=lambda *a: (_ for _ in ()).throw(
+                                       AssertionError(a[0] % a[1:]))))
+            check(lp.carry_out_interrupts(fake, board) == 1 and board.recorded == [(row["id"], "int")],
+                  f"interrupt-lease on A's lease still has something to signal: {board.recorded}")
+            check(wait_until(lambda: not sleeping("841.3"), 3), "the two-deep C was sent SIGINT and ended")
+        finally:
+            if b:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.kill(b, signal.SIGKILL)
+            stop(proc, "841.3")
 
 
 def test_the_wrapper_reaps_an_adopted_orphan_while_its_command_still_runs() -> None:

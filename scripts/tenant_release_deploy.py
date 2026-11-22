@@ -386,7 +386,8 @@ def _build_switchyard_deploy_release_parser() -> argparse.ArgumentParser:
             "and close the release phase only after re-proving from the running board that it "
             "serves that release. Stops the notify listener before the deploy (migrations run "
             "inside it) and starts it after; restarts no panes. Refuses, deploying nothing, "
-            "unless root's pin for the tenant is this commit and root holds that release."
+            "unless root's pin for the tenant is this commit and root holds that release (with "
+            "--rollback, the rollback's own checks instead: it moves the pin itself)."
         ),
     )
     parser.add_argument("project", help="registered project name or slug")

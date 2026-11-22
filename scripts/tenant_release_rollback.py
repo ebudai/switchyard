@@ -62,15 +62,33 @@ def staged_board_release_problem(board_root: Path, commit: str) -> str:
     return ""
 
 
+def _read_root_note(note_path: Path) -> object:
+    """Root's note, read through one descriptor that never follows a link, or {} (SYRD-858).
+
+    Every check is made on the opened file itself, so a link swapped in after a look at the path is refused, never
+    read: it was an lstat of the path and then a read that followed links. `O_NONBLOCK` because opening a FIFO for
+    reading otherwise waits for a writer before any check runs; a regular file ignores it, and anything else is then
+    refused by the check, at once.
+    """
+    try:
+        descriptor = os.open(note_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return {}
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid not in (0, os.getuid()) or info.st_mode & 0o022:
+            return {}
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            return json.loads(handle.read(1 << 20).decode("utf-8"))
+    except (OSError, ValueError):
+        return {}
+    finally:
+        os.close(descriptor)
+
+
 def previous_release_problem(note_path: Path, *, current: str, commit: str) -> str:
     """Why `commit` is not the release root recorded this tenant's current board release as replacing, or ""."""
-    try:
-        info = os.lstat(note_path)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid not in (0, os.getuid()) or info.st_mode & 0o022:
-            raise OSError("not root's own record")
-        note = json.loads(note_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        note = {}
+    note = _read_root_note(note_path)
     note = note if isinstance(note, dict) else {}
     went_to = str(note.get("upgrading_to") or "").strip()
     came_from = str(note.get("previous_board_commit") or "").strip()

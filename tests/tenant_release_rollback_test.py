@@ -23,6 +23,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -381,6 +382,57 @@ def callers(tree: Path) -> dict:
     return out
 
 
+def note_reads(tree: Path) -> dict:
+    """The previous-release check on root's note as a file, a link to it, and a file others may write (SYRD-858)."""
+    guarded(tree)
+    from scripts import tenant_release_rollback as rollback
+
+    out: dict = {}
+    opened: list[int] = []
+    real_open = rollback.os.open
+    with tempfile.TemporaryDirectory(prefix="syrd858.") as raw:
+        tmp = Path(raw)
+        note = tmp / "release-rollback.json"
+        note.write_text(json.dumps({"upgrading_to": B, "previous_board_commit": A}), encoding="utf-8")
+        os.chmod(note, 0o600)
+        link = tmp / "linked.json"
+        link.symlink_to(note)
+        rollback.os.open = lambda path, flags, *rest: (opened.append(flags), real_open(path, flags, *rest))[-1]
+        try:
+            out["file"] = rollback.previous_release_problem(note, current=B, commit=A)
+            out["link"] = rollback.previous_release_problem(link, current=B, commit=A)
+            # A link swapped in after a look at the path: the look passes, as it would have for the real file, and
+            # the read is still refused, because it is made through a descriptor that does not follow links.
+            real_lstat = rollback.os.lstat
+            rollback.os.lstat = lambda path, *a, **k: real_lstat(note)
+            try:
+                out["swapped"] = rollback.previous_release_problem(link, current=B, commit=A)
+            finally:
+                rollback.os.lstat = real_lstat
+        finally:
+            rollback.os.open = real_open
+        os.chmod(note, 0o620)
+        out["group writable"] = rollback.previous_release_problem(note, current=B, commit=A)
+        # A FIFO at the note's path: opening it to read used to wait for a writer before any check (Audit, SYRD-858).
+        # Asked in a thread, so a hang is seen as one rather than turned into an error the reader would swallow.
+        fifo = tmp / "fifo.json"
+        os.mkfifo(fifo, 0o600)
+        answer: list[str] = []
+        asking = threading.Thread(target=lambda: answer.append(
+            rollback.previous_release_problem(fifo, current=B, commit=A)), daemon=True)
+        asking.start()
+        asking.join(10)
+        if asking.is_alive():
+            out["fifo"] = "hung"
+            os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))  # its reader is there: release it
+            asking.join(5)
+        else:
+            out["fifo"] = answer[0]
+    out["nofollow"] = bool(opened) and all(flags & os.O_NOFOLLOW for flags in opened)
+    untouched("tenant_release_rollback_test note reads")
+    return out
+
+
 def catalogue(tree: Path) -> dict:
     sys.path[:0] = [str(tree)]
     from scripts.ticket_board import privileged_actions as actions
@@ -395,14 +447,15 @@ def catalogue(tree: Path) -> dict:
 
 def main() -> int:
     clean_env()
-    if len(sys.argv) == 3 and sys.argv[1] in ("--scenarios", "--callers", "--catalogue"):
+    if len(sys.argv) == 3 and sys.argv[1] in ("--scenarios", "--callers", "--catalogue", "--note"):
         tree = Path(sys.argv[2])
         if sys.argv[1] == "--scenarios":
             guarded(tree)
             install_test_dispatch()
             print("RESULT " + json.dumps(scenarios(tree)))
         else:
-            print("RESULT " + json.dumps((callers if sys.argv[1] == "--callers" else catalogue)(tree)))
+            mode = {"--callers": callers, "--catalogue": catalogue, "--note": note_reads}[sys.argv[1]]
+            print("RESULT " + json.dumps(mode(tree)))
         return 0
 
     def child(mode: str, tree: Path) -> dict:
@@ -512,6 +565,17 @@ def main() -> int:
     quiet = now["no migration crossed"]
     check(quiet["code"] == 0 and quiet["board"] == A and "stay applied" not in quiet["said"],
           f"with no newer migration there is nothing to declare: {quiet}")
+    notes = child("--note", ROOT)
+    check(notes["file"] == "", f"root's own note naming the release replaced is accepted: {notes}")
+    check(notes["link"] and "holds no note" in notes["link"],
+          f"a link to that same note is refused, never followed (SYRD-858): {notes}")
+    check(notes["swapped"] and "holds no note" in notes["swapped"],
+          f"a link swapped in after a look at the path is refused by the read itself (SYRD-858): {notes}")
+    check(notes["group writable"] and "holds no note" in notes["group writable"],
+          f"a note others could write is not root's record: {notes}")
+    check(notes["nofollow"] is True, f"every open of the note refuses to follow a link: {notes}")
+    check(notes["fifo"] != "hung" and "holds no note" in notes["fifo"],
+          f"a FIFO at the note's path is refused at once, never waited on (SYRD-858): {notes}")
     print(f"tenant_release_rollback_test: {CHECKS} checks ok")
     return 0
 

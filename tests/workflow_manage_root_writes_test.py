@@ -54,7 +54,8 @@ WRITES = ("apply", "rollback", "set-role-prompt", "clear-role-prompt", "migrate-
           "enable-documentation-gate", "disable-documentation-gate",  # SYRD-624
           "enable-publisher", "disable-publisher",  # SYRD-625
           "enable-designer-implementation",  # SYRD-678
-          "enable-research-stage", "disable-research-stage")  # SYRD-842
+          "enable-research-stage", "disable-research-stage",  # SYRD-842
+          "enable-plan-gate", "disable-plan-gate")  # SYRD-843
 READS = ("show", "show-role-prompt", "validate", "prepare-role")
 CHECKS = 0
 

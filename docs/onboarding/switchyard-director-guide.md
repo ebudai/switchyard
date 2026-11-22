@@ -798,6 +798,67 @@ This section and `switchyard research-stage --help` are the current
 procedure; [SYRD-842](../syrd-842-research-stage.md) is historical design and
 rollout evidence.
 
+## Scoping from a plan: the optional plan gate
+
+With the plan gate, the project's implementation plan has one owner (the
+designer, or the role named when it was enabled), changes only through plan
+tickets that Audit reviews and the User approves, and is the source you scope
+tickets from. **You never edit the plan.** The full rules -- the three levels,
+the `plan-index` block the board reads, what never goes in the plan, Audit's
+checklist -- are in the [plan guide](switchyard-plan-guide.md).
+
+```bash
+switchyard plan-gate <project> enable --owner designer --dry-run   # an existing role owns the plan
+switchyard plan-gate <project> enable --runtime claude [--template-role audit]   # a new Designer
+switchyard plan-gate <project> enable --owner main --plan-file docs/plan.md --max-lines 1200
+switchyard plan-gate <project> disable   # refused while a plan ticket is open
+```
+
+**Scoping tickets.** Every ticket you route into Implementation serves a
+deliverable of the approved plan, or is unplanned with a reason (a bug, an ops
+one-off, a platform report). The board refuses the route otherwise, refuses a
+deliverable the approved plan does not have (and lists the ones it does), and
+refuses a deliverable of a milestone that is not detailed yet: a re-plan is due.
+
+```bash
+ticket-board-write create-ticket --title ... --body-file body.md --deliverable D1.2
+ticket-board-write set-deliverable PGU-123 --deliverable D1.2
+ticket-board-write set-deliverable PGU-124 --unplanned-reason-file why.md
+```
+
+Unplanned tickets stay allowed, and are counted apart in the plan's status.
+
+**Scope changes.** When the work you need fits no deliverable, do not add it to
+the plan yourself. Raise a scope change:
+
+```bash
+ticket-board-write request-scope-change PGU-125 --reason-file missing.md
+```
+
+It opens a plan ticket for the plan owner (or extends the one already open),
+and PGU-125 waits on it as a blocker. A research finding that changes what is
+needed is a scope change too.
+
+**Plan tickets.** `create-ticket --plan` or `plan-ticket <id>` marks one; it
+needs the User's acceptance before you close it, and its candidate may change
+only the plan and the decision log. When it is closed, its commit's index is the
+approved plan. When every ticket of a milestone's deliverables is Done or
+cancelled, you and the plan owner are told once that a re-plan is due.
+
+**Findings.** A non-plan ticket whose candidate changes the plan file, and any
+candidate whose plan is over the size limit, is flagged once on the ticket (for
+Audit) and to you. The submission itself is not refused; Audit kicks it back.
+
+### Adopting the plan gate on an existing project
+
+Never rewrite an existing plan in place. At a milestone boundary, freeze the old
+plan as an archive, enable the gate, and have the owner write a new plan for the
+remaining work only, through the first plan ticket; then name a deliverable or
+`unplanned` on each open ticket. The steps are in the
+[plan guide](switchyard-plan-guide.md#adopting-the-plan-gate-on-an-existing-project).
+This section and `switchyard plan-gate --help` are the current procedure;
+[SYRD-843](../syrd-843-plan-gate.md) is historical design and rollout evidence.
+
 ## Reports to other boards
 
 Your project files reports to its **report parent**: the board root declared for it, and

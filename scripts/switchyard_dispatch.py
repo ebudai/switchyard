@@ -356,16 +356,17 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         from scripts import paste_image
 
         return paste_image.main(argv[1:])
-    # `design-stage`, `router-role`, `documentation-gate`, `publisher` and `research-stage` share
-    # this block: like role-prompt they write the tenant's own declared workflow through
-    # workflow_manage as the caller (SYRD-567, SYRD-599, SYRD-624, SYRD-625, SYRD-842).
+    # `design-stage`, `router-role`, `documentation-gate`, `publisher`, `research-stage` and `plan-gate`
+    # share this block: like role-prompt they write the tenant's own declared workflow through
+    # workflow_manage as the caller (SYRD-567, SYRD-599, SYRD-624, SYRD-625, SYRD-842, SYRD-843).
     if argv[0].casefold() in ("role-prompt", "design-stage", "router-role", "documentation-gate", "publisher",
-                              "research-stage"):
+                              "research-stage", "plan-gate"):
         design_stage = argv[0].casefold() == "design-stage"
         router = argv[0].casefold() == "router-role"
         gate = argv[0].casefold() == "documentation-gate"
         publisher = argv[0].casefold() == "publisher"
         research = argv[0].casefold() == "research-stage"
+        plan = argv[0].casefold() == "plan-gate"
         parser = argparse.ArgumentParser(
             prog=f"switchyard {argv[0].casefold()}",
             description=(
@@ -402,6 +403,15 @@ def switchyard_main(argv: list[str] | None = None) -> int:
                 "stops nothing. --role gives the research to an existing role; --runtime declares a new detached "
                 "Researcher on that agent CLI. disable is refused while a ticket is in Research or its review."
             ) if research else (
+                "Turn the optional plan gate on or off. With it, a designer owns the project's implementation plan "
+                "-- milestones, deliverables, tickets, with a machine-readable index -- and changes it only through "
+                "plan tickets, which Audit reviews against its plan checklist and the User approves. The Director "
+                "scopes tickets from the approved plan and never edits it: each ticket names its deliverable, or is "
+                "unplanned with a reason, before it enters Implementation, and what the plan does not cover is a "
+                "scope change (ticket-board-write request-scope-change). --owner gives the plan to an existing role "
+                "(the designer, or an Implementation owner); --runtime declares a new detached Designer. disable is "
+                "refused while a plan ticket is open."
+            ) if plan else (
                 "Show, set, or clear the onboarding prompt a role receives when its next "
                 "conversation starts fresh. A running conversation is never interrupted or "
                 "rewritten: a changed prompt is used by the next fresh session or an "
@@ -425,6 +435,14 @@ def switchyard_main(argv: list[str] | None = None) -> int:
                                                         "starts from")
         if publisher:
             parser.add_argument("action", choices=("enable", "disable"))
+        if plan:
+            parser.add_argument("action", choices=("enable", "disable"))
+            parser.add_argument("--owner", help="enable: the existing role that owns the plan")
+            parser.add_argument("--runtime", help="enable: the agent CLI a new Designer runs on")
+            parser.add_argument("--template-role", help="enable --runtime: the role whose model the Designer starts from")
+            parser.add_argument("--plan-file", help="enable: the plan file (default docs/implementation-plan.md)")
+            parser.add_argument("--decision-log", help="enable: the decision log (default docs/decision-log.md)")
+            parser.add_argument("--max-lines", type=int, help="enable: the plan's size limit (default 1500 lines)")
         if research:
             parser.add_argument("action", choices=("enable", "disable"))
             parser.add_argument("--role", help="enable: an existing role that does the research")
@@ -433,7 +451,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
                                                         "Researcher starts from")
             parser.add_argument("--research-directory", help="enable: where findings files go in the repository "
                                                              "(default docs/research)")
-        if design_stage or router or gate or publisher or research:
+        if design_stage or router or gate or publisher or research or plan:
             parser.add_argument(
                 "--dry-run", action="store_true",
                 help="print the document and projection it would apply, and change nothing",
@@ -446,14 +464,14 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             default=os.environ.get("TICKET_BOARD_PROJECT", ""),
             help="project name or slug; defaults to TICKET_BOARD_PROJECT in the caller's pane",
         )
-        if not (design_stage or router or gate or publisher or research):
+        if not (design_stage or router or gate or publisher or research or plan):
             parser.add_argument("--prompt", help="prompt text; use --prompt-file for anything long")
             parser.add_argument(
                 "--prompt-file",
                 type=Path,
                 help="read the prompt from a file, or from stdin when given as -",
             )
-        if (router or gate or publisher or research) and len(argv) > 2 and argv[2] in ("enable", "disable") and not argv[1].startswith("-"):
+        if (router or gate or publisher or research or plan) and len(argv) > 2 and argv[2] in ("enable", "disable") and not argv[1].startswith("-"):
             # `switchyard router-role <project> enable|disable`, as the docs and the
             # User write it, is the same command as `... enable --project <project>`.
             argv = [argv[0], argv[2], "--project", argv[1], *argv[3:]]
@@ -472,6 +490,13 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             return workflow_manage.main(forwarded + (["--dry-run"] if args.dry_run else []))
         if publisher:
             forwarded = [f"{args.action}-publisher", "--board-url", config.board_url, "--config", str(entry.config_path)]
+            return workflow_manage.main(forwarded + (["--dry-run"] if args.dry_run else []))
+        if plan:
+            forwarded = [f"{args.action}-plan-gate", "--board-url", config.board_url, "--config", str(entry.config_path)]
+            for flag, value in (("--owner", args.owner), ("--runtime", args.runtime), ("--template-role", args.template_role),
+                                ("--plan-file", args.plan_file), ("--decision-log", args.decision_log),
+                                ("--max-lines", str(args.max_lines) if args.max_lines else None)):
+                forwarded += [flag, value] if value else []
             return workflow_manage.main(forwarded + (["--dry-run"] if args.dry_run else []))
         if research:
             forwarded = [f"{args.action}-research-stage", "--board-url", config.board_url, "--config", str(entry.config_path)]

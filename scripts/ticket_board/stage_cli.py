@@ -1,5 +1,5 @@
-"""ticket-board-write's commands for the opt-in stages: the documentation gate's decisions (SYRD-624) and the research
-stage's brief and moves (SYRD-842).
+"""ticket-board-write's commands for the opt-in stages: the documentation gate's decisions (SYRD-624), the research
+stage's brief and moves (SYRD-842), and the plan gate's deliverables, plan tickets and scope changes (SYRD-843).
 
 Each research move is the declared transition of the same name, so the board
 checks the actor, the owner, the stage and the reason, and research_finding
@@ -33,6 +33,8 @@ RESEARCH_MOVES = {
 }
 #: research-brief, and set-research-brief, its name as the board's operation.
 RESEARCH_COMMANDS = frozenset({"research_brief", "set_research_brief", *RESEARCH_MOVES})
+#: The plan gate's commands; set-ticket-deliverable is set-deliverable under the board's operation name.
+PLAN_COMMANDS = frozenset({"set_deliverable", "set_ticket_deliverable", "request_scope_change", "plan_ticket"})
 
 
 def documentation_decision(client: Any, args: argparse.Namespace, command: str) -> dict[str, Any]:
@@ -93,10 +95,48 @@ def add_research_parsers(subparsers: Any, free_text: Callable[..., Any]) -> None
 
 
 def add_create_arguments(create: argparse.ArgumentParser, free_text: Callable[..., Any]) -> None:
-    """create-ticket --research, with its brief (Director only: the board refuses anyone else)."""
+    """create-ticket --research with its brief, and the plan gate's --deliverable, --unplanned-reason and --plan
+    (Director only: the board refuses anyone else)."""
     create.add_argument("--research", action="store_true",
                         help="a research ticket: needs --question, --timebox and --usable-answer, its brief")
     _brief_arguments(create, free_text, required=False)
+    create.add_argument("--deliverable", default=None,
+                        help="plan-gated boards: the deliverable of the approved plan this ticket serves")
+    free_text(create, "--unplanned-reason", default=None,
+              help="plan-gated boards: why this ticket serves no deliverable (a bug, an ops one-off, a report)")
+    create.add_argument("--plan", action="store_true",
+                        help="plan-gated boards: a plan ticket, the only way the plan changes; it needs the User's "
+                             "acceptance before it is closed")
+
+
+def add_plan_parsers(subparsers: Any, free_text: Callable[..., Any]) -> None:
+    """The plan gate's commands (SYRD-843)."""
+    deliverable = subparsers.add_parser(
+        "set-deliverable", aliases=["set-ticket-deliverable"],
+        help="Director: name the deliverable of the approved plan a ticket serves, or that it is unplanned and why")
+    deliverable.add_argument("ticket_id")
+    choice = deliverable.add_mutually_exclusive_group(required=True)
+    choice.add_argument("--deliverable", help="the deliverable's id in the approved plan, e.g. D1.2")
+    choice.add_argument("--unplanned-reason", help="why the ticket serves no deliverable")
+    choice.add_argument("--unplanned-reason-file", help="read the unplanned reason from PATH (- for standard input)")
+    scope = subparsers.add_parser(
+        "request-scope-change", help="Director: the plan does not cover this ticket -- open (or extend) a plan ticket "
+                                     "for the plan owner, and make this ticket wait on it")
+    scope.add_argument("ticket_id")
+    free_text(scope, "--reason", required=True, help="what the plan is missing")
+    planned = subparsers.add_parser("plan-ticket", help="Director: mark a ticket as a plan ticket (or not, with --off)")
+    planned.add_argument("ticket_id")
+    planned.add_argument("--off", action="store_true", help="it is not a plan ticket after all")
+
+
+def _unplanned(args: argparse.Namespace) -> str:
+    path = getattr(args, "unplanned_reason_file", None)
+    if path:
+        import sys
+        from pathlib import Path
+
+        return sys.stdin.read() if path == "-" else Path(path).read_text(encoding="utf-8")
+    return str(getattr(args, "unplanned_reason", None) or "")
 
 
 def _refused(message: str) -> Exception:
@@ -104,7 +144,12 @@ def _refused(message: str) -> Exception:
 
 
 def check_create(args: argparse.Namespace) -> None:
-    """create-ticket's research brief, checked before anything is created: whole with --research, absent without."""
+    """create-ticket's research brief, checked before anything is created: whole with --research, absent without; and
+    at most one of --deliverable and --unplanned-reason, neither on a plan ticket."""
+    if args.deliverable and str(args.unplanned_reason or "").strip():
+        raise _refused("a ticket serves a deliverable, or is unplanned with a reason: give one of the two")
+    if args.plan and (args.deliverable or str(args.unplanned_reason or "").strip()):
+        raise _refused("a plan ticket changes the plan itself, so it serves no deliverable and is not unplanned")
     given = [flag for flag, value in (("--question", args.question), ("--timebox", args.timebox),
                                       ("--usable-answer", args.usable_answer)) if value not in (None, "")]
     if not args.research:
@@ -127,17 +172,39 @@ def _brief(client: Any, ticket_id: str, args: argparse.Namespace) -> dict[str, A
 
 
 def after_create(client: Any, args: argparse.Namespace, response: dict[str, Any]) -> dict[str, Any]:
-    """With --research, the new ticket's brief, which turns its needs_research gate on."""
-    if not args.research:
-        return response
+    """With --research, the new ticket's brief, which turns its needs_research gate on; with --deliverable or
+    --unplanned-reason, its place in the plan; with --plan, its mark as a plan ticket."""
     ticket = response.get("ticket") if isinstance(response.get("ticket"), dict) else response
     ticket_id = str(ticket.get("id") or "")
-    try:
-        _brief(client, ticket_id, args)
-    except write_client.TicketBoardWriteError as exc:
-        raise _refused(f"{ticket_id} was created, but its research brief was refused, so it is not a research "
-                       f"ticket yet: {exc}. Write it with ticket-board-write research-brief {ticket_id}") from None
+    steps = []
+    if args.research:
+        steps.append(("its research brief", f"research-brief {ticket_id}", lambda: _brief(client, ticket_id, args)))
+    if args.deliverable or str(args.unplanned_reason or "").strip():
+        steps.append(("its deliverable", f"set-deliverable {ticket_id}", lambda: client.set_ticket_deliverable(
+            ticket_id, deliverable=args.deliverable or "", unplanned_reason=str(args.unplanned_reason or ""))))
+    if args.plan:
+        steps.append(("its plan ticket mark", f"plan-ticket {ticket_id}", lambda: client.set_workflow_flags(
+            ticket_id, {"plan_change": True, "needs_user_signoff": True})))
+    for what, command, step in steps:
+        try:
+            step()
+        except write_client.TicketBoardWriteError as exc:
+            raise _refused(f"{ticket_id} was created, but {what} was refused: {exc}. Set it with "
+                           f"ticket-board-write {command}") from None
     return response
+
+
+def plan_command(client: Any, args: argparse.Namespace, command: str) -> dict[str, Any]:
+    """One plan gate command."""
+    if command in ("set_deliverable", "set_ticket_deliverable"):
+        client.set_ticket_deliverable(args.ticket_id, deliverable=args.deliverable or "",
+                                      unplanned_reason=_unplanned(args))
+    elif command == "request_scope_change":
+        client.request_scope_change(args.ticket_id, reason=args.reason)
+    else:
+        client.set_workflow_flags(args.ticket_id, {"plan_change": not args.off, **({} if args.off else
+                                                                                   {"needs_user_signoff": True})})
+    return {"ticket": read_client.TicketBoardReadClient(args.board_url).get_ticket(args.ticket_id)}
 
 
 def research_command(client: Any, args: argparse.Namespace, command: str) -> dict[str, Any]:

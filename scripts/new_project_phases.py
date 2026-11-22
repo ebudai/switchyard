@@ -114,6 +114,8 @@ class NewProjectChoices:
     selected_documentation: tuple[tuple[str, str], ...]
     #: The research stage's record, or () for off (SYRD-842).
     selected_research: tuple[tuple[str, str], ...]
+    #: The plan gate's record, `(("owner", <role>),)`, or () for off (SYRD-843).
+    selected_plan: tuple[tuple[str, str], ...]
     stages: ProvisioningStages
     #: Where its Switchyard reports go, decided before anything exists (SYRD-674).
     upstream_report: ReportChoice
@@ -174,6 +176,7 @@ def _resolve_new_project_choices(
         selected_router = artifact.router
         selected_documentation = artifact.documentation
         selected_research = getattr(artifact, "research", ())  # SYRD-842
+        selected_plan = getattr(artifact, "plan", ())  # SYRD-843
     else:
         resolved_project_name = (project_name or launcher._prompt_text("Project name", input_func=input_func)).strip()
         if not resolved_project_name:
@@ -200,6 +203,7 @@ def _resolve_new_project_choices(
         selected_router = ()
         selected_documentation = ()
         selected_research = ()
+        selected_plan = ()
     # Where the owner is decided -- the artifact or the agent user -- and before anything is recorded or created: a
     # uid-0 owner would send every root write for it down its by-path branch (SYRD-763), and a name
     # that is not a plain account name may be read as a uid further on (SYRD-765).
@@ -300,6 +304,10 @@ def _resolve_new_project_choices(
 
             # And the research stage's (SYRD-842).
             roles, selected_research = research_onboarding.split_role_plan(roles)
+            from scripts import plan_onboarding
+
+            # And the plan gate's (SYRD-843).
+            roles, selected_plan = plan_onboarding.split_role_plan(roles)
             chosen_pairs = [(entry.role, entry.cli) for entry in roles]
             selected_role_models = {
                 entry.role: entry.model for entry in roles if entry.model
@@ -309,7 +317,8 @@ def _resolve_new_project_choices(
             }
             # The Director-owned gate is no role to review; it is summarised below like Router's choice.
             reviewed = tuple(entry for entry in role_plan
-                             if entry.role not in (documentation_onboarding.GATE_MARKER, research_onboarding.STAGE_MARKER))
+                             if entry.role not in (documentation_onboarding.GATE_MARKER, research_onboarding.STAGE_MARKER,
+                                                   plan_onboarding.GATE_MARKER))
             launcher.print_role_plan_review(role_plan if len(reviewed) == len(role_plan) else reviewed,
                                             print_func=print_func)
         selected_role_clis = launcher._dedupe_role_cli_pairs(chosen_pairs)
@@ -335,6 +344,9 @@ def _resolve_new_project_choices(
     print_func(research_onboarding.summary_line(  # SYRD-842
         selected_research, slot=research_onboarding.researcher_slot(selected_role_clis, selected_documentation),
         project=resolved_slug))
+    from scripts import plan_onboarding
+
+    print_func(plan_onboarding.summary_line(selected_plan))  # SYRD-843
     # Where its reports go, said before the confirmation (SYRD-674).
     print_func(upstream_report_sinks.choice_summary(resolved_slug, upstream_report, registry_dir=registry_dir))
     # The one confirmation, and it comes last: after every choice -- Router,
@@ -386,6 +398,7 @@ def _resolve_new_project_choices(
         selected_router=selected_router,
         selected_documentation=selected_documentation,
         selected_research=selected_research,
+        selected_plan=selected_plan,
         stages=stages,
         upstream_report=upstream_report,
     )
@@ -569,6 +582,7 @@ def _prepare_new_project_accounts(
     selected_audit_roles: tuple[str, ...],
     selected_desktop_policy: dict,
     selected_implementer_roles: tuple[str, ...],
+    selected_plan: tuple[tuple[str, str], ...],
     selected_role_efforts: dict[str, str],
     selected_role_models: dict[str, str],
     stages: ProvisioningStages,
@@ -689,6 +703,7 @@ def _prepare_new_project_accounts(
             router=selected_router,
             documentation=selected_documentation,
             research=selected_research,
+            plan=selected_plan,
         )
         launcher._chown_switchyard_project_files(owner_user=owner_user, project_dir=project_dir, runner=runner)
         # Looked at by descriptor, never through a link at the name or above it, and handed over only as the

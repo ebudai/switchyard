@@ -259,6 +259,39 @@ def _document_with_research_stage(current: dict, args: argparse.Namespace, parse
         parser.error(str(exc))
 
 
+def _document_with_plan_gate(current: dict, args: argparse.Namespace, parser: argparse.ArgumentParser) -> dict:
+    """SYRD-843: the tenant's own document with the plan gate on (an existing owner, or a new Designer) or off."""
+    from scripts.ticket_board.documentation_gate import free_visible_slot
+    from scripts.ticket_board.plan_gate import (DEFAULT_DECISION_LOG, DEFAULT_FILE, DEFAULT_MAX_LINES, with_plan_gate,
+                                                without_plan_gate)
+
+    if not current.get("document"):
+        parser.error("no workflow configuration is active for this board")
+    try:
+        if args.operation == "disable-plan-gate":
+            if args.owner or args.runtime or args.template_role or args.plan_file or args.decision_log or args.max_lines:
+                parser.error("disable-plan-gate takes no owner, runtime or plan settings")
+            return without_plan_gate(current["document"])
+        if bool(args.owner) == bool(args.runtime):
+            parser.error("enable-plan-gate needs --owner <an existing role> or --runtime <cli> for a new Designer, "
+                         "one of the two")
+        if args.template_role and not args.runtime:
+            parser.error("--template-role chooses a new Designer's model, so it needs --runtime")
+        designer = None
+        if args.runtime:
+            designer = {"runtime": args.runtime, "template_role": args.template_role,
+                        "slot": free_visible_slot(current["document"])}
+            print(f"workflow: the Designer takes display slot {designer['slot']}; it appears in the project window "
+                  "once the window is relaunched" if designer["slot"] is not None else
+                  "workflow: all six display slots are taken, so the Designer runs in the background; "
+                  "`switchyard attach <project> designer` shows it", file=sys.stderr)
+        return with_plan_gate(current["document"], owner=args.owner or None, designer=designer,
+                              plan_file=args.plan_file or DEFAULT_FILE, decision_log=args.decision_log or DEFAULT_DECISION_LOG,
+                              max_lines=args.max_lines or DEFAULT_MAX_LINES)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+
 def _document_with_publisher(current: dict, args: argparse.Namespace, parser: argparse.ArgumentParser) -> dict:
     """SYRD-625: the tenant's own document with the Publisher's publication stage after Audit, or without it."""
     from scripts.ticket_board.publisher_stage import with_publisher, without_publisher
@@ -454,6 +487,7 @@ TENANT_WRITES = frozenset({
     "enable-publisher", "disable-publisher",  # SYRD-625
     "enable-designer-implementation",  # SYRD-678
     "enable-research-stage", "disable-research-stage",  # SYRD-842
+    "enable-plan-gate", "disable-plan-gate",  # SYRD-843
 })
 
 
@@ -499,6 +533,8 @@ def main(argv=None):
             "enable-designer-implementation",
             "enable-research-stage",
             "disable-research-stage",
+            "enable-plan-gate",
+            "disable-plan-gate",
         ],
     )
     parser.add_argument("--document", type=Path)
@@ -541,6 +577,10 @@ def main(argv=None):
                                          "own default on any other")
     parser.add_argument("--research-directory", help="enable-research-stage: the repository directory findings files "
                                                      "go in (default docs/research)")
+    parser.add_argument("--owner", help="enable-plan-gate: the existing role that owns the plan")
+    parser.add_argument("--plan-file", help="enable-plan-gate: the plan file (default docs/implementation-plan.md)")
+    parser.add_argument("--decision-log", help="enable-plan-gate: the decision log (default docs/decision-log.md)")
+    parser.add_argument("--max-lines", type=int, help="enable-plan-gate: the plan's size limit (default 1500 lines)")
     parser.add_argument("--routing-flag", help="enable-designer-implementation: a gate flag Router requires before it "
                                                "gives the designer a ticket (design work only)")
     parser.add_argument("--prompt", help="onboarding prompt text for set-role-prompt")
@@ -707,6 +747,10 @@ def main(argv=None):
     elif args.operation in {"enable-research-stage", "disable-research-stage"}:
         # And for the research stage (SYRD-842).
         cfg = _document_with_research_stage(current, args, parser)
+        files = projection_files(args.config, cfg)
+    elif args.operation in {"enable-plan-gate", "disable-plan-gate"}:
+        # And for the plan gate (SYRD-843).
+        cfg = _document_with_plan_gate(current, args, parser)
         files = projection_files(args.config, cfg)
     elif args.operation == "enable-designer-implementation":
         # And for the designer as an Implementation owner (SYRD-678).

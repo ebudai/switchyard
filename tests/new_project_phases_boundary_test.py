@@ -74,8 +74,8 @@ OUTPUTS = ("agy_source_origin", "artifact_path", "design_document", "director_on
            "resolved_agy_credential_source", "resolved_project_name", "resolved_slug", "runner",
            "selected_audit_roles", "selected_desktop_policy", "selected_implementer_roles", "selected_role_clis",
            "selected_role_efforts", "selected_role_models", "selected_router", "selected_documentation",
-           "selected_research", "stages",
-           "upstream_report")  # SYRD-599 added selected_router, SYRD-624 selected_documentation, SYRD-674 upstream_report, SYRD-842 selected_research
+           "selected_research", "selected_plan", "stages",
+           "upstream_report")  # SYRD-599 added selected_router, SYRD-624 selected_documentation, SYRD-674 upstream_report, SYRD-842 selected_research, SYRD-843 selected_plan
 OWN = ("subprocess", "dataclass", "Path", "Any", "Callable", "Sequence")
 OWNER = "syrd369-agent"
 
@@ -330,6 +330,8 @@ def test_the_seams_and_nothing_bound_read_through_the_launcher() -> None:
     gate_summary = [i for i, s in enumerate(fn.body) if "documentation_onboarding.summary_line(" in ast.unparse(s)]
     # SYRD-842: and the research stage's, likewise.
     research_summary = [i for i, s in enumerate(fn.body) if "research_onboarding.summary_line(" in ast.unparse(s)]
+    # SYRD-843: and the plan gate's.
+    plan_summary = [i for i, s in enumerate(fn.body) if "plan_onboarding.summary_line(" in ast.unparse(s)]
     # SYRD-674: and where its reports go, decided by its own module, imported right where it is used -- since
     # SYRD-742 before the role questions, so ahead of Router's and the gate's summaries. SYRD-778: with the module
     # that asks it, when no single declared board decides it.
@@ -342,7 +344,8 @@ def test_the_seams_and_nothing_bound_read_through_the_launcher() -> None:
                     (report_choice[0] - 1, "from scripts import new_project_questions, upstream_report_sinks"),
                     (summary[0] - 1, "from scripts import router_onboarding"),
                     (gate_summary[0] - 1, "from scripts import documentation_onboarding"),
-                    (research_summary[0] - 1, "from scripts import research_onboarding")]
+                    (research_summary[0] - 1, "from scripts import research_onboarding"),
+                    (plan_summary[0] - 1, "from scripts import plan_onboarding")]
           and "validate_policy(" in ast.unparse(fn.body[decided[0] + 2]),
           f"the desktop validation is imported inside the phase, right after the policy is decided, then used: {local}")
 

@@ -115,6 +115,8 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
     "force_fresh_context": {"director"},
     "set_uat_instructions": {"director"},
     "set_research_brief": {"director"},  # SYRD-842
+    "set_ticket_deliverable": {"director"},  # SYRD-843
+    "request_scope_change": {"director"},  # SYRD-843
     "ask_director": {"user"},
     # SYRD-662: a wait on the User is the Director's decision.
     "await_user": {"director"},
@@ -200,6 +202,9 @@ COMPOSED_OPERATION_CAPABILITIES = {
     "set_uat_instructions": frozenset({"director_edit"}),
     # SYRD-842: a research brief is the Director's edit of the ticket, as UAT steps are.
     "set_research_brief": frozenset({"director_edit"}),
+    # SYRD-843: naming the deliverable a ticket serves is the Director's edit; a scope change is a blocker it sets.
+    "set_ticket_deliverable": frozenset({"director_edit"}),
+    "request_scope_change": frozenset({"set_blockers"}),
     "ask_director": frozenset({"add_comment"}),
     # SYRD-662: a wait on the User is await_role and its sentence, as request_dependency is, and the Director's
     # alone: the capabilities that identify the control role. The database checks both itself.

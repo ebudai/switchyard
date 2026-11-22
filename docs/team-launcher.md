@@ -1956,6 +1956,21 @@ the [Researcher guide](onboarding/switchyard-researcher-guide.md) and
 `switchyard research-stage --help`; [SYRD-842](syrd-842-research-stage.md) is
 historical design and rollout evidence.
 
+**The plan gate is a choice here too, off by default (SYRD-843).** After the
+research stage, `new` asks `Plan gate (optional)`: off, or the role that owns the
+plan -- the designer, when the project has one, or one of its implementers. No
+role or session is created. It is recorded as `project.plan = {"owner": <role>}`;
+no field, or `{"owner": "off"}`, means off. Noninteractively, `team-launcher
+<project> design --plan-owner <role>` records it. The project starts with a
+declared workflow carrying the gate, added by the same `with_plan_gate` that
+`switchyard plan-gate <project> enable` uses, with the default plan file,
+decision log and size limit. `switchyard upgrade` never turns it on. The current
+procedure is the
+[Director guide](onboarding/switchyard-director-guide.md#scoping-from-a-plan-the-optional-plan-gate),
+the [plan guide](onboarding/switchyard-plan-guide.md) and `switchyard plan-gate
+--help`; [SYRD-843](syrd-843-plan-gate.md) is historical design and rollout
+evidence.
+
 `switchyard add-role <project> <role> --cli <cli>` adds another implementer role
 after provisioning. `switchyard add-role <project> <role> --audit --cli <cli>`
 adds an auditor role instead. Auditor additions widen the Audit stage owners,

@@ -228,8 +228,8 @@ def inner(root: Path, work: Path, mode: str) -> dict:
             precheck_plan=SimpleNamespace(service_user="boardsvc"), selected_role_clis=(), selected_router=(),
             selected_documentation=(), worktree_branch="main",
             # SYRD-842's record, where the tree under test takes it; the before-run's tree, main's, does not.
-            **({"selected_research": ()} if "selected_research" in __import__("inspect").signature(
-                launcher._prepare_new_project_accounts).parameters else {})))
+            **{name: () for name in ("selected_research", "selected_plan")  # SYRD-842/843, where the tree takes them
+               if name in __import__("inspect").signature(launcher._prepare_new_project_accounts).parameters}))
         written = directory or PROVISION
         out[f"accounts/{name}"]["policy_written"] = (written / "desktop-policy.json").exists() and \
             not written.is_symlink()

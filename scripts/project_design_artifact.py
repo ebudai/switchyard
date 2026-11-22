@@ -326,6 +326,11 @@ def load_project_design_artifact(path: Path, *, expected_project: str | None = N
     research = research_onboarding.artifact_research(  # SYRD-842
         project_raw.get("research"), path=artifact_path, role_names=[role for role, _cli in role_clis],
         implementers=implementer_roles)
+    from scripts import plan_onboarding
+
+    plan = plan_onboarding.artifact_plan(  # SYRD-843
+        project_raw.get("plan"), path=artifact_path,
+        owners=[*(["designer"] if include_designer_raw else []), *implementer_roles])
     push_policy = launcher._artifact_string(project_raw, "push_policy", path=artifact_path, default="director-main-only")
     gates = launcher._artifact_bool_mapping(project_raw.get("gates"), path=artifact_path, field="project.gates", defaults=launcher.PROJECT_DESIGN_DEFAULT_GATES)
     capability_grants = launcher._artifact_capability_grants(project_raw.get("capability_grants"), path=artifact_path)
@@ -357,5 +362,6 @@ def load_project_design_artifact(path: Path, *, expected_project: str | None = N
         router=router,
         documentation=documentation,
         research=research,
+        plan=plan,
         **({"local_qwen_roles": local_qwen_roles} if local_qwen_roles else {}),
     )

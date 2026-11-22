@@ -105,7 +105,7 @@ def test_enter_on_router_off_is_reviewed_and_then_confirmed() -> None:
     # SYRD-624: the documentation gate's menu follows Router, SYRD-842 the research stage's; the confirmation is
     # still the last question.
     check(questions[router_at + 1:] == ["Documentation gate (optional) [off]: ", "Research stage (optional) [off]: ",
-                                        PROCEED],
+                                        "Plan gate (optional) [off]: ", PROCEED],  # SYRD-843: the plan gate's too
           f"Router, then the documentation gate, and the only question after them is the confirmation: {questions[router_at:]}")
     review = said_before(result, PROCEED)
     check("switchyard: roles to create:" in review, f"the roles are reviewed before the question: {review[-6:]}")

@@ -654,8 +654,15 @@ cannot make, such as the tenant-control sudoers rule, happen there -- then
 `upgrade-tenant-release` applies it pinned to the same commit, and
 `deploy-release` deploys an approved release. The root-owned helper runs these
 only for your registered pane, and none of them asks you for a password: see
-[privileged actions](../privileged-actions.md). What remains an operator's is host-wide:
-installing or selecting the shared release everyone runs. The privileged
+[privileged actions](../privileged-actions.md). Going back is yours the same way:
+`switchyard privileged-action <project> rollback-release commit=<sha>` returns your
+tenant -- board, listener and role tooling -- to the board release its last upgrade
+replaced, still staged for it, unprompted and usable in an outage. Migrations stay
+applied, so it refuses, changing nothing, unless each newer one is declared safe for
+older code, and names any that is not. Going back to any other staged release is an
+administrator's `select-shared-release`, run from their own terminal, where they
+authenticate. What remains an operator's is host-wide: installing the shared release
+everyone runs (`install-shared-release`). The privileged
 boundary follows that shared release, never a tenant's pin: installing a shared
 release installs its boundary. On a host whose boundary predates an action (a
 release installed before that rule), the action is refused and names the repair:

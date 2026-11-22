@@ -157,7 +157,8 @@ is unchanged.
 - **The per-tenant polkit rule** gains `rollback-release`. The root upgrade
   replaces an installed rule whose bytes differ, so existing tenants get it
   at their next upgrade.
-- **`docs/privileged-actions.md`** and the Director skill say how to roll
+- **[Privileged actions: rolling one tenant back](privileged-actions.md#rolling-one-tenant-back)**
+  is the maintained procedure; the Director guide and skill say how to roll
   back.
 
 ## Evidence

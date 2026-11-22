@@ -41,7 +41,19 @@ any notice could start a turn (SYRD-589).
   after, with the reason.
 * **What ended.** A lease ends as exited only when its process is gone, by the
   same identity. One that has left its pane's tree but still runs stays open,
-  so it can still be interrupted.
+  so it can still be interrupted. A session whose every member has exited and
+  only waits to be reaped runs nothing: it is never leased, and its lease ends.
+* **One command, one lease.** A session started from inside another leased
+  session -- a test stage's `start_new_session`, git's detached maintenance, an
+  orphan `switchyard-bounded` adopted -- is that command's, not a command of
+  its own: it is folded into the outer lease, whose evidence counts it and
+  whose interrupt reaches its process groups. One bounded run of `scripts/check`
+  on SAPI-128 opened 200 leases, each on the default threshold, and the first
+  alerts named exited git children of the wrapper (SYRD-840). Each look records
+  the folded sessions on the outer lease by identity (`folded` in its evidence),
+  and keeps those still running. So when the outer command dies and a folded
+  session runs on, reparented out of the pane's tree, the lease stays open and
+  its interrupt still reaches that session, until nothing it holds is left.
 
 The pane's text is never read. Never fatal: a failure is logged, and the pass
 goes on.
@@ -147,9 +159,74 @@ def _io(proc_root: Path, pid: int) -> tuple[int, int]:
     return read, write
 
 
+def family(table: list, session: int) -> set[int]:
+    """A session's members and every descendant they started, whatever session it went on to start (SYRD-840)."""
+    found = {int(row[0]) for row in table if len(row) > 3 and int(row[3]) == session}
+    children: dict[int, list[int]] = {}
+    for row in table:
+        children.setdefault(int(row[1]), []).append(int(row[0]))
+    frontier = list(found)
+    while frontier:
+        for child in children.get(frontier.pop(), ()):
+            if child not in found:
+                found.add(child)
+                frontier.append(child)
+    return found
+
+
+def _outer(holder: background_child.Holder, sessions: set[int], parent_of: dict[int, int], session_of: dict[int, int],
+           pane_pid: int) -> int:
+    """The outermost other leased session under the pane the holder was started from inside, whose command it is; 0
+    when it was started from none."""
+    pid, seen, outer = parent_of.get(holder.pid, 0), set(), 0
+    while pid > 1 and pid != pane_pid and pid not in seen:
+        seen.add(pid)
+        if session_of.get(pid, holder.session) != holder.session and session_of.get(pid) in sessions:
+            outer = session_of[pid]
+        pid = parent_of.get(pid, 0)
+    return outer
+
+
+def folded(row: dict[str, Any] | None) -> list[tuple[int, int]]:
+    """The sessions folded into a lease, by identity (number, leader's start tick or 0), as its last look recorded.
+
+    A folded session is remembered, not worked out again from the ppid chain: one whose outer command dies is
+    reparented out of the pane's tree, and would otherwise leave the lease system altogether (SYRD-840).
+    """
+    points = [point for point in (row or {}).get("evidence") or [] if isinstance(point, dict)]
+    found = []
+    for item in (points[-1].get("folded") or []) if points else []:
+        try:
+            found.append((int(item[0]), int(item[1])))
+        except (TypeError, ValueError, IndexError):
+            continue
+    return found
+
+
+def _identity(session: int, table: list, proc_root: Path) -> tuple[int, int]:
+    """A session to remember: its number, and its leader's start tick while the leader still leads it (else 0)."""
+    leader = next((row for row in table if int(row[0]) == session), None)
+    leads = leader is not None and len(leader) > 3 and int(leader[3]) == session and not _exited(proc_root, session)
+    return session, (lease.start_ticks(session, proc_root) if leads else 0)
+
+
+def lease_sessions(row: dict[str, Any], table: list, proc_root: Path) -> list[int]:
+    """Every session still running of what a lease holds: its own, then each folded into it (SYRD-840)."""
+    own = lease_session(row, table, proc_root)
+    kept = [session for number, ticks in folded(row)
+            if (session := lease_session({"pid": number, "start_ticks": ticks}, table, proc_root)) is not None]
+    return ([own] if own is not None else []) + [session for session in kept if session != own]
+
+
+def _ended(holder: background_child.Holder, table: list, proc_root: Path) -> bool:
+    """Whether every member of the holder's session has exited and only waits to be reaped (SYRD-840)."""
+    return all(_exited(proc_root, int(row[0])) for row in table if len(row) > 3 and int(row[3]) == holder.session)
+
+
 def evidence(table: list, session: int, proc_root: Path, now: float) -> dict[str, Any]:
-    """One look at a session: its members, their CPU ticks, bytes read and written."""
-    members = [row for row in table if len(row) > 3 and int(row[3]) == session]
+    """One look at a session: its members and what they started, their CPU ticks, bytes read and written."""
+    kin = family(table, session)
+    members = [row for row in table if int(row[0]) in kin]
     io = [_io(proc_root, int(row[0])) for row in members]
     return {"at": round(now, 1), "members": len(members), "cpu_ticks": sum(int(row[2]) for row in members),
             "read_bytes": sum(r for r, _ in io), "written_bytes": sum(w for _, w in io)}
@@ -227,6 +304,16 @@ def _role_pass(listener: Any, conn: Any, gate: Any, nl: Any, role: str, target: 
     furniture_until = provider_started + gate.LAUNCHER_SEED_SETTLE_SECONDS
     holders = {holder.key: holder for holder in background_child.describe(sample, sample.detached, (), proc_root=proc_root)
                if holder.detached and holder.pgid > 0 and holder.started_at > furniture_until}
+    holders = {key: holder for key, holder in holders.items() if not _ended(holder, table, proc_root)}
+    sessions = {holder.session for holder in holders.values()}
+    parent_of, session_of = {int(row[0]): int(row[1]) for row in table}, {int(row[0]): int(row[3]) for row in table
+                                                                           if len(row) > 3}
+    outer_of = {key: _outer(holder, sessions, parent_of, session_of, pane_pid) for key, holder in holders.items()}
+    nested: dict[int, set[int]] = {}
+    for key, outer in outer_of.items():
+        if outer:
+            nested.setdefault(outer, set()).add(holders[key].session)
+    holders = {key: holder for key, holder in holders.items() if not outer_of[key]}
     state = gate.state_store.read(target)
     turn = getattr(state, "turn_started_at", None) if state is not None else None
     open_leases = {_text(row["child"]): row for row in _rows(
@@ -239,7 +326,13 @@ def _role_pass(listener: Any, conn: Any, gate: Any, nl: Any, role: str, target: 
         row = open_leases.get(key)
         if row is None and declared is None and now - holder.started_at < MIN_AGE_SECONDS:
             continue
-        if row is None or now - seen_at.get(f"{role}:{key}", 0.0) >= OBSERVE_EVERY_SECONDS or declared is not None:
+        recorded = folded(row)
+        fold = [(number, ticks) for number, ticks in recorded
+                if lease_session({"pid": number, "start_ticks": ticks}, table, proc_root) is not None]
+        fold += [_identity(number, table, proc_root)
+                 for number in sorted(nested.get(holder.session, set()) - {number for number, _ in fold})]
+        if (row is None or now - seen_at.get(f"{role}:{key}", 0.0) >= OBSERVE_EVERY_SECONDS or declared is not None
+                or fold != recorded):
             if ticket_now is None:
                 ticket_now = role_ticket(conn, role, terminal)
             deadline = declared["deadline"] if declared else holder.started_at + observe_seconds
@@ -247,7 +340,9 @@ def _role_pass(listener: Any, conn: Any, gate: Any, nl: Any, role: str, target: 
                                   "%s, to_timestamp(%s), to_timestamp(%s), %s, %s, %s)",
                             (role, key, holder.pid, holder.pgid, ticks, holder.started_at, holder.summary,
                              ticket_now or None, turn, deadline, declared["source"] if declared else "default",
-                             bool(declared and declared["hard"]), Jsonb(evidence(table, holder.session, proc_root, now))))
+                             bool(declared and declared["hard"]),
+                             Jsonb(evidence(table, holder.session, proc_root, now)
+                                   | ({"folded": [list(item) for item in fold]} if fold else {}))))
             row = observed if isinstance(observed, dict) else row
             seen_at[f"{role}:{key}"] = now
         if row is None:
@@ -255,7 +350,7 @@ def _role_pass(listener: Any, conn: Any, gate: Any, nl: Any, role: str, target: 
         told += _decide(conn, row, holder, role, turn, terminal, directory, table, proc_root, now)
     for key, row in open_leases.items():
         # Not under the pane is not gone: an interrupt is carried out, and a lease ended, by its own identity (SYRD-740).
-        if key not in holders and not row.get("interrupt") and lease_session(row, table, proc_root) is None:
+        if key not in holders and not row.get("interrupt") and not lease_sessions(row, table, proc_root):
             _one(conn, "SELECT ticket_board.end_execution_lease(%s, 'exited', %s)", (row["id"], "the process exited"))
             seen_at.pop(f"{role}:{key}", None)
     return told
@@ -411,8 +506,8 @@ def interrupt_watch(listener: Any) -> Iterator[threading.Thread | None]:
 
 
 def _session_groups(table: list, session: int, proc_root: Path) -> set[int]:
-    return {background_child._process_group(proc_root, int(row[0])) for row in table
-            if len(row) > 3 and int(row[3]) == session} - {0}
+    """The process groups of the session and of what it started: a folded session is the command's too (SYRD-840)."""
+    return {background_child._process_group(proc_root, pid) for pid in family(table, session)} - {0}
 
 
 def _step_interrupt(conn: Any, row: dict[str, Any], role: str, terminal: set[str], directory: Path, table: list,
@@ -420,7 +515,7 @@ def _step_interrupt(conn: Any, row: dict[str, Any], role: str, terminal: set[str
     interrupt = dict(row["interrupt"])
     stage = _text(interrupt.get("stage"))
     session = lease_session(row, table, proc_root)
-    groups = _session_groups(table, session, proc_root) if session is not None else set()
+    groups = {group for each in lease_sessions(row, table, proc_root) for group in _session_groups(table, each, proc_root)}
     if not groups:
         _finish_interrupt(conn, row, role, terminal,
                           "its leader was gone before any signal" if stage == "requested" else "it ended")
@@ -430,7 +525,7 @@ def _step_interrupt(conn: Any, row: dict[str, Any], role: str, terminal: set[str
     step = next(((after, sig) for before, after, sig in INTERRUPT_STEPS if before == stage), None)
     if step is None:
         return 0  # SIGKILL was sent; the lease ends when the session is gone
-    if stage == "requested":
+    if stage == "requested" and session is not None:
         lease.mark_interrupt(directory, session, int(row["start_ticks"]),
                              actor=_text(interrupt.get("requested_by")) or "Director", reason=_text(interrupt.get("reason")))
     after, sig = step

@@ -27,6 +27,11 @@ output open. At most `--output-limit` bytes of each are printed, head and tail.
 The command runs in a process group of its own inside the caller's session,
 so the board sees one session for one tool command, and nothing outside that
 group -- the provider, the caller's shell, another role -- is ever signalled.
+The wrapper adopts the orphans its command leaves (it is their subreaper) and
+reaps each one that exits while the command runs. Before SYRD-840 it reaped
+them only at the end, so a 40-minute run left exited git children waiting as
+zombies under the pane, and the board kept a lease open for each and alerted
+on it.
 """
 
 from __future__ import annotations
@@ -223,6 +228,7 @@ def run(argv: Sequence[str], *, deadline: float | None = None, expect: float | N
                 if hard and time.monotonic() - started >= limit:
                     status, reason = "timeout", f"no result within {limit:g}s"
                     break
+                _reap(gained())  # an adopted orphan that exited is reaped now, not left a zombie under the pane (SYRD-840)
                 time.sleep(0.05)
         finally:
             sent, left = (stop(proc.pid, gained, grace=grace) if status != "completed" or _group_members(proc.pid)

@@ -37,6 +37,10 @@ every role. It is the production counterpart of SYRD-403's
   is printed. The command runs in a process group of its own inside the
   caller's session, so one tool command is one session to the board, and
   nothing outside its group is signalled.
+- **Orphans.** The wrapper is the subreaper of the orphans its command
+  leaves. Since SYRD-840 it reaps each one that exits while the command runs.
+  Before, it reaped them only at the end, so exited git children waited under
+  the pane as zombies for the whole run.
 
 The wrapper writes its declaration, `leases/<session>-<leader tick>.json`,
 beside the pane-state files the listener already reads, and withdraws it at
@@ -94,6 +98,32 @@ Ended leases are kept a week.
   session costs nothing but that one table read.
 - **What it records.** A session is recorded once it has run 60 s, or at once
   when it was declared. A shorter command can reach no deadline.
+- **One command, one lease (SYRD-840).** A session started from inside another
+  leased session under the same pane belongs to that command, and gets no
+  lease of its own. Examples are a test stage's `start_new_session`, git's
+  detached maintenance, and an orphan `switchyard-bounded` adopted. It is
+  folded into the outer lease instead: that lease's evidence counts it, and its
+  interrupt reaches its process groups.
+  - **Why.** On sapi, ops ran one `switchyard-bounded --expect 40m` run of
+    `scripts/check` for SAPI-128. The board opened 200 leases, one per session
+    the run started, each on the default 15-minute threshold. The Director
+    extended each one by hand.
+  - **Not folded:** a session started from the provider's own start-up session.
+    That session is left out, so nothing nested in it has an outer lease.
+  - **Remembered, not recomputed.** Each look records the folded sessions on
+    the outer lease by identity: the session number, and its leader's start
+    tick while the leader still leads it. They are recorded as `folded` in that
+    look's evidence, carrying forward those still running. A folded session can
+    leave the pane's tree: its parent exits, or the outer command dies, and it
+    is reparented to the user's systemd. The lease then still holds it. It stays
+    open, its interrupt still reaches that session, and it ends as exited only
+    once nothing it holds is left. A stage folded between two looks is recorded
+    on the pass that first sees it, without waiting for the next look.
+- **A zombie holds no lease.** A session whose every member has exited, and
+  only waits to be reaped, runs nothing. It is never leased, and its open lease
+  ends as exited. The first two SAPI-128 alerts named exited git children of
+  the wrapper. A session whose leader exited while a member still runs is
+  still running, and keeps its lease.
 - **Expiry.** Wall clock is authoritative. Past its deadline the Director is
   told once for that deadline:
   - the role, ticket, age and command;
@@ -133,7 +163,9 @@ Ended leases are kept a week.
   repeat it.
 - **Interrupt.** The Director's interrupt is carried out in steps, never
   waiting inside one: SIGINT, then SIGTERM, then SIGKILL, 10 s apart. The
-  signals go to the process groups of that lease's session only. The role is
+  signals go to the process groups of that lease's session, of the sessions
+  its members started, and of the sessions recorded as folded into it
+  (SYRD-840), and to nothing else. The role is
   then told once who stopped it and why. A wrapped command also prints it and
   exits 130.
 
@@ -159,8 +191,9 @@ Ended leases are kept a week.
   - **When it ends.** When nothing of the session is left, the lease ends,
     saying what it was sent: "SIGINT, then SIGTERM; it ended".
 - **Ended means gone.** A lease ends as exited only when its process is gone,
-  by the same identity. A lease whose command has left its pane's tree but
-  still runs stays open, so the Director can still interrupt it.
+  by the same identity, and so is every session folded into it. A lease whose
+  command, or a folded stage of it, has left its pane's tree but still runs
+  stays open, so the Director can still interrupt it.
 
 ### The Director's commands
 

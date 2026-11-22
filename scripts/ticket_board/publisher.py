@@ -31,14 +31,21 @@ For one ticket the Publisher:
    brought up to it. A candidate already on the tip was published earlier --
    by a run that stopped before it could record so, say -- and is recorded
    without pushing again. Otherwise the candidate must have exactly one
-   parent, and that parent must be the tip;
-5. builds a bundle of exactly that one commit from the trusted cache, checks
-   its one head and one prerequisite, and journals its sha256;
+   parent, and that parent must be the tip -- or it is the board-recorded
+   documentation pair (SYRD-848): the implementer's commit the board recorded,
+   whose sole parent is the tip, with the documentation layer the board
+   recorded on it -- each documentation commit's sole parent the one under it,
+   one commit, or more after Audit's documentation-only return. Only exactly
+   that record; any other shape of several commits is returned as before;
+5. builds a bundle of exactly that one commit (or that pair) from the trusted
+   cache, checks its one head and one prerequisite, and journals its sha256;
 6. publishes from a fresh repository holding nothing but the public branch and
    that bundle: a compare-and-swap push leased on the tip it checked
    (`--force-with-lease=refs/heads/<branch>:<tip>`). The candidate's only
-   parent is that tip, so the update is a fast-forward: the lease is what makes
-   it fail, rather than land, if the branch moved in between;
+   parent is that tip (a pair's lower commit's is), so the update is a
+   fast-forward: the lease is what makes it fail, rather than land, if the
+   branch moved in between. A pair's two commits land in that one push, each
+   with its own author;
 7. reads the public branch back, refreshes the trusted cache's copy of it,
    checks both carry the candidate, and records the evidence and the move on
    (`publisher_finish`), in one transaction.
@@ -235,6 +242,13 @@ class Journal:
 
     def begin(self, ticket: str) -> dict[str, Any]:
         return self._one("SELECT ticket_board.publisher_begin(%s)", (ticket,))
+
+    def documentation_pair(self, ticket: str) -> dict[str, Any] | None:
+        """The board-recorded implementer + documentation pair that is exactly the ticket's candidate (SYRD-848), or
+        None: none recorded, not the candidate, or a board that predates the record's read."""
+        present = _value(self.conn.execute(
+            "SELECT to_regprocedure('ticket_board.publication_documentation_pair(text)') IS NOT NULL").fetchone())
+        return self._one("SELECT ticket_board.publication_documentation_pair(%s)", (ticket,)) if present else None
 
     def step(self, attempt: int, step: str, expected: str, facts: dict[str, Any], repairs: list[str]) -> None:
         try:
@@ -611,11 +625,37 @@ class Attempt:
         full = self.facts["candidate_full"]
         return tip == full or self.git("merge-base", "--is-ancestor", full, tip, repo=work).returncode == 0
 
+    def parents_of(self, work: Path, commit: str) -> list[str]:
+        return self.local("reading a commit's parents", "rev-list", "--parents", "-n", "1", commit, repo=work).split()[1:]
+
+    def author_of(self, work: Path, commit: str) -> str:
+        return self.local("reading a commit's author", "log", "-1", "--format=%an <%ae>", commit, repo=work)
+
     def require_one_commit_on(self, work: Path, tip: str) -> None:
-        """Return the ticket unless the candidate is exactly one commit whose only parent is `tip`."""
+        """Return the ticket unless the candidate is exactly one commit whose only parent is `tip`, or exactly the
+        board-recorded implementer commit on `tip` with the documentation layer the board recorded on it (SYRD-848)."""
         full, parents, branch = self.facts["candidate_full"], self.facts["parents"], self.facts["branch"]
+        self.facts.pop("documentation_pair", None)
         if parents == [tip]:
             return
+        pair = self.journal.documentation_pair(self.ticket) or {}
+        chain = [str(pair.get("implementer") or "")] + [str(layer.get("commit") or "") for layer in pair.get("layers") or []]
+        if (pair.get("documentation") == full and len(chain) >= 2 and chain[-1] == full and len(parents) == 1
+                and parents == [chain[-2]]
+                and all(self.parents_of(work, upper) == [lower] for lower, upper in zip(chain, chain[1:-1]))):
+            lower = chain[0]
+            if self.parents_of(work, lower) == [tip]:
+                roles = [pair.get("implementer_role") or ""] + [layer.get("role") or "" for layer in pair["layers"]]
+                self.facts["documentation_pair"] = {
+                    "implementer": lower, "implementer_role": roles[0], "documentation": full,
+                    "documentation_role": pair.get("documentation_role") or "", "decision": pair.get("decision") or "",
+                    "chain": [{"commit": c, "author": self.author_of(work, c), "role": r} for c, r in zip(chain, roles)]}
+                return
+            raise back("lineage", f"candidate {short(full)} is the board-recorded documentation pair: "
+                                  f"{len(chain) - 1} documentation commit(s) on "
+                                  f"{pair.get('implementer_role') or 'the implementer'}'s {short(lower)}. But "
+                                  f"{short(lower)} is not one commit on public {branch} ({short(tip)}); the Publisher "
+                                  f"only fast-forwards: rebuild the work on {short(tip)} and resubmit")
         if len(parents) != 1:
             raise back("lineage", f"candidate {short(full)} has {len(parents)} parents. The Publisher publishes one "
                                   f"commit whose only parent is public {branch} ({short(tip)}), as a fast-forward, "
@@ -644,7 +684,8 @@ class Attempt:
                               "resubmit")
 
     def bundle(self, work: Path, tip: str) -> Path:
-        """The one-commit bundle the push is made from: reused when it is still exactly that, else rebuilt."""
+        """The bundle the push is made from -- the one commit, or the recorded pair, on `tip` -- reused when it is
+        still exactly that, else rebuilt."""
         full = self.facts["candidate_full"]
         folder = self.root / "bundles"
         folder.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -704,9 +745,14 @@ class Attempt:
                        f"{CANDIDATE_REF}:{CANDIDATE_REF}", repo=repo)
             line = self.local("reading the bundled commit", "rev-list", "--parents", "-n", "1", CANDIDATE_REF,
                               repo=repo).split()
-            if line != [full, tip]:
-                raise director("helper", f"the bundle unpacked as {' '.join(line) or 'nothing'}, not {short(full)} on "
-                                         f"{short(tip)}; nothing was pushed")
+            pair = self.facts.get("documentation_pair") or {}
+            commits = [tip] + [step["commit"] for step in pair.get("chain") or []] if pair else [tip, full]
+            chain = [[upper, lower] for lower, upper in zip(commits, commits[1:])][::-1]
+            found = [line] + [self.local("reading a bundled lower commit", "rev-list", "--parents", "-n", "1", lower,
+                                         repo=repo).split() for lower in commits[1:-1][::-1]]
+            if found != chain or commits[-1] != full:
+                raise director("helper", f"the bundle unpacked as {found}, not "
+                                         + " on ".join(short(c) for c in commits[::-1]) + "; nothing was pushed")
             self.journal_step("pushing", tip)
             pushed = self.remote("the push", "push", "--porcelain", f"--force-with-lease=refs/heads/{branch}:{tip}",
                                  self.facts["push_url"], f"{full}:refs/heads/{branch}", repo=repo)
@@ -765,9 +811,17 @@ class Attempt:
 
     def evidence(self, tip: str, cache_tip: str, already: bool) -> str:
         full, branch = self.facts["candidate_full"], self.facts["branch"]
+        pair = self.facts.get("documentation_pair") or {}
         how = (f"It was already on public {branch} when this attempt read it, so nothing was pushed." if already else
                f"Pushed as a fast-forward from {short(self.facts['public_before'])}, compare-and-swap leased on that "
                f"tip, from bundle sha256 {self.facts.get('bundle_sha256', '')[:16]}.")
+        if pair and not already:
+            steps = pair["chain"]
+            how += (f" It is the board-recorded documentation pair, {len(steps)} commits in that one push, each with its "
+                    f"own author: {steps[0]['role'] or 'the implementer'}'s {steps[0]['commit']} ({steps[0]['author']}) "
+                    "on the tip, then " + ", then ".join(
+                        f"{step['role'] or 'the Librarian'}'s documentation commit {step['commit']} ({step['author']})"
+                        for step in steps[1:]) + " on it.")
         how += provenance_sentence(self.facts.get("provenance") or {}, branch)
         return (f"Published {full} (tree {self.facts.get('tree', '')[:12]}, parent "
                 f"{short((self.facts.get('parents') or [''])[0])}) to {branch} of {self.facts['public_url']}. {how} "

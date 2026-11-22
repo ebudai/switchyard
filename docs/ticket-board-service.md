@@ -987,7 +987,11 @@ A project can hand that routine to the Publisher instead (`switchyard publisher
 <project> enable`, SYRD-625). The Publisher is a stage after Audit, taken by a
 system actor that the notify listener runs as the project account. It publishes
 the exact approved candidate with that lease discipline: one commit on the tip,
-pushed from a verified bundle under `--force-with-lease` on that tip. It then
+pushed from a verified bundle under `--force-with-lease` on that tip. The one
+exception is the documentation pair the board recorded at a Librarian's
+documentation sign-off: the implementer's commit on the tip and the
+documentation commits the board recorded on it go in that same leased push,
+each with its author (SYRD-848). It then
 verifies the public branch and the trusted cache before recording the move on.
 It returns lineage problems to the implementer and everything else to the
 Director. See `docs/syrd-625-publisher.md`.

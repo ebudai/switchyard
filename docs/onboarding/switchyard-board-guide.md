@@ -232,12 +232,16 @@ the project runs the plan gate)
 **Publisher** (a system actor with no pane, model or session; only where the project runs it)
 - The `publication` stage follows Audit: every approval out of Audit enters it. The
   board's listener publishes the exact approved candidate to the integration branch, as
-  a compare-and-swap fast-forward on the public tip, then:
+  a compare-and-swap fast-forward on the public tip. A candidate the Librarian
+  signed off with a documentation commit is published as the board recorded it: the
+  implementer's commit with the Librarian's documentation commit on it (two, after a
+  correction that followed Audit's documentation-only return), in one push, each commit
+  with its own author. No squash or resubmission is needed for it. Then:
   - `publication_published` — on to where Audit used to approve into (User Review or Final
     Sign-Off by the usual gates), with evidence in a comment;
   - `publication_return` — back to the implementer when the candidate must change (main
-    advanced, more than one commit, a merge, history differs, published nowhere), every
-    sign-off cleared, with the exact diagnostic;
+    advanced, more than one commit other than that recorded documentation layer, a merge, history differs,
+    published nowhere), every sign-off cleared, with the exact diagnostic;
   - `publication_escalate` — to `publication_failed`, the Director's, for anything else,
     including a main the Publisher did not move (`provenance`).
 - Nobody else can take those three moves. You never publish main yourself.

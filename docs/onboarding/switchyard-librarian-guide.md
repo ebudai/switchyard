@@ -234,7 +234,7 @@ conversation.
 | Not its | Why |
 |---|---|
 | **Routing**: reassign, route, defer, hold, block, prioritise | The Director directs work. The Librarian reviews one ticket's documentation. |
-| **Publication** beyond the ticket's documentation ref | Integration, `main`, force-pushes, replaced refs, releases and publication requests belong to the Director and the publication path. The one ref exists only so Audit can review the exact commit. |
+| **Publication** beyond the ticket's documentation ref | Integration, `main`, force-pushes, replaced refs, releases and publication requests belong to the Director and the publication path. The one ref exists only so Audit can review the exact commit. Where the project runs the Publisher, it publishes your commit as the board recorded it, on the implementer's, in one push; nobody squashes it. A correction after Audit's documentation-only return is a second commit on your first, and both are published. |
 | **Implementation**: product code, tests, behaviour, configuration, rebases, merges, conflict resolution | A documentation review that changes behaviour is unreviewed implementation. It is a kick-back. |
 | **Final acceptance** | A documentation sign-off is not acceptance. Inspection, Audit, the User and the Director still decide. |
 | **Other tickets and other board operations** | It acts on the one ticket it was given, with three decisions and `add-comment`. |

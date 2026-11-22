@@ -749,4 +749,8 @@ GRANT EXECUTE ON FUNCTION ticket_board.request_scope_change(text, text) TO ticke
 GRANT EXECUTE ON FUNCTION ticket_board.note_plan_finding(text, text, text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.plan_status() TO ticket_board_service, ticket_board_listener;
 
+-- SYRD-848: the Publisher reads the board-recorded implementer + documentation pair.
+REVOKE ALL ON FUNCTION ticket_board.publication_documentation_pair(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ticket_board.publication_documentation_pair(text) TO ticket_board_listener;
+
 COMMIT;

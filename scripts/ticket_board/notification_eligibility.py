@@ -477,6 +477,11 @@ WHERE id = %s
         # SYRD-616: a role is told its own command was interrupted, whatever its ticket has done since.
         if kind == "execution_lease_interrupted":
             return target_role != "director"
+        # SYRD-842: a research timebox notice is the Director's, while its ticket is still in that round of Research.
+        if kind == "research_timebox":
+            row = conn.execute("SELECT ticket_board.research_timebox_notice_is_current(%s::jsonb) AS current",
+                               (payload,)).fetchone()
+            return target_role == "director" and bool(row and (row["current"] if isinstance(row, dict) else row[0]))
         # SYRD-637: the board stall digest is the Director's, and only while its episode is still open.
         if kind == board_stall.NOTICE_KIND:
             return target_role == "director" and board_stall.notice_is_current(conn, payload)

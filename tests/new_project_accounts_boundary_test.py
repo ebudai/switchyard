@@ -61,7 +61,7 @@ FROM_P0 = ("agy_source_origin", "artifact_path", "design_document", "director_on
            "include_designer", "owner_shell", "owner_user", "project_dir", "resolved_agy_credential_source",
            "resolved_project_name", "resolved_slug", "runner", "selected_audit_roles", "selected_desktop_policy",
            "selected_implementer_roles", "selected_role_efforts", "selected_role_models", "stages")
-FROM_P1 = ("effective_source_repo", "precheck_plan", "selected_role_clis", "selected_router", "selected_documentation", "worktree_branch")  # SYRD-599: Router, as P1 settled it; SYRD-624: the documentation gate
+FROM_P1 = ("effective_source_repo", "precheck_plan", "selected_role_clis", "selected_router", "selected_documentation", "selected_research", "worktree_branch")  # SYRD-599: Router, as P1 settled it; SYRD-624: the documentation gate
 OWNER = "syrd371-agent"
 
 
@@ -167,7 +167,8 @@ def inputs(tmp: Path, world: World, said: list, **overrides: object) -> dict:
                   runner=lambda *a, **k: None, selected_audit_roles=("audit",), selected_desktop_policy={"mode": "headless"},
                   selected_implementer_roles=("main",), selected_role_efforts={"main": "high"},
                   selected_role_models={"main": "opus"}, selected_router=(("runtime", "claude"),),
-                  selected_documentation=(("gate", "director"),), stages=Stages(world.log),
+                  selected_documentation=(("gate", "director"),), selected_research=(),
+                  stages=Stages(world.log),
                   effective_source_repo=tmp / "source", precheck_plan=SimpleNamespace(service_user="s371-board"),
                   selected_role_clis=(("director", "claude"), ("main", "codex")), worktree_branch="trunk")
     values.update(overrides)
@@ -401,7 +402,9 @@ def test_the_fresh_branch() -> None:
     with tempfile.TemporaryDirectory(prefix="syrd371.") as tmp:
         tmp = Path(tmp)
         world, said = World(tmp), []
-        values = inputs(tmp, world, said, resolved_agy_credential_source="hostuser")
+        # SYRD-842: a research stage chosen, so the record handed to the artifact is a real one, not the empty tuple.
+        values = inputs(tmp, world, said, resolved_agy_credential_source="hostuser",
+                        selected_research=(("stage", "role"), ("role", "main")))
         run(world, values)
         check(world.names()[5:] == ["agy-state", "agy-seed", "onboarding", "artifact-write", "chown-files", "docs", "git-init", "policy"],
               f"onboarding, the artifact, ownership, documents, git, then the policy: {world.names()}")
@@ -413,7 +416,7 @@ def test_the_fresh_branch() -> None:
         written = next(e[1] for e in world.log if e[0] == "artifact-write")
         identity = dict(implementer_roles="selected_implementer_roles", role_clis="selected_role_clis", role_models="selected_role_models",
                         role_efforts="selected_role_efforts", audit_roles="selected_audit_roles", router="selected_router",
-                        documentation="selected_documentation")
+                        documentation="selected_documentation", research="selected_research")
         check(all(written[k] is values[v] for k, v in identity.items()), "roles, models, efforts and audit roles, the very objects")
         check(written == dict(project_name=values["resolved_project_name"], slug="s371", owner_user=OWNER, project_dir=tmp / "project",
                               artifact_path=values["artifact_path"], design_document=values["design_document"], owner_shell="fish",
@@ -422,7 +425,8 @@ def test_the_fresh_branch() -> None:
                               include_designer=False, include_audit=True, audit_roles=values["selected_audit_roles"],
                               agy_credential_source="hostuser", agy_credential_source_origin="host",
                               router=values["selected_router"],  # SYRD-599: Router, as P0 chose it
-                              documentation=values["selected_documentation"]),  # SYRD-624: and the documentation gate
+                              documentation=values["selected_documentation"],  # SYRD-624: and the documentation gate
+                              research=values["selected_research"]),  # SYRD-842: and the research stage
               f"and every other field of the initial artifact: {written}")
         check(next(e[1] for e in world.log if e[0] == "chown-files") == dict(owner_user=OWNER, project_dir=tmp / "project", runner=values["runner"]),
               "the project's files given to the owner")
@@ -457,7 +461,8 @@ def test_a_switched_router_is_recorded_in_the_artifact_it_came_from() -> None:
         with tempfile.TemporaryDirectory(prefix="syrd371.") as tmp:
             tmp = Path(tmp)
             world, said = World(tmp, artifact=SimpleNamespace(design_document=tmp / "d.md", include_designer=False,
-                                                              router=recorded, documentation=(("gate", "director"),))), []
+                                                              router=recorded, documentation=(("gate", "director"),),
+                                                              research=())), []
             values = inputs(tmp, world, said, from_artifact=tmp / "a.json", selected_router=settled)
             art = values["artifact_path"]
             art.parent.mkdir(parents=True, exist_ok=True)
@@ -572,7 +577,8 @@ def earlier(tmp: Path, log: list) -> tuple:
                              artifact_path=tmp / "project" / ".switchyard" / "s371.project.json",
                              design_document=tmp / "project" / "DESIGN.md", runner=lambda *a, **k: None)
     p1 = m.NewProjectPreflight(effective_source_repo=tmp / "source", precheck_plan=SimpleNamespace(service_user="s371-board"),
-                               selected_role_clis=(("main", "codex"),), selected_router=(), selected_documentation=(), worktree_branch="trunk")
+                               selected_role_clis=(("main", "codex"),), selected_router=(), selected_documentation=(), selected_research=(),
+                               worktree_branch="trunk")
     return p0, p1
 
 

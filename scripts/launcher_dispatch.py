@@ -74,6 +74,10 @@ def main(argv: list[str] | None = None) -> int:
             librarian_runtime=args.librarian_runtime,
             librarian_model=args.librarian_model,
             librarian_effort=args.librarian_effort,
+            research_role=args.research_role,
+            researcher_runtime=args.researcher_runtime,
+            researcher_model=args.researcher_model,
+            researcher_effort=args.researcher_effort,
         )
     if args.command == "new":
         return launcher.new_project_command(

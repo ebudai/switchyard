@@ -9,15 +9,15 @@ from __future__ import annotations
 from typing import Any
 
 from . import (audit_return, break_glass, blocker_explanation, blocker_review, cohort_ops, provider_hold_ops, context_continuation, director_notice, documentation_candidate, execution_lease_ops, pull_queue, reminder_snooze,
-               recovery_packet, reopen_restore, report_intake, router_role, size_review, uat_instructions, ui_delegation, user_events,
-               user_wait, work_pause_ops)
+               recovery_packet, reopen_restore, report_intake, research_finding, router_role, size_review, uat_instructions, ui_delegation,
+               user_events, user_wait, work_pause_ops)
 
 OPERATIONS = (reminder_snooze.OPERATIONS | size_review.OPERATIONS | report_intake.OPERATIONS
               | router_role.OPERATIONS | ui_delegation.OPERATIONS | context_continuation.OPERATIONS
               | uat_instructions.OPERATIONS | execution_lease_ops.OPERATIONS | cohort_ops.OPERATIONS
               | provider_hold_ops.OPERATIONS | user_wait.OPERATIONS | audit_return.OPERATIONS | director_notice.OPERATIONS
               | blocker_explanation.OPERATIONS | blocker_review.OPERATIONS | reopen_restore.OPERATIONS
-              | work_pause_ops.OPERATIONS)
+              | work_pause_ops.OPERATIONS | research_finding.OPERATIONS)
 
 
 def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: str,
@@ -61,12 +61,16 @@ def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: s
         return cohort_ops.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
     if operation in ui_delegation.OPERATIONS:  # SYRD-598
         return ui_delegation.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
+    if operation in research_finding.OPERATIONS:  # SYRD-842: the Director's research brief
+        return research_finding.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
     return size_review.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
 
 
 def before_transition(app: Any, ticket_id: str, action: str, payload: dict[str, Any], *, caller_role: str) -> None:
-    """What the board measures, and a documentation decision checks (SYRD-624), before a declared transition."""
+    """What the board measures, and a documentation decision (SYRD-624) and a research move (SYRD-842) check, before a
+    declared transition."""
     documentation_candidate.before_transition(app, ticket_id, action, payload, caller_role=caller_role)
+    research_finding.before_transition(app, ticket_id, action, payload, caller_role=caller_role)
     size_review.scan_for_transition(app, ticket_id, action, payload, caller_role=caller_role)
 
 

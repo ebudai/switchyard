@@ -139,6 +139,7 @@ def switchyard_new_command(
     selected_role_models = new_project_choices.selected_role_models
     selected_router = new_project_choices.selected_router
     selected_documentation = new_project_choices.selected_documentation
+    selected_research = new_project_choices.selected_research
     stages = new_project_choices.stages
     upstream_report = new_project_choices.upstream_report
     new_project_preflight = launcher._check_new_project_preflight(
@@ -170,6 +171,7 @@ def switchyard_new_command(
         selected_role_clis=selected_role_clis,
         selected_router=selected_router,
         selected_documentation=selected_documentation,
+        selected_research=selected_research,
         stages=stages,
     )
     effective_source_repo = new_project_preflight.effective_source_repo
@@ -177,6 +179,7 @@ def switchyard_new_command(
     selected_role_clis = new_project_preflight.selected_role_clis
     selected_router = new_project_preflight.selected_router
     selected_documentation = new_project_preflight.selected_documentation
+    selected_research = new_project_preflight.selected_research
     worktree_branch = new_project_preflight.worktree_branch
     new_project_accounts = launcher._prepare_new_project_accounts(
         from_artifact=from_artifact,
@@ -208,6 +211,7 @@ def switchyard_new_command(
         selected_role_clis=selected_role_clis,
         selected_router=selected_router,
         selected_documentation=selected_documentation,
+        selected_research=selected_research,
         worktree_branch=worktree_branch,
     )
     provision_dir = new_project_accounts.provision_dir

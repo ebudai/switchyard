@@ -114,6 +114,7 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
     # SYRD-626: a package boundary -- start this ticket in a fresh conversation.
     "force_fresh_context": {"director"},
     "set_uat_instructions": {"director"},
+    "set_research_brief": {"director"},  # SYRD-842
     "ask_director": {"user"},
     # SYRD-662: a wait on the User is the Director's decision.
     "await_user": {"director"},
@@ -197,6 +198,8 @@ COMPOSED_OPERATION_CAPABILITIES = {
     # SYRD-629: preparing the User's UAT steps is a Director edit of the ticket;
     # the User's question is a comment that also tells the Director.
     "set_uat_instructions": frozenset({"director_edit"}),
+    # SYRD-842: a research brief is the Director's edit of the ticket, as UAT steps are.
+    "set_research_brief": frozenset({"director_edit"}),
     "ask_director": frozenset({"add_comment"}),
     # SYRD-662: a wait on the User is await_role and its sentence, as request_dependency is, and the Director's
     # alone: the capabilities that identify the control role. The database checks both itself.

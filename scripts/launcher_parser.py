@@ -115,6 +115,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--librarian-runtime", help="design: the Librarian's runtime, for the documentation gate")
     parser.add_argument("--librarian-model", help="design: the Librarian's model, with --librarian-runtime")
     parser.add_argument("--librarian-effort", help="design: the Librarian's effort, with --librarian-runtime")
+    parser.add_argument("--research-role", help="design: turn the optional research stage on, researched by this "
+                                                "implementer (default: off)")
+    parser.add_argument("--researcher-runtime", help="design: turn the research stage on with a new Researcher on "
+                                                     "this runtime")
+    parser.add_argument("--researcher-model", help="design: the Researcher's model, with --researcher-runtime")
+    parser.add_argument("--researcher-effort", help="design: the Researcher's effort, with --researcher-runtime")
     parser.add_argument("--execute", action="store_true", help="execute new-project provisioning after precheck")
     parser.add_argument("--runtime-user", help="local user whose lingering /run/user/<uid> runtime should be provisioned")
     parser.add_argument("--launcher-repo", type=Path, help="launcher checkout to update or verify (default: this script's repo)")

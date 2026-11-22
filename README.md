@@ -119,6 +119,7 @@ Commands:
   documentation-gate
                    turn on or off the documentation gate, decided by a Librarian or the Director
   publisher        turn on or off the Publisher, which publishes approved work to the integration branch
+  research-stage   turn on or off the research stage: a question, an evidence-reviewed finding, back to you
   onboarding-readiness
                    report whether every registered tenant has migrated director onboarding
   stop             suspend a project: window, sessions, listener and board, reversibly
@@ -132,7 +133,7 @@ Commands:
                    let the control role resume one legacy conversation of its own
   local-model      preview, install and control the opt-in host-wide local model service
 
-Bare project names start or attach the project. Recognized commands: board-skill, new, register, upgrade, repair-boundary, approve-desktop, adopt-workflow, migrate-workflow, rebind-workflow-panes, rebind-director, break-glass, resume-provision, finish-upgrade, cutover-roles, publication-status, rollout-log, recover-display, privileged-action, install-shared-release, release-status, deploy-release, database-auth, add-role, worker-pool, set-owner-identity, present, attach, replace-window, set-vcs-close-role, set-role-runtime, reconcile-role-models, restart-role, agy-credential, seed-role-credentials, role-prompt, design-stage, router-role, documentation-gate, publisher, onboarding-readiness, stop, start, teardown, status, validate-models, paste-image, adopt-conversation, local-model.
+Bare project names start or attach the project. Recognized commands: board-skill, new, register, upgrade, repair-boundary, approve-desktop, adopt-workflow, migrate-workflow, rebind-workflow-panes, rebind-director, break-glass, resume-provision, finish-upgrade, cutover-roles, publication-status, rollout-log, recover-display, privileged-action, install-shared-release, release-status, deploy-release, database-auth, add-role, worker-pool, set-owner-identity, present, attach, replace-window, set-vcs-close-role, set-role-runtime, reconcile-role-models, restart-role, agy-credential, seed-role-credentials, role-prompt, design-stage, router-role, documentation-gate, publisher, research-stage, onboarding-readiness, stop, start, teardown, status, validate-models, paste-image, adopt-conversation, local-model.
 ```
 
 <!-- switchyard-help:end -->

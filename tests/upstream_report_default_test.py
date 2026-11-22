@@ -357,7 +357,7 @@ def new_until_sign_in(h: Host, choice) -> tuple[object, list[str], object]:
     choices = SimpleNamespace(**{**fields, "resolved_slug": "mefp", "owner_user": h.owner,
                                  "stages": SimpleNamespace(begin=lambda _name: None), "upstream_report": choice})
     preflight = SimpleNamespace(effective_source_repo=None, precheck_plan=None, selected_role_clis=None,
-                                selected_router=(), selected_documentation=(), worktree_branch=None)
+                                selected_router=(), selected_documentation=(), selected_research=(), worktree_branch=None)
 
     def sign_in(**kwargs):
         reached["config"] = kwargs["config"]

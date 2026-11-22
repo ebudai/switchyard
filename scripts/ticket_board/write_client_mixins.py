@@ -1,6 +1,7 @@
 """Write client calls kept beside write_client.py, so that file does not grow past its size limit.
 
-Provider account holds (SYRD-672), the restore of a mistaken reopen (SYRD-746) and the pause switch (SYRD-756).
+Provider account holds (SYRD-672), the restore of a mistaken reopen (SYRD-746), the pause switch (SYRD-756) and the
+research brief (SYRD-842).
 """
 
 from __future__ import annotations
@@ -39,3 +40,10 @@ class TicketRepairWrites:
     def restore_reopened(self, ticket_id: str, *, reason: str, caller_role: str | None = None) -> dict[str, Any]:
         """Put back the closed disposition a mistaken reopen took away, as the board recorded it (SYRD-746)."""
         return self._ticket_action(ticket_id, "restore_reopened", {"reason": reason}, caller_role=caller_role)
+
+    def set_research_brief(self, ticket_id: str, *, question: str, timebox: int | str, usable_answer: str,
+                           caller_role: str | None = None) -> dict[str, Any]:
+        """The Director's research brief -- question, timebox, usable answer -- which makes a research ticket (SYRD-842)."""
+        return self._ticket_action(ticket_id, "set_research_brief",
+                                   {"question": question, "timebox": timebox, "usable_answer": usable_answer},
+                                   caller_role=caller_role)

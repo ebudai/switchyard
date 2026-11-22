@@ -226,6 +226,39 @@ def _document_with_documentation_gate(current: dict, args: argparse.Namespace, p
         parser.error(str(exc))
 
 
+def _document_with_research_stage(current: dict, args: argparse.Namespace, parser: argparse.ArgumentParser) -> dict:
+    """SYRD-842: the tenant's own document with the research stage on (an existing role, or a new Researcher) or off."""
+    from scripts.ticket_board.documentation_gate import free_visible_slot
+    from scripts.ticket_board.research_stage import DEFAULT_DIRECTORY, with_research_stage, without_research_stage
+
+    if not current.get("document"):
+        parser.error("no workflow configuration is active for this board")
+    try:
+        if args.operation == "disable-research-stage":
+            if args.role or args.runtime or args.template_role or args.research_directory:
+                parser.error("disable-research-stage takes no --role, --runtime, --template-role or --research-directory")
+            return without_research_stage(current["document"])
+        if bool(args.role) == bool(args.runtime):
+            parser.error("enable-research-stage needs --role <an existing role> or --runtime <cli> for a new "
+                         "Researcher, one of the two")
+        if args.template_role and not args.runtime:
+            parser.error("--template-role chooses a new Researcher's model, so it needs --runtime")
+        researcher = None
+        if args.runtime:
+            researcher = {"runtime": args.runtime, "template_role": args.template_role,
+                          # The window's next free display slot, or the background when all six are taken.
+                          "slot": free_visible_slot(current["document"])}
+            print(f"workflow: the Researcher takes display slot {researcher['slot']}; it appears in the project "
+                  "window once the window is relaunched (as add-role --relayout's new slots do)"
+                  if researcher["slot"] is not None else
+                  "workflow: all six display slots are taken, so the Researcher runs in the background; "
+                  "`switchyard attach <project> researcher` shows it", file=sys.stderr)
+        return with_research_stage(current["document"], role=args.role or None, researcher=researcher,
+                                   directory=args.research_directory or DEFAULT_DIRECTORY)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+
 def _document_with_publisher(current: dict, args: argparse.Namespace, parser: argparse.ArgumentParser) -> dict:
     """SYRD-625: the tenant's own document with the Publisher's publication stage after Audit, or without it."""
     from scripts.ticket_board.publisher_stage import with_publisher, without_publisher
@@ -420,6 +453,7 @@ TENANT_WRITES = frozenset({
     "enable-documentation-gate", "disable-documentation-gate",  # SYRD-624
     "enable-publisher", "disable-publisher",  # SYRD-625
     "enable-designer-implementation",  # SYRD-678
+    "enable-research-stage", "disable-research-stage",  # SYRD-842
 })
 
 
@@ -463,6 +497,8 @@ def main(argv=None):
             "enable-publisher",
             "disable-publisher",
             "enable-designer-implementation",
+            "enable-research-stage",
+            "disable-research-stage",
         ],
     )
     parser.add_argument("--document", type=Path)
@@ -503,6 +539,8 @@ def main(argv=None):
                                         "runtime's own default on any other")
     parser.add_argument("--effort", help="enable-router: Router's effort; default high on claude, the runtime's "
                                          "own default on any other")
+    parser.add_argument("--research-directory", help="enable-research-stage: the repository directory findings files "
+                                                     "go in (default docs/research)")
     parser.add_argument("--routing-flag", help="enable-designer-implementation: a gate flag Router requires before it "
                                                "gives the designer a ticket (design work only)")
     parser.add_argument("--prompt", help="onboarding prompt text for set-role-prompt")
@@ -665,6 +703,10 @@ def main(argv=None):
     elif args.operation in {"enable-publisher", "disable-publisher"}:
         # And for the Publisher's publication stage (SYRD-625).
         cfg = _document_with_publisher(current, args, parser)
+        files = projection_files(args.config, cfg)
+    elif args.operation in {"enable-research-stage", "disable-research-stage"}:
+        # And for the research stage (SYRD-842).
+        cfg = _document_with_research_stage(current, args, parser)
         files = projection_files(args.config, cfg)
     elif args.operation == "enable-designer-implementation":
         # And for the designer as an Implementation owner (SYRD-678).

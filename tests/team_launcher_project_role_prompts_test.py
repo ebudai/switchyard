@@ -38,6 +38,7 @@ def test_switchyard_new_prompts_roles_and_skips_designer_when_absent() -> None:
             "codex", "", "",                           # runtime: runtime, model, effort
             "",                                        # Router: Enter keeps it off (SYRD-599)
             "",                                        # documentation gate: Enter keeps it off (SYRD-624)
+            "",                                        # research stage: Enter keeps it off (SYRD-842)
         ])
         runner = PromptedRoleRunner()
         process_launcher = RecordingProcessLauncher()
@@ -98,6 +99,7 @@ def test_switchyard_new_prompts_roles_and_skips_designer_when_absent() -> None:
         "runtime effort [high]: ",
         "Router (optional) [off]: ",
         "Documentation gate (optional) [off]: ",
+        "Research stage (optional) [off]: ",  # SYRD-842
     ], prompts
     # agy renders no effort level, so it is not asked for one.
     assert not any(prompt.startswith("code-review effort") for prompt in prompts)

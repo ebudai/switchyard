@@ -122,6 +122,7 @@ SWITCHYARD_COMMANDS = (
     "router-role",
     "documentation-gate",
     "publisher",
+    "research-stage",
     "onboarding-readiness",
     "stop",
     # The other half of `stop`: bring a suspended tenant back in dependency
@@ -194,7 +195,7 @@ SWITCHYARD_UNPRIVILEGED_COMMANDS = frozenset(
     # `sudo switchyard local-model <action>` (SYRD-691).
     {
         "present", "attach", "board-skill", "role-prompt", "design-stage", "router-role", "documentation-gate",
-        "publisher", "set-role-runtime",
+        "publisher", "research-stage", "set-role-runtime",
         "reconcile-role-models", "restart-role", "finish-upgrade", "worker-pool", "privileged-action", "status",
         "paste-image", "adopt-conversation", "local-model",
     }
@@ -244,6 +245,7 @@ Commands:
   documentation-gate
                    turn on or off the documentation gate, decided by a Librarian or the Director
   publisher        turn on or off the Publisher, which publishes approved work to the integration branch
+  research-stage   turn on or off the research stage: a question, an evidence-reviewed finding, back to you
   onboarding-readiness
                    report whether every registered tenant has migrated director onboarding
   stop             suspend a project: window, sessions, listener and board, reversibly

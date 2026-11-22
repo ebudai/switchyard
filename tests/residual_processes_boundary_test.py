@@ -115,6 +115,11 @@ REACHED: set[str] = set()
 # --- the synthetic /proc trees, as `gold402.py` builds them ---------------------------------------------------------
 PARENT = 3999999  # a synthetic parent of this process, well above pid_max defaults
 GRANDPARENT = 3999998
+#: This process, as the code under test sees it (SYRD-847). The real pid is the kernel's: in the sweep's bwrap sandbox,
+#: a pid namespace of its own, it is a small number such as 2, and replacing it in the measured messages turned
+#: "201" into "SELF01". A synthetic pid, reported by os.getpid while the module runs, is the same everywhere and
+#: collides with nothing in a tree or a message.
+SELF_PID = 3999997
 #: Entries whose owner a stat of them reports as someone else (the files are all ours; the uid is what is read).
 UIDS = {}
 MANAGED = {"atlas-ticket-board.service", "atlas-notify.service"}
@@ -156,8 +161,19 @@ TREES = {
     "an explicit exclusion": [dict(pid=161), dict(pid=162)],
 }
 
+class own_pid:
+    """os.getpid reports SELF_PID while the module under test runs, so its own process is the tree's SELF entry."""
+
+    def __enter__(self) -> None:
+        self.real = os.getpid
+        os.getpid = lambda: SELF_PID
+
+    def __exit__(self, *exc: object) -> None:
+        os.getpid = self.real
+
+
 def build(root, spec):
-    me = os.getpid()
+    me = SELF_PID
     for item in spec:
         item = dict(item)
         pid = item.pop("pid")
@@ -170,7 +186,7 @@ def build(root, spec):
         entry(root, pid, **item)
 
 def norm(value, root):
-    me = os.getpid()
+    me = SELF_PID
     if isinstance(value, dict):
         return {k: norm(v, root) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
@@ -286,7 +302,7 @@ def discover(label: str, spec, **seams: object) -> object:
     with tempfile.TemporaryDirectory() as tmp:
         build(tmp, spec)
         exclude = (161,) if label == "an explicit exclusion" else ()
-        with contained(tmp), patched(t, managed_unit_names=seam("managed_unit_names", lambda config: set(MANAGED)), **seams):
+        with contained(tmp), own_pid(), patched(t, managed_unit_names=seam("managed_unit_names", lambda config: set(MANAGED)), **seams):
             try:
                 found = m.residual_project_processes(SimpleNamespace(project="atlas"), proc_root=Path(tmp), exclude=exclude)
                 return json.loads(json.dumps(norm([[p.pid, p.uid, p.command, type(p).__name__] for p in found], tmp)))
@@ -307,7 +323,7 @@ def contain(error, **seams: object) -> object:
             if error is not None and pid == 202:
                 raise error
 
-        with contained(tmp), patched(t, managed_unit_names=lambda config: set(MANAGED), **seams):
+        with contained(tmp), own_pid(), patched(t, managed_unit_names=lambda config: set(MANAGED), **seams):
             try:
                 problems = m.contain_residual_project_processes(SimpleNamespace(project="atlas"), proc_root=Path(tmp), signaller=signaller, print_func=said.append)
             except AssertionError:

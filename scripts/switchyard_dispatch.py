@@ -303,7 +303,8 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         )
     if argv[0].casefold() == "deploy-release":
         args = launcher._build_switchyard_deploy_release_parser().parse_args(argv[1:])
-        return launcher.switchyard_deploy_release_command(args.project, commit=args.commit)
+        return launcher.switchyard_deploy_release_command(args.project, commit=args.commit, rollback=args.rollback,
+                                                          any_staged=args.any_staged)
     if argv[0].casefold() == "release-status":
         args = launcher._build_switchyard_release_status_parser().parse_args(argv[1:])
         return launcher.switchyard_release_status_command(args.project, close=args.close)

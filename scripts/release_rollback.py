@@ -238,9 +238,10 @@ def release_rollback_commands(project: str, *, publish_remote: str = "") -> list
     first line, `ln -sfn <previous shared> /opt/switchyard/current`, repointed
     every tenant on the host, and when the operator had installed the shared
     release before the upgrade (the supported order) it named the release being
-    left (SYRD-528). The tenant returns to the release its staged tooling was
-    from, through the admin-authenticated `select-shared-release`, which only
-    takes a commit root already holds -- and only when root holds it. Lines
+    left (SYRD-528). The tenant returns to the board release the upgrade
+    replaced, with its role tooling, through the control pane's
+    `rollback-release`, which only takes a commit root already holds -- and only
+    when root holds it (SYRD-855). Lines
     beginning `#` are what an operator must know, not commands; a way back that
     cannot be named is said, not replaced by one that runs.
 
@@ -267,7 +268,13 @@ def release_rollback_commands(project: str, *, publish_remote: str = "") -> list
             "it is not part of this way back (an operator's own activation is undone with "
             "`switchyard install-shared-release --rollback`)"
         )
-    exact = len(tenant_commit) == 40 and all(char in "0123456789abcdef" for char in tenant_commit)
+    # The board release the upgrade replaced is what `rollback-release` goes back to, with its role tooling;
+    # the staged tooling's own release names it when the board's was not recorded as a commit (SYRD-855).
+    def is_commit(value: str) -> bool:
+        return len(value) == 40 and all(char in "0123456789abcdef" for char in value)
+
+    target = board_commit if is_commit(board_commit) else tenant_commit
+    exact = is_commit(target)
     if not exact:
         lines.append(
             f"# no earlier release of {project} was recorded before this upgrade"
@@ -275,26 +282,26 @@ def release_rollback_commands(project: str, *, publish_remote: str = "") -> list
             + ", so no way back can be named: returning it is an operator's decision, from its release-status"
         )
         return lines
-    if tenant_commit == upgraded_to:
-        lines.append(f"# {project} was already on {tenant_commit} before this upgrade: there is nothing to go back to")
+    if target == upgraded_to:
+        lines.append(f"# {project} was already on {target} before this upgrade: there is nothing to go back to")
         return lines
-    release_root = launcher.switchyard_shared_install_root() / "releases" / tenant_commit
+    release_root = launcher.switchyard_shared_install_root() / "releases" / target
     held = launcher._read_switchyard_release_marker(release_root)
-    if held is None or held.marker_commit != tenant_commit:
+    if held is None or held.marker_commit != target:
         lines.append(
-            f"# {project} ran {tenant_commit} before this upgrade, but this host holds no installed release of it "
+            f"# {project} ran {target} before this upgrade, but this host holds no installed release of it "
             f"({release_root}): an operator installs that release first; until then there is no way back to name"
         )
         return lines
-    board = (
-        f"it was on {board_commit}" if board_commit and board_commit != tenant_commit
-        else "it was on the same release" if board_commit else "its earlier build was not recorded"
+    lines.append(
+        f"# this rolls {project}'s board, listener and role tooling back to {target}, still staged for it; the "
+        "host's shared release is not touched. Database migrations the newer release applied stay applied: the "
+        "rollback refuses, changing nothing, unless each is declared safe for older code (schema_compatibility)"
     )
     lines.append(
-        f"# this redeploys {project}'s board at {tenant_commit} ({board}). Database migrations the newer "
-        "release applied are not reversed, and running the older board against them is not verified: "
-        "confirm before applying"
+        f"# an administrator rolls back to any other staged release from their own terminal: "
+        f"`switchyard privileged-action {shlex.quote(project)} select-shared-release commit=<sha>`"
     )
-    action = f"switchyard privileged-action {shlex.quote(project)} select-shared-release commit={tenant_commit}"
+    action = f"switchyard privileged-action {shlex.quote(project)} rollback-release commit={target}"
     lines.extend([f"{action} --dry-run", action])
     return lines

@@ -56,6 +56,8 @@ def test_the_rule_names_one_account_four_actions_and_the_helper() -> None:
           f"exactly the four actions, one YES: {text}")
     check(all(pa.action_for(name).authentication == pa.ALLOW_ACTIVE for name in rule.TENANT_UPGRADE_ACTIONS),
           "every action it lists is already the control pane's, unprompted, in an active session")
+    check(f'"{pa.ACTION_NAMESPACE}.rollback-release"' in text,
+          "the tenant's own rollback is prompt-free too, so a Director can roll back in an outage (SYRD-855)")
     held = [action.name for action in pa.CATALOGUE if action.authentication != pa.ALLOW_ACTIVE]
     check(held and not any(f".{name}\"" in text for name in held),
           f"no action that asks an administrator is listed: {held}")

@@ -341,7 +341,7 @@ def test_the_way_back_is_written_down_before_anything_is_replaced() -> None:
         # which a tenant upgrade does not move (SYRD-528).
         commands = team_launcher.release_rollback_commands("demo", publish_remote="git@host:repo")
         assert not any("ln -sfn" in line for line in commands), commands
-        assert f"switchyard privileged-action demo select-shared-release commit={'a' * 40}" in commands, commands
+        assert f"switchyard privileged-action demo rollback-release commit={'a' * 40}" in commands, commands
 
 
 def test_nothing_in_the_path_gives_the_shared_key_write_authority_back() -> None:

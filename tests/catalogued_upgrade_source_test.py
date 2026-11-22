@@ -138,14 +138,16 @@ def chain(tree: Path) -> dict:
         seen["preview"] = catalogued("preview-upgrade", new)
         seen["apply"] = catalogued("upgrade-tenant-release", new)
         seen["preview after"] = catalogued("preview-upgrade", new)
-        # The pinned way back: `select-shared-release` (admin-authenticated) names
-        # root's own release for the old commit as the source, so nothing here
-        # substitutes or refuses it. Root's cache is the sandbox's, owned by this
-        # namespace's root.
+        # The way back is no longer an upgrade: an installed launcher stages only its
+        # own release, so `upgrade --source-repo <old>` was refused on a host and passed
+        # here only because this runs from a checkout. `select-shared-release` is the
+        # administrator's rollback now (SYRD-855; tenant_release_rollback_test drives
+        # it). Root's cache is the sandbox's, owned by this namespace's root.
         saved = operations.SHARED_RELEASES, operations.TRUSTED_OWNER_UID
         operations.SHARED_RELEASES, operations.TRUSTED_OWNER_UID = str(install_root / "releases"), 0
         try:
-            seen["rollback"] = catalogued("select-shared-release", OLD_PIN)
+            seen["rollback"] = {"argv": operations.OPERATIONS["select-shared-release"](
+                {"project": "porter", "commit": OLD_PIN})}
         finally:
             operations.SHARED_RELEASES, operations.TRUSTED_OWNER_UID = saved
     seen["old root"], seen["new root"], seen["cache"] = "<opt>/releases/" + OLD_PIN, "<opt>/releases/" + new, cache
@@ -208,13 +210,9 @@ def main() -> int:
     check("in place of the recorded" not in now["preview after"]["said"] and not mismatched(now["preview after"]["said"]),
           f"afterwards the recorded source is that release itself: {now['preview after']['said'][-400:]}")
     rollback = now["rollback"]
-    check("--source-repo" in rollback["argv"] and rollback["argv"][-2:] == ["--deploy-ref", OLD_PIN]
-          and "in place of the recorded" not in rollback["said"] and not refused_early(rollback["said"])
-          and not mismatched(rollback["said"]),
-          f"the pinned rollback to the old release is neither substituted nor refused for its release: {rollback['said'][-600:]}")
-    check(rollback["pin"]["source_repo"].endswith(f"/releases/{OLD_PIN}") and rollback["pin"]["deploy_ref"] == OLD_PIN
-          and rollback["pin"]["commit_git_dir"] == cache,
-          f"and records the old tuple, the project's commit cache kept: {rollback['pin']}")
+    check(rollback["argv"][1:] == ["deploy-release", "porter", "--commit", OLD_PIN, "--rollback", "--any-staged"],
+          f"the way back to the old release is the rollback, not an upgrade the running launcher refuses (SYRD-855): "
+          f"{rollback['argv']}")
     for name, commit in (("other", NOT_CURRENT), ("missing", MISSING)):
         key = "apply other" if name == "other" else "apply missing"
         result = now[key]

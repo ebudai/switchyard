@@ -195,25 +195,28 @@ def _install_shared_release(values: Mapping[str, str]) -> list[str]:
     return [LAUNCHER, "install-shared-release", "--commit", commit]
 
 
-def _select_shared_release(values: Mapping[str, str]) -> list[str]:
-    """Point one tenant at a shared release root already has, by commit.
+def _rollback_release(values: Mapping[str, str]) -> list[str]:
+    """One tenant back to the board release its last upgrade replaced, already staged for it (SYRD-855).
 
-    The last line of `shared_release_install_commands` -- the durable
-    re-selection -- whose every input is either a commit or root's own
-    directory. Resolved through the same trusted-source check, so a tenant
-    cannot be pointed at a release this host never built.
+    Resolved through the trusted-source check first, so a commit root does not hold is refused before privilege.
+    The command makes the rest of the checks -- staged, the previous one, the schema -- before it changes anything.
     """
     commit = values["commit"]
-    release = trusted_release_root(commit)
-    return [
-        LAUNCHER,
-        "upgrade",
-        values["project"],
-        "--source-repo",
-        release,
-        "--deploy-ref",
-        commit,
-    ]
+    trusted_release_root(commit)
+    return [LAUNCHER, "deploy-release", values["project"], "--commit", commit, "--rollback"]
+
+
+def _select_shared_release(values: Mapping[str, str]) -> list[str]:
+    """One tenant onto any earlier release already staged for it and installed by root, by commit.
+
+    It used to be `upgrade --source-repo <release> --deploy-ref <commit>`, which the launcher running it refuses
+    for every release but its own -- an upgrade stages only the release it runs -- so it could never select an
+    earlier one (SYRD-855). A rollback needs nothing staged anew: the same command as `rollback-release`, without
+    its one-release limit.
+    """
+    commit = values["commit"]
+    trusted_release_root(commit)
+    return [LAUNCHER, "deploy-release", values["project"], "--commit", commit, "--rollback", "--any-staged"]
 
 
 def _preview_database_auth(values: Mapping[str, str]) -> list[str]:
@@ -253,6 +256,7 @@ def _withdraw_conversation_adoption(values: Mapping[str, str]) -> list[str]:
 #: authorizes something and then does nothing.
 OPERATIONS: dict[str, Callable[[Mapping[str, str]], list[str]]] = {
     "deploy-release": _deploy_release,
+    "rollback-release": _rollback_release,
     "upgrade-tenant": _upgrade_tenant,
     "preview-upgrade": _preview_upgrade,
     "upgrade-tenant-release": _upgrade_tenant_release,
@@ -272,7 +276,7 @@ OPERATIONS: dict[str, Callable[[Mapping[str, str]], list[str]]] = {
 #: rollback restored the previous release (`tenant_release_report.ROLLED_BACK_EXIT`,
 #: `ticket-board-service.sh`'s `ROLLED_BACK_EXIT`). Recorded as `rolled_back`
 #: (SYRD-113).
-ROLLED_BACK_EXITS: dict[str, int] = {"deploy-release": 3}
+ROLLED_BACK_EXITS: dict[str, int] = {"deploy-release": 3, "rollback-release": 3, "select-shared-release": 3}
 
 
 def command_for(action_name: str, values: Mapping[str, str]) -> list[str]:

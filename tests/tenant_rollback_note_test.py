@@ -12,9 +12,10 @@ back from 7fe0aee was 7fe0aee. The note did hold the tenant's own earlier
 release, as its staged tooling; nothing used it.
 
 Now the note also records the tenant's deployed board build, and the way back
-is the tenant's: `select-shared-release commit=<its earlier release>` (admin-
-authenticated, root's own release only), dry run first, named only when root
-holds that release, with what it does to the board said plainly. The host's
+is the tenant's: `rollback-release commit=<its earlier release>` (SYRD-855; it
+was SYRD-528's admin-authenticated `select-shared-release`), root's own release
+only, dry run first, named only when root holds that release, with what it does
+said plainly. The host's
 pointer is never part of it. Where no way back can be proved, it says so.
 
 Real `record_release_rollback` and `release_rollback_commands`, in a sandbox
@@ -173,20 +174,26 @@ def main() -> int:
     commands = [l for l in first["lines"] if not l.startswith("#")]
     check(len(commands) == 2, f"a dry run, then the action: {first['lines']}")
     dry, applied = (parsed(line, ROOT) for line in commands)
-    check(dry == ("select-shared-release", {"project": "demo", "commit": TENANT}, True)
-          and applied == ("select-shared-release", {"project": "demo", "commit": TENANT}, False),
-          f"back to the tenant's own release through the admin action, as the real parser reads it: {dry} {applied}")
+    check(dry == ("rollback-release", {"project": "demo", "commit": TENANT}, True)
+          and applied == ("rollback-release", {"project": "demo", "commit": TENANT}, False),
+          f"back to the tenant's own release through the control pane's rollback (SYRD-855), as the real parser reads "
+          f"it: {dry} {applied}")
     notes = [l for l in first["lines"] if l.startswith("#")]
     check(any(f"shared release ({NEW})" in l and "did not move it" in l for l in notes),
           f"the host's release is named as not part of it: {notes}")
-    check(any("redeploys demo's board at " + TENANT in l and "not reversed" in l and "not verified" in l for l in notes),
-          f"and what it does to the board is said, not claimed safe: {notes}")
+    check(any("demo's board, listener and role tooling back to " + TENANT in l and "stay applied" in l
+              and "declared safe for older code" in l for l in notes),
+          f"and what it does is said, with the schema rule it is held to, not claimed safe (SYRD-855): {notes}")
     check(now["retry"] == first["lines"], f"a retry after a failed phase keeps the way back taken before it: {now['retry']}")
     switched = now["host switched during"]
-    check([parsed(l, ROOT)[1]["commit"] for l in switched["lines"] if not l.startswith("#")] == [TENANT, TENANT]
-          and switched["note"]["previous_board_commit"] == BOARD
-          and any(f"it was on {BOARD}" in l for l in switched["lines"]),
-          f"different host, tenant and board commits: back to the tenant's, the board's own named: {switched['lines']}")
+    # SYRD-855: the way back is the board release the upgrade replaced -- the one `rollback-release` takes, with its
+    # role tooling -- so with distinct commits it is the board's, and root does not hold that one here: no command.
+    check([l for l in switched["lines"] if not l.startswith("#")] == []
+          and switched["note"]["previous_board_commit"] == BOARD and switched["note"]["previous_staged_commit"] == TENANT
+          and any(f"ran {BOARD} before this upgrade" in l and "holds no installed release" in l
+                  for l in switched["lines"]),
+          f"different host, tenant and board commits: the board's own release is named, and root holding none of it "
+          f"is said: {switched['lines']}")
     for name, why in (("tenant release not installed", "holds no installed release"),
                       ("tenant release marker disagrees", "holds no installed release"),
                       ("no prior proof", "no way back can be named")):

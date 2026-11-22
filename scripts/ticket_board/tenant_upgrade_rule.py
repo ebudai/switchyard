@@ -5,8 +5,8 @@ judges to be in an active session. A Director's CLI can run its commands where p
 so the same upgrade asked a password on one tenant and nothing on another. This per-tenant rule answers YES for:
 
 - one account, the tenant's own owner;
-- four actions, the catalogue's tenant upgrade actions (`TENANT_UPGRADE_ACTIONS`), never the shared-release or
-  database-auth actions, which stay `auth_admin`;
+- five actions, the catalogue's tenant upgrade and rollback actions (`TENANT_UPGRADE_ACTIONS`), never the
+  shared-release or database-auth actions, which stay `auth_admin`;
 - one program, the root-owned privileged helper, which pkexec names in the `program` detail.
 
 It widens who REACHES the helper, never who it acts for: the helper still walks its own ancestry to the caller's
@@ -31,7 +31,9 @@ except ImportError:  # pragma: no cover - supports direct script execution
     import privileged_install
 
 #: The catalogue's tenant upgrade actions, each already `allow_active=yes` in the shipped policy.
-TENANT_UPGRADE_ACTIONS = ("preview-upgrade", "upgrade-tenant-release", "deploy-release", "upgrade-tenant")
+#: `rollback-release` among them, so a Director can roll its own tenant back in an outage (SYRD-855).
+TENANT_UPGRADE_ACTIONS = ("preview-upgrade", "upgrade-tenant-release", "deploy-release", "upgrade-tenant",
+                          "rollback-release")
 #: An owner name the rule may carry: a plain local account name, so nothing in it can end the JS string it is in.
 OWNER_NAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
 #: A project the rule may name: the launcher's slug rule, so nothing in it can end a comment line or a string of the

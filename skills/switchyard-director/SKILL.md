@@ -691,9 +691,17 @@ the live workflow and command help are the current operating contract;
   root's read-only dry run, `upgrade-tenant-release` with the same commit
   applies it, and `deploy-release` deploys an approved release. The helper runs
   them for your registered pane and no other process, and journals each run.
+- To go back, `switchyard privileged-action <project> rollback-release
+  commit=<sha>` returns your tenant to the board release its last upgrade
+  replaced, still staged for it: board, listener and role tooling, never the
+  host's shared release. It works in an outage, unprompted, from your pane.
+  Migrations stay applied, so it refuses, changing nothing, unless each newer
+  one is declared safe for older code; it names any that is not. An earlier
+  staged release is an administrator's: `select-shared-release`, from their own
+  terminal, where they authenticate.
 - Host-wide changes stay with the root operator: building or installing the
-  shared release (`install-shared-release`, `select-shared-release`), which
-  also installs that release's privileged helper and policy. If an action is
+  shared release (`install-shared-release`), which also installs that
+  release's privileged helper and policy. If an action is
   refused because this host's boundary predates it, run
   `switchyard privileged-action <project> upgrade-tenant` once: with the tenant
   pinned to an older release than the host runs, it installs the boundary from

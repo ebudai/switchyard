@@ -477,12 +477,20 @@ def test_the_way_back_as_commands() -> None:
 
             held[old] = old
             lines = way_back(previous_release_commit=host, previous_staged_commit=old, previous_board_commit="board-old")
-            action = f"switchyard privileged-action 'my proj' select-shared-release commit={old}"
+            action = f"switchyard privileged-action 'my proj' rollback-release commit={old}"
             check([l for l in lines if not l.startswith("#")] == [f"{action} --dry-run", action],
-                  f"the tenant's own release, through the admin action, dry run first, the project quoted: {lines}")
+                  f"the tenant's own release, through the control pane's rollback, dry run first, the project quoted "
+                  f"(SYRD-855): {lines}")
             check(not any("ln -sfn" in l or "/current" in l for l in lines) and any(f"({host})" in l and "did not move it" in l for l in lines),
                   f"never the host's pointer, which is named as not part of it: {lines}")
-            check(any("it was on board-old" in l and "not reversed" in l for l in lines), f"what the board goes back to, said plainly: {lines}")
+            check(any("board, listener and role tooling back to" in l and "stay applied" in l for l in lines)
+                  and any("select-shared-release commit=<sha>" in l for l in lines),
+                  f"what goes back, that migrations stay, and the administrator's wider choice, said plainly: {lines}")
+            board = way_back(previous_staged_commit=old, previous_board_commit="d" * 40)
+            held["d" * 40] = "d" * 40
+            board = way_back(previous_staged_commit=old, previous_board_commit="d" * 40)
+            check(f"rollback-release commit={'d' * 40}" in board[-1],
+                  f"a recorded board release is the one named, before the staged tooling's (SYRD-855): {board}")
             check([l for l in way_back(previous_staged_commit="b0" * 20) if not l.startswith("#")] == [],
                   "a release root does not hold: no command")
             held["e" * 40] = "f" * 40

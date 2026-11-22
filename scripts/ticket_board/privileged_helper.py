@@ -461,17 +461,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "the installed privileged boundary is not the one this release installs, "
                 "so it will not be used: " + "; ".join(problems)
             )
-        caller = caller_identity()
         project = values.get("project") or ""
         requester_role = ""
+        # An administrator's authentication is the authority for an `auth_admin` action, and it is asked for from
+        # the administrator's own terminal, which is no pane: demanding a pane as well left select-shared-release
+        # with no caller who could satisfy both (SYRD-855). A pre-authorized action has no human, so the pane is
+        # its whole proof, as before.
+        admin_authenticated = action.authentication == privileged_actions.AUTH_ADMIN
+        caller = None if admin_authenticated else caller_identity()
         if project:
             board_get, board_url = authorizing_board(action, project)
-            requester_role = require_registered_control_caller(
-                project,
-                board_get=board_get,
-                board_url=board_url,
-                caller=caller,
-            ) or ""
+            if caller is not None:
+                requester_role = require_registered_control_caller(
+                    project,
+                    board_get=board_get,
+                    board_url=board_url,
+                    caller=caller,
+                ) or ""
             if values.get("ticket"):
                 require_ticket_on_board(project, values["ticket"], board_get=board_get, board_url=board_url)
         # A host-wide action names no tenant, so there is no single board to

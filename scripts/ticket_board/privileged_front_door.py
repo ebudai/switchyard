@@ -19,13 +19,12 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
 if __package__ in (None, ""):  # pragma: no cover - direct execution as a program
-    import sys
-
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from ticket_board import (
         polkit_preflight,
@@ -76,10 +75,14 @@ class ActionPlan:
     #: `problems` -- so a dry run says which release would be used, or why none
     #: can be.
     command: list[str] = field(default_factory=list)
+    #: True when an administrator at this terminal answers polkit's prompt: an `auth_admin` action asked for from
+    #: outside any pane, with a terminal to ask on (SYRD-855).
+    attended: bool = False
 
     @property
     def ready(self) -> bool:
-        return not self.problems and self.decision.may_proceed
+        answered = self.attended and self.decision.state == polkit_preflight.NEEDS_AUTHENTICATION
+        return not self.problems and (self.decision.may_proceed or answered)
 
     def argv(self) -> list[str]:
         """Exactly what the helper will be given. No shell, ever."""
@@ -124,6 +127,7 @@ def plan_action(
     verify: Callable[..., list[str]] = privileged_install.verify_installation,
     build_command: Callable[..., list[str]] = privileged_operations.command_for,
     read_policy: Callable[[Path], str] | None = None,
+    interactive: Callable[[], bool] = lambda: sys.stdin.isatty(),
 ) -> ActionPlan:
     """Decide everything that can be decided without privilege.
 
@@ -193,18 +197,29 @@ def plan_action(
     except KeyError as exc:
         problems.append(str(exc).strip("'"))
 
+    attended = False
     try:
         caller = identity()
         decision = decide(
             action.action_id, pid=caller.pid, start_time=caller.start_time, uid=caller.uid
         )
     except privileged_helper.Refused as exc:
-        # No pane means the helper would refuse this caller anyway. Say it here,
-        # where it costs nothing, rather than after a privilege request.
-        problems.append(str(exc))
-        decision = polkit_preflight.PolkitDecision(
-            polkit_preflight.UNAVAILABLE, action.action_id, "the caller has no pane identity"
-        )
+        if action.authentication == privileged_actions.AUTH_ADMIN:
+            # An administrator authenticates for this one, from their own terminal, which is no pane; the helper
+            # asks no pane of it either (SYRD-855). polkit is asked about this process instead, and its prompt is
+            # this terminal's to answer -- so only when there is a terminal here to answer it.
+            decision = decide(action.action_id, pid=os.getpid())
+            attended = interactive()
+            if decision.state == polkit_preflight.NEEDS_AUTHENTICATION and not attended:
+                problems.append(f"{action.name} asks an administrator to authenticate, and this has no terminal to "
+                                "ask them on: run it from your own terminal")
+        else:
+            # No pane means the helper would refuse this caller anyway. Say it here,
+            # where it costs nothing, rather than after a privilege request.
+            problems.append(str(exc))
+            decision = polkit_preflight.PolkitDecision(
+                polkit_preflight.UNAVAILABLE, action.action_id, "the caller has no pane identity"
+            )
 
     return ActionPlan(
         action=action,
@@ -216,6 +231,7 @@ def plan_action(
         rollback=list(rollback_commands(project)),
         problems=problems,
         command=command,
+        attended=attended,
     )
 
 

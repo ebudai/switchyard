@@ -186,6 +186,18 @@ CATALOGUE: tuple[PrivilegedAction, ...] = (
         board_from_unit=True,
     ),
     PrivilegedAction(
+        name="rollback-release",
+        summary="Roll a tenant back to the board release its last upgrade replaced, already staged for it",
+        message="Authentication is required to roll a Switchyard tenant back to its previous release",
+        # As narrow as deploy-release: one tenant, its registered control pane, and one release -- the one root's
+        # own note says the tenant's current board release replaced, still staged for it and installed by root.
+        # Its newer migrations stay applied, and each must be declared safe for older code. The host's shared
+        # release is not touched. Usable in an outage, when nobody is there to authenticate (SYRD-855).
+        authentication=ALLOW_ACTIVE,
+        arguments=(("project", _slug), ("commit", _commit)),
+        board_from_unit=True,
+    ),
+    PrivilegedAction(
         name="upgrade-tenant",
         summary="Run the privileged phases of a tenant upgrade",
         message="Authentication is required to upgrade a Switchyard tenant",
@@ -234,11 +246,12 @@ CATALOGUE: tuple[PrivilegedAction, ...] = (
     ),
     PrivilegedAction(
         name="select-shared-release",
-        summary="Run a tenant from an already-installed shared release, by commit",
+        summary="Roll a tenant back to any earlier release already staged for it, by commit",
         message="Authentication is required to select a Switchyard release for a tenant",
-        # This one chooses which Switchyard code root itself will execute for
-        # this tenant from now on, so a human authenticates for it even though
-        # the caller is already proven to be the control pane.
+        # `rollback-release` without its one-release limit: any release staged for the tenant and installed by
+        # root, under the same schema rule. Wider, so an administrator authenticates -- and that authentication is
+        # the authority: it is asked for from the administrator's own terminal, which is no pane, so the helper
+        # proves no pane for it (SYRD-855). It used to demand both, which nobody could give.
         authentication=AUTH_ADMIN,
         arguments=(("project", _slug), ("commit", _commit)),
     ),

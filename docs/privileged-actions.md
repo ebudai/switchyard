@@ -19,12 +19,14 @@ It answers yes without a prompt only when all three of these hold:
 
 - **The account is that tenant's owner,** and no other account.
 - **The action is one of the tenant's own upgrade actions:** `preview-upgrade`,
-  `upgrade-tenant-release`, `deploy-release` and `upgrade-tenant`.
+  `upgrade-tenant-release`, `deploy-release`, `upgrade-tenant` and
+  `rollback-release`.
 - **The program is the root-owned privileged helper,** as `pkexec` names it.
 
 Everything else asks for an administrator, as before. That covers installing
-or selecting the shared release everyone runs (`install-shared-release`,
-`select-shared-release`) and the database actions.
+the shared release everyone runs (`install-shared-release`), choosing any
+earlier staged release for a tenant (`select-shared-release`), and the database
+actions.
 
 ## Why it is still safe
 
@@ -71,3 +73,44 @@ root can make, such as reading the tenant-control sudoers rule. It reports each
 one as a note, names `upgrade-tenant-release` as the step that makes it as
 root, and does not hold it against readiness. A real upgrade run as the tenant
 still stops there, because it would have to install the rule.
+
+## Rolling one tenant back
+
+```
+switchyard privileged-action <project> rollback-release commit=<previous release>
+```
+
+It returns the tenant to the board release its last upgrade replaced: its
+board, its notify listener and its role tooling. That release must still be
+staged for the tenant (`<board root>/releases/<commit>`) and installed by root
+(`/opt/switchyard/releases/<commit>`). It never changes the host's shared
+release or any other tenant. It is pre-authorized like `deploy-release`, from
+the control pane, so it works in an outage with nobody there to type a
+password.
+
+Migrations are never reversed. The older board and listener run against the
+newer schema, so the rollback first reads which migrations the database has
+that the older release does not carry. Each must be declared safe for older
+code in `scripts/ticket_board/schema_compatibility.py`, and any condition on
+that (such as "the research stage is not declared") must hold on the tenant's
+database. Otherwise it refuses, names each migration, and changes nothing.
+Then root's pin names the older release, `deploy-release` deploys it with its
+usual health gates, and the role tooling is restaged from it. A deploy that
+fails puts the pin back. Every run is journalled, like any privileged action.
+
+An administrator can choose any earlier staged release, not only the last one:
+
+```
+switchyard privileged-action <project> select-shared-release commit=<release>
+```
+
+They run it from their own terminal and authenticate as an administrator.
+The helper asks no pane for this action: the administrator's authentication is
+its authority. From a pane, or with no terminal to ask on, it is refused before
+anything is asked.
+
+The operator's own form is one command, with the same checks:
+
+```
+sudo switchyard deploy-release <project> --commit <release> --rollback [--any-staged]
+```

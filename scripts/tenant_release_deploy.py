@@ -391,6 +391,14 @@ def _build_switchyard_deploy_release_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("project", help="registered project name or slug")
     parser.add_argument("--commit", required=True, help="the full 40-character commit the tenant was prepared for")
+    parser.add_argument(
+        "--rollback", action="store_true",
+        help="roll the tenant back to this earlier release, already staged for it: the board release its last "
+             "upgrade replaced (SYRD-855). Its newer migrations stay applied, so each must be declared safe for "
+             "older code. Never changes the host's shared release",
+    )
+    parser.add_argument("--any-staged", action="store_true",
+                        help="with --rollback: any release staged for the tenant, not only the one it last replaced")
     return parser
 
 
@@ -403,8 +411,13 @@ def switchyard_deploy_release_command(
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     opener: Callable[[str], Any] | None = None,
     print_func: Callable[[str], None] = print,
+    rollback: bool = False,
+    any_staged: bool = False,
 ) -> int:
-    """Deploy the prepared release and close the phase, or say exactly where it stopped."""
+    """Deploy the prepared release and close the phase, or say exactly where it stopped.
+
+    With `rollback`, first prepare the tenant for an earlier release already staged for it (SYRD-855).
+    """
     from scripts import team_launcher as launcher
 
     commit = (commit or "").strip()
@@ -420,6 +433,16 @@ def switchyard_deploy_release_command(
     entry = launcher._resolve_switchyard_project(project, config_dir=config_dir, registry_dir=registry_dir)
     config = launcher.load_project_config(entry.slug, entry.config_path)
     config_path = entry.config_path
+    if rollback:
+        from scripts import tenant_release_rollback
+
+        return tenant_release_rollback.roll_back(
+            config, config_path=config_path, commit=commit, any_staged=any_staged, runner=runner,
+            print_func=print_func,
+            deploy=lambda: switchyard_deploy_release_command(
+                project, commit=commit, config_dir=config_dir, registry_dir=registry_dir, runner=runner,
+                opener=opener, print_func=print_func),
+        )
 
     def closing(line: str) -> None:
         # `release-status --close` speaks as a command that deploys nothing; here

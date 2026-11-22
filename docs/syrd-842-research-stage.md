@@ -39,6 +39,16 @@ template_role, slot}, directory="docs/research")` adds:
   - `close_on_finding` to the terminal stage that finished work goes to. That
     is the one terminal stage the Director cannot already move triage work
     into, so the shipped example's `done`.
+  - **Later (SYRD-849): findings through the Publisher.** On a board that runs
+    the Publisher, a finding with a commit goes through publication.
+    - `publish_finding` takes it from triage into publication.
+    - The Publisher's `finding_published` takes it on to that terminal stage.
+    - Its `finding_publication_return` takes it back to Research.
+    - The Director's `finding_publication_kick_back` takes it from
+      `publication_failed` back to Research.
+    - close_on_finding is refused for such a finding.
+
+    See docs/syrd-849-findings-publication.md.
 - **Implementation's Director-only defer and cancel**, cloned out of both new
   stages.
 - **`research` added to `user_waits`**, so `await-user` works in Research when

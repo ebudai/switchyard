@@ -237,6 +237,11 @@ to you. The full guide is the "Research spikes" section of
   with your decision, `return-finding` with what is missing, or file the tickets
   it justifies yourself. Nothing is filed for you, and a research ticket never
   reaches User Review. A passed timebox is said once; the board stops nothing.
+- Where the Publisher also runs, a finding with a commit is accepted with
+  `publish-finding`, not `close-on-finding`: the Publisher puts the findings
+  commit on main and the ticket is Done. A stale finding goes back to the
+  researcher. From `publication_failed`, use `workflow-action <id> publication_retry`, or
+  `finding-publication-kick-back` with what to change.
 
 ## Documentation review, when the project runs the gate
 
@@ -653,6 +658,9 @@ Anything else lands in `publication_failed` with the exact diagnostic and the
 repairs it tried: a credential, a hook or branch protection, the publication
 target, the journal, sign-offs or size review. Fix the cause, then send the
 ticket back with `publication_retry`, or return it with `publication_kick_back`.
+A research finding accepted with `publish-finding` passes through the same
+stage and goes on to Done; its return is `finding-publication-kick-back`, and
+`publication_kick_back` is refused for it.
 
 A main the Publisher did not move is `provenance`: a role's push, an alias, a
 rewind, or the candidate already on main. It names the commits nobody

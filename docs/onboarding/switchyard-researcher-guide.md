@@ -35,7 +35,9 @@ Triage ──start-research──▶ Research ──finding──▶ Research re
   cited? Without it the finding goes straight back to the Director.
 - **The decision is not yours.** The Director closes the ticket on your
   finding, files the implementation tickets it justifies, or returns it to you
-  with what is missing.
+  with what is missing. Where the project runs the Publisher, a findings commit
+  the Director accepts is published to main, so your file becomes a project
+  document.
 
 ## Doing the research
 
@@ -101,6 +103,12 @@ Audit's `research-kick-back`, or the Director's `return-finding`, returns the
 ticket to Research with what is missing. Read the reason, add the evidence, and
 submit again. A new findings commit edits the same file; a no-commit finding
 replaces an earlier round's commit.
+
+The Publisher can return it too, when your findings commit cannot be published
+as it is. Usually that means main moved after you built it. Rebuild the commit
+on main as it is now, publish it at your ref, and submit it again; it goes
+through review again. The Director's `finding-publication-kick-back`, after a
+failed publication, works the same way.
 
 ## For Audit
 

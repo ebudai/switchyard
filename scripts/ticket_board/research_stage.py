@@ -44,6 +44,23 @@ enable it is unchanged.
   the finding justifies is the Director's ordinary create-ticket; nothing is
   created automatically. The database refuses both for a ticket without the
   flag;
+* on a board that runs the Publisher (SYRD-849), a finding with a commit reaches
+  main through it. The Director accepts the finding with `publish_finding`,
+  from triage into publication, with the reason, in place of close_on_finding.
+  The Publisher publishes the findings commit as it publishes any candidate:
+  - `finding_published` moves it on to the terminal stage;
+  - `finding_publication_return` returns it to the researcher. A stale base,
+    for example, is rebased and resubmitted;
+  - an escalation goes to `publication_failed` as any other does. There the
+    Director retries it, or returns it to the researcher with
+    `finding_publication_kick_back`.
+
+  The database picks the finding moves for a ticket the Director accepted
+  this way (pgu1054). A no-commit finding still closes with
+  close_on_finding. Findings take no documentation review: the documentation
+  gate does not apply to research tickets. The moves are composed whichever of
+  the two composers runs first: with_publisher and without_publisher
+  recompose them (`recompose_research`);
 * a defer (and any other Director-only exit to parking or a terminal stage) out
   of both new stages, under the names the document already uses for
   Implementation's;
@@ -77,11 +94,20 @@ SIGN_OFF = "research_sign_off"
 KICK_BACK = "research_kick_back"
 RETURN = "return_finding"
 CLOSE = "close_on_finding"
+#: SYRD-849: a finding with a commit through the Publisher -- the Director's acceptance, the Publisher's two finding
+#: moves, and the Director's return of a failed publication to the researcher.
+PUBLISH = "publish_finding"
+PUBLISHED = "finding_published"
+PUBLICATION_RETURN = "finding_publication_return"
+PUBLICATION_KICK_BACK = "finding_publication_kick_back"
+#: The Publisher's moves this composer declares, beside its own three.
+PUBLISHER_FINDING_ACTIONS = (PUBLISHED, PUBLICATION_RETURN)
+PUBLICATION_ACTIONS = (PUBLISH, *PUBLISHER_FINDING_ACTIONS, PUBLICATION_KICK_BACK)
 #: The researcher's own moves, the review's, and the Director's: every action this composer declares.
 RESEARCHER_ACTIONS = (SUBMIT, SUBMIT_NO_CODE, HAND_BACK)
 REVIEW_ACTIONS = (SIGN_OFF, KICK_BACK)
 DIRECTOR_ACTIONS = (START, RETURN, CLOSE)
-ACTIONS = (*DIRECTOR_ACTIONS, *RESEARCHER_ACTIONS, *REVIEW_ACTIONS)
+ACTIONS = (*DIRECTOR_ACTIONS, *RESEARCHER_ACTIONS, *REVIEW_ACTIONS, *PUBLICATION_ACTIONS)
 RESEARCHER_ROLE = "researcher"
 RESEARCHER_KIND = "support"
 #: A Researcher comments and records waits; it routes, edits, files and publishes nothing on the board.
@@ -91,6 +117,8 @@ DEFAULT_DIRECTORY = "docs/research"
 #: Roles that can never be the research role: the board's own identities and the single-purpose roles.
 NOT_RESEARCHERS = frozenset({"director", "user", "unassigned", "router", "librarian", "publisher"})
 _DIRECTORY = re.compile(r"^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$")
+#: The Publisher's stages and role (publisher_stage.py), named here so this module imports nothing from it.
+PUBLICATION, PUBLICATION_FAILED, PUBLISHER = "publication", "publication_failed", "publisher"
 
 
 #: The timebox a brief may set, in seconds: 15 minutes to 30 days, as the database checks.
@@ -264,7 +292,45 @@ def _composed(cfg: dict[str, Any], owner: str, triage: str, finished: str, audit
         ]
     for source in (RESEARCH_STAGE, *([REVIEW_STAGE] if audit is not None else [])):
         moves += _director_exits(cfg, source, impl)
+    if any(s["name"] == PUBLICATION for s in cfg["stages"]):
+        moves += [
+            _transition(triage, PUBLICATION, PUBLISH, "Accept the finding: publish its commit", director,
+                        require_reason=True),
+            _transition(PUBLICATION, finished, PUBLISHED, "Finding published to the integration branch",
+                        [PUBLISHER], owner_scoped=True, require_commit=True, require_reason=True),
+            # Moves, not returns: a return goes back into a review only from the stage that submitted into it.
+            _transition(PUBLICATION, RESEARCH_STAGE, PUBLICATION_RETURN,
+                        "Return finding: its commit cannot be published as it is", [PUBLISHER],
+                        owner_scoped=True, require_reason=True),
+            _transition(PUBLICATION_FAILED, RESEARCH_STAGE, PUBLICATION_KICK_BACK, "Return finding to the researcher",
+                        director, require_reason=True),
+        ]
     return moves
+
+
+def _shape(cfg: dict[str, Any]) -> tuple[str, str, str, dict[str, Any] | None, str]:
+    """(owner, triage, finished, the review's Audit stage or None, implementation) of a declared research stage."""
+    impl = _implementation(cfg)
+    triage = _triage(cfg, impl["name"])
+    return (research_owner(cfg) or "", triage, _finished(cfg, triage),
+            _audit(cfg) if review_stage(cfg) is not None else None, impl["name"])
+
+
+def recompose_research(cfg: dict[str, Any]) -> dict[str, Any]:
+    """`cfg` with the research stage's moves composed again for what it declares now, in place (SYRD-849).
+
+    The moves depend on whether the board runs the Publisher, so with_publisher and without_publisher call this
+    before they validate: the two composers can be turned on and off in either order. Without a research stage it
+    changes nothing.
+    """
+    if research_stage(cfg) is None:
+        return cfg
+    owner, triage, finished, audit, impl = _shape(cfg)
+    gone = (RESEARCH_STAGE, REVIEW_STAGE)
+    cfg["transitions"] = [t for t in cfg["transitions"]
+                          if t["action"] not in ACTIONS and t["from"] not in gone and t["to"] not in gone]
+    cfg["transitions"] += _composed(cfg, owner, triage, finished, audit, impl)
+    return cfg
 
 
 def with_research_stage(document: dict[str, Any], *, role: str | None = None,
@@ -450,8 +516,9 @@ def validate_research_stage(cfg: dict[str, Any], need: Callable[[bool, str], Non
          "invalid research stage: its moves are exactly as composed -- start_research from triage; the "
          "researcher's owner-scoped submit_finding (a commit), submit_finding_without_commit (a reason) and "
          "research_hand_back (a reason); Audit's research_sign_off and research_kick_back; the director's "
-         "return_finding and close_on_finding (each with a reason), defer and cancel -- and nothing else enters "
-         "or leaves the stage")
+         "return_finding and close_on_finding (each with a reason), defer and cancel; with the Publisher, the "
+         "director's publish_finding and finding_publication_kick_back and the Publisher's finding_published and "
+         "finding_publication_return -- and nothing else enters or leaves the stage")
     if any(r.get("kind") == "user" and r.get("active") is True for r in cfg["roles"]):
         need(RESEARCH_STAGE in (cfg.get("user_waits") or []),
              "invalid research stage: the director may wait on the User in research (user_waits)")

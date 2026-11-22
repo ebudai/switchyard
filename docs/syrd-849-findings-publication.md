@@ -69,6 +69,18 @@ validate_research_stage holds them exactly.
 - Findings take no documentation review. The documentation gate does not apply
   to research tickets, so SYRD-848's documentation pair never meets a finding.
 
+**Later (SYRD-852): the acceptance mark.** The mark is now cleared when the
+ticket stops being a finding in publication:
+- when `needs_research` goes off;
+- when it leaves publication or `publication_failed` by anything but
+  `finding_published`;
+- when it enters publication by anything but `publish_finding` or
+  `publication_retry`.
+
+The Publisher's code gates therefore apply to a deferred finding that was
+later built as code. `publication_is_finding`'s `needs_research` condition
+stays as a second guard. docs/syrd-852-finding-mark.md has the detail.
+
 ## Test gaps closed
 
 - **The round-scoped timebox notice** (`research_timebox_notice_is_current`).

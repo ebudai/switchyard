@@ -21,6 +21,12 @@ upgraded with this tree's migrations. It declares the research stage, the docume
   - publish_finding on a commit that is not the finding submitted;
   - the finding's kick-back on a ticket that was never accepted as one.
 * **Code tickets are unchanged:** an ordinary approved candidate still goes publication -> Final Sign-Off.
+* **The acceptance mark** (SYRD-852):
+  - it goes when the finding is deferred out of publication, and when needs_research goes off;
+  - an entry into publication by anything but publish_finding or publication_retry carries none;
+  - a mark on a ticket that is not a research ticket is no finding, so its code goes to Final Sign-Off (Audit's
+    probe);
+  - an escalation and the Director's retry keep the mark.
 """
 
 from __future__ import annotations
@@ -244,6 +250,68 @@ def refusals(lab: Research) -> None:
           f"the finding's kick-back is not a code ticket's: {said}")
 
 
+def mark(board, t: str) -> str:
+    """Whether the round's finding carries publish_finding's acceptance mark: true, false, or none (no finding)."""
+    return board.sql("SELECT coalesce((finding ? 'publication')::text, 'none') FROM ticket_board.ticket_research_briefs "
+                     f"WHERE ticket_id = '{t}';")
+
+
+def put_mark(board, t: str) -> None:
+    """The mark written under the triggers: a state no board move makes, to pin what the Publisher reads."""
+    board.sql("BEGIN; SET LOCAL session_replication_role = replica; UPDATE ticket_board.ticket_research_briefs SET "
+              "finding = coalesce(finding, '{}'::jsonb) || '{\"publication\": {\"by\": \"director\"}}'::jsonb "
+              f"WHERE ticket_id = '{t}'; COMMIT;")
+
+
+def mark_lifecycle(lab: Research) -> None:
+    """SYRD-852: the acceptance mark holds only while the ticket is a finding in publication by the finding's moves."""
+    board, world = lab.board, lab.world
+    # Audit's probe: a finding accepted into publication, deferred, made an ordinary ticket, and built as code.
+    t = lab.seeded()
+    lab.submitted(t, lab.findings_commit(t))
+    lab.accepted(t)
+    check(mark(board, t) == "true", "publish_finding marks the finding accepted")
+    check(short(board.act(t, "defer", "director")) == "ok" and board.where(t)[0] == "backlog" and mark(board, t) == "false",
+          f"deferred out of publication, the finding is no longer accepted: {mark(board, t)}")
+    said = short(board.act(t, "set_workflow_flags", "director", needs_research=False))
+    check(said == "ok", f"made an ordinary ticket: {said}")
+    said = short(board.act(t, "route", "director", state="analysis", assignee="director"))
+    check(said == "ok", f"taken back up into triage: {said}")
+    said = short(board.act(t, "route", "director", state="in_progress", assignee="app"))
+    check(said == "ok", f"and routed to an implementer: {said}")
+    code = world.commit([world.main()], {f"src/{t.lower()}.py": "# code\n"}, f"{t}: code")
+    world.publish(f"roles/app/{t.lower()}", code)
+    check(short(board.act(t, "submit_to_audit", "app", commit_hash=code)) == "ok", "the code is submitted")
+    put_mark(board, t)
+    check(short(board.act(t, "audit_sign_off", "audit")) == "ok" and board.where(t)[0] == "publication"
+          and mark(board, t) == "false", f"entering publication by Audit's approval carries no mark: {mark(board, t)}")
+    put_mark(board, t)  # and were one there, a ticket that is not a research ticket is still no finding
+    result = lab.bench.publish(t)
+    check(result["outcome"] == "published" and board.where(t) == ["director_review", "director"] and world.main() == code,
+          f"the code ticket is published on to Final Sign-Off, not to Done: {result} {board.where(t)}")
+    check(short(board.act(t, "mark_done", "director", commit_hash=code)) == "ok", "closed")
+    # needs_research turned off while the finding waits in publication.
+    t = lab.seeded()
+    lab.submitted(t, lab.findings_commit(t))
+    lab.accepted(t)
+    check(short(board.act(t, "set_workflow_flags", "director", needs_research=False)) == "ok" and mark(board, t) == "false",
+          f"turning needs_research off takes the mark: {mark(board, t)}")
+    check(short(board.act(t, "defer", "director")) == "ok", "put down")
+    # The finding's own moves keep it: escalated and retried, it is still published as a finding.
+    t = lab.seeded()
+    commit = lab.findings_commit(t)
+    lab.submitted(t, commit)
+    lab.accepted(t)
+    permission = "git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository."
+    result = lab.bench.publish(t, Runner(lambda argv: failed(argv, permission) if "push" in argv else None))
+    check(result["outcome"] == "escalated" and mark(board, t) == "true", f"an escalation keeps the mark: {result}")
+    check(short(board.act(t, "publication_retry", "director")) == "ok" and mark(board, t) == "true",
+          "and so does the Director's retry")
+    result = lab.bench.publish(t)
+    check(result["outcome"] == "published" and board.where(t)[0] == "done" and world.main() == commit,
+          f"retried, the finding is published and done: {result} {board.where(t)}")
+
+
 def main() -> int:
     test_composition()
     for key in [k for k in os.environ if k.startswith(("TICKET_BOARD_", "PGU_TICKET_BOARD_", "DIRECTORCTL"))]:
@@ -265,6 +333,7 @@ def main() -> int:
             stale(lab)
             failed_publication(lab)
             refusals(lab)
+            mark_lifecycle(lab)
         finally:
             bench.close()
     print(f"research_publication_test: {CHECKS} checks ok (and {pb.CHECKS} of the shared fixture's)")

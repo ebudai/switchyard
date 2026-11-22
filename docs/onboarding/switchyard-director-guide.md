@@ -807,6 +807,12 @@ researcher. The ordinary `publication_kick_back` is refused for a finding. A
 no-commit finding closes with `close-on-finding` as before. Findings take no
 documentation review.
 
+A finding stays one in publication only through its own moves, an escalation
+and `publication_retry`. Deferring it, turning its `needs_research` off, or
+moving it into publication any other way (a force-move included) makes it an
+ordinary ticket to the Publisher, which then asks for every gate a code
+candidate needs.
+
 or file the implementation tickets the finding justifies, each linking the
 research ticket, and then close it. Nothing is filed automatically. A research
 ticket never reaches User Review.

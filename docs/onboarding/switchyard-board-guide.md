@@ -116,7 +116,8 @@ The optional **plan gate** (`switchyard plan-gate`) adds no stage. It adds the
 `plan_change` gate, which marks a **plan ticket**: the only kind of ticket whose
 candidate may change the project's implementation plan. A plan ticket takes the ordinary
 path (the plan owner implements it, Audit reviews it, the User approves it, the Director
-closes it), and the board refuses to close one the User did not accept. On a plan-gated
+closes it), and a plan ticket needs Audit's sign-off and the User's acceptance before it
+is closed. On a plan-gated
 board, every other ticket enters Implementation only once it names a deliverable of the
 approved plan, or is marked unplanned with a reason. See `switchyard-plan-guide.md`.
 
@@ -257,7 +258,11 @@ the project runs the plan gate)
 - `research-brief` / `start-research` — where the project runs the research stage: write
   a ticket's brief (also `create-ticket --research`), then analysis → research.
   `return-finding` sends a finding back to the research role; `close-on-finding` closes the
-  ticket as Done on it. A research ticket never enters User Review.
+  ticket as Done on it. Where the project also runs the Publisher, a finding with a
+  commit is accepted with `publish-finding` instead: the Publisher publishes the findings
+  commit to main, and the ticket is Done. A stale finding goes back to the research role.
+  `finding-publication-kick-back` returns a finding whose publication failed. A research
+  ticket never enters User Review.
 - `set-deliverable` / `request-scope-change` / `plan-ticket` — where the project runs the
   plan gate: name the deliverable a ticket serves, or that it is unplanned and why (also
   `create-ticket --deliverable` or `--unplanned-reason-file`); open or extend a plan ticket

@@ -427,6 +427,12 @@ def refusals(board: Board) -> None:
         answer = brief(board, t, **overrides)
         check(words in short(answer), f"a brief with {list(overrides)} is refused: {short(answer)}")
     check(snapshot(board, t) == before, "and no refused brief changed the ticket")
+    # SYRD-849: the operation passes an int timebox straight through, so on that path the database's range is the
+    # only guard.
+    for seconds in (899, 2592001):
+        answer = brief(board, t, timebox=seconds)
+        check("15 minutes to 30 days" in short(answer) and snapshot(board, t) == before,
+              f"an int timebox of {seconds}s is refused by the database, the ticket unchanged: {short(answer)}")
     answer = brief(board, t)
     check(short(answer) == "ok" and "Research brief.\nQuestion: Which encoding" in last_comment(board, t)
           and "Timebox: 2h" in last_comment(board, t), f"the Director's brief is recorded: {last_comment(board, t)}")
@@ -588,6 +594,24 @@ def timebox(board: Board) -> None:
     queued = board.sql(f"SELECT count(*) FROM ticket_board.notification_trace WHERE ticket_id = '{t}' "
                        "AND event = 'enqueue' AND detail->'payload'->>'kind' = 'research_timebox';")
     check(queued == "2", f"one notice per round: {queued}")
+    # SYRD-849: a round's notice still waiting when the ticket is back in Research for a later round is stale too.
+    check(short(board.act(t, rs.START, "director")) == "ok", "a third round")
+    board.sql(f"UPDATE ticket_board.ticket_research_briefs SET round_started_at = clock_timestamp() - interval '2 hours' "
+              f"WHERE ticket_id = '{t}';")
+    check(run() == 1, "its notice is queued")
+    check(short(board.act(t, rs.SUBMIT_NO_CODE, "researcher", reason="Not worth it: no licence.")) == "ok"
+          and short(board.act(t, rs.KICK_BACK, "audit", reason="Which licence? Cite it.")) == "ok"
+          and board.where(t) == ["research", "researcher"], "the finding is kicked back: a fourth round, in Research")
+    told = []
+    for _ in range(3):
+        board.busy.clear()
+        told += [m for m in to(board.one_pass(), "director") if "timebox" in m]
+    board.busy.clear()
+    dropped = board.sql(f"SELECT count(*) FROM ticket_board.notification_trace WHERE ticket_id = '{t}' AND event = 'drop' "
+                        "AND busy_reason = 'stale_notification' AND detail->'payload'->>'kind' = 'research_timebox';")
+    check(not told and dropped == "2",
+          f"the third round's notice is dropped as stale in the fourth round, though the ticket is in Research: "
+          f"{told} {dropped}")
     check(short(board.act(t, "defer", "director")) == "ok", "put down")
 
 

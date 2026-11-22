@@ -30,6 +30,8 @@ RESEARCH_MOVES = {
     "research_kick_back": research_stage.KICK_BACK,
     "return_finding": research_stage.RETURN,
     "close_on_finding": research_stage.CLOSE,
+    "publish_finding": research_stage.PUBLISH,
+    "finding_publication_kick_back": research_stage.PUBLICATION_KICK_BACK,
 }
 #: research-brief, and set-research-brief, its name as the board's operation.
 RESEARCH_COMMANDS = frozenset({"research_brief", "set_research_brief", *RESEARCH_MOVES})
@@ -85,7 +87,12 @@ def add_research_parsers(subparsers: Any, free_text: Callable[..., Any]) -> None
             ("research-kick-back", "Audit", "return a finding to the researcher: its evidence is missing or does "
              "not back its claims", "what is missing"),
             ("return-finding", "Director", "return a finding in triage to the researcher", "what is missing"),
-            ("close-on-finding", "Director", "close a research ticket as done on its finding", "the decision")):
+            ("close-on-finding", "Director", "close a research ticket as done on its finding (a no-commit finding, or "
+             "any finding on a board without the Publisher)", "the decision"),
+            ("publish-finding", "Director", "accept a finding with a commit: the Publisher publishes the findings "
+             "commit to main, then the ticket is done (boards with the Publisher)", "the decision"),
+            ("finding-publication-kick-back", "Director", "return a finding whose publication failed to the "
+             "researcher", "what the researcher must change")):
         move = subparsers.add_parser(name, help=f"{who}: {what}")
         move.add_argument("ticket_id")
         free_text(move, "--reason", required=True, help=helped)
@@ -105,8 +112,8 @@ def add_create_arguments(create: argparse.ArgumentParser, free_text: Callable[..
     free_text(create, "--unplanned-reason", default=None,
               help="plan-gated boards: why this ticket serves no deliverable (a bug, an ops one-off, a report)")
     create.add_argument("--plan", action="store_true",
-                        help="plan-gated boards: a plan ticket, the only way the plan changes; it needs the User's "
-                             "acceptance before it is closed")
+                        help="plan-gated boards: a plan ticket, the only way the plan changes; it needs Audit's "
+                             "sign-off and the User's acceptance before it is closed")
 
 
 def add_plan_parsers(subparsers: Any, free_text: Callable[..., Any]) -> None:

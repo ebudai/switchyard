@@ -785,6 +785,26 @@ ticket-board-write close-on-finding PGU-123 --reason-file decision.md   # Done, 
 ticket-board-write return-finding PGU-123 --reason-file missing.md      # back to the researcher
 ```
 
+**A finding with a commit, where the project runs the Publisher.** The findings
+file is a project document, so it reaches main like any approved candidate.
+Accept it with `publish-finding` instead of `close-on-finding`, which the board
+refuses for such a finding:
+
+```bash
+ticket-board-write publish-finding PGU-123 --reason-file decision.md     # publish, then Done
+```
+
+The Publisher publishes the findings commit as one fast-forward on main. Then
+the ticket is Done, with no Final Sign-Off: your acceptance was the decision.
+If main moved since the finding was built, the Publisher returns it to the
+researcher to rebase and resubmit. Anything the Publisher cannot fix comes to
+you in `publication_failed`. There, `workflow-action PGU-123 publication_retry`
+tries again, and
+`finding-publication-kick-back PGU-123 --reason-file why.md` returns it to the
+researcher. The ordinary `publication-kick-back` is refused for a finding. A
+no-commit finding closes with `close-on-finding` as before. Findings take no
+documentation review.
+
 or file the implementation tickets the finding justifies, each linking the
 research ticket, and then close it. Nothing is filed automatically. A research
 ticket never reaches User Review.
@@ -795,7 +815,8 @@ When the research needs something only the User has, `await-user` works in
 Research. When the timebox passes with no finding, you are told once for that
 round. The board stops nothing; wait, return it, or put it down.
 This section and `switchyard research-stage --help` are the current
-procedure; [SYRD-842](../syrd-842-research-stage.md) is historical design and
+procedure; [SYRD-842](../syrd-842-research-stage.md) and
+[SYRD-849](../syrd-849-findings-publication.md) are historical design and
 rollout evidence.
 
 ## Scoping from a plan: the optional plan gate
@@ -827,6 +848,10 @@ ticket-board-write set-deliverable PGU-124 --unplanned-reason-file why.md
 ```
 
 Unplanned tickets stay allowed, and are counted apart in the plan's status.
+
+A narrated override (`force-move`) into Implementation skips the deliverable
+check. That is a way round the plan, for last-resort recovery only. Its
+narration must name the deliverable the ticket serves, or why it is unplanned.
 
 **On the board page.** The ticket view says which deliverable a ticket serves,
 or that it is unplanned and why. **Deliverable**, beside the Show switches,

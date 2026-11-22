@@ -31,6 +31,8 @@ transitions composed here.
   - `publication_escalate` to `publication_failed`, for anything the Director
     has to fix: a credential, a policy, the publication target, the journal or
     a helper;
+  - on a board with the research stage, its finding moves too, composed and
+    validated by research_stage (SYRD-849);
 * the Director's two ways out of `publication_failed`: `publication_retry`
   back to the Publisher, and `publication_kick_back` to the implementer, which
   clears every sign-off like the Publisher's own return;
@@ -204,7 +206,7 @@ def with_publisher(document: dict[str, Any]) -> dict[str, Any]:
     cfg["transitions"] += _composed_transitions(cfg, impl, after) + exits
     removed = [name for name in cfg.get("remove_stages") or [] if name not in (PUBLICATION_STAGE, FAILED_STAGE)]
     cfg["remove_stages"] = removed
-    return validate(cfg)
+    return validate(_recompose_research(cfg))
 
 
 def without_publisher(document: dict[str, Any]) -> dict[str, Any]:
@@ -229,7 +231,15 @@ def without_publisher(document: dict[str, Any]) -> dict[str, Any]:
     role = publisher_role(cfg)
     if role is not None:
         role["active"] = False
-    return validate(cfg)
+    return validate(_recompose_research(cfg))
+
+
+def _recompose_research(cfg: dict[str, Any]) -> dict[str, Any]:
+    """The research stage's moves for a board with (or without) the Publisher: a finding with a commit reaches main
+    through it (SYRD-849)."""
+    from scripts.ticket_board.research_stage import recompose_research
+
+    return recompose_research(cfg)
 
 
 def validate_publisher(cfg: dict[str, Any], need: Callable[[bool, str], None]) -> None:
@@ -241,10 +251,13 @@ def validate_publisher(cfg: dict[str, Any], need: Callable[[bool, str], None]) -
              "invalid publisher: it is a system actor with no model, runtime, pane, session, prompt or capability")
         need(not any(PUBLISHER_ROLE in s["owners"] and s["name"] != PUBLICATION_STAGE for s in cfg["stages"]),
              "invalid publisher: it owns the publication stage and nothing else")
+        from scripts.ticket_board.research_stage import PUBLISHER_FINDING_ACTIONS
+
         need(not any((PUBLISHER_ROLE in t["actors"] or t.get("relays_decision_of") == PUBLISHER_ROLE)
-                     and t["action"] not in PUBLISHER_ACTIONS for t in cfg["transitions"]),
+                     and t["action"] not in PUBLISHER_ACTIONS + PUBLISHER_FINDING_ACTIONS for t in cfg["transitions"]),
              "invalid publisher: its only moves are publication_published, publication_return and "
-             "publication_escalate")
+             "publication_escalate, and on a board with the research stage its finding_published and "
+             "finding_publication_return (validated with that stage)")
     stage = publication_stage(cfg)
     composed = [t for t in cfg["transitions"] if t["action"] in PUBLISHER_ACTIONS + DIRECTOR_ACTIONS]
     stages = {s["name"]: s for s in cfg["stages"]}

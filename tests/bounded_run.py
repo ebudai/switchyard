@@ -27,30 +27,47 @@ This module is the reusable fix. Import it from a scratch runner
   - **Bounded output:** at most `output_limit` bytes of each output file are
     read, as head and tail.
   - The result says `completed` or `timeout`, never both.
-* `Deadline(seconds)` is a whole-run budget; `case_timeout()` never gives a
-  case more time than the run has left.
+* `Deadline(seconds)` is a whole-run budget, or none (`Deadline(None)`);
+  `case_timeout()` never gives a case more time than the run has left.
 * `run_mutation_plan(...)` applies each mutant with exact-count edits, runs
   the suites through `run_bounded`, and restores the file byte-for-byte and
   clears `__pycache__` in `finally`. It records every mutant as `killed`,
   `survived` or `inconclusive`. A timeout, a run that left processes behind
-  (not `clean`), a spent whole-run budget or an edit that does not apply is
-  `inconclusive`: never a kill, and never a pass.
+  (not `clean`), a spent whole-run budget, an edit that does not apply, or a
+  suite that fails on the clean tree is `inconclusive`: never a kill, and
+  never a pass.
 * On the command line, `run` exits 124 on a timeout and 125 when processes
   outlived cleanup. `mutate` exits 0 when every mutant was killed, 1 when any
   survived, and 2 when any was inconclusive.
 
-Limits. The defaults come from measured runtimes (2026-09-30):
-- 80 focused suite runs from SYRD-515 to SYRD-518 had a median under 1s, a
-  90th percentile of 6s and a maximum of 32s
-  (`ticket_board_listener_pane_state_authority_test`).
-- SYRD-402's whole 34-mutant run took 14s once it was bounded.
-
-So a case gets 300s (about nine times the slowest suite). A whole run gets
-540s, just under the Bash tool's 600-second foreground limit, so an
-over-long run fails inside the turn that started it instead of drifting into
-the background. Override them deliberately with `--case-seconds` and
-`--total-seconds`, or with `SWITCHYARD_BOUNDED_CASE_SECONDS` and
-`SWITCHYARD_BOUNDED_TOTAL_SECONDS`.
+Limits (SYRD-845). The deadlines stop a hang, never a long but legitimate
+run:
+- **No whole-run budget by default.** A plan runs until every mutant has a
+  result, however long the scoped plan takes. A caller that wants a budget
+  asks for one: `total_seconds=`, `--total-seconds` or
+  `SWITCHYARD_BOUNDED_TOTAL_SECONDS`. A plan longer than a foreground tool
+  call runs in the background, through the CLI's background-task tool (which
+  says when it exits), or under `switchyard-bounded --expect <duration>`,
+  which tells the board how long it should take and stops nothing.
+- **Each case's hang deadline scales with its suite.** Before the first
+  mutant, `run_mutation_plan` runs each suite once on the clean tree and
+  gives that suite's cases `max(CASE_TIMEOUT_FLOOR_SECONDS, clean seconds x
+  CASE_TIMEOUT_FACTOR)`: ten times the clean run, but at least 60s. The old
+  fixed 300s was about nine times the slowest suite then measured (32s), so
+  ten keeps that margin for every suite, including one whose clean run
+  alone is minutes long. The floor covers interpreter and database start-up
+  jitter on a sub-second suite and a loaded host. A caller that already
+  measured the clean runs passes `clean_seconds=` (or `"clean_seconds"` in a
+  plan file) instead.
+- **A clean run that fails, hangs or leaves processes** gives no deadline
+  and no baseline: every mutant is `inconclusive`, because a red suite would
+  "kill" every mutant. The clean run itself stops only a suite that never
+  returns, at `CLEAN_RUN_SECONDS` (an hour).
+- **An explicit deadline overrides the scaling:** `case_seconds=`,
+  `--case-seconds` or `SWITCHYARD_BOUNDED_CASE_SECONDS`.
+- **`run`, one command with nothing measured,** gets `--case-seconds`, or
+  ten times `--clean-seconds` (at least the floor), or else
+  `DEFAULT_CASE_SECONDS` (300s).
 
 Descendants that leave the group. A process that leaves the process group
 on purpose (`setsid`, `start_new_session=True`) is not reached by the group
@@ -72,6 +89,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shutil
 import signal
@@ -83,8 +101,15 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
+#: The hang deadline of a command with nothing measured: `run` given no --case-seconds or --clean-seconds.
 DEFAULT_CASE_SECONDS = 300.0
-DEFAULT_TOTAL_SECONDS = 540.0
+#: No whole-run budget unless the caller asks for one (SYRD-845).
+DEFAULT_TOTAL_SECONDS: float | None = None
+#: A mutation case's hang deadline: its suite's clean runtime times the factor, but at least the floor (SYRD-845).
+CASE_TIMEOUT_FACTOR = 10.0
+CASE_TIMEOUT_FLOOR_SECONDS = 60.0
+#: The clean run is unmodified code: this stops only a clean suite that never returns.
+CLEAN_RUN_SECONDS = 3600.0
 DEFAULT_GRACE_SECONDS = 5.0
 DEFAULT_OUTPUT_LIMIT = 64 * 1024
 
@@ -95,12 +120,24 @@ SURVIVED = "survived"
 INCONCLUSIVE = "inconclusive"
 
 
-def configured_seconds(value: float | None, env_name: str, default: float) -> float:
-    """An explicit value, else the environment override, else the documented default."""
+def configured_optional(value: float | None, env_name: str) -> float | None:
+    """An explicit value, else the environment override, else None."""
     if value is not None:
         return float(value)
     raw = os.environ.get(env_name, "").strip()
-    return float(raw) if raw else default
+    return float(raw) if raw else None
+
+
+def configured_seconds(value: float | None, env_name: str, default: float) -> float:
+    """An explicit value, else the environment override, else the documented default."""
+    configured = configured_optional(value, env_name)
+    return default if configured is None else configured
+
+
+def scaled_case_seconds(clean_seconds: float, *, factor: float = CASE_TIMEOUT_FACTOR,
+                        floor: float = CASE_TIMEOUT_FLOOR_SECONDS) -> float:
+    """A case's hang deadline from its suite's clean runtime: `factor` times it, but at least `floor`."""
+    return max(float(floor), float(clean_seconds) * float(factor))
 
 
 @dataclass(frozen=True)
@@ -325,13 +362,15 @@ def run_bounded(
 
 
 class Deadline:
-    """A whole-run budget shared by every case in the run."""
+    """A whole-run budget shared by every case in the run; `None` is no budget at all."""
 
-    def __init__(self, seconds: float) -> None:
-        self.seconds = float(seconds)
+    def __init__(self, seconds: float | None) -> None:
+        self.seconds = None if seconds is None else float(seconds)
         self.started = time.monotonic()
 
     def remaining(self) -> float:
+        if self.seconds is None:
+            return math.inf
         return max(0.0, self.seconds - (time.monotonic() - self.started))
 
     def expired(self) -> bool:
@@ -392,6 +431,10 @@ def run_mutation_plan(
     killed_when: Callable[[Outcome], bool] = lambda outcome: outcome.returncode != 0,
     report: Callable[[MutantResult], None] | None = None,
     grace: float = DEFAULT_GRACE_SECONDS,
+    clean_seconds: Sequence[float] | None = None,
+    timeout_factor: float = CASE_TIMEOUT_FACTOR,
+    floor_seconds: float = CASE_TIMEOUT_FLOOR_SECONDS,
+    clean_run_seconds: float = CLEAN_RUN_SECONDS,
 ) -> list[MutantResult]:
     """Run every suite against every mutant, in order, stopping a mutant's suites at its first kill.
 
@@ -399,17 +442,35 @@ def run_mutation_plan(
     counts any non-zero exit. A caller whose sandbox refuses host access
     should exclude those refusals, because a refusal is not the test catching
     the mutant. A timeout never reaches `killed_when`.
+
+    There is no whole-run budget unless `total_seconds` (or its environment
+    variable) gives one. Each suite's cases get `case_seconds` when it is
+    given, else `scaled_case_seconds` of the suite's clean runtime: from
+    `clean_seconds`, one per suite, or measured here on the clean tree first.
     """
     root = Path(root)
-    case = configured_seconds(case_seconds, "SWITCHYARD_BOUNDED_CASE_SECONDS", DEFAULT_CASE_SECONDS)
-    deadline = Deadline(configured_seconds(total_seconds, "SWITCHYARD_BOUNDED_TOTAL_SECONDS", DEFAULT_TOTAL_SECONDS))
+    total = configured_optional(total_seconds, "SWITCHYARD_BOUNDED_TOTAL_SECONDS")
+    deadline = Deadline(DEFAULT_TOTAL_SECONDS if total is None else total)
+    explicit = configured_optional(case_seconds, "SWITCHYARD_BOUNDED_CASE_SECONDS")
+    if explicit is not None:
+        cases, refused = [explicit] * len(suites), ""
+    elif clean_seconds is not None:
+        if len(clean_seconds) != len(suites):
+            raise ValueError(f"clean_seconds has {len(clean_seconds)} entries for {len(suites)} suites")
+        cases = [scaled_case_seconds(s, factor=timeout_factor, floor=floor_seconds) for s in clean_seconds]
+        refused = ""
+    else:
+        cases, refused = _clean_deadlines(root, suites, deadline, env, killed_when, grace, timeout_factor,
+                                          floor_seconds, clean_run_seconds)
     results: list[MutantResult] = []
     for mutant in mutants:
         started = time.monotonic()
-        if deadline.expired():
+        if refused:
+            result = MutantResult(mutant.name, INCONCLUSIVE, f"not run: {refused}", 0.0)
+        elif deadline.expired():
             result = MutantResult(mutant.name, INCONCLUSIVE, f"not run: the whole-run budget of {deadline.seconds:g}s was spent", 0.0)
         else:
-            result = _run_one(root, mutant, suites, case, deadline, env, killed_when, grace)
+            result = _run_one(root, mutant, suites, cases, deadline, env, killed_when, grace)
         result.seconds = round(time.monotonic() - started, 3)
         results.append(result)
         if report is not None:
@@ -417,20 +478,42 @@ def run_mutation_plan(
     return results
 
 
-def _run_one(root, mutant, suites, case, deadline, env, killed_when, grace) -> MutantResult:
+def _clean_deadlines(root, suites, deadline, env, killed_when, grace, factor, floor,
+                     clean_run_seconds) -> tuple[list[float], str]:
+    """Each suite's case deadline, scaled from one run of it on the clean tree; or why there is none."""
+    cases = []
+    for argv in suites:
+        command = " ".join(argv)
+        budget = deadline.case_timeout(clean_run_seconds)
+        if budget <= 0:
+            return cases, f"the whole-run budget of {deadline.seconds:g}s was spent on the clean runs"
+        outcome = run_bounded(argv, timeout=budget, cwd=root, env=env, label=f"clean :: {command}", grace=grace)
+        if outcome.timed_out:
+            return cases, f"the clean run of {command} did not finish: {outcome.reason}"
+        if not outcome.clean:
+            return cases, f"the clean run of {command} left processes behind: {outcome.reason}"
+        if killed_when(outcome):
+            return cases, (f"{command} fails on the clean tree (exit {outcome.returncode}), so it would kill every "
+                           "mutant")
+        cases.append(scaled_case_seconds(outcome.seconds, factor=factor, floor=floor))
+    return cases, ""
+
+
+def _run_one(root, mutant, suites, cases, deadline, env, killed_when, grace) -> MutantResult:
     try:
         original = _apply(root, mutant)
     except (OSError, ValueError) as exc:
         return MutantResult(mutant.name, INCONCLUSIVE, f"not applied: {exc}", 0.0)
     try:
         records = []
-        for argv in suites:
+        for argv, case in zip(suites, cases):
             budget = deadline.case_timeout(case)
             if budget <= 0:
                 return MutantResult(mutant.name, INCONCLUSIVE, "the whole-run budget ran out mid-mutant", 0.0, records)
             outcome = run_bounded(argv, timeout=budget, cwd=root, env=env, label=f"{mutant.name} :: {' '.join(argv)}", grace=grace)
             records.append({"argv": list(argv), "status": outcome.status, "returncode": outcome.returncode,
-                            "seconds": outcome.seconds, "tail": (outcome.stdout + outcome.stderr).strip()[-300:]})
+                            "seconds": outcome.seconds, "timeout": outcome.timeout,
+                            "tail": (outcome.stdout + outcome.stderr).strip()[-300:]})
             if outcome.timed_out:
                 return MutantResult(mutant.name, INCONCLUSIVE, f"timeout: {outcome.reason}", 0.0, records)
             if not outcome.clean:
@@ -453,7 +536,9 @@ def summarize(results: Sequence[MutantResult]) -> tuple[str, int]:
 
 # -- command line ---------------------------------------------------------------------------------------------------
 def _cli_run(args: argparse.Namespace) -> int:
-    timeout = configured_seconds(args.case_seconds, "SWITCHYARD_BOUNDED_CASE_SECONDS", DEFAULT_CASE_SECONDS)
+    clean = getattr(args, "clean_seconds", None)  # a caller's own Namespace may predate it
+    measured = DEFAULT_CASE_SECONDS if clean is None else scaled_case_seconds(clean)
+    timeout = configured_seconds(args.case_seconds, "SWITCHYARD_BOUNDED_CASE_SECONDS", measured)
     outcome = run_bounded(args.command, timeout=timeout, label=" ".join(args.command))
     sys.stdout.write(outcome.stdout)
     sys.stderr.write(outcome.stderr)
@@ -474,7 +559,7 @@ def _cli_mutate(args: argparse.Namespace) -> int:
         print(json.dumps(asdict(result), sort_keys=True), flush=True)
 
     results = run_mutation_plan(mutants, plan["suites"], root=plan.get("root", "."), case_seconds=args.case_seconds,
-                                total_seconds=args.total_seconds, report=emit)
+                                total_seconds=args.total_seconds, report=emit, clean_seconds=plan.get("clean_seconds"))
     line, code = summarize(results)
     print(line, flush=True)
     return code
@@ -484,12 +569,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Bounded execution for mutation and adversarial test runs.")
     sub = parser.add_subparsers(dest="verb", required=True)
     run = sub.add_parser("run", help="run one command with a deadline; exit 124 on timeout, like timeout(1)")
-    run.add_argument("--case-seconds", type=float, default=None)
+    run.add_argument("--case-seconds", type=float, default=None, help="the deadline itself")
+    run.add_argument("--clean-seconds", type=float, default=None,
+                     help="the command's measured clean runtime: the deadline is ten times it, at least 60s")
     run.add_argument("command", nargs=argparse.REMAINDER)
     mutate = sub.add_parser("mutate", help="run a JSON mutation plan; one JSON line per mutant, then a summary")
     mutate.add_argument("plan")
-    mutate.add_argument("--case-seconds", type=float, default=None)
-    mutate.add_argument("--total-seconds", type=float, default=None)
+    mutate.add_argument("--case-seconds", type=float, default=None,
+                        help="every case's deadline (default: ten times its suite's clean run, at least 60s)")
+    mutate.add_argument("--total-seconds", type=float, default=None,
+                        help="a whole-run budget (default: none)")
     args = parser.parse_args(argv)
     if args.verb == "run":
         if args.command and args.command[0] == "--":

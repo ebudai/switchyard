@@ -11,7 +11,8 @@ root, which is where every suite and every reviewer ran it.
 
 1. Static: no module the board server or the listener can import holds a
    `scripts.`-qualified import, at module level or inside a function. "Can
-   import" is the closure of every import, relative or sibling, from the two
+   import" is the closure of every import, relative, sibling or
+   package-absolute (`from ticket_board import x`, SYRD-856), from the two
    programs' own `ticket_board` entry modules. The one exception keeps a
    fallback for the release layout and records why. Each module outside the
    closure that holds one is listed with its reason, and the check fails if one
@@ -24,8 +25,10 @@ root, which is where every suite and every reviewer ran it.
    - `configure_workflow` as a dry run, then applied, answers through the
      server's own socket;
    - the listener's pass reaches the Publisher, which runs only after the
-     workflow validated (`validate_publisher`), and the listener is still
-     running.
+     workflow validated (`validate_publisher`), and the Publisher records its
+     own outcome for the ticket: "was not recorded", which a Publisher that
+     failed on an import logs with no traceback, is refused (SYRD-856). The
+     listener is still running.
 
 `SYRD853_RELEASE=<commit>` installs that commit instead of HEAD. On bceacabf
 both runtime checks fail.
@@ -41,6 +44,7 @@ import ast
 import getpass
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -108,6 +112,10 @@ def imports(module: str, package: Path = PACKAGE) -> tuple[set[str], list[tuple[
                 qualified.append((node, target))
                 if target.startswith("scripts.ticket_board."):
                     siblings.add(target.split(".")[2])
+            elif target == "ticket_board":
+                siblings |= {alias.name for alias in node.names}  # `from ticket_board import x` (SYRD-856)
+            elif target.startswith("ticket_board."):
+                siblings.add(target.split(".")[1])  # `from ticket_board.x import y`
             elif node.level == 0:
                 siblings.add(target.split(".")[0])  # `from publisher_stage import ...`, outside the package
         elif isinstance(node, ast.Import):
@@ -116,6 +124,8 @@ def imports(module: str, package: Path = PACKAGE) -> tuple[set[str], list[tuple[
                     qualified.append((node, alias.name))
                     if alias.name.startswith("scripts.ticket_board."):
                         siblings.add(alias.name.split(".")[2])
+                elif alias.name.startswith("ticket_board."):
+                    siblings.add(alias.name.split(".")[1])  # `import ticket_board.x`
                 else:
                     siblings.add(alias.name.split(".")[0])
     return siblings & names, qualified
@@ -211,6 +221,19 @@ def test_static() -> None:
             found = violations(copy / "ticket_board", copy)
             check(len(found) == 1 and found[0].startswith(f"{module}.py:"), f"the guard names {module}'s: {found}")
             path.write_text(text)
+        # SYRD-856: a holder reachable only through a package-absolute import is followed and reported, in each form.
+        holder = copy / "ticket_board" / "zz_holder.py"
+        holder.write_text("def f():\n    from scripts.ticket_board.role_kinds import IMPLEMENTER\n    return IMPLEMENTER\n")
+        stage = copy / "ticket_board" / "publisher_stage.py"
+        text = stage.read_text()
+        for form in ("from ticket_board import zz_holder", "from ticket_board.zz_holder import f",
+                     "import ticket_board.zz_holder"):
+            stage.write_text(text + f"\n\ndef _reach():\n    {form}  # noqa: F401\n")
+            found = violations(copy / "ticket_board", copy)
+            check(any(line.startswith("zz_holder.py:2 ") for line in found),
+                  f"a holder reached only by `{form}` is reported: {found}")
+        stage.write_text(text)
+        holder.unlink()
         path = copy / "ticket_board" / "provision_role_tooling.py"
         text = path.read_text()
         path.write_text(text.replace("from repository_hooks import", "from repository_hooks_gone import"))
@@ -326,13 +349,17 @@ def test_release(commit: str) -> None:
                     env=service_env(tmp, TICKET_BOARD_URL=f"http://127.0.0.1:{port}"),
                     stdout=sink, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, cwd="/"))
             listener = processes[1]
+            # SYRD-856: the Publisher's own outcome for CER-1, never "was not recorded": a Publisher that failed on
+            # an import logs that line with no traceback (Audit's mutant on SYRD-853).
+            outcome = re.compile(r"Publisher: CER-1 (?!was not recorded)(\S+)")
             deadline = time.monotonic() + 300  # a hang guard: a pass takes well under a second
-            while ("Publisher: CER-1" not in listener_log.read_text() and listener.poll() is None
-                   and time.monotonic() < deadline):
+            while (not outcome.search(listener_log.read_text()) and "Publisher: CER-1 was not recorded"
+                   not in listener_log.read_text() and listener.poll() is None and time.monotonic() < deadline):
                 time.sleep(0.2)
             said = listener_log.read_text()
-            check("Publisher: CER-1" in said, f"the release's listener passes validate_publisher and reaches the "
-                  f"Publisher with CER-1: {said[-2000:]}")
+            check(outcome.search(said) and "was not recorded" not in said and "No module named" not in said,
+                  f"the release's listener passes validate_publisher and its Publisher records an outcome for "
+                  f"CER-1: {said[-2000:]}")
             check(listener.poll() is None and "Traceback" not in said,
                   f"and is still running, with no traceback: {said[-2000:]}")
         finally:

@@ -624,6 +624,14 @@ reused; a Librarian commit of prose nothing executes needs no rerun. After a
 merge commit, a short integration smoke check is enough unless the merge
 needed real resolution or pulled in changed dependencies.
 
+Code the served board or listener loads is the exception to reuse: suites run
+it from the repository root, where `scripts.ticket_board` imports, and the
+served processes do not. When a candidate touches it, run the release smoke on
+the candidate before you sign, and read Audit's run of it:
+`git archive <candidate> scripts examples | tar -x -C <dir>`, then
+`python3 -I -B scripts/release_smoke.py --release <dir> --project <any
+name>`. NOT READY is a kick-back, whatever the suites said.
+
 **Your own mutants go on the change.** Put them on the lines and behaviours
 the candidate adds or changes and run them against the tests covering that
 area, never the whole corpus: a few semantic mutants beat hundreds of syntactic
@@ -691,6 +699,14 @@ the live workflow and command help are the current operating contract;
   root's read-only dry run, `upgrade-tenant-release` with the same commit
   applies it, and `deploy-release` deploys an approved release. The helper runs
   them for your registered pane and no other process, and journals each run.
+  Both the preview and the deploy first run the release smoke: the release's
+  own board and listener, from root's installed tree, on a throwaway database.
+  NOT READY stops them before anything live changes. After the switch the
+  deploy watches the listener. One that does not hold is put back on the
+  previous release with the board (exit 3, REVERTED), or, where a migration it
+  applied is not declared safe for the previous release's code (the rule
+  `rollback-release` uses), stopped and left for you (exit 1, NOT REVERTED).
+  Either way the release phase is blocked with the reason.
 - To go back, `switchyard privileged-action <project> rollback-release
   commit=<sha>` returns your tenant to the board release its last upgrade
   replaced, still staged for it: board, listener and role tooling, never the

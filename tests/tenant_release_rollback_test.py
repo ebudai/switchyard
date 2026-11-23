@@ -95,6 +95,9 @@ class Host:
             if sql == "SELECT name FROM ticket_board.schema_migrations":
                 self.steps.append("read applied migrations")
                 return result(0, "\n".join(self.applied) + "\n")
+            if sql == "SELECT document::text FROM ticket_board.workflow_configuration":
+                self.steps.append("read declared workflow")  # SYRD-854: the release smoke's, before the deploy
+                return result(0, "")
             for expression, answer in self.answers.items():
                 if f"({expression})" in sql:
                     self.steps.append(f"ask {expression}")
@@ -104,6 +107,13 @@ class Host:
             assert any(part.startswith(str(self.trusted_release) + "/") for part in argv), argv
             self.steps.append("migrate as postgres" if argv[-1].endswith("ticket-board-migrate") else "rbac as postgres")
             return result(0)
+        if argv[0] == "runuser" and any(str(part).endswith("/release_smoke.py") for part in argv):
+            self.steps.append("release smoke")  # SYRD-854: the release rolled back to is smoked like any other
+            return result(0, "release smoke: READY\n")
+        if "systemctl --user show" in text:
+            if self.steps[-1] != "watch listener":  # SYRD-854: the deploy watches the listener it started
+                self.steps.append("watch listener")
+            return result(0, "ActiveState=active\nSubState=running\nNRestarts=0\nMainPID=7\n")
         if "systemctl --user is-active" in text:
             return result(0 if self.listener == "active" else 3, self.listener)
         if text.startswith("systemctl is-active ") and text.endswith("-ticket-board.service"):

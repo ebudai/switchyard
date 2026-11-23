@@ -648,6 +648,10 @@ def _finish_upgrade(
             dry_run=dry_run,
         )
         release_blocked = launcher.release_update_blocked(release_status)
+        if dry_run and deploy_ref and not release_blocked and os.geteuid() == 0:
+            from scripts import release_smoke  # SYRD-854: the release's own board and listener, before READY
+
+            release_blocked = release_smoke.preview(release_status, config.project, runner=runner, say=print_func)
     if verdict is not None:
         verdict.release(status=release_status if final_cutover.is_complete and not release_root_problems else None,
                         withheld=not final_cutover.is_complete)

@@ -85,6 +85,14 @@ yours, in a throwaway worktree at the exact commit — green on the branch is no
 main. After a merge commit, a short integration smoke check is enough unless the merge
 needed real resolution or pulled in changed dependencies.
 
+Code the served board or listener loads is the exception to reusing recorded evidence:
+suites run it from the repository root, where `scripts.ticket_board` imports, and the
+served processes do not. When a candidate touches it, run the release smoke on the
+candidate before you sign, and read Audit's run of it: `git archive <candidate> scripts
+examples | tar -x -C <dir>`, then `python3 -I -B scripts/release_smoke.py --release <dir>
+--project <any name>` (`--workflow <file>` smokes a declared workflow). NOT READY
+is a kick-back, whatever the suites said ([the release smoke](../syrd-854-release-smoke.md)).
+
 **Say which is which.** Name what you ran yourself and what you reused, with the commit
 the reused result covers. "The implementer's run covers `<sha>`, tree `<tree>`, which
 audit verified and which is the tree I signed off; I ran the mutation myself" is a
@@ -654,7 +662,16 @@ cannot make, such as the tenant-control sudoers rule, happen there -- then
 `upgrade-tenant-release` applies it pinned to the same commit, and
 `deploy-release` deploys an approved release. The root-owned helper runs these
 only for your registered pane, and none of them asks you for a password: see
-[privileged actions](../privileged-actions.md). Going back is yours the same way:
+[privileged actions](../privileged-actions.md). The preview and the deploy both run
+the release smoke first: the release's own board and listener, from root's installed
+tree, on a throwaway database. NOT READY stops them before anything live changes.
+After the switch the deploy watches the listener, and starts one that was restarting
+when it began. A listener that does not hold is put back on the previous release with
+the board (exit 3, REVERTED), or, where a migration it applied is not declared safe
+for the previous release's code (the rule `rollback-release` uses), stopped and left for
+you (exit 1, NOT REVERTED). Either way the release phase is blocked with the reason
+([the release smoke](../syrd-854-release-smoke.md)).
+Going back is yours the same way:
 `switchyard privileged-action <project> rollback-release commit=<sha>` returns your
 tenant -- board, listener and role tooling -- to the board release its last upgrade
 replaced, still staged for it, unprompted and usable in an outage. Migrations stay

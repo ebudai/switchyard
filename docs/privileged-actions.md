@@ -9,6 +9,12 @@ switchyard privileged-action <project> upgrade-tenant-release commit=<release co
 switchyard privileged-action <project> deploy-release commit=<release commit>
 ```
 
+The preview and the deploy first run the release smoke: the release's own board and
+listener, from root's installed tree, on a throwaway database. NOT READY stops them
+before anything live changes. After the switch the deploy watches the listener and
+reverts or stops one that does not hold (exit 3 REVERTED, exit 1 NOT REVERTED; see
+[the release smoke](syrd-854-release-smoke.md)).
+
 Each one runs a single root-owned program, the privileged helper, through
 `pkexec`. None of them asks for a password from the tenant's own Director.
 
@@ -95,7 +101,8 @@ code in `scripts/ticket_board/schema_compatibility.py`, and any condition on
 that (such as "the research stage is not declared") must hold on the tenant's
 database. Otherwise it refuses, names each migration, and changes nothing.
 Then root's pin names the older release, `deploy-release` deploys it with its
-usual health gates, and the role tooling is restaged from it. A deploy that
+usual health gates, the release smoke and the listener watch included, and the role
+tooling is restaged from it. A deploy that
 fails puts the pin back. Every run is journalled, like any privileged action.
 
 An administrator can choose any earlier staged release, not only the last one:

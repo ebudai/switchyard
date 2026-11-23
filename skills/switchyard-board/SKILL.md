@@ -370,6 +370,11 @@ complete suite merely because the ticket entered their stage. The default is:
 3. Run focused checks chosen from the risk you see: the tests that answer a
    concrete review question, a mutant of your own, the boundary the change
    touches. Reuse the exact evidence for the rest.
+4. Code the served board or listener loads: run the release smoke on the
+   candidate before you sign (`git archive <candidate> scripts examples | tar
+   -x -C <dir>`, then `python3 -I -B scripts/release_smoke.py --release <dir>
+   --project <any name>`). Repository-root suites import `scripts.ticket_board`
+   and are not evidence for it. NOT READY is a kick-back.
 
 Rerun when something could make the result differ, and only the area it
 concerns where that is enough:

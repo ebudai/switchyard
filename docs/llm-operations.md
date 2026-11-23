@@ -98,6 +98,15 @@ and dashes in CLI subcommands.
   answering a review question, with recorded mutants reused. That limits scope,
   not how long the run takes. A whole-corpus run is for test tier `full`, a
   project that asks for one, or a milestone pass (board guide, “Test evidence”).
+- Code the served board or listener loads is proven from the release layout,
+  not the repository root, where `scripts.ticket_board` imports and the
+  served processes' `ticket_board` does not. Before Audit signs off such a
+  change, and before the Director's Final Sign-Off, run the release smoke on
+  the candidate: `git archive <candidate> scripts examples | tar -x -C <dir>`,
+  then `python3 -I -B scripts/release_smoke.py --release <dir> --project <any
+  name>` (READY or NOT READY; `--workflow <file>` for a declared workflow).
+  Repository-root suites are not evidence for served code. deploy-release runs
+  the same smoke before it changes anything.
 - Workflows, examples and configuration consumed by programs are product
   inputs, not prose. A documentation role reviews them but does not edit them.
 - Commit and publish from the checkout that actually contains the candidate.

@@ -68,16 +68,19 @@ class Host:
     """systemd and the deploy, as the recording runner answers them."""
 
     def __init__(self, tenant, board, unit_dir: Path, trusted_release: Path,
-                 *, stop="ok", units="ok", deploy="ok", start="ok", restart="ok", database="ok", postgres="ok") -> None:
+                 *, stop="ok", units="ok", deploy="ok", start="ok", restart="ok", database="ok", postgres="ok",
+                 smoke="ok", holds="ok", listener="active") -> None:
         self.tenant, self.board = tenant, board
         self.unit_dir = unit_dir
         self.trusted_release = trusted_release
         self.outcome = {"stop": stop, "units": units, "deploy": deploy, "start": start, "restart": restart,
-                        "database": database, "postgres": postgres}
+                        "database": database, "postgres": postgres, "smoke": smoke, "holds": holds}
         self.steps: list[str] = []
         # SYRD-700: whether root's template chain installed a staged (legacy) board or canary itself.
         self.legacy_installed = False
-        self.listener = "active"
+        self.listener = listener
+        # SYRD-854: the listener unit as `systemctl --user show` reports it to the watch after the switch.
+        self.restarts, self.pid = 0, 4100
 
     def move_board(self, commit: str) -> None:
         release = self.tenant.board_root / "releases" / commit
@@ -90,6 +93,35 @@ class Host:
     def __call__(self, argv, **_kwargs):
         text = " ".join(str(part) for part in argv)
         result = lambda code, out="": SimpleNamespace(returncode=code, stdout=out, stderr="" if code == 0 else "simulated failure")
+        if "systemctl --user show" in text:
+            # SYRD-854: a listener that crashes on the new release restarts between every two reads.
+            if not self.steps or self.steps[-1] != "watch listener":
+                self.steps.append("watch listener")
+            on_new = (self.tenant.board_root / "current").resolve().name == NEW
+            crashing = self.outcome["holds"] == "crash everywhere" or (self.outcome["holds"] == "crash" and on_new)
+            if self.listener == "active" and crashing:
+                self.restarts, self.pid = self.restarts + 1, self.pid + 1
+                return result(0, f"ActiveState=activating\nSubState=auto-restart\nNRestarts={self.restarts}\nMainPID=0\n")
+            state = "ActiveState=active\nSubState=running" if self.listener == "active" else "ActiveState=inactive\nSubState=dead"
+            return result(0, f"{state}\nNRestarts={self.restarts}\nMainPID={self.pid}\n")
+        if argv[0] == "runuser" and "SELECT name FROM ticket_board.schema_migrations" in text:
+            # SYRD-854 with SYRD-855's rule: the migrations the database applied are the new release's.
+            self.steps.append("read applied migrations")
+            applied = sorted(path.name for path in (self.trusted_release / "scripts/ticket_board/migrations").iterdir())
+            return result(0, "\n".join(applied) + "\n")
+        if argv[0] == "runuser" and "ticket_board.workflow_configuration" in text:
+            # SYRD-854: the smoke reads the tenant's declared workflow as the cluster's account, and writes nothing.
+            assert argv[1:4] == ["-u", "postgres", "--"] and argv[4:6] == ["env", "-i"] and _kwargs.get("cwd") == "/"
+            self.steps.append("read declared workflow")
+            return result(0, json.dumps({"project": "porter", "roles": [], "stages": []}))
+        if argv[0] == "runuser" and "release_smoke.py" in text:
+            # SYRD-854: the release smoke, as the tenant owner, against root's installed release of the commit.
+            assert argv[1:4] == ["-u", getpass.getuser(), "--"] and str(self.trusted_release) in argv, argv
+            self.steps.append("release smoke")
+            if self.outcome["smoke"] == "ok":
+                return result(0, "release smoke: every module imports\nrelease smoke: READY\n")
+            return result(1, "release smoke: NOT READY\nticket_board/publisher_stage.py:254 imports "
+                             "scripts.ticket_board.research_stage, and 'scripts' does not import in the release layout\n")
         if "systemctl --user is-active" in text:
             return result(0 if self.listener == "active" else 3, self.listener)
         if text.startswith("systemctl is-active ") and text.endswith("-ticket-board.service"):
@@ -175,7 +207,8 @@ def scenarios(tree: Path) -> dict:
 
     def run(name: str, *, deployed: str = OLD, pin: str | None = NEW, root: bool = True,
             action: str = "deploy-release", installed: tuple[str, ...] = (NEW, OLD), exact_installed: bool = False,
-            runtime: bool = True, installed_canary: str = "old", **outcome) -> None:
+            runtime: bool = True, installed_canary: str = "old", previous: tuple[str, ...] = ("pgu1_fixture.sql",),
+            added: tuple[str, ...] = (), **outcome) -> None:
         with tempfile.TemporaryDirectory(prefix="syrd531.") as raw:
             tmp = Path(raw)
             tenant = journal.Tenant(tmp, deployed=deployed)
@@ -189,6 +222,8 @@ def scenarios(tree: Path) -> dict:
                 # SYRD-706: what root migrates and grants from, as the cluster's account.
                 (release / "scripts" / "ticket_board" / "migrations").mkdir(parents=True, exist_ok=True)
                 (release / "scripts" / "ticket_board" / "migrations" / "pgu1_fixture.sql").write_text("SELECT 1;\n")
+                for migration in added if commit == NEW else ():  # SYRD-854: migrations the release applies
+                    (release / "scripts" / "ticket_board" / "migrations" / migration).write_text("SELECT 1;\n")
                 (release / "scripts" / "ticket_board" / "rbac.sql").write_text("SELECT 1;\n", encoding="utf-8")
                 (release / "scripts" / "ticket-board-migrate").write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
                 # SYRD-700: a release new enough to run under its exact unit carries the renderer.
@@ -196,6 +231,12 @@ def scenarios(tree: Path) -> dict:
                     (release / "scripts" / "ticket_board").mkdir(exist_ok=True)
                     (release / "scripts" / "ticket_board" / "release_units.py").write_text("# renderer\n",
                                                                                             encoding="utf-8")
+            # SYRD-854: the migrations the release the board serves now carries, for the revert's schema rule.
+            served = (tenant.board_root / "current").resolve() / "scripts" / "ticket_board" / "migrations"
+            served.mkdir(parents=True, exist_ok=True)
+            # The tenant's own copy even claims what the new release added: root decides from its own release.
+            for migration in (*previous, *added):
+                (served / migration).write_text("SELECT 1;\n")
             units = launcher.privileged_provision_dir("porter", root=launcher.switchyard_privileged_provision_root())
             units.mkdir(parents=True, exist_ok=True)
             plan = build_plan(
@@ -242,7 +283,10 @@ def scenarios(tree: Path) -> dict:
             saved = (launcher._resolve_switchyard_project, launcher._open_board_url, launcher.os.geteuid,
                      launcher.subprocess.run, operations.SHARED_RELEASES, operations.TRUSTED_OWNER_UID,
                      tenant_release_deploy.SYSTEM_UNIT_DIR, tenant_release_deploy.TRUSTED_UNIT_OWNER_UID,
-                     board_identity.effective_unit)
+                     board_identity.effective_unit, board_identity.board_opener)
+            # As root the close asks the board the installed unit names (SYRD-769); this host has no such unit, so
+            # it asks the stand-in board, as every other read here does.
+            board_identity.board_opener = lambda _config, _opener=None: None
             launcher._resolve_switchyard_project = lambda project, **_k: SimpleNamespace(slug="porter", config_path=tenant.config_path)
             launcher._open_board_url = board
             launcher.os.geteuid = (lambda: 0) if root else (lambda: 1006)
@@ -289,7 +333,7 @@ def scenarios(tree: Path) -> dict:
                 (launcher._resolve_switchyard_project, launcher._open_board_url, launcher.os.geteuid,
                  launcher.subprocess.run, operations.SHARED_RELEASES, operations.TRUSTED_OWNER_UID,
                  tenant_release_deploy.SYSTEM_UNIT_DIR, tenant_release_deploy.TRUSTED_UNIT_OWNER_UID,
-                 board_identity.effective_unit) = saved
+                 board_identity.effective_unit, board_identity.board_opener) = saved
             seen[name] = {
                 "code": code, "steps": host.steps, "said": "\n".join(printed),
                 "board": launcher._current_tenant_release(tenant.board_root)[1],
@@ -316,6 +360,12 @@ def scenarios(tree: Path) -> dict:
     run("release predates exact units", runtime=False)
     run("prepared release not installed", installed=(OLD,))
     run("database work fails", database="fail")
+    # SYRD-854: the smoke before anything live changes, and the listener watched after the switch.
+    run("release smoke not ready", smoke="fail")
+    run("listener crash-loops on the release", holds="crash")
+    run("listener crash-loops, the release migrated", holds="crash", added=("pgu2_new.sql",))
+    run("listener crash-loops on both releases", holds="crash everywhere")
+    run("listener was crash-looping before the deploy", listener="activating")
     return seen
 
 
@@ -328,7 +378,9 @@ def install_test_dispatch() -> None:
         original = tenant_release_deploy.switchyard_deploy_release_command
 
         def with_host(project, *, commit, **kwargs):
-            return original(project, commit=commit, runner=host, print_func=printed.append, **kwargs)
+            now = [0.0]  # SYRD-854: the listener watch's clock, advanced only by its own sleeps
+            return original(project, commit=commit, runner=host, print_func=printed.append, clock=lambda: now[0],
+                            sleep=lambda seconds: now.__setitem__(0, now[0] + seconds), **kwargs)
 
         launcher.switchyard_deploy_release_command = with_host
         try:
@@ -359,12 +411,12 @@ def main() -> int:
         return json.loads(line[len("RESULT "):])
 
     with tempfile.TemporaryDirectory(prefix="syrd531-before.") as raw:
+        # The commit's files alone: a sweep's repository is read-only, so no worktree can be added to it.
         before_tree = Path(raw) / "tree"
-        subprocess.run(["git", "-C", str(ROOT), "worktree", "add", "--detach", "-q", str(before_tree), BEFORE], check=True)
-        try:
-            before = child("--catalogue", before_tree)
-        finally:
-            subprocess.run(["git", "-C", str(ROOT), "worktree", "remove", "--force", str(before_tree)], check=False)
+        before_tree.mkdir()
+        subprocess.run(f"git -C {shlex.quote(str(ROOT))} archive {BEFORE} scripts | tar -C {shlex.quote(str(before_tree))} -x",
+                       shell=True, check=True)
+        before = child("--catalogue", before_tree)
     check(before["deploy-release"] == before["upgrade-tenant-release"]
           and before["deploy-release"][1:] == ["upgrade", "porter", "--deploy-ref", NEW],
           f"reproduced: main's `deploy-release` asks root for the same preparation as `upgrade-tenant-release`: {before}")
@@ -377,9 +429,13 @@ def main() -> int:
     now = child("--scenarios", ROOT)
     ok = now["deployed"]
     check(ok["code"] == 0 and ok["steps"] == [
-              "postgres probe", "stop listener", "install templates", "install exact units",
-              "migrate as postgres", "rbac as postgres", "canary exact candidate", "deploy-restart exact candidate", "health passed", "start listener"],
-          f"a prepared tenant: listener down, root's units, the deploy, listener up -- in that order: {ok['steps']} {ok['said'][-600:]}")
+              "postgres probe", "read declared workflow", "release smoke", "stop listener", "install templates",
+              "install exact units", "migrate as postgres", "rbac as postgres", "canary exact candidate",
+              "deploy-restart exact candidate", "health passed", "start listener", "watch listener"],
+          f"a prepared tenant: the release smoke, listener down, root's units, the deploy, listener up and watched -- in "
+          f"that order: {ok['steps']} {ok['said'][-600:]}")
+    check("release smoke: READY" in ok["said"] and "REVERTED" not in ok["said"],
+          f"SYRD-854: a healthy deploy says the smoke passed and reverts nothing: {ok['said'][-800:]}")
     check(ok["board"] == NEW and ok["release"] == "done" and ok["listener"] == "active",
           f"the board serves the release and the phase is closed against it: {ok}")
     check(NEW in ok["board_unit"],
@@ -399,7 +455,7 @@ def main() -> int:
           f"preparation is not activation: an unprepared tenant is refused before anything runs: {unprepared}")
     failed = now["deploy fails, board unchanged"]
     check(failed["code"] == 1 and failed["steps"] == [
-              "postgres probe", "stop listener", "install templates", "install exact units", "migrate as postgres", "rbac as postgres", "canary exact candidate",
+              "postgres probe", "read declared workflow", "release smoke", "stop listener", "install templates", "install exact units", "migrate as postgres", "rbac as postgres", "canary exact candidate",
               "deploy-restart exact candidate",
               "health failed", "restore units", "restart restored board", "start listener"]
           and failed["board"] == OLD and failed["listener"] == "active" and failed["release"] == "blocked",
@@ -408,14 +464,14 @@ def main() -> int:
           f"failed health restores the captured board unit before the listener: {failed}")
     database = now["database work fails"]
     check(database["code"] == 1 and database["steps"] == [
-              "postgres probe", "stop listener", "install templates", "install exact units", "migrate as postgres", "restore units",
+              "postgres probe", "read declared workflow", "release smoke", "stop listener", "install templates", "install exact units", "migrate as postgres", "restore units",
               "restart restored board", "start listener"]
           and database["board"] == OLD and database["listener"] == "active" and database["release"] == "blocked"
           and "the database work for" in database["said"] and "as postgres failed" in database["said"],
           f"SYRD-706: root's migration fails: no tenant deploy runs, the units come back, the phase is blocked: {database}")
     moved = now["deploy fails, board moved"]
     check(moved["code"] == 1 and moved["steps"] == [
-              "postgres probe", "stop listener", "install templates", "install exact units", "migrate as postgres", "rbac as postgres", "canary exact candidate",
+              "postgres probe", "read declared workflow", "release smoke", "stop listener", "install templates", "install exact units", "migrate as postgres", "rbac as postgres", "canary exact candidate",
               "deploy-restart exact candidate",
               "health failed", "restore units", "restart restored board"]
           and moved["listener"] == "inactive" and moved["release"] == "blocked" and "left stopped" in moved["said"],
@@ -436,7 +492,8 @@ def main() -> int:
           f"{[n for n, r in now.items() if r['legacy_installed']]}")
     converged = now["already named, legacy unit"]
     check(converged["code"] == 0 and converged["steps"] == [
-              "postgres probe", "stop listener", "install templates", "install exact units", "restart board", "start listener"]
+              "postgres probe", "stop listener", "install templates", "install exact units", "restart board", "start listener",
+              "watch listener"]
           and converged["release"] == "done" and NEW in converged["board_unit"]
           and "-E -s -B" in converged["board_unit"] and "EnvironmentFile=" not in converged["board_unit"],
           f"a tenant already naming the release under a legacy unit converges on root's exact unit: no deploy, "
@@ -446,7 +503,8 @@ def main() -> int:
     for name in ("exact board, legacy canary", "exact board, another release's canary"):
         both = now[name]
         check(both["code"] == 0 and both["steps"] == [
-                  "postgres probe", "stop listener", "install templates", "install exact units", "restart board", "start listener"]
+                  "postgres probe", "stop listener", "install templates", "install exact units", "restart board", "start listener",
+                  "watch listener"]
               and both["release"] == "done" and f"releases/{NEW}/scripts/ticket-board.py" in both["canary_unit"]
               and f"releases/{OLD}" not in both["canary_unit"] and "/bin/sh" not in both["canary_unit"],
               f"{name}: both units converge on root's render of the release: {both}")
@@ -468,6 +526,44 @@ def main() -> int:
     unprivileged = now["not root"]
     check(unprivileged["code"] == 1 and unprivileged["steps"] == [] and "Nothing was deployed" in unprivileged["said"],
           f"not root: nothing: {unprivileged}")
+    # SYRD-854: the release smoke refuses before anything live changes.
+    smoked = now["release smoke not ready"]
+    check(smoked["code"] == 1 and smoked["steps"] == ["postgres probe", "read declared workflow", "release smoke"]
+          and smoked["board"] == OLD and smoked["listener"] == "active" and smoked["release"] == "blocked"
+          and smoked["board_unit"] == "old board unit\n"
+          and "NOT READY" in smoked["said"] and "'scripts' does not import in the release layout" in smoked["said"]
+          and "nothing was deployed: the board, its database and the listener were not touched" in smoked["said"],
+          f"a release the smoke finds NOT READY: no listener stop, no migration, no unit, the reason recorded: {smoked}")
+    # SYRD-854: a listener that does not hold on the new release.
+    deploy = ["postgres probe", "read declared workflow", "release smoke", "stop listener", "install templates",
+              "install exact units", "migrate as postgres", "rbac as postgres", "canary exact candidate",
+              "deploy-restart exact candidate", "health passed", "start listener", "watch listener"]
+    reverted = now["listener crash-loops on the release"]
+    check(reverted["code"] == 3 and reverted["steps"] == deploy + ["read applied migrations", "restore units",
+                                                                   "restart restored board", "start listener",
+                                                                   "watch listener"]
+          and reverted["board"] == OLD and reverted["board_unit"] == "old board unit\n"
+          and reverted["listener"] == "active" and reverted["release"] == "blocked"
+          and "REVERTED" in reverted["said"] and "did not hold" in reverted["said"]
+          and f"on {OLD} it holds" in reverted["said"] and "ends as it began" in reverted["said"],
+          f"a listener crash-looping on the release: board and listener back on the previous release, which holds, "
+          f"rolled back, the phase blocked: {reverted}")
+    kept = now["listener crash-loops, the release migrated"]
+    check(kept["code"] == 1 and kept["steps"] == deploy + ["read applied migrations", "stop listener"]
+          and kept["board"] == NEW and kept["listener"] == "inactive" and kept["release"] == "blocked"
+          and "NOT REVERTED" in kept["said"]
+          and "pgu2_new.sql is not declared safe for older code" in kept["said"],
+          f"where the release applied a migration not declared safe for the previous release's code (the rollback's "
+          f"rule): nothing reverted, the loop stopped, the phase blocked with the migration named: {kept}")
+    both = now["listener crash-loops on both releases"]
+    check(both["code"] == 3 and both["board"] == OLD and both["release"] == "blocked"
+          and f"on {OLD} it does not hold either" in both["said"] and "did NOT end as it began" in both["said"],
+          f"a previous release that does not hold either is said, loudly, to need an operator: {both['said'][-900:]}")
+    looping = now["listener was crash-looping before the deploy"]
+    check(looping["code"] == 0 and looping["steps"] == deploy and looping["listener"] == "active"
+          and looping["release"] == "done" and "restarting; the deploy starts it after the switch" in looping["said"],
+          f"a listener restarting when the deploy began is started after the switch and watched, not left stopped: "
+          f"{looping}")
     for name, result in now.items():
         expected = "succeeded" if result["code"] == 0 else "rolled_back" if result["code"] == 3 else "failed"
         check(result["attempts"] and result["attempts"][0]["closed"]["status"] == expected,

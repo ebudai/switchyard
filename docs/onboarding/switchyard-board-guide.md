@@ -401,6 +401,11 @@ mutation rule below); `full` lets the reviewer run the wider plan.
 - Run independent, focused checks chosen from the risk you see: add or rerun the
   tests that answer a concrete review question, kill a mutant of your own, probe the
   boundary the change touches.
+- Code the served board or listener loads: run the release smoke on the candidate
+  before you sign (`git archive <candidate> scripts examples | tar -x -C <dir>`, then
+  `python3 -I -B scripts/release_smoke.py --release <dir> --project <any name>`).
+  Repository-root suites import `scripts.ticket_board` and are not evidence for it.
+  NOT READY is a kick-back.
 - Do not rerun the complete suite merely because the ticket entered Audit.
 
 **The Director's Final Sign-Off** verifies the exact audited or published candidate,

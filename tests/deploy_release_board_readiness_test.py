@@ -206,6 +206,14 @@ class Host:
             self._start(delay=0.0)
             self._wait_until_serving()
             return done(0)
+        if argv[:1] == ["runuser"] and "ticket_board.workflow_configuration" in text:
+            return done(0)  # SYRD-854: the release smoke reads the declared workflow; this tenant declares none
+        if argv[:1] == ["runuser"] and any(str(part).endswith("/release_smoke.py") for part in argv):
+            return SimpleNamespace(returncode=0, stdout="release smoke: READY\n", stderr="")  # SYRD-854
+        if "systemctl --user show" in text:
+            # SYRD-854: the deploy's watch of a started listener; this one holds.
+            return SimpleNamespace(returncode=0, stdout="ActiveState=active\nSubState=running\nNRestarts=0\nMainPID=7\n",
+                                   stderr="")
         if argv[:4] == ["runuser", "-u", "postgres", "--"] and argv[-2:] == ["-c", "DO $$ BEGIN NULL; END $$;"]:
             # SYRD-826: one plpgsql block in a fresh connection, as the cluster's account.
             self.steps.append("postgres probe")

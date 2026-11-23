@@ -21,6 +21,18 @@ close ran in that gap -- connection refused, no build, no workflow -- and the
 phase was recorded blocked; the board was then put back down 1.17 s after it
 was started. The operator's recovery waited for `/api/board` first and closed
 the same release cleanly (SYRD-632).
+
+bceacabf passed every check and then crash-looped syrd's listener 31 s after the switch, with deploy-release exiting
+0: the canary only asked a throwaway board for `/api/board`, and the listener was read `active` once, which a
+`Restart=always` unit in a restart loop reads too (SYRD-854). So, before anything stops or migrates, the release
+smoke (`release_smoke`) runs the release's real board and listener from root's installed tree on a database of its
+own, and refuses the deploy when it fails. After the switch the listener is watched for `LISTENER_WATCH_SECONDS`:
+it must log LISTEN established and stay up with no restart. If it does not, the board and listener go back to the
+release they served (`revert_release`) -- automatically only where every migration the database applied that the
+release lacks is declared safe for its code (`schema_compatibility`, through `tenant_release_rollback.schema_problems`,
+the rule the one-tenant rollback uses); otherwise the listener is stopped to end the loop and the phase is blocked,
+naming what was not reverted. A listener restarting when the deploy began is one to start after the switch, never one to
+leave stopped.
 """
 
 from __future__ import annotations
@@ -48,6 +60,11 @@ BOARD_READY_SECONDS = 30.0
 BOARD_READY_POLL_SECONDS = 0.5
 SYSTEM_UNIT_DIR = Path("/etc/systemd/system")
 TRUSTED_UNIT_OWNER_UID = 0
+#: Listener states that mean the tenant runs one: `activating` is a `Restart=always` unit between restarts.
+LISTENER_WANTED = ("active", "activating", "reloading")
+#: How long a started listener must hold, and how often it is read: its unit restarts a crash within `RestartSec=2`.
+LISTENER_WATCH_SECONDS = 20.0
+LISTENER_WATCH_POLL_SECONDS = 1.0
 
 
 #: The file a release must carry to run under root's exact-release units: their renderer, which arrived with the
@@ -332,6 +349,87 @@ def _restore_units(units: dict[Path, bytes], board_unit: str, *, runner: Callabl
     return []
 
 
+def revert_release(status: Any, previous_units: dict[Path, bytes], board_unit: str, *,
+                   runner: Callable[..., Any]) -> list[str]:
+    """Put a tenant's board and listener back on the release `status` found them on: its release selector, which the
+    listener runs from, and root's previous board and canary units, with the board restarted under them. The one
+    revert deploy-release makes; a standalone one-tenant rollback reuses it (SYRD-855). Migrations are not undone.
+    Returns what could not be put back."""
+    from scripts import team_launcher as launcher
+
+    problems = launcher.restore_release_pointer(status.board_root / "current", str(status.current_release or ""),
+                                                runner=runner, owner_user=status.owner_user)
+    return problems + _restore_units(previous_units, board_unit, runner=runner)
+
+
+def _listener_log(config: Any, config_path: Path | None) -> Path | None:
+    """The file the installed listener unit appends to (`StandardOutput=append:`), if it names one."""
+    from scripts import board_services
+
+    unit = board_services._owner_user_unit_path(config, board_services._listener_user_unit(config),
+                                                config_path=config_path)
+    try:
+        for line in unit.read_text(encoding="utf-8").splitlines():
+            if line.startswith("StandardOutput=append:"):
+                return Path(line.partition(":")[2].strip())
+    except OSError:
+        pass
+    return None
+
+
+def _log_size(log: Path | None) -> int:
+    try:
+        return log.stat().st_size if log is not None else 0
+    except OSError:
+        return 0
+
+
+def listener_holds(config: Any, *, runner: Callable[..., Any], config_path: Path | None, log: Path | None,
+                   log_from: int, clock: Callable[[], float] = time.monotonic,
+                   sleep: Callable[[float], None] = time.sleep) -> str:
+    """'' when the started listener stays active with no restart for the watch and logged LISTEN established since
+    `log_from`; else why not, with the end of its log."""
+    from scripts import board_services
+
+    unit = board_services._listener_user_unit(config)
+
+    def sample() -> dict[str, str]:
+        done = board_services._run_owner_user_systemctl(config, "show --property=ActiveState,SubState,NRestarts,MainPID",
+                                                  unit, runner=runner, config_path=config_path)
+        if done.returncode != 0:
+            return {"error": f"the owner's manager did not say how {unit} is (exit {done.returncode})"}
+        return dict(line.partition("=")[::2] for line in str(done.stdout).splitlines() if "=" in line)
+
+    def said() -> str:
+        try:
+            with log.open("rb") as handle:  # type: ignore[union-attr]
+                handle.seek(log_from)
+                return handle.read().decode("utf-8", "replace")
+        except (OSError, AttributeError):
+            return ""
+
+    first = sample()
+    deadline = clock() + LISTENER_WATCH_SECONDS
+    while True:
+        now = sample()
+        trouble = now.get("error") or first.get("error")
+        if not trouble and (now.get("ActiveState") != "active" or now.get("NRestarts") != first.get("NRestarts")
+                            or now.get("MainPID") != first.get("MainPID")):
+            trouble = (f"{unit} did not hold: it is {now.get('ActiveState')}/{now.get('SubState')}, restarts "
+                       f"{first.get('NRestarts')} -> {now.get('NRestarts')}, main pid {first.get('MainPID')} -> "
+                       f"{now.get('MainPID')}")
+        if trouble:
+            break
+        if clock() >= deadline:
+            if log is None or "established" in "".join(line for line in said().splitlines() if "LISTEN" in line):
+                return ""
+            trouble = f"{unit} stayed up for {LISTENER_WATCH_SECONDS:g}s but never logged LISTEN established"
+            break
+        sleep(LISTENER_WATCH_POLL_SECONDS)
+    end = said().strip()[-1500:]
+    return trouble + (f"; its log since the start:\n{end}" if end else "")
+
+
 def _await_board(config: Any, *, opener: Callable[[str], Any] | None, clock: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], None] = time.sleep) -> str:
     """Wait until the running board reports a build: '' once it does, else the last reason it could not be read."""
@@ -384,10 +482,17 @@ def _build_switchyard_deploy_release_parser() -> argparse.ArgumentParser:
         description=(
             "Deploy a tenant's board to the exact release its upgrade was prepared for, as root, "
             "and close the release phase only after re-proving from the running board that it "
-            "serves that release. Stops the notify listener before the deploy (migrations run "
-            "inside it) and starts it after; restarts no panes. Refuses, deploying nothing, "
-            "unless root's pin for the tenant is this commit and root holds that release (with "
-            "--rollback, the rollback's own checks instead: it moves the pin itself)."
+            "serves that release. Refuses, deploying nothing, unless root's pin for the tenant is "
+            "this commit and root holds that release (with --rollback, the rollback's own checks "
+            "instead: it moves the pin itself), and unless the release smoke -- the release's own "
+            "board and listener, run from root's installed tree on a throwaway database -- says "
+            "READY. Stops the notify listener before the deploy (migrations run inside it) and "
+            "starts it after, also one that was restarting, then watches it for "
+            f"{LISTENER_WATCH_SECONDS:g} s; restarts no panes. A listener that does not hold is put "
+            "back on the previous release with the board (exit 3, REVERTED) where every migration "
+            "that release lacks is declared safe for its code; otherwise it is stopped and the board "
+            "stays on this release (exit 1, NOT REVERTED). Either way the release phase is recorded "
+            "blocked."
         ),
     )
     parser.add_argument("project", help="registered project name or slug")
@@ -414,6 +519,8 @@ def switchyard_deploy_release_command(
     print_func: Callable[[str], None] = print,
     rollback: bool = False,
     any_staged: bool = False,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> int:
     """Deploy the prepared release and close the phase, or say exactly where it stopped.
 
@@ -512,9 +619,13 @@ def switchyard_deploy_release_command(
     # work the user wanted held (SYRD-577). Panes and windows are never touched.
     board_was_active = launcher.board_system_unit_is_active(config, runner=runner)
     listener_was = launcher.capture_listener_state(config, runner=runner, config_path=config_path)
-    listener_was_active = listener_was == "active"
+    # A listener in a restart loop reads `activating`: the tenant runs one, so the deploy starts it after the switch
+    # and watches it, never leaves it stopped (SYRD-854).
+    listener_was_active = listener_was in LISTENER_WANTED
     if board_was_active and listener_was_active:
-        began = "active (its board and listener were running)"
+        began = ("active (its board and listener were running)" if listener_was == "active" else
+                 f"active (its board was running and its listener was {listener_was}, restarting; the deploy starts "
+                 "it after the switch)")
     elif not board_was_active and not listener_was_active:
         began = f"suspended (its board was not running, and its listener was {listener_was or 'not running'})"
     else:
@@ -614,6 +725,16 @@ def switchyard_deploy_release_command(
         return "; ".join(problems) if problems else "the notify listener is running again"
 
     before = status.current_sha
+    if not converging:
+        # Before anything stops or migrates: the release's own board and listener, run from root's installed tree on
+        # a database of their own. A release whose served code does not run is never switched to (SYRD-854).
+        from scripts import release_smoke
+
+        smoked = release_smoke.for_tenant(status, config.project, source, runner=runner, say=print_func)
+        if smoked:
+            return ended(blocked(f"the release smoke found {commit} NOT READY:\n" + "\n".join(smoked),
+                                 "nothing was deployed: the board, its database and the listener were not touched"),
+                         board_back())
     # The order the printed sequence always had: the listener comes down before
     # anything can migrate the schema it reads (SYRD-45), the units are root's
     # reviewed copy, the deploy is the tenant's own deploy-restart -- with its
@@ -644,6 +765,51 @@ def switchyard_deploy_release_command(
     def restore_units() -> list[str]:
         return _restore_units({path: payload for path, payload in previous_units.items() if payload is not None},
                               board_target.name, runner=runner)
+
+    def contain(trouble: str, log: Path | None) -> tuple[int, list[str]]:
+        """A listener that does not hold on the new release: the tenant back on the release it served, or, where a
+        migration the database applied is not declared safe for that release's code -- the one-tenant rollback's rule
+        (SYRD-855) -- the restart loop stopped and nothing reverted (SYRD-854)."""
+        from scripts import tenant_release_rollback
+        from scripts.ticket_board import database_admin
+
+        was = before or "its previous release"
+        from scripts.ticket_board.privileged_operations import trusted_release_root
+
+        try:
+            database = database_admin.database_from_unit(candidate_units[board_target].decode("utf-8"))
+            # What the previous release carries, read from root's installed copy of it, as the rollback reads it:
+            # never the tenant's own staged copy, which the tenant can write (Audit, SYRD-854).
+            previous = Path(trusted_release_root(before)) if before else None
+            unsafe = (tenant_release_rollback.schema_problems(database, previous, runner=runner, print_func=print_func)
+                      if previous else ["there is no previous release to go back to"])
+        except Exception as exc:  # no database, or no root release of `before`: no proof, so no revert
+            unsafe = [f"the schema could not be checked against root's release of {was}: {exc}"]
+        if unsafe:
+            stopped = launcher.stop_owner_listener(config, runner=runner, config_path=config_path)
+            print_func(f"switchyard: NOT REVERTED: {config.project}'s listener does not hold on {commit}, and {was}'s "
+                       f"code is not declared safe on the schema {commit} migrated.")
+            return blocked(
+                f"{config.project}'s listener did not hold on {commit}: {trouble}\nIt was NOT reverted automatically: "
+                + "; ".join(unsafe),
+                "; ".join(stopped) if stopped else
+                f"the listener was stopped to end its restart loop and the board stays on {commit}: deploy a fixed "
+                f"release, or roll back (`rollback-release`) once those migrations are declared safe for {was}",
+            ), stopped + board_back()
+        put_back = revert_release(status, {path: payload for path, payload in previous_units.items()
+                                           if payload is not None}, board_target.name, runner=runner)
+        log_from = _log_size(log)
+        listener_said = listener_back()
+        held = "" if put_back or not listener_said.startswith("the notify listener is running") else listener_holds(
+            config, runner=runner, config_path=config_path, log=log, log_from=log_from, clock=clock, sleep=sleep)
+        print_func(f"switchyard: REVERTED: {config.project}'s listener does not hold on {commit}; its board and "
+                   f"listener were put back on {was}.")
+        return blocked(
+            f"{config.project}'s listener did not hold on {commit}: {trouble}\nThe board and listener were put back "
+            f"on {was}; the migrations stay applied, each one {was} lacks declared safe for its code",
+            listener_said + (f"; on {was} it does not hold either: {held}" if held else f"; on {was} it holds"),
+            ROLLED_BACK_EXIT,
+        ), put_back + _listener_leftover(listener_said) + ([held] if held else []) + board_back()
 
     canary_port = _free_canary_port()
     try:
@@ -751,25 +917,29 @@ def switchyard_deploy_release_command(
     try:
         board_identity.effective_unit(config.project, runner=runner)
     except board_identity.BoardIdentityError as exc:
-        pointer_problems = launcher.restore_release_pointer(
-            status.board_root / "current", str(status.current_release or ""), runner=runner,
-            owner_user=status.owner_user,
-        )
-        unit_leftovers = restore_units()
+        put_back = revert_release(status, {path: payload for path, payload in previous_units.items()
+                                           if payload is not None}, board_target.name, runner=runner)
         listener_said = listener_back()
         return ended(
             blocked(f"the deployed board did not attest its exact root release: {exc}",
                     f"the previous unit and release selector were restored; {listener_said}",
                     ROLLED_BACK_EXIT),
-            unit_leftovers + pointer_problems + _listener_leftover(listener_said) + board_back(),
+            put_back + _listener_leftover(listener_said) + board_back(),
         )
     if listener_was_active:
+        log = _listener_log(config, config_path)
+        log_from = _log_size(log)
         started = launcher.start_owner_listener(config, runner=runner, config_path=config_path)
-        if started:
+        if started and not any(" was started but is " in problem for problem in started):
+            # The owner's manager would not start it at all: nothing the release did, so nothing to revert.
             return ended(
                 blocked("; ".join(started), f"the board was deployed at {commit} but its listener is not running"),
                 started + board_back(),
             )
+        trouble = "; ".join(started) or listener_holds(config, runner=runner, config_path=config_path, log=log,
+                                                       log_from=log_from, clock=clock, sleep=sleep)
+        if trouble:
+            return ended(*contain(trouble, log))
     print_func(
         f"switchyard: {config.project}'s board was deployed at {commit}; closing the phase only against what "
         "the running board reports. Panes are not restarted."

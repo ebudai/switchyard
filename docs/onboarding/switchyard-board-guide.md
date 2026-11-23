@@ -406,6 +406,13 @@ mutation rule below); `full` lets the reviewer run the wider plan.
   `python3 -I -B scripts/release_smoke.py --release <dir> --project <any name>`).
   Repository-root suites import `scripts.ticket_board` and are not evidence for it.
   NOT READY is a kick-back.
+- Code the served board or listener loads, or install and deploy tooling: also install
+  the candidate in a disposable VM and use it as production does
+  (`tests/vm_kit/vm_kit.py check --commit <candidate> --keep-logs <dir>`, from a checkout
+  that holds the candidate). That is the real `./install`, a tenant from `switchyard new`,
+  the real board and listener, a dry run from the Director's pane and a listener
+  delivery. Run each further affected `--dry-run` in a VM of your own and record the
+  output ([the review VM](../syrd-857-test-vm.md)). A failure is a kick-back.
 - Do not rerun the complete suite merely because the ticket entered Audit.
 
 **The Director's Final Sign-Off** verifies the exact audited or published candidate,

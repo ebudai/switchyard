@@ -70,6 +70,11 @@ HOST_ONLY: dict[str, tuple[str, ...]] = {
     "a browser": (
         "board_write_token_rotation_browser_test",
     ),
+    # It boots a real VM (tests/vm_kit): /dev/kvm, and the network for the VM's packages and image; --unshare-net
+    # takes the network away (SYRD-857).
+    "KVM and the network": (
+        "vm_kit_test",
+    ),
 }
 
 #: Suites that call `live_boundary.isolate()` at the top of main() rather than at module level, each for a measured

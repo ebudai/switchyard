@@ -48,6 +48,7 @@ running. Do not copy a transition or option from a historical ticket record.
 | Change a role's agent or model | [Role runtime](role-runtime.md) | `switchyard set-role-runtime --help`; `switchyard reconcile-role-models --help` |
 | Install, qualify or stop the host's local model service, or see what holds the GPU | [Local model service](local-model-service.md) | `switchyard local-model --help`; `switchyard local-model status` |
 | Run or add tests | [Testing](testing.md) and [contributing](../CONTRIBUTING.md) | the repository's current test entry points |
+| Review a candidate release in a disposable VM | [Board guide: test evidence](onboarding/switchyard-board-guide.md#test-evidence-reuse-what-is-exact-rerun-for-a-reason), then [the review VM](syrd-857-test-vm.md) | `tests/vm_kit/vm_kit.py --help` |
 
 For a low-context route through authority, evidence and failure handling, use
 the [LLM operations reference](llm-operations.md).
@@ -97,6 +98,7 @@ changes.
 | [User notifications](user-notifications.md) | User phone notification setup and operation |
 | [Local model service](local-model-service.md) | The opt-in host-wide local model service: approval, installation, GPU memory, idle stop, qualification and removal |
 | [SYRD-727 Hermes ticket boundary](syrd-727-hermes-ticket-boundary.md) | What "fresh" means for a Hermes role: no memory or session search, the board's check and `/new now`, continuation, recovery, rollback |
+| [SYRD-857 review VM](syrd-857-test-vm.md) | Installing a candidate in a disposable VM for review: the kit's commands, how every VM is bounded, the stand-in CLIs and why they cannot reach a real tenant |
 | [SYRD-693 local-Qwen canary](syrd-693-local-qwen-canary.md) | The live canary's evidence and what it decides: which roles may run local Qwen, one role per host, attended windows |
 | [Git update hook](git-update-hook.md), [testing](testing.md), and [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Repository policy and contribution checks |
 | [`examples/workflows/inspection.json`](../examples/workflows/inspection.json) | Executable example workflow; validate it as configuration, not prose |

@@ -93,6 +93,12 @@ examples | tar -x -C <dir>`, then `python3 -I -B scripts/release_smoke.py --rele
 --project <any name>` (`--workflow <file>` smokes a declared workflow). NOT READY
 is a kick-back, whatever the suites said ([the release smoke](../syrd-854-release-smoke.md)).
 
+The same candidates, and any that change install or deploy tooling, are installed in a
+disposable VM before Final Sign-Off. Read Audit's VM evidence. When it is missing, or the
+candidate changed since, run `tests/vm_kit/vm_kit.py check --commit <candidate>` yourself,
+and use a VM of your own for any affected `--dry-run` Audit did not run
+([the review VM](../syrd-857-test-vm.md)). Every VM ends powered off.
+
 **Say which is which.** Name what you ran yourself and what you reused, with the commit
 the reused result covers. "The implementer's run covers `<sha>`, tree `<tree>`, which
 audit verified and which is the tree I signed off; I ran the mutation myself" is a

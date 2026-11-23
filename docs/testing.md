@@ -30,7 +30,8 @@ To compare a candidate with its base, run the suites a change could reach from
 nothing of your pane: each in a bwrap sandbox, with no network, a private `/tmp`
 and `/run`, a disposable HOME and `env -i`. Some suites need what only the host
 gives: user namespaces of their own, ids outside a sandbox's map, root-owned
-host files, the system bus or a browser. `tests/sweep_requirements.py` declares
+host files, the system bus, a browser, or KVM and the network (`vm_kit_test`,
+which boots a real VM). `tests/sweep_requirements.py` declares
 those, with the reason, and the sweep runs them on the host instead, still cold.
 It gives a suite that calls `live_boundary.isolate()` first no HOME, so the
 suite builds its own disposable root, and the live pane's two store names, so
@@ -59,6 +60,21 @@ retry. The sweep never runs as root (SYRD-815).
 Declare a suite there only for a reason the sandbox cannot give, measured.
 Twenty suites were red in every sandboxed sweep for these reasons alone, and so
 guarded nothing (SYRD-806).
+
+## A release in a disposable VM
+
+`tests/vm_kit/` boots a throwaway KVM VM and uses a candidate the way production
+does: the real `./install`, a tenant from `switchyard new` (offline, on a stand-in
+Codex that runs only in the kit's VMs), the real board and listener. Reviewers run
+it for a change to served board or listener code, or to install and deploy tooling:
+
+```
+tests/vm_kit/vm_kit.py check --commit <candidate> --keep-logs <dir>
+```
+
+Every VM is powered off at the end and proved gone. `tests/vm_kit/vm_kit.py --help`
+lists the commands for a VM of your own; [the review VM](syrd-857-test-vm.md) is
+the procedure and why it is safe.
 
 ## Why the bus matters
 

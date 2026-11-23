@@ -375,6 +375,15 @@ complete suite merely because the ticket entered their stage. The default is:
    -x -C <dir>`, then `python3 -I -B scripts/release_smoke.py --release <dir>
    --project <any name>`). Repository-root suites import `scripts.ticket_board`
    and are not evidence for it. NOT READY is a kick-back.
+5. Code the served board or listener loads, or install and deploy tooling: also
+   install the candidate in a disposable VM and use it as production does,
+   from a checkout that holds the candidate: `tests/vm_kit/vm_kit.py check
+   --commit <candidate> --keep-logs <dir>`. It runs the real `./install`, a
+   tenant from `switchyard new`, the real board and listener, a dry run from
+   the Director's pane and a listener delivery, then powers the VM off. Run
+   each further affected `--dry-run` in a VM of your own (`boot`, `install`,
+   `tenant`, `run --role <slug>/director -- <command>`, `deliveries`, then
+   `down`). Record what ran and what it printed. A failure is a kick-back.
 
 Rerun when something could make the result differ, and only the area it
 concerns where that is enough:

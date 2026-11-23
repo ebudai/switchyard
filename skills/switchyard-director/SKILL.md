@@ -632,6 +632,13 @@ the candidate before you sign, and read Audit's run of it:
 `python3 -I -B scripts/release_smoke.py --release <dir> --project <any
 name>`. NOT READY is a kick-back, whatever the suites said.
 
+The same candidates, and any that change install or deploy tooling, are also
+installed in a disposable VM before you sign: read Audit's VM evidence, and run
+`tests/vm_kit/vm_kit.py check --commit <candidate>` yourself when it is missing
+or the candidate changed since. Use a VM of your own (`boot`, `install`,
+`tenant`, `run --role <slug>/director -- <command>`, `deliveries`, `down`) for
+any affected `--dry-run` Audit did not run. Every VM ends powered off.
+
 **Your own mutants go on the change.** Put them on the lines and behaviours
 the candidate adds or changes and run them against the tests covering that
 area, never the whole corpus: a few semantic mutants beat hundreds of syntactic

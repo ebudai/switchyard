@@ -107,6 +107,11 @@ and dashes in CLI subcommands.
   name>` (READY or NOT READY; `--workflow <file>` for a declared workflow).
   Repository-root suites are not evidence for served code. deploy-release runs
   the same smoke before it changes anything.
+- The same candidates, and any that change install or deploy tooling, are also
+  installed in a disposable VM before Audit signs off and before Final Sign-Off:
+  `tests/vm_kit/vm_kit.py check --commit <candidate> --keep-logs <dir>`, plus
+  each further affected `--dry-run` in a VM of one's own (docs/syrd-857-test-vm.md).
+  Every VM ends powered off, proved gone.
 - Workflows, examples and configuration consumed by programs are product
   inputs, not prose. A documentation role reviews them but does not edit them.
 - Commit and publish from the checkout that actually contains the candidate.

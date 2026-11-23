@@ -73,6 +73,9 @@ DECLARED: dict[str, OlderCode] = {
     "pgu1057_syrd868_no_code_reasons.sql": OlderCode(
         True, "adds the no-code reason table and an AFTER UPDATE trigger on tickets that writes only that table; "
         "older code never reads it"),
+    "pgu1058_syrd870_release_notice_message.sql": OlderCode(
+        True, "adds a nullable message column to release_notices and replaces note_release_available with the same "
+        "signature, storing the message as well; older code reads neither"),
 }
 
 

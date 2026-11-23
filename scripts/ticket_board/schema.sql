@@ -26786,7 +26786,8 @@ CREATE TABLE IF NOT EXISTS ticket_board.release_notices (
     current_release text NOT NULL CHECK (current_release ~ '^[0-9a-f]{40}$'),
     noticed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     anchor_ticket text NOT NULL,
-    notification_id bigint
+    notification_id bigint,
+    message text  -- SYRD-870 (pgu1058): what the notice said; NULL for one recorded before it
 );
 
 CREATE OR REPLACE FUNCTION ticket_board.note_release_available(p_commit text, p_current text, p_message text)
@@ -26796,6 +26797,8 @@ RETURNS text LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = ticket
 -- record -- and no board role: rbac.sql grants it to none. It upgrades nothing; it queues one Director notice, as any
 -- Director notice, held while the pane is busy. 'told', 'already' when this release was told before, or 'no_anchor'
 -- when the board has no ticket to carry a Director notice (nothing is recorded, so a later install tells it).
+-- SYRD-870 (pgu1058): the message is kept with the record, so this board's listener can tell which upstream reports
+-- the notice named.
 DECLARE anchor text; queued bigint;
 BEGIN
     IF coalesce(p_commit, '') !~ '^[0-9a-f]{40}$' OR coalesce(p_current, '') !~ '^[0-9a-f]{40}$' THEN
@@ -26817,8 +26820,8 @@ BEGIN
         jsonb_build_object('kind', 'release_available', 'id', anchor, 'target_role', 'director',
                            'commit', p_commit, 'current', p_current, 'message', p_message),
         'release_available:' || p_commit);
-    INSERT INTO ticket_board.release_notices (commit, current_release, anchor_ticket, notification_id)
-    VALUES (p_commit, p_current, anchor, queued);
+    INSERT INTO ticket_board.release_notices (commit, current_release, anchor_ticket, notification_id, message)
+    VALUES (p_commit, p_current, anchor, queued, p_message);
     RETURN 'told';
 END;
 $$;

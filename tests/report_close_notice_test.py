@@ -20,6 +20,9 @@ Here:
   no release notice for such a release reached this board (the install did not tell it); not when one did, nor once
   this board's release carries it; the listener re-reads the host's installed-release link every pass; and the read
   refuses an installed or noticed value that is not a full commit hash;
+* SYRD-870: only a recorded release notice that named the report ends that wait -- of two notices, an older one
+  naming nothing and a newer one naming it, the close ends quietly; a notice carrying the fix that named nothing does
+  not, and the close is told late, once; a pending record the listener cannot read counts as owed;
 * a cancelled report gives its Director's reason, a commit or none; a Done close with no commit, or on a commit
   whether the release contains cannot be told, gives one notice each;
 * SYRD-868, the Director's cases: a no-code close (the board's own no-code submission, then Done) carries the reason
@@ -76,9 +79,9 @@ def git(repo: Path, *args: str) -> str:
                           env=env).stdout.strip()
 
 
-def history(scratch: Path) -> tuple[Path, str, str, str, str]:
+def history(scratch: Path) -> tuple[Path, str, str, str, str, str, str]:
     """A repository: release R contains commit IN; commit OUT is on a branch R does not have, whose release R1
-    contains it."""
+    contains it; then OUT2, which R1 does not have, and release R2, which has both."""
     repo = scratch / "control"
     repo.mkdir()
     git(repo, "init", "-q", "-b", "main")
@@ -91,7 +94,11 @@ def history(scratch: Path) -> tuple[Path, str, str, str, str]:
     git(repo, "commit", "-q", "--allow-empty", "-m", "out")
     outside = git(repo, "rev-parse", "HEAD")
     git(repo, "commit", "-q", "--allow-empty", "-m", "release 1")
-    return repo / ".git", release, inside, outside, git(repo, "rev-parse", "HEAD")
+    first = git(repo, "rev-parse", "HEAD")
+    git(repo, "commit", "-q", "--allow-empty", "-m", "out 2")
+    second_fix = git(repo, "rev-parse", "HEAD")
+    git(repo, "commit", "-q", "--allow-empty", "-m", "release 2")
+    return repo / ".git", release, inside, outside, first, second_fix, git(repo, "rev-parse", "HEAD")
 
 
 def report(board, admin_url: str, ticket: str, project: str, *, title: str) -> None:
@@ -176,7 +183,7 @@ def test_report_close_notices() -> None:
                            initdb_args=("--username=postgres", "--encoding=UTF8")) as cluster, \
             tempfile.TemporaryDirectory(prefix="syrd827.") as raw:
         scratch = Path(raw)
-        git_dir, release, inside, outside, carrying = history(scratch)
+        git_dir, release, inside, outside, carrying, outside2, carrying2 = history(scratch)
         os.environ["TICKET_BOARD_COMMIT_GIT_DIR"] = str(git_dir)  # the upstream board's own commit repository
         up_admin = urs.build_board(fixture, cluster, ROOT, "up")
         up = urs.Board(fixture, cluster, up_admin, "up", "u")
@@ -224,7 +231,8 @@ def test_report_close_notices() -> None:
                 report(up, up_admin, "PGU-9", "sapi", title="A duplicate")
                 report(up, up_admin, "PGU-10", "sapi", title="Long ago")
                 report(up, up_admin, "PGU-11", "mefp", title="A report of another project")
-                for ticket in ("PGU-12", "PGU-13", "PGU-14", "PGU-15", "PGU-16", "PGU-18", "PGU-19", "PGU-21"):
+                for ticket in ("PGU-12", "PGU-13", "PGU-14", "PGU-15", "PGU-16", "PGU-18", "PGU-19", "PGU-21",
+                               "PGU-22", "PGU-23", "PGU-30"):
                     report(up, up_admin, ticket, "sapi", title=f"Report {ticket}")
                 check(tell() == [] and rep.sql("SELECT count(*) FROM ticket_board.report_closures;") == "0",
                       "nothing is told, or recorded, while every report is open")
@@ -322,13 +330,47 @@ def test_report_close_notices() -> None:
                 # PGU-21 waits on an install too. The reporter's release coming to carry it ends that quietly; and a
                 # release notice this board recorded for a release carrying it named it, so that ends it too.
                 end(up, "PGU-21", "done", outside)
-                check(tell() == [], "PGU-21: neither release carries it: silent")
+                end(up, "PGU-22", "done", outside)
+                check(tell() == [], "PGU-21, PGU-22: neither release carries it: silent")
                 listener._report_closure_build = listener._report_closure_installed = carrying
                 check(tell() == [], "this board's release carries it: nothing owed")
                 listener._report_closure_build = release
-                rep.sql("INSERT INTO ticket_board.release_notices (commit, current_release, anchor_ticket) "
-                        f"VALUES ('{carrying}', '{release}', 'PGU-1');")
-                check(tell() == [], "a release notice reached this board for the release carrying it: nothing owed")
+                # SYRD-870: two release notices reached this board, an older one naming nothing, then the one for the
+                # release that carries the fix, naming PGU-21 alone (root's read saw PGU-22 not yet done, say).
+                for commit, message in ((release, "Release ... ready for sapi.\nWhat changed (1 commit):\n- x"),
+                                        (carrying, "Release ... ready for sapi.\nThis release resolves your reports "
+                                                   "PGU-20, PGU-21 and 2 more on syrd's board.\nWhat changed (2 "
+                                                   "commits):\n- y")):
+                    rep.sql("INSERT INTO ticket_board.release_notices (commit, current_release, anchor_ticket, message) "
+                            f"VALUES ('{commit}', '{'e' * 40}', 'PGU-1', '{message.replace(chr(39), chr(39) * 2)}');")
+                told = tell()
+                check(len(told) == 1 and " PGU-22 " in told[0] and installed_line in told[0],
+                      f"a notice named PGU-21: it ends quietly; the notice carried PGU-22's fix and named nothing of it: "
+                      f"PGU-22 told late, once: {told}")
+                check(tell() == [], "and once only")
+
+                # SYRD-870: a pending record the listener cannot read counts as owed -- loud, not silent.
+                listener._report_closure_installed = release
+                end(up, "PGU-23", "done", outside)
+                check(tell() == [], "PGU-23: neither release carries it: silent")
+                listener._report_closure_installed = carrying
+
+                class Unreadable:
+                    """The listener's connection, with its records unreadable (no grant, say)."""
+                    def execute(self, statement, *args):
+                        if "FROM ticket_board.report_closures" in statement or "FROM ticket_board.release_notices" \
+                                in statement:
+                            raise PermissionError("permission denied")
+                        return conn.execute(statement, *args)
+
+                report_closure.run(listener, Unreadable(), environ=environ)
+                loud = [m for t, m in rep.one_pass() if t == "pgu-director:0.0"]
+                said = {ticket: [m for m in loud if f" {ticket} " in m] for ticket in ("PGU-23", "PGU-18", "PGU-21")}
+                check(len(said["PGU-23"]) == 1 and installed_line in said["PGU-23"][0] and len(said["PGU-18"]) == 1
+                      and len(said["PGU-21"]) == 1 and len(loud) == 3,
+                      f"the records cannot be read: PGU-23 told; PGU-18, told before, and PGU-21, which a notice "
+                      f"named, told once more -- duplicates, not silence: {loud}")
+                check(tell() == [], "and readable again, the late keys keep both from repeating")
                 listener._report_closure_installed = release
 
                 # The listener reads the installed release afresh each pass, from the link alone (Audit's M2).
@@ -351,6 +393,29 @@ def test_report_close_notices() -> None:
                       f"the link moved between passes: the next pass judges by the release it names now: {first} "
                       f"{second}")
 
+                # SYRD-870, Audit round 1: a notice that named a report's first close is not its next close's.
+                def notice(commit: str, message: str) -> None:
+                    rep.sql("INSERT INTO ticket_board.release_notices (commit, current_release, anchor_ticket, message) "
+                            f"VALUES ('{commit}', '{'e' * 40}', 'PGU-1', '{message.replace(chr(39), chr(39) * 2)}');")
+
+                end(up, "PGU-30", "done", outside)
+                check(tell() == [], "PGU-30: neither release carries it: silent")
+                notice("f" * 40, "Release ... ready for sapi.\nThis release resolves your report PGU-30 on syrd's board.")
+                listener._report_closure_installed = carrying
+                check(tell() == [], "a notice since named it: it ends quietly")
+                listener._report_closure_installed = release
+                reopen(up, "PGU-30")
+                end(up, "PGU-30", "done", outside2)
+                check(tell() == [], "reopened and closed again on a second fix neither release carries: silent")
+                notice(carrying2, "Release ... ready for sapi.\nWhat changed (3 commits):\n- z")  # its read failed
+                listener._report_closure_installed = carrying2
+                told = tell()
+                check(len(told) == 1 and " PGU-30 " in told[0] and f"release {carrying2}, installed on this host" in told[0],
+                      f"the release carrying the second fix named nothing; the earlier notice named the first close: "
+                      f"told late, once: {told}")
+                check(tell() == [], "and once only")
+                listener._report_closure_installed = release
+
                 reopen(up, "PGU-7")
                 check(tell() == [], "a reopened report is open again: nothing is told")
                 end(up, "PGU-7", "done", inside)
@@ -364,8 +429,9 @@ def test_report_close_notices() -> None:
                                                "WHERE ticket_id = 'PGU-10';") == "false"
                       and rep.sql("SELECT count(*) FROM ticket_board.report_closures WHERE ticket_id = 'PGU-11';") == "0",
                       "a close older than 30 days is recorded, not told; another project's is neither")
-                check(rep.sql("SELECT count(*) FROM ticket_board.report_closures WHERE told;") == "11",
-                      "eleven closes told in all: PGU-7 twice, PGU-8 late, PGU-9, PGU-12 to PGU-16, PGU-18, PGU-19")
+                check(rep.sql("SELECT count(*) FROM ticket_board.report_closures WHERE told;") == "16",
+                      "sixteen closes told in all: PGU-7 twice, PGU-8, PGU-21, PGU-22, PGU-23 and PGU-30's second "
+                      "late, PGU-9, PGU-12 to PGU-16, PGU-18 twice, PGU-19")
                 check(not [line for line in records.lines if line.startswith(("ERROR", "WARNING"))],
                       f"and no pass failed or warned along the way: {records.lines}")
 

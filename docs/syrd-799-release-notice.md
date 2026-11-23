@@ -54,12 +54,16 @@ release notice must say so, or the link is lost:
   listener poll (15 minutes) can give both notices.
 - **An install that told the reporter nothing (SYRD-869).** ./install can list a tenant as not told (not
   registered, no ticket to carry the notice, a board from before release notices), so a silent close stays pending.
-  The listener sends `&noticed=<the newest release in its board's release_notices>` (releases follow main, so the
-  newest carries whatever an older one did), and the board answers `noticed_contains`. A close recorded without a
-  notice is told late, once (close key `done_installed#<reopens>`), when the installed release contains it, the
-  reporter's does not, and the noticed one is not known to. A release notice recorded for a release that carries it,
-  or the reporter's own release carrying it, ends it quietly. rbac.sql lets the listener read `report_closures` and
-  `release_notices` for this.
+  A close recorded without a notice is told late, once (close key `done_installed#<reopens>`), when the installed
+  release contains it and the reporter's does not -- unless a release notice this board recorded since it recorded
+  that close named it (one that named an earlier close of a reopened report is not this one's). Only that
+  ends the wait quietly, or the reporter's own release carrying the fix (SYRD-870): a notice can reach the board and
+  name nothing, when root's read of the upstream board failed. pgu1058 keeps each notice's message in
+  `release_notices.message`, and the listener looks there for "This release resolves your report(s) ... on
+  <upstream>'s board" naming the ticket, a capped list's "and N more" aside. A record it cannot read, of either
+  table, counts as owed: a duplicate rather than silence. rbac.sql lets the listener read `report_closures` and
+  `release_notices`. (SYRD-869's listeners asked the board whether the newest noticed release carried the fix
+  (`&noticed=`); the board still answers that, and no listener now asks.)
 
 - **Where it comes from.** Root reads every tenant board on the host as the database superuser, the same way it makes
   its one write: each ticket in `report_provenance` that is done on a closing commit, with the reporting project the

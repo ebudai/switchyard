@@ -190,6 +190,8 @@ def test_the_board_records_it_once_and_only_root_may() -> None:
                                f"'release_available:{NEW}';")
             check(stored == hostile and board.sql("SELECT count(*) FROM ticket_board.tickets;") == "1",
                   f"the notice is stored exactly as written, quotes and all; nothing ran: {stored!r}")
+            kept = board.sql(f"SELECT message FROM ticket_board.release_notices WHERE commit = '{NEW}';")
+            check(kept == hostile, f"SYRD-870: and its record keeps the message, for the listener to read: {kept!r}")
             sent = board.one_pass()
             to_director = [m for t, m in sent if t == "pgu-director:0.0" and m == hostile]
             check(len(to_director) == 1 and board.one_pass() == [], f"one Director notice, delivered once: {sent}")

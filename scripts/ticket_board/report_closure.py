@@ -12,8 +12,7 @@ ticket has been closed or cancelled". Two halves, and no new write across boards
   `?release=<the caller's build>`, it also says whether that release contains each closing commit, from this board's
   own commit repositories (`git merge-base --is-ancestor`): true, false, or null when it cannot tell. Given
   `&installed=<the release installed on the caller's host>`, it says the same of that release (`installed_contains`);
-  given `&noticed=<the newest release the caller's board recorded a release notice for>`, of that one
-  (`noticed_contains`).
+  given `&noticed=<a release>`, of that one (`noticed_contains`; SYRD-869's listeners ask it, later ones do not).
 * **The reporting board's own listener asks.** On a slow interval (`TICKET_BOARD_REPORT_CLOSE_SECONDS`, default 900),
   it walks its project's report chain as `file-report` does (root's registry; each ancestor's own credential file) and
   records each close with `ticket_board.note_report_closed`, which queues one Director notice for a close it has not
@@ -27,11 +26,13 @@ ticket has been closed or cancelled". Two halves, and no new write across boards
   reports it resolves. One the installed release already contains is announced: that install's notice went out before
   the report was done, so it did not name it (Audit, round 1), and no later one will. A cancelled close, one with no
   commit, one this board's release already contains, and one where either cannot be told (null) are announced too.
-* **Until a release notice tells it (SYRD-869).** A close recorded that way stays pending. ./install may tell this
-  board nothing (its tenant not registered, or no ticket to carry the notice), so a later pass that finds the installed
-  release containing the fix, this board's release not, and no release this board was told of (`release_notices`, the
-  newest: releases follow main) containing it, announces it then, once (close key `<state>_installed#<reopens>`).
-  This board's release coming to contain it ends it quietly, as a release notice recorded for it does.
+* **Until a release notice names it (SYRD-869, SYRD-870).** A close recorded that way stays pending. ./install may
+  tell this board nothing (its tenant not registered, or no ticket to carry the notice), or tell it and name nothing
+  (its read of the upstream board failed), so a later pass that finds the installed release containing the fix and
+  this board's release not announces it then, once (close key `<state>_installed#<reopens>`) -- unless a release
+  notice this board recorded since that close named it ("This release resolves your report ... on <upstream>'s
+  board", kept in `release_notices.message` by pgu1058). This board's release coming to contain it ends it quietly
+  too. A record it cannot read counts as owed: a duplicate rather than silence.
 """
 
 from __future__ import annotations
@@ -196,12 +197,12 @@ def installed_release(link: Path | None = None) -> str:
     return name if RELEASE_RE.fullmatch(name) else ""
 
 
-def fetch_status(url: str, token: str, release: str, installed: str = "", noticed: str = "", *,
+def fetch_status(url: str, token: str, release: str, installed: str = "", *,
                  timeout: float = TIMEOUT_SECONDS) -> dict[str, Any]:
     """One ancestor's answer about this project's ended reports. Raises OSError/ValueError when it cannot say."""
     from urllib import error, parse, request
 
-    pairs = (("release", release), ("installed", installed), ("noticed", noticed))
+    pairs = (("release", release), ("installed", installed))
     asked = [f"{name}={parse.quote(value)}" for name, value in pairs if RELEASE_RE.fullmatch(value or "")]
     query = "?" + "&".join(asked) if asked else ""
     req = request.Request(f"{url.rstrip('/')}{PATH}{query}", method="GET",
@@ -271,33 +272,47 @@ def awaits_release(report: dict[str, Any]) -> bool:
 
 
 def told_late(report: dict[str, Any]) -> bool:
-    """Whether a close recorded without a notice is now owed one (SYRD-869): done on a commit the installed release
-    contains, this board's release does not, and no release this board was told of is known to."""
+    """Whether a close recorded without a notice may now be owed one (SYRD-869): done on a commit the installed
+    release contains and this board's release does not. It is owed unless a release notice named it."""
     return (report.get("state") == "done" and bool(report.get("commit_hash"))
-            and report.get("release_contains") is False and report.get("installed_contains") is True
-            and report.get("noticed_contains") is not True)
+            and report.get("release_contains") is False and report.get("installed_contains") is True)
 
 
 def _recorded_silently(conn: Any, upstream: str, ticket: str, key: str) -> bool:
-    """Whether this board recorded that close without a notice; False when it cannot tell."""
+    """Whether this board recorded that close without a notice. A record it cannot read counts as one (SYRD-870): the
+    late key still tells it once where it can be recorded, and a duplicate is better than silence."""
     try:
         row = conn.execute("SELECT told FROM ticket_board.report_closures WHERE upstream = %s AND ticket_id = %s "
                            "AND close_key = %s", (upstream, ticket, key)).fetchone()
-    except Exception:  # noqa: BLE001 - a board whose listener cannot read it: nothing is owed late
-        return False
+    except Exception:  # noqa: BLE001 - fail loud: owed
+        return True
     told = (row["told"] if isinstance(row, dict) else row[0]) if row else None
     return told is False
 
 
-def noticed_release(conn: Any) -> str:
-    """The newest release this board recorded a release notice for (release_notices), or ''."""
+#: The line a release notice names its reporter's resolved reports with (scripts/release_notice.py, SYRD-868).
+RESOLVES_RE = re.compile(r"^This release resolves your reports? (.+) on ([a-z0-9][a-z0-9_]{0,39})'s board\.$")
+
+
+def named_by_notice(conn: Any, upstream: str, ticket: str, key: str) -> bool:
+    """Whether a release notice this board recorded since it recorded this close (`key`) named `ticket` on
+    `upstream`'s board (SYRD-870): one that named an earlier close of a reopened report is not this close's. False when
+    no record says so, or none can be read -- the close is then told."""
     try:
-        row = conn.execute("SELECT commit FROM ticket_board.release_notices "
-                           "ORDER BY noticed_at DESC LIMIT 1").fetchone()
-    except Exception:  # noqa: BLE001 - none to name: a pending close is announced rather than kept
-        return ""
-    commit = (row["commit"] if isinstance(row, dict) else row[0]) if row else ""
-    return commit if RELEASE_RE.fullmatch(commit or "") else ""
+        rows = conn.execute(
+            "SELECT n.message FROM ticket_board.release_notices n WHERE n.message IS NOT NULL AND n.noticed_at > "
+            "(SELECT r.recorded_at FROM ticket_board.report_closures r WHERE r.upstream = %s AND r.ticket_id = %s "
+            "AND r.close_key = %s)", (upstream, ticket, key)).fetchall()
+    except Exception:  # noqa: BLE001 - fail loud: not named
+        return False
+    for row in rows:
+        text = (row["message"] if isinstance(row, dict) else row[0]) or ""
+        for line in text.splitlines():
+            found = RESOLVES_RE.fullmatch(line.strip())
+            named = re.sub(r" and [0-9]+ more$", "", found.group(1)).split(", ") if found else []  # a capped list
+            if found and found.group(2) == upstream and ticket in named:
+                return True
+    return False
 
 
 def announce(report: dict[str, Any], *, now: datetime) -> bool:
@@ -362,7 +377,8 @@ def _record_one(conn: Any, report: Any, *, reporter: str, upstream: str, url: st
     text = message(reporter=reporter, upstream=upstream, url=url, report=report, build=build,
                    contains=contains if isinstance(contains, bool) else None, installed=installed)
     recent = announce(report, now=now)
-    if recent and told_late(report) and _recorded_silently(conn, upstream, ticket, key):
+    if recent and told_late(report) and _recorded_silently(conn, upstream, ticket, key) \
+            and not named_by_notice(conn, upstream, ticket, key):
         key = f"{state}_installed#{int(report.get('reopens') or 0)}"  # once: the next pass finds it
         tell = True
     else:
@@ -398,14 +414,13 @@ def run(listener: Any, conn: Any, *, environ: Any = os.environ, clock: Callable[
         build = listener.__dict__.get("_report_closure_build") or board_build_id()
         listener._report_closure_build = build
         installed = listener.__dict__.get("_report_closure_installed") or installed_release()  # each pass: it moves
-        noticed = noticed_release(conn)
         for link, credential in destinations(project, environ):
             token, why = report_ancestry.read_token(credential) if credential else ("", "none")
             if not token:
                 problem = f"no report credential for {link.project} ({why})"
             else:
                 try:
-                    answer = fetch(link.url, token, build, installed, noticed)
+                    answer = fetch(link.url, token, build, installed)
                     counts = record(conn, reporter=project, upstream=link.project, url=link.url, answer=answer,
                                     build=build, now=datetime.now(timezone.utc), log=log,
                                     seen=listener.__dict__.setdefault("_report_closure_entries", set()),

@@ -563,6 +563,9 @@ def run_as(release: Path, *, project: str, owner: str, database: str, python: st
     if stages and stages.returncode != 0:
         return [f"reading {project}'s live stages from {database} failed (exit {stages.returncode}): "
                 f"{str(stages.stderr or '').strip()[-600:]}"]
+    live_names = str(stages.stdout or "").split() if stages else []
+    if declared and not live_names:  # a board always has stages: judged against none, nothing is ever omitted
+        return [f"read no live stages from {database}: a board always has stages, so the read is wrong"]
     with tempfile.TemporaryDirectory(prefix=f"switchyard-{project}-smoke.") as hand:
         os.chmod(hand, 0o755)
         argv = ["runuser", "-u", owner, "--", "env", "-i", "PATH=/usr/bin:/bin", "LANG=C.UTF-8", "TMPDIR=/tmp",
@@ -574,7 +577,7 @@ def run_as(release: Path, *, project: str, owner: str, database: str, python: st
             workflow.chmod(0o644)
             argv += ["--workflow", str(workflow)]
             live = Path(hand) / "stages.json"
-            live.write_text(json.dumps(str(stages.stdout or "").split()))
+            live.write_text(json.dumps(live_names))
             live.chmod(0o644)
             argv += ["--stages", str(live)]
         done = runner(argv, cwd="/", stdin=subprocess.DEVNULL, capture_output=True, text=True,
@@ -642,7 +645,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="a name for the throwaway board (any name; nothing live is read)")
     parser.add_argument("--workflow", default="", help="the tenant's declared workflow (JSON); default: the example")
     parser.add_argument("--stages", default="",
-                        help="the tenant's live board's stages (a JSON list); default: the declared workflow's own")
+                        help="the tenant's live board's stages (a JSON list, never empty); default: the declared "
+                             "workflow's own, which cannot catch an omission")
     parser.add_argument("--python", default="/usr/bin/python3", help="the interpreter the release's units name")
     args = parser.parse_args(argv)
     if os.geteuid() == 0:
@@ -658,6 +662,10 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     document = json.loads(Path(args.workflow).read_text(encoding="utf-8")) if args.workflow else None
     live = json.loads(Path(args.stages).read_text(encoding="utf-8")) if args.stages else None
+    if live is not None and not live:  # SYRD-867: as run_as refuses an empty read
+        print("release smoke: NOT READY")
+        print(f"read no live stages from {args.stages}: a board always has stages, so the file is wrong")
+        return 1
     problems = smoke(Path(args.release), project=args.project, document=document, python=args.python,
                      say=lambda line: print(line, flush=True), live_stages=live)
     if problems:

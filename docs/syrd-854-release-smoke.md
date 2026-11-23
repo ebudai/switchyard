@@ -65,7 +65,13 @@ database of its own and answers READY or NOT READY.
      throwaway board alone: the tenant's document and live board are not
      changed;
    - is refused if it omits a stage the live board does have, in the board's own
-     words, as the live board would refuse it.
+     words, as the live board would refuse it. A stage the candidate removes
+     explicitly, in its own `remove_stages`, is not omitted: that is how an
+     operator removes a stage (SYRD-867).
+
+   An empty live stage list is refused, NOT READY: "read no live stages from
+   <database>" from root's read, or "from <file>" for `--stages []`. A real board
+   always has stages, and judged against none, nothing would ever be omitted.
 4. **Listener.** The workflow with the Publisher is applied and one ticket waits
    in publication. The release's real `ticket-board-notify-listener` must then:
    - establish LISTEN;
@@ -187,6 +193,9 @@ python3 -I -B scripts/release_smoke.py --release "$dir" --project <any name>
 Add `--workflow <file>` to smoke a tenant's declared workflow, and
 `--stages <file>` (a JSON list) for its live board's stages. Without
 `--stages`, they are the workflow's own, which a board that applied it has.
+Such a run cannot catch an omission: the declared workflow never omits its own
+stages. Only root's path, which reads the live board, or an explicit `--stages`
+can.
 Repository-root suites import `scripts.ticket_board`, so they are no evidence
 for what the served processes import. The disposable-VM review for Audit is its own ticket.
 
@@ -210,6 +219,9 @@ for what the served processes import. The disposable-VM review for Audit is its 
   - all three are READY on HEAD;
   - a workflow that omits a live stage is still refused, whether the stage is a
     default one or one the throwaway board never had;
+  - one that removes a live stage explicitly (sapi's, with its documentation
+    gate disabled) is READY;
+  - an empty live stage list is NOT READY, from root's read or from `--stages`;
   - root's entry reads the live stages and passes them to the smoke.
 - `tests/catalogued_deploy_release_test.py` covers the deploy:
   - the smoke refuses before anything live changes;

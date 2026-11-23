@@ -27,6 +27,8 @@ from the repository root, where `scripts.ticket_board` imports; the served proce
    and live stages, read from their boards): 79280dab's own smoke refuses sapi's, which has no `inspection`, as
    sapi's preview-upgrade did; on HEAD all three are READY. A workflow that omits a stage its live board has is
    still refused, a default stage or one the throwaway board never had, and root's entry reads the live stages.
+   SYRD-867: one that removes a live stage explicitly, as an operator does, is not refused for omitting it; an empty
+   live stage list, from root's read or from --stages, is NOT READY, naming the database or the file.
 """
 
 from __future__ import annotations
@@ -337,6 +339,35 @@ def test_live_stages(tmp: Path, head: Path) -> None:
                                     python=sys.executable, runner=runner, say=said.append)
     check(problems and "omits the live board's stage uat_delivery" in problems[0],
           f"and the smoke judges the workflow by them: {problems}")
+
+    # SYRD-867: an explicit removal is how an operator removes a stage; it is no omission.
+    from scripts.ticket_board.documentation_gate import without_documentation_gate
+
+    removing = without_documentation_gate(sapi["document"])
+    check("documentation" in sapi["live_stages"] and "documentation" in removing["remove_stages"]
+          and "documentation" not in [stage["name"] for stage in removing["stages"]], "sapi's, removing its gate")
+    said = []
+    problems = release_smoke.smoke(head, project="sapi", document=removing, live_stages=sapi["live_stages"],
+                                   say=said.append)
+    check(not problems and "release smoke: configure_workflow dry-runs the declared workflow" in said,
+          f"a workflow that removes a live stage explicitly is not refused for omitting it: {problems[-2:]}")
+
+    # SYRD-867: judged against no live stages, nothing is ever omitted; a board always has stages, so refuse.
+    runner = Runuser(json.dumps(sapi["document"]), [])
+    problems = release_smoke.run_as(head, project="sapi", owner=getpass.getuser(), database="sapi_ticket_board",
+                                    python=sys.executable, runner=runner, say=said.append)
+    check(problems == ["read no live stages from sapi_ticket_board: a board always has stages, so the read is wrong"]
+          and len(runner.calls) == 2, f"root's read of no live stages is NOT READY, before any smoke: {problems} "
+                                      f"{runner.calls[2:]}")
+    empty = tmp / "stages.json"
+    empty.write_text("[]")
+    done = subprocess.run([sys.executable, "-I", "-B", str(ROOT / "scripts/release_smoke.py"), "--release", str(head),
+                           "--project", "sapi", "--workflow", str(document), "--stages", str(empty)],
+                          capture_output=True, text=True, timeout=release_smoke.STEP_SECONDS * 4)
+    check(done.returncode == 1 and done.stdout.splitlines()[:2] == [
+              "release smoke: NOT READY",
+              f"read no live stages from {empty}: a board always has stages, so the file is wrong"],
+          f"and so is --stages []: {done.stdout[-800:]}")
 
 
 def test_preview_hook() -> None:

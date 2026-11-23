@@ -113,9 +113,10 @@ def base_document(project: str = PROJECT) -> dict:
             {"from": "inspection", "to": "in_progress", "action": "kick_back", "label": "Kick back",
              "primitive": "return", "actors": ["review"], "owner_scoped": False,
              "require_commit": False, "require_reason": True, "clear_signoffs": [], "allow_no_code": False},
+            # A close into done records its commit (SYRD-864).
             {"from": "inspection", "to": "done", "action": "sign_off", "label": "Sign off",
              "primitive": "move", "actors": ["review"], "owner_scoped": False,
-             "require_commit": False, "require_reason": False, "clear_signoffs": [], "allow_no_code": False},
+             "require_commit": True, "require_reason": False, "clear_signoffs": [], "allow_no_code": False},
             {"from": "done", "to": "analysis", "action": "reopen", "label": "Reopen",
              "primitive": "reopen", "actors": ["director"], "owner_scoped": False,
              "require_commit": False, "require_reason": True, "clear_signoffs": [], "allow_no_code": False},
@@ -302,7 +303,7 @@ def test_a_pool_with_no_role_to_copy_is_refused_by_name() -> None:
     ]
     document["transitions"].append(
         {"from": "in_progress", "to": "done", "action": "finish", "label": "Finish",
-         "primitive": "move", "actors": ["main"], "owner_scoped": True, "require_commit": False,
+         "primitive": "move", "actors": ["main"], "owner_scoped": True, "require_commit": True,
          "require_reason": False, "clear_signoffs": [], "allow_no_code": False}
     )
     validate(document, project=PROJECT)
@@ -386,7 +387,7 @@ def test_review_lanes_are_followed_past_the_first_hop() -> None:
          "primitive": "move", "actors": ["review"], "owner_scoped": False, "require_commit": False,
          "require_reason": False, "clear_signoffs": [], "allow_no_code": False},
         {"from": "audit", "to": "done", "action": "audit_sign_off", "label": "Audit sign off",
-         "primitive": "move", "actors": ["audit"], "owner_scoped": False, "require_commit": False,
+         "primitive": "move", "actors": ["audit"], "owner_scoped": False, "require_commit": True,
          "require_reason": False, "clear_signoffs": [], "allow_no_code": False},
         {"from": "audit", "to": "analysis", "action": "route", "label": "Route back",
          "primitive": "move", "actors": ["director"], "owner_scoped": False, "require_commit": False,

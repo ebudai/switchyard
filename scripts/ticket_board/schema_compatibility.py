@@ -66,6 +66,10 @@ DECLARED: dict[str, OlderCode] = {
     "pgu1055_syrd852_finding_mark.sql": OlderCode(
         True, "replaces the research-round trigger function, which acts only on a board that declares the research "
         "stage", RESEARCH_OFF, "the research stage is not declared"),
+    "pgu1056_syrd864_close_requires_commit.sql": OlderCode(
+        True, "replaces validate_declared_workflow with the same signature, only adding a refusal of a move into done "
+        "without require_commit; older code's composers never write such a move, and older code calls the function "
+        "only to apply a document, so it refuses nothing older code produces"),
 }
 
 

@@ -16,6 +16,7 @@ from .user_wait import validate_user_waits
 from .board_stall import validate_declared as validate_board_stall
 from .role_kinds import IMPLEMENTER, has_kind, validate_role_kinds
 from .audit_return import advertise as advertise_audit_return
+from .close_commit import validate_close_commit
 
 SCHEMA = "switchyard.workflow.v1"
 NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -1102,6 +1103,7 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
     validate_role_kinds(cfg, need)  # SYRD-678
     validate_research_stage(cfg, need)  # SYRD-842
     validate_plan_gate(cfg, need)  # SYRD-843
+    validate_close_commit(cfg, need)  # SYRD-864
     return cfg
 
 

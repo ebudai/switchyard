@@ -8126,6 +8126,21 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'deferred work must have an ordinary way back';
     END IF;
+    -- SYRD-864: every move into done records the commit it closes on. A no-code completion (allow_no_code) and,
+    -- on a board that declares the research stage, its close_on_finding close without one by design.
+    IF EXISTS (SELECT FROM jsonb_array_elements(cfg->'transitions') t
+               WHERE t->>'to' = 'done' AND NOT (t->>'require_commit')::boolean
+                 AND NOT coalesce((t->>'allow_no_code')::boolean, false)
+                 AND NOT (t->>'action' = 'close_on_finding'
+                          AND EXISTS (SELECT FROM jsonb_array_elements(cfg->'stages') x WHERE x->>'name' = 'research'))) THEN
+        RAISE EXCEPTION 'a move into done must require the commit it closes on (require_commit): %',
+            (SELECT string_agg(format('%s (%s -> done)', t->>'action', t->>'from'), ', ')
+               FROM jsonb_array_elements(cfg->'transitions') t
+              WHERE t->>'to' = 'done' AND NOT (t->>'require_commit')::boolean
+                AND NOT coalesce((t->>'allow_no_code')::boolean, false)
+                AND NOT (t->>'action' = 'close_on_finding'
+                         AND EXISTS (SELECT FROM jsonb_array_elements(cfg->'stages') x WHERE x->>'name' = 'research')));
+    END IF;
     PERFORM ticket_board.validate_router_declaration(cfg);  -- SYRD-599
 END;
 $$;

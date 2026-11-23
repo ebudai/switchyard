@@ -286,18 +286,18 @@ def test_the_declared_refusal_can_be_followed() -> None:
     closing = [t for t in (declared or {}).get("transitions", []) if t["from"] == "vcs" and t["action"] == "mark_done"]
     check(closing and closing[0]["require_commit"] is True and close["require_commit"] is True,
           f"and the role's close requires the commit, as the Director's did: {closing}")
-    # What the clause prevents: the board itself accepts a close that records no commit.
+    # Without the clause the close would record no commit, and since SYRD-864 the board refuses such a document.
     loose = json.loads(json.dumps(document))
     for move in loose["transitions"]:
         if move["from"] == "vcs" and move["action"] == "mark_done":
             move["require_commit"] = False
     try:
-        accepted = validate(loose)
+        validate(loose)
+        refused = ""
     except ValueError as exc:
-        accepted, why = None, str(exc)
-    check(accepted and not next(t for t in accepted["transitions"]
-                                if t["from"] == "vcs" and t["action"] == "mark_done")["require_commit"],
-          "without the clause the board would accept a close with no commit, so the clause is what keeps it")
+        refused = str(exc)
+    check("a move into done must require the commit it closes on" in refused and "mark_done (vcs -> done)" in refused,
+          f"without the clause the document is refused, naming the role's close: {refused!r}")
 
 
 # --- artifacts and SQL ----------------------------------------------------------------------------------------------

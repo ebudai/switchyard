@@ -957,8 +957,16 @@ Changing where your project reports is not a board action. It is root's
 every 15 minutes, for the reports your project filed there that have ended. It uses the report
 credential your project already holds, and the ancestor gains no access to your board. Each close
 gives you one notice on your own board. It names the upstream ticket, its title and its final state:
-- **Done:** the commit, and whether your board's release already contains it. If not, it gives
-  `switchyard release-status <project>` and the three privileged upgrade actions.
+- **Done:** the commit, and that your board's release already contains it. If whether your
+  release contains the commit cannot be told, it says that and gives
+  `switchyard release-status <project>`.
+- **Done with no commit** (a no-code close, for example only a configuration change, or a
+  won't-fix closed as done): no release will tell you anything, so the notice carries the reason.
+  That is the reason the upstream no-code submission recorded, or else the upstream Director's
+  latest comment.
+- **Done on a commit your release does not contain yet: no notice.** A release will carry the
+  fix, and that release's "ready" notice names it: "This release resolves your report <ID> on
+  <board>'s board". The close is recorded, so it is never announced later either.
 - **Cancelled:** the reason, from the upstream Director's latest comment.
 - Every notice ends with the `ticket-board-read --board-url ... ticket <ID>` that shows it.
 

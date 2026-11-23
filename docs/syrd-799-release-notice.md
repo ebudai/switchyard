@@ -33,7 +33,32 @@ The notice is self-contained:
   - `switchyard privileged-action <tenant> preview-upgrade commit=<new>`;
   - `... upgrade-tenant-release ...`;
   - `... deploy-release ...`;
-- then `switchyard release-status <tenant>` to check, and the statement that nothing was upgraded.
+- then `switchyard release-status <tenant>` to check, and the statement that nothing was upgraded;
+- the tenant's own reports this release resolves (SYRD-868), above the subjects so no cap drops them.
+
+## Reports the release resolves (SYRD-868)
+
+The User, 2026-11-23: "the notice that goes out when a ticket submitted downstream is completed is kind of redundant
+if it results in a new release. they will get the release notification anyway". So a report closed Done upstream on a
+commit the reporter's release does not contain is recorded on the reporter's board without a notice
+(`report_closure.awaits_release`). The release notice must then say it carries the fix, or the link is lost:
+
+- **Where it comes from.** Root reads every tenant board on the host as the database superuser, the same way it makes
+  its one write: each ticket in `report_provenance` that is done on a closing commit, with the reporting project the
+  board recorded when the report was filed. It also reads the commits from the tenant's release to the new one in the
+  installing checkout, as its owner, merges included (a report may close on its integration merge).
+- **What is named.** For each tenant, its own reports whose closing commit (full or abbreviated) is among those
+  commits, by board: "This release resolves your reports SYRD-9, SYRD-866 on syrd's board." A tenant with none gets no
+  such line. A board that cannot be read resolves nothing, and the notice still goes.
+- **Still announced as closes:** a cancelled report, a Done close with no commit, one the reporter's release already
+  contains, and one where that cannot be told. No release follows those, or none is known to.
+- **With the reason, where no release will tell** (the Director, at routing): a won't-fix, recorded as a cancel or as
+  a Done close with no commit, and a no-code close (only a configuration change). A cancel carries its Director's
+  latest comment, as before. A Done close with no commit carries the reason its no-code submission recorded, or else
+  its Director's latest comment. A declared board writes that reason as a plain comment, so the upstream board keeps
+  it when the move is made: pgu1057's trigger records the ticket's newest comment on a move whose declared transition
+  is `allow_no_code`, and nothing else. A close from before pgu1057, or on an undeclared board, falls back to the
+  Director's comment.
 
 ## Why the database, not a board route
 
@@ -61,6 +86,12 @@ The write here keeps the socket's boundary exactly as it is, and is as narrowly 
   - a notice holding quotes and a semicolon is stored and delivered exactly as written, once;
   - the same release again is `already`, with nothing queued;
   - the write is refused to the board service, the listener and every role.
+
+SYRD-868 adds: the notice naming a tenant's resolved reports, short commits too, above sixty subjects capped to
+twenty; another tenant's report, and one closed on a later commit, not named; a tenant with none given no line; root's
+read of a production-built board returning exactly the reports closed done on a commit; and the commits between two
+releases, merges included. Its six mutants (any reporter, any commit, the line below the subjects, merges dropped, any
+state read, no line) are each killed by an assertion.
 
 Six mutants, all killed: the behind check dropped, the once-per-release record dropped, an unregistered tenant told,
 an unreachable board failing the run, the commands naming the old commit, and `release_available` not treated as the

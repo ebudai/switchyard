@@ -6,7 +6,9 @@ ticket has been closed or cancelled". Two halves, and no new write across boards
 * **The upstream board answers a read.** `GET /api/report-status`, with the report credential the reporting project
   already holds (`X-Ticket-Board-Report-Token`, bound to that project; the project comes from the credential, never
   from the request): that project's own reports, by `report_provenance`, that are in a terminal stage -- id, title,
-  state, closing commit, how many times it was reopened, and for a cancelled one its Director's latest comment. Given
+  state, closing commit, how many times it was reopened, and its reason when no release will tell its reporter
+  anything: for a cancelled one its Director's latest comment; for one done with no commit (a no-code close, or a
+  won't-fix closed as done) its no-code submission's reason, or else its Director's latest comment. Given
   `?release=<the caller's build>`, it also says whether that release contains each closing commit, from this board's
   own commit repositories (`git merge-base --is-ancestor`): true, false, or null when it cannot tell.
 * **The reporting board's own listener asks.** On a slow interval (`TICKET_BOARD_REPORT_CLOSE_SECONDS`, default 900),
@@ -16,6 +18,10 @@ ticket has been closed or cancelled". Two halves, and no new write across boards
   close; one still open is none. An unreachable ancestor is logged when it fails and when it is back, never per pass,
   and tells nothing. A close older than ANNOUNCE_DAYS is recorded without a notice, so the first pass after this ships
   does not replay a project's whole history to its Director.
+* **A release will tell it (SYRD-868).** A report closed done on a commit this board's release does not contain
+  (`release_contains` false) is recorded without a notice too: the release that carries the fix brings its own notice
+  (scripts/release_notice.py at ./install), which names the reports it resolves. A cancelled close, one with no commit,
+  one this release already contains, and one where it cannot be told (null) are still announced.
 """
 
 from __future__ import annotations
@@ -72,7 +78,9 @@ WITH terminal AS (
 SELECT t.id, t.title, t.state, t.commit_hash, t.updated_at,
        (SELECT count(*) FROM ticket_board.ticket_reopen_records r WHERE r.ticket_id = t.id) AS reopens,
        (SELECT c.text FROM ticket_board.ticket_comments c
-         WHERE c.ticket_id = t.id AND c.who = 'director' ORDER BY c.position DESC LIMIT 1) AS director_comment
+         WHERE c.ticket_id = t.id AND c.who = 'director' ORDER BY c.position DESC LIMIT 1) AS director_comment,
+       (SELECT n.reason FROM ticket_board.ticket_no_code_reasons n
+         WHERE n.ticket_id = t.id ORDER BY n.id DESC LIMIT 1) AS no_code_reason
   FROM ticket_board.report_provenance p
   JOIN ticket_board.tickets t ON t.id = p.ticket_id
  WHERE p.origin_project = %s AND t.state IN (SELECT name FROM terminal)
@@ -85,7 +93,7 @@ def statuses(app: Any, project: str) -> list[dict[str, Any]]:
     """`project`'s reports on this board that are in a terminal stage, newest first."""
     with app._pg_connect() as conn:
         rows = conn.execute(STATUS_SQL, (project, MAX_REPORTS)).fetchall()
-    names = ("id", "title", "state", "commit_hash", "updated_at", "reopens", "director_comment")
+    names = ("id", "title", "state", "commit_hash", "updated_at", "reopens", "director_comment", "no_code_reason")
     out = []
     for row in rows:
         values = dict(row) if isinstance(row, dict) else dict(zip(names, row))
@@ -93,8 +101,20 @@ def statuses(app: Any, project: str) -> list[dict[str, Any]]:
         out.append({"id": values["id"], "title": values["title"], "state": values["state"],
                     "commit_hash": values.get("commit_hash") or "", "reopens": int(values.get("reopens") or 0),
                     "updated_at": updated.isoformat() if hasattr(updated, "isoformat") else (updated or None),
-                    "reason": (values.get("director_comment") or "") if values["state"] == "cancelled" else ""})
+                    "reason": reason(values)})
     return out
+
+
+def reason(values: dict[str, Any]) -> str:
+    """Why a report ended where no release will say anything (SYRD-868): a cancel's Director comment; for a close with
+    no commit, the reason its declared no-code move recorded (pgu1057), else -- a won't-fix closed as done, a close
+    from before pgu1057 or on an undeclared board -- its Director's latest comment."""
+    director = values.get("director_comment") or ""
+    if values["state"] == "cancelled":
+        return director
+    if values.get("commit_hash"):
+        return ""
+    return (values.get("no_code_reason") or "").strip() or director
 
 
 def release_contains(git_dirs: tuple[Path, ...], commit: str, release: str,
@@ -195,7 +215,10 @@ def message(*, reporter: str, upstream: str, url: str, report: dict[str, Any], b
             lines.append(f"Whether this board's release ({shown}) contains it could not be told; check "
                          f"`switchyard release-status {reporter}`.")
     else:
-        lines.append("It closed with no commit.")
+        reason = (report.get("reason") or "").strip()
+        lines.append("It closed with no commit, so no release will carry it. Reason, as its board recorded it: "
+                     + (reason[:MAX_REASON_CHARS] + ("..." if len(reason) > MAX_REASON_CHARS else "")
+                        if reason else "(none recorded)"))
     lines.append(f"Read it: ticket-board-read --board-url {url} ticket {ticket}")
     text = plain("\n".join(lines))
     return text if len(text) <= MAX_MESSAGE_CHARS else text[:MAX_MESSAGE_CHARS - 3] + "..."
@@ -204,6 +227,12 @@ def message(*, reporter: str, upstream: str, url: str, report: dict[str, Any], b
 def plain(text: str) -> str:
     """`text` without C0/C1 control characters or DEL; its newlines kept."""
     return CONTROL_CHARS.sub("", text)
+
+
+def awaits_release(report: dict[str, Any]) -> bool:
+    """Whether a release notice will carry this close instead (SYRD-868): done, on a commit this board's release is
+    known not to contain."""
+    return report.get("state") == "done" and bool(report.get("commit_hash")) and report.get("release_contains") is False
 
 
 def announce(report: dict[str, Any], *, now: datetime) -> bool:
@@ -265,7 +294,8 @@ def _record_one(conn: Any, report: Any, *, reporter: str, upstream: str, url: st
     text = message(reporter=reporter, upstream=upstream, url=url, report=report, build=build,
                    contains=contains if isinstance(contains, bool) else None)
     row = conn.execute("SELECT ticket_board.note_report_closed(%s, %s, %s, %s, %s, %s, %s) AS outcome",
-                       (upstream, ticket, key, state, commit, text, announce(report, now=now))).fetchone()
+                       (upstream, ticket, key, state, commit, text,
+                        announce(report, now=now) and not awaits_release(report))).fetchone()
     outcome = row["outcome"] if isinstance(row, dict) else row[0]
     return outcome if outcome in ("told", "recorded", "already", "no_anchor") else "skipped"
 

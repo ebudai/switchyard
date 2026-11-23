@@ -28123,3 +28123,40 @@ BEGIN
     RETURN NULL;
 END;
 $$;
+
+-- SYRD-868 (pgu1057): the reason a ticket closed with no code, as its no-code move recorded it; see the migration.
+CREATE TABLE IF NOT EXISTS ticket_board.ticket_no_code_reasons (
+    id bigserial PRIMARY KEY,
+    ticket_id text NOT NULL REFERENCES ticket_board.tickets(id) ON DELETE CASCADE,
+    reason text NOT NULL,
+    recorded_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+REVOKE ALL ON ticket_board.ticket_no_code_reasons FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION ticket_board.record_no_code_reason()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+-- A declared allow_no_code move (the no-code submission): keep the reason it wrote, the ticket's newest comment,
+-- which perform_workflow_action_as appends before the update that moves and exempts the ticket. Nothing else that
+-- exempts a ticket (a Director edit, a merge) is a no-code reason, and neither is recorded.
+DECLARE said text;
+BEGIN
+    IF NOT EXISTS (
+        SELECT FROM jsonb_array_elements(coalesce(ticket_board.declared_workflow()->'transitions', '[]'::jsonb)) x
+         WHERE x->>'from' = OLD.state  -- its 'to' may be gate-skipped past
+           AND x->>'action' = current_setting('ticket_board.workflow_action', true)
+           AND coalesce((x->>'allow_no_code')::boolean, false)) THEN
+        RETURN NULL;
+    END IF;
+    SELECT c.text INTO said FROM ticket_board.ticket_comments c WHERE c.ticket_id = NEW.id
+     ORDER BY c.position DESC LIMIT 1;
+    IF btrim(coalesce(said, '')) <> '' THEN
+        INSERT INTO ticket_board.ticket_no_code_reasons (ticket_id, reason) VALUES (NEW.id, said);
+    END IF;
+    RETURN NULL;
+END;
+$$;
+REVOKE ALL ON FUNCTION ticket_board.record_no_code_reason() FROM PUBLIC;
+DROP TRIGGER IF EXISTS tickets_z_no_code_reason ON ticket_board.tickets;
+CREATE TRIGGER tickets_z_no_code_reason AFTER UPDATE ON ticket_board.tickets
+    FOR EACH ROW WHEN (NEW.commit_exempt AND NEW.state IS DISTINCT FROM OLD.state)
+    EXECUTE FUNCTION ticket_board.record_no_code_reason();

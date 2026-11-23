@@ -19,6 +19,13 @@ which reads only files root owns):
 
 The notice names both commits, the commit subjects between them (capped), the three privileged actions with
 `commit=<new>`, and `switchyard release-status <tenant>`. Nothing is upgraded, restarted or deployed.
+
+It also names the tenant's own reports this release resolves (SYRD-868): a report closed done upstream on a commit its
+reporter's release does not contain is not announced as a close (report_closure), because this notice follows it, so
+this notice must say so. Root reads every tenant board on this host as the database superuser: each ticket in
+`report_provenance` (the reporting project, recorded by the board at filing) that is done on a closing commit. One the
+tenant filed whose closing commit is among the commits from the tenant's release to the new one, in the installing
+checkout, is named -- above the subjects, so no cap drops it.
 """
 
 from __future__ import annotations
@@ -38,6 +45,13 @@ COMMIT = re.compile(r"^[0-9a-f]{40}$")
 SOCKET_DIR = "/var/run/postgresql"
 SHARED_ROOT = Path("/opt/switchyard")
 MAX_SUBJECTS = 20
+MAX_REPORTS = 40
+#: Every report this board closed as done on a commit: ticket, the project that filed it (as the board recorded it at
+#: filing), closing commit. Only the database superuser runs it, as for note_release_available.
+REPORTS_SQL = ("SELECT t.id || '|' || p.origin_project || '|' || t.commit_hash FROM ticket_board.report_provenance p "
+               "JOIN ticket_board.tickets t ON t.id = p.ticket_id WHERE t.state = 'done' AND t.commit_hash <> ''")
+SHORT_COMMIT = re.compile(r"^[0-9a-f]{7,40}$")
+TICKET = re.compile(r"^([A-Z][A-Z0-9]*)-([0-9]+)$")
 MAX_SUBJECT_CHARS = 140
 MAX_MESSAGE_CHARS = 3800
 TIMEOUT_SECONDS = 30
@@ -67,7 +81,48 @@ def changes(repo: Path, current: str, new: str, *, user: str = "",
     return [line.strip() for line in str(done.stdout).splitlines() if line.strip()]
 
 
-def message(project: str, current: str, new: str, subjects: Sequence[str]) -> str:
+def commits(repo: Path, current: str, new: str, *, user: str = "",
+            runner: Callable[..., Any] = subprocess.run) -> list[str]:
+    """Every commit from `current` to `new` in the operator's checkout, merges too (a report may close on one); []
+    when that history is not there. Read as the checkout's owner, as `changes` is."""
+    command = ["git", "-C", str(repo), "log", "--format=%H", f"{current}..{new}"]
+    if user and user != "root" and os.geteuid() == 0:
+        command = ["runuser", "-u", user, "--", *command]
+    try:
+        done = runner(command, capture_output=True, text=True, timeout=TIMEOUT_SECONDS, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [line.strip() for line in str(done.stdout).splitlines() if COMMIT.fullmatch(line.strip())] \
+        if done.returncode == 0 else []
+
+
+def closed_reports(database: str, *, runner: Callable[..., Any] = subprocess.run) -> list[tuple[str, str, str]]:
+    """(ticket, reporting project, closing commit) for each report `database`'s board closed done on a commit, read
+    as the database superuser; [] when it cannot say (a board from before report provenance, or unreachable)."""
+    command = ["runuser", "-u", "postgres", "--", "env", "-i", "PATH=/usr/bin:/bin", "LANG=C.UTF-8",
+               "PGPASSFILE=/dev/null", "PGSERVICEFILE=/dev/null", "psql", "-X", "-w", "-At", "-v", "ON_ERROR_STOP=1",
+               f"host={SOCKET_DIR} dbname={database}", "-c", REPORTS_SQL]
+    try:
+        done = runner(command, capture_output=True, text=True, timeout=TIMEOUT_SECONDS, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    rows = [tuple(line.strip().split("|")) for line in str(done.stdout).splitlines()] if done.returncode == 0 else []
+    return [row for row in rows if len(row) == 3]  # type: ignore[misc]
+
+
+def resolved(project: str, closed: Sequence[tuple[str, str, str, str]], between: Sequence[str]) -> dict[str, list[str]]:
+    """`project`'s reports, by the board that closed them, whose closing commit is among `between`."""
+    found: dict[str, list[str]] = {}
+    for board, ticket, origin, commit in closed:
+        if origin == project and TICKET.fullmatch(ticket) and SHORT_COMMIT.fullmatch(commit) \
+                and any(full.startswith(commit) for full in between):
+            found.setdefault(board, []).append(ticket)
+    order = lambda ticket: (TICKET.fullmatch(ticket).group(1), int(TICKET.fullmatch(ticket).group(2)))  # noqa: E731
+    return {board: sorted(set(tickets), key=order) for board, tickets in sorted(found.items())}
+
+
+def message(project: str, current: str, new: str, subjects: Sequence[str],
+            resolves: dict[str, list[str]] | None = None) -> str:
     """The Director's notice: self-contained, so it can be acted on without asking anyone."""
     shown = [f"- {subject[:MAX_SUBJECT_CHARS]}" for subject in subjects[:MAX_SUBJECTS]]
     if len(subjects) > MAX_SUBJECTS:
@@ -78,7 +133,13 @@ def message(project: str, current: str, new: str, subjects: Sequence[str]) -> st
                          for action in ("preview-upgrade", "upgrade-tenant-release", "deploy-release"))
     text = (f"Release {new} is installed on this host and ready for {project}, which runs {current}. Nothing has been "
             "upgraded: when you choose, preview, upgrade and deploy it:\n"
-            f"{commands}\nthen check with `switchyard release-status {project}`.\n{what}")
+            f"{commands}\nthen check with `switchyard release-status {project}`.\n")
+    for board, tickets in (resolves or {}).items():  # above the subjects: no cap drops it (SYRD-868)
+        shown_reports = ", ".join(tickets[:MAX_REPORTS]) + (f" and {len(tickets) - MAX_REPORTS} more"
+                                                            if len(tickets) > MAX_REPORTS else "")
+        plural = "s" if len(tickets) > 1 else ""
+        text += f"This release resolves your report{plural} {shown_reports} on {board}'s board.\n"
+    text += what
     return text if len(text) <= MAX_MESSAGE_CHARS else text[:MAX_MESSAGE_CHARS - 3] + "..."
 
 
@@ -104,10 +165,13 @@ def tell(database: str, new: str, current: str, text: str, *, runner: Callable[.
 def run(*, new: str, repo: Path, user: str, tenants: Callable[[], tuple[list[Any], list[str]]],
         registered: Callable[[str], bool], current_release: Callable[[str], str],
         tell_board: Callable[[str, str, str, str], str] = tell,
-        subjects_for: Callable[[str, str], list[str]] | None = None) -> str:
+        subjects_for: Callable[[str, str], list[str]] | None = None,
+        commits_for: Callable[[str, str], list[str]] | None = None,
+        reports_on: Callable[[str], list[tuple[str, str, str]]] = closed_reports) -> str:
     """Tell every registered tenant behind `new`; the one line ./install ends with."""
     told, skipped, not_told = [], [], []
     found, problems = tenants()
+    closed: list[tuple[str, str, str, str]] | None = None  # every board's closed reports, read once when needed
     not_told += [problem for problem in problems]
     for tenant in found:
         project, database = tenant.project, tenant.database
@@ -125,8 +189,17 @@ def run(*, new: str, repo: Path, user: str, tenants: Callable[[], tuple[list[Any
             not_told.append(f"{project} (its board runs no exact release: {current!r})")
             continue
         subjects = (subjects_for or (lambda old, fresh: changes(repo, old, fresh, user=user)))(current, new)
+        if closed is None:
+            closed = []
+            for board in found:
+                try:
+                    closed += [(board.project, *row) for row in reports_on(board.database)]
+                except Exception:  # noqa: BLE001 - a board that cannot say resolves nothing; the notice still goes
+                    continue
+        between = (commits_for or (lambda old, fresh: commits(repo, old, fresh, user=user)))(current, new)
         try:
-            answer = tell_board(database, new, current, message(project, current, new, subjects))
+            answer = tell_board(database, new, current,
+                                message(project, current, new, subjects, resolved(project, closed, between)))
         except Exception as exc:
             not_told.append(f"{project} ({str(exc).splitlines()[0][:200] if str(exc) else type(exc).__name__})")
             continue

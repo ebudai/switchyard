@@ -70,6 +70,9 @@ DECLARED: dict[str, OlderCode] = {
         True, "replaces validate_declared_workflow with the same signature, only adding a refusal of a move into done "
         "without require_commit; older code's composers never write such a move, and older code calls the function "
         "only to apply a document, so it refuses nothing older code produces"),
+    "pgu1057_syrd868_no_code_reasons.sql": OlderCode(
+        True, "adds the no-code reason table and an AFTER UPDATE trigger on tickets that writes only that table; "
+        "older code never reads it"),
 }
 
 

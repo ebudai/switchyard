@@ -12,6 +12,10 @@ upgraded. Here:
   and a semicolon is stored as written;
 * the board's side, on a production-built board (SYRD-772's rig, real server and listener): told once and 'already'
   after, one Director notice delivered once, and the write refused to every board role.
+* SYRD-868: a tenant's notice names its own reports that the release resolves -- done upstream on a commit between its
+  release and the new one -- above the subjects, so sixty subjects capped to twenty never drop it; a tenant with none
+  gets no such line. Root reads them from each board's report_provenance as the database superuser (real cluster),
+  and the commits between from git, merges included.
 """
 
 from __future__ import annotations
@@ -97,6 +101,40 @@ def test_the_notice_is_bounded() -> None:
     check("not in the installing checkout" in text, "commits it cannot read are said to be unknown")
 
 
+def test_the_notice_names_the_reports_it_resolves() -> None:
+    tenants = [SimpleNamespace(project=p, database=f"{p}_ticket_board") for p in ("mefp", "sapi", "syrd")]
+    runs = {"mefp": OLD_A, "sapi": OLD_B, "syrd": NEW}
+    fixed, merged, later, theirs = "1" * 40, "2" * 40, "3" * 40, "4" * 40
+    boards = {"syrd_ticket_board": [("SYRD-866", "sapi", fixed), ("SYRD-9", "sapi", merged[:12]),
+                                    ("SYRD-900", "sapi", later), ("SYRD-901", "mefp", theirs)],
+              "sapi_ticket_board": [], "mefp_ticket_board": []}
+    told: dict[str, str] = {}
+
+    def board(database: str, new: str, cur: str, text: str) -> str:
+        told[database] = text
+        return "told"
+
+    rn.run(new=NEW, repo=ROOT, user="eric", tenants=lambda: (tenants, []), registered=lambda project: True,
+           current_release=lambda project: runs[project], tell_board=board,
+           subjects_for=lambda cur, new: [f"SYRD-{n}: " + "x" * 300 for n in range(60)],
+           commits_for=lambda cur, new: ["5" * 40, fixed, merged], reports_on=lambda database: boards[database])
+    sapi, mefp = told["sapi_ticket_board"], told["mefp_ticket_board"]
+    line = "This release resolves your reports SYRD-9, SYRD-866 on syrd's board."
+    check(line in sapi and "SYRD-900" not in sapi and "SYRD-901" not in sapi and "... and 40 more" in sapi
+          and sapi.index(line) < sapi.index("What changed"),
+          f"sapi's notice names its reports closed between its release and the new one, short commits too, above the "
+          f"capped subjects; not one closed later, nor another tenant's: {sapi}")
+    check("resolves your report" not in mefp, f"mefp, whose report is not in this release, gets no such line: {mefp}")
+
+
+def test_root_reads_the_commits_between() -> None:
+    parent, merge = "79280dab3b326d41ae1048464516b4fe2b8c35ea", "a1ac46226afb230a65107b8c95680ae82046d5ac"
+    check(rn.commits(ROOT, parent, merge) == [merge] and rn.commits(ROOT, merge, "f" * 40) == [],
+          "the commits between two releases, by full hash; none when that history is not there")
+    first, joined = "e4dcc38e2ca5b6ecc6373bc4b096a12befc79525", "53f7f44d2869b0ff6f9ec8d5bc5f5fa31596b276"
+    check(joined in rn.commits(ROOT, first, joined), "a merge too: a report may close on its integration merge")
+
+
 def test_a_board_older_than_release_notices_says_so() -> None:
     error = ":<stdin>:1: ERROR:  function ticket_board.note_release_available(unknown, unknown, unknown) does not exist"
     try:
@@ -172,6 +210,25 @@ def test_the_board_records_it_once_and_only_root_may() -> None:
             check(set(refused.values()) == {"denied"}, f"no board role may make root's write: {refused}")
             check(board.sql("SELECT count(*) FROM ticket_board.release_notices;") == "1",
                   "and none of them recorded anything")
+
+            # SYRD-868: root reads the reports this board closed done on a commit, with who filed them.
+            for ticket, state, commit in (("PGU-2", "done", "1" * 40), ("PGU-3", "cancelled", "2" * 40),
+                                          ("PGU-4", "done", ""), ("PGU-5", "done", "3" * 40)):
+                fixture.seed_postgres_ticket(admin, ticket, title=ticket, state="analysis", assignee="director",
+                                             commit_exempt=True)
+                board.sql("SET session_replication_role = replica; UPDATE ticket_board.tickets SET "
+                          f"state = '{state}', commit_hash = '{commit}' WHERE id = '{ticket}';")
+                if ticket != "PGU-5":  # not a report: filed on this board itself
+                    board.sql("INSERT INTO ticket_board.report_provenance (ticket_id, origin_project, recorded_from) "
+                              f"VALUES ('{ticket}', 'sapi', 'filing');")
+
+            def superuser(command, **kwargs):
+                start = command.index("psql")
+                return subprocess.run([part if not part.startswith("host=") else admin
+                                       for part in command[start:]], **kwargs)
+
+            check(rn.closed_reports("board", runner=superuser) == [("PGU-2", "sapi", "1" * 40)],
+                  "root reads exactly the reports closed done on a commit, and who filed each")
         finally:
             board.close()
 
@@ -212,7 +269,8 @@ def test_the_board_records_it_once_and_only_root_may() -> None:
 
 
 def main() -> int:
-    for test in (test_who_is_told, test_the_notice_is_bounded, test_a_board_older_than_release_notices_says_so,
+    for test in (test_who_is_told, test_the_notice_is_bounded, test_the_notice_names_the_reports_it_resolves,
+                 test_root_reads_the_commits_between, test_a_board_older_than_release_notices_says_so,
                  test_not_root_tells_nobody_and_fails_nothing,
                  test_the_board_records_it_once_and_only_root_may):
         test()

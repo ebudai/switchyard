@@ -78,6 +78,9 @@ GRANT EXECUTE ON FUNCTION ticket_board.file_confirmed_report(text, text, text, t
 -- SYRD-677: a tenant's follow-up on its own report; the provenance it is checked against.
 REVOKE ALL ON ticket_board.report_provenance, ticket_board.report_follow_ups FROM PUBLIC;
 GRANT SELECT ON ticket_board.report_provenance, ticket_board.report_follow_ups TO ticket_board_service;
+-- SYRD-868: the reason a ticket closed with no code, for the report-status read.
+REVOKE ALL ON ticket_board.ticket_no_code_reasons FROM PUBLIC;
+GRANT SELECT ON ticket_board.ticket_no_code_reasons TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.report_follow_up_target(text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.append_report_follow_up(text, text, text, text, text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.report_intake() TO ticket_board_service;

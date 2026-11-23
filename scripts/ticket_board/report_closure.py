@@ -6,9 +6,12 @@ ticket has been closed or cancelled". Two halves, and no new write across boards
 * **The upstream board answers a read.** `GET /api/report-status`, with the report credential the reporting project
   already holds (`X-Ticket-Board-Report-Token`, bound to that project; the project comes from the credential, never
   from the request): that project's own reports, by `report_provenance`, that are in a terminal stage -- id, title,
-  state, closing commit, how many times it was reopened, and for a cancelled one its Director's latest comment. Given
+  state, closing commit, how many times it was reopened, and its reason when no release will tell its reporter
+  anything: for a cancelled one its Director's latest comment; for one done with no commit (a no-code close, or a
+  won't-fix closed as done) its no-code submission's reason, or else its Director's latest comment. Given
   `?release=<the caller's build>`, it also says whether that release contains each closing commit, from this board's
-  own commit repositories (`git merge-base --is-ancestor`): true, false, or null when it cannot tell.
+  own commit repositories (`git merge-base --is-ancestor`): true, false, or null when it cannot tell. Given
+  `&installed=<the release installed on the caller's host>`, it says the same of that release (`installed_contains`).
 * **The reporting board's own listener asks.** On a slow interval (`TICKET_BOARD_REPORT_CLOSE_SECONDS`, default 900),
   it walks its project's report chain as `file-report` does (root's registry; each ancestor's own credential file) and
   records each close with `ticket_board.note_report_closed`, which queues one Director notice for a close it has not
@@ -16,6 +19,12 @@ ticket has been closed or cancelled". Two halves, and no new write across boards
   close; one still open is none. An unreachable ancestor is logged when it fails and when it is back, never per pass,
   and tells nothing. A close older than ANNOUNCE_DAYS is recorded without a notice, so the first pass after this ships
   does not replay a project's whole history to its Director.
+* **A release will tell it (SYRD-868).** A report closed done on a commit neither this board's release nor the release
+  installed on this host contains (`release_contains` and `installed_contains` both false) is recorded without a
+  notice too: the next ./install must carry the fix, and its release notice (scripts/release_notice.py) names the
+  reports it resolves. One the installed release already contains is announced: that install's notice went out before
+  the report was done, so it did not name it (Audit, round 1), and no later one will. A cancelled close, one with no
+  commit, one this board's release already contains, and one where either cannot be told (null) are announced too.
 """
 
 from __future__ import annotations
@@ -42,6 +51,8 @@ except ImportError:  # pragma: no cover - run outside the package, as the listen
     from commit_repos import commit_git_dirs_for_project  # type: ignore[no-redef]
 
 PATH = "/api/report-status"
+#: The release ./install last installed on this host (release_notice.installed_release reads the same link).
+INSTALLED_RELEASE = Path("/opt/switchyard/current")
 INTERVAL_ENV = "TICKET_BOARD_REPORT_CLOSE_SECONDS"
 DEFAULT_INTERVAL_SECONDS = 900.0
 #: A close older than this is recorded, not announced.
@@ -72,7 +83,9 @@ WITH terminal AS (
 SELECT t.id, t.title, t.state, t.commit_hash, t.updated_at,
        (SELECT count(*) FROM ticket_board.ticket_reopen_records r WHERE r.ticket_id = t.id) AS reopens,
        (SELECT c.text FROM ticket_board.ticket_comments c
-         WHERE c.ticket_id = t.id AND c.who = 'director' ORDER BY c.position DESC LIMIT 1) AS director_comment
+         WHERE c.ticket_id = t.id AND c.who = 'director' ORDER BY c.position DESC LIMIT 1) AS director_comment,
+       (SELECT n.reason FROM ticket_board.ticket_no_code_reasons n
+         WHERE n.ticket_id = t.id ORDER BY n.id DESC LIMIT 1) AS no_code_reason
   FROM ticket_board.report_provenance p
   JOIN ticket_board.tickets t ON t.id = p.ticket_id
  WHERE p.origin_project = %s AND t.state IN (SELECT name FROM terminal)
@@ -85,7 +98,7 @@ def statuses(app: Any, project: str) -> list[dict[str, Any]]:
     """`project`'s reports on this board that are in a terminal stage, newest first."""
     with app._pg_connect() as conn:
         rows = conn.execute(STATUS_SQL, (project, MAX_REPORTS)).fetchall()
-    names = ("id", "title", "state", "commit_hash", "updated_at", "reopens", "director_comment")
+    names = ("id", "title", "state", "commit_hash", "updated_at", "reopens", "director_comment", "no_code_reason")
     out = []
     for row in rows:
         values = dict(row) if isinstance(row, dict) else dict(zip(names, row))
@@ -93,8 +106,20 @@ def statuses(app: Any, project: str) -> list[dict[str, Any]]:
         out.append({"id": values["id"], "title": values["title"], "state": values["state"],
                     "commit_hash": values.get("commit_hash") or "", "reopens": int(values.get("reopens") or 0),
                     "updated_at": updated.isoformat() if hasattr(updated, "isoformat") else (updated or None),
-                    "reason": (values.get("director_comment") or "") if values["state"] == "cancelled" else ""})
+                    "reason": reason(values)})
     return out
+
+
+def reason(values: dict[str, Any]) -> str:
+    """Why a report ended where no release will say anything (SYRD-868): a cancel's Director comment; for a close with
+    no commit, the reason its declared no-code move recorded (pgu1057), else -- a won't-fix closed as done, a close
+    from before pgu1057 or on an undeclared board -- its Director's latest comment."""
+    director = values.get("director_comment") or ""
+    if values["state"] == "cancelled":
+        return director
+    if values.get("commit_hash"):
+        return ""
+    return (values.get("no_code_reason") or "").strip() or director
 
 
 def release_contains(git_dirs: tuple[Path, ...], commit: str, release: str,
@@ -124,14 +149,16 @@ def serve_status(handler: Any, parsed: Any) -> None:
         if not project:
             raise PermissionError("report status needs this project's own report credential, bound to it; this is "
                                   "the board's shared report token")
-        release = (parse_qs(parsed.query).get("release") or [""])[0].strip().lower()
-        if release and not RELEASE_RE.fullmatch(release):
-            raise ValueError("release must be a full commit hash")
+        query = parse_qs(parsed.query)
+        release, installed = ((query.get(name) or [""])[0].strip().lower() for name in ("release", "installed"))
+        if (release and not RELEASE_RE.fullmatch(release)) or (installed and not RELEASE_RE.fullmatch(installed)):
+            raise ValueError("release and installed must be full commit hashes")
         reports = statuses(handler.app, project)
-        git_dirs = commit_git_dirs_for_project(project=str(handler.app.project)) if release else ()
+        git_dirs = commit_git_dirs_for_project(project=str(handler.app.project)) if release or installed else ()
         for report in reports:
-            report["release_contains"] = (release_contains(git_dirs, report["commit_hash"], release)
-                                          if release and report["commit_hash"] else None)
+            for key, commit in (("release_contains", release), ("installed_contains", installed)):
+                report[key] = (release_contains(git_dirs, report["commit_hash"], commit)
+                               if commit and report["commit_hash"] else None)
     except PermissionError as exc:
         return handler.send_text(str(exc), HTTPStatus.FORBIDDEN)
     except ValueError as exc:
@@ -151,11 +178,23 @@ def destinations(project: str, environ: Any = os.environ) -> list[tuple[Any, Pat
             for index, link in enumerate(links)]
 
 
-def fetch_status(url: str, token: str, release: str, *, timeout: float = TIMEOUT_SECONDS) -> dict[str, Any]:
+def installed_release(link: Path = INSTALLED_RELEASE) -> str:
+    """The release installed on this host, or '' when there is none to name."""
+    try:
+        name = Path(os.readlink(link)).name
+    except OSError:
+        return ""
+    return name if RELEASE_RE.fullmatch(name) else ""
+
+
+def fetch_status(url: str, token: str, release: str, installed: str = "", *,
+                 timeout: float = TIMEOUT_SECONDS) -> dict[str, Any]:
     """One ancestor's answer about this project's ended reports. Raises OSError/ValueError when it cannot say."""
     from urllib import error, parse, request
 
-    query = f"?release={parse.quote(release)}" if RELEASE_RE.fullmatch(release or "") else ""
+    asked = [f"{name}={parse.quote(value)}" for name, value in (("release", release), ("installed", installed))
+             if RELEASE_RE.fullmatch(value or "")]
+    query = "?" + "&".join(asked) if asked else ""
     req = request.Request(f"{url.rstrip('/')}{PATH}{query}", method="GET",
                           headers={report_follow_up.REPORT_TOKEN_HEADER: token})
     try:
@@ -172,7 +211,7 @@ def fetch_status(url: str, token: str, release: str, *, timeout: float = TIMEOUT
 
 
 def message(*, reporter: str, upstream: str, url: str, report: dict[str, Any], build: str,
-            contains: bool | None) -> str:
+            contains: bool | None, installed: str = "") -> str:
     """The Director's notice about one close: what ended, how, whether this board runs it, and where to read it."""
     ticket, state, commit = report["id"], report["state"], report.get("commit_hash") or ""
     lines = [f"Your report {ticket} on {upstream}'s board is now {state}: {report.get('title', '')}"]
@@ -186,6 +225,12 @@ def message(*, reporter: str, upstream: str, url: str, report: dict[str, Any], b
         shown = build[:12] if RELEASE_RE.fullmatch(build or "") else (build or "unknown")
         if contains is True:
             lines.append(f"This board's release ({shown}) already contains it: nothing to deploy for it.")
+        elif contains is False and report.get("installed_contains") is True and RELEASE_RE.fullmatch(installed or ""):
+            # SYRD-868: installed before this close, so that install's notice could not name it.
+            lines.append(f"This board's release ({shown}) does not contain it yet; release {installed}, installed on "
+                         "this host, does. Preview, upgrade and deploy it:")
+            lines += [f"  switchyard privileged-action {reporter} {action} commit={installed}"
+                      for action in ("preview-upgrade", "upgrade-tenant-release", "deploy-release")]
         elif contains is False:
             lines.append(f"This board's release ({shown}) does not contain it yet. Once a release on this host does "
                          f"(`switchyard release-status {reporter}`), preview, upgrade and deploy it:")
@@ -195,7 +240,10 @@ def message(*, reporter: str, upstream: str, url: str, report: dict[str, Any], b
             lines.append(f"Whether this board's release ({shown}) contains it could not be told; check "
                          f"`switchyard release-status {reporter}`.")
     else:
-        lines.append("It closed with no commit.")
+        reason = (report.get("reason") or "").strip()
+        lines.append("It closed with no commit, so no release will carry it. Reason, as its board recorded it: "
+                     + (reason[:MAX_REASON_CHARS] + ("..." if len(reason) > MAX_REASON_CHARS else "")
+                        if reason else "(none recorded)"))
     lines.append(f"Read it: ticket-board-read --board-url {url} ticket {ticket}")
     text = plain("\n".join(lines))
     return text if len(text) <= MAX_MESSAGE_CHARS else text[:MAX_MESSAGE_CHARS - 3] + "..."
@@ -204,6 +252,13 @@ def message(*, reporter: str, upstream: str, url: str, report: dict[str, Any], b
 def plain(text: str) -> str:
     """`text` without C0/C1 control characters or DEL; its newlines kept."""
     return CONTROL_CHARS.sub("", text)
+
+
+def awaits_release(report: dict[str, Any]) -> bool:
+    """Whether a release notice must still carry this close (SYRD-868): done, on a commit neither this board's release
+    nor the one installed on this host is known to contain, so the next ./install names it."""
+    return (report.get("state") == "done" and bool(report.get("commit_hash"))
+            and report.get("release_contains") is False and report.get("installed_contains") is False)
 
 
 def announce(report: dict[str, Any], *, now: datetime) -> bool:
@@ -218,7 +273,8 @@ def announce(report: dict[str, Any], *, now: datetime) -> bool:
 
 
 def record(conn: Any, *, reporter: str, upstream: str, url: str, answer: dict[str, Any], build: str,
-           now: datetime, log: Any = LOGGER, seen: set[tuple[str, str]] | None = None) -> dict[str, int]:
+           now: datetime, log: Any = LOGGER, seen: set[tuple[str, str]] | None = None,
+           installed: str = "") -> dict[str, int]:
     """Record every close in one ancestor's answer; how many were told, recorded silently, known, unanchored, skipped
     as malformed, or refused by this board. One bad entry is skipped -- logged once per upstream ticket (`seen` carries
     that across passes) -- and every entry after it still counts."""
@@ -233,7 +289,8 @@ def record(conn: Any, *, reporter: str, upstream: str, url: str, answer: dict[st
     for report in answer.get("reports") or []:
         ticket = str(report.get("id") or "?")[:60] if isinstance(report, dict) else "?"
         try:  # the whole entry: whatever one entry holds, it can cost only itself
-            counts[_record_one(conn, report, reporter=reporter, upstream=upstream, url=url, build=build, now=now)] += 1
+            counts[_record_one(conn, report, reporter=reporter, upstream=upstream, url=url, build=build, now=now,
+                               installed=installed)] += 1
         except _Malformed as exc:
             counts["skipped"] += 1  # not something this board stores or says: an answer it cannot vouch for
             once(ticket, f"is malformed ({exc})")
@@ -252,7 +309,8 @@ class _Malformed(ValueError):
     """An entry this board cannot vouch for: its id, state or commit is not one a board stores."""
 
 
-def _record_one(conn: Any, report: Any, *, reporter: str, upstream: str, url: str, build: str, now: datetime) -> str:
+def _record_one(conn: Any, report: Any, *, reporter: str, upstream: str, url: str, build: str, now: datetime,
+                installed: str = "") -> str:
     """One entry of an ancestor's answer, recorded: note_report_closed's outcome. Raises on anything it cannot use."""
     if not isinstance(report, dict):
         raise _Malformed("not an object")
@@ -263,9 +321,10 @@ def _record_one(conn: Any, report: Any, *, reporter: str, upstream: str, url: st
     key = f"{state}#{int(report.get('reopens') or 0)}"
     contains = report.get("release_contains")
     text = message(reporter=reporter, upstream=upstream, url=url, report=report, build=build,
-                   contains=contains if isinstance(contains, bool) else None)
+                   contains=contains if isinstance(contains, bool) else None, installed=installed)
     row = conn.execute("SELECT ticket_board.note_report_closed(%s, %s, %s, %s, %s, %s, %s) AS outcome",
-                       (upstream, ticket, key, state, commit, text, announce(report, now=now))).fetchone()
+                       (upstream, ticket, key, state, commit, text,
+                        announce(report, now=now) and not awaits_release(report))).fetchone()
     outcome = row["outcome"] if isinstance(row, dict) else row[0]
     return outcome if outcome in ("told", "recorded", "already", "no_anchor") else "skipped"
 
@@ -294,16 +353,18 @@ def run(listener: Any, conn: Any, *, environ: Any = os.environ, clock: Callable[
     try:
         build = listener.__dict__.get("_report_closure_build") or board_build_id()
         listener._report_closure_build = build
+        installed = listener.__dict__.get("_report_closure_installed") or installed_release()  # each pass: it moves
         for link, credential in destinations(project, environ):
             token, why = report_ancestry.read_token(credential) if credential else ("", "none")
             if not token:
                 problem = f"no report credential for {link.project} ({why})"
             else:
                 try:
-                    answer = fetch(link.url, token, build)
+                    answer = fetch(link.url, token, build, installed)
                     counts = record(conn, reporter=project, upstream=link.project, url=link.url, answer=answer,
                                     build=build, now=datetime.now(timezone.utc), log=log,
-                                    seen=listener.__dict__.setdefault("_report_closure_entries", set()))
+                                    seen=listener.__dict__.setdefault("_report_closure_entries", set()),
+                                    installed=installed)
                     problem = ""
                     if counts["told"] or counts["recorded"]:
                         log.info("Report closes from %s: %s", link.project, counts)

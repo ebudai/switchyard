@@ -625,7 +625,14 @@ ticket-board-write report-follow-up --ticket SYRD-673 --kind supersession \
 - **When it ends, your Director is told** (SYRD-827). With the same bound credential, your
   board's listener reads `GET /api/report-status` on each ancestor: your project's ended reports
   there, and whether your release contains each closing commit. Each close gives your Director one
-  notice. The read changes nothing upstream, and the shared token cannot use it.
+  notice, except a Done close on a commit neither your release nor the release installed on the
+  host contains yet (SYRD-868): that one is recorded silently, and the next install's release
+  notice, which carries the fix, names the report instead. One the installed release already
+  contains is told, with that release: its install's notice went out before the close. A
+  close no release will follow carries its reason: a cancel, its Director's latest comment; a Done
+  close with no commit, the reason its no-code submission recorded (kept by the board when the move
+  is made), or else its Director's latest comment. The read changes nothing upstream, and the
+  shared token cannot use it.
 
 #### More than one upstream board: report ancestry
 

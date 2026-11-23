@@ -10,9 +10,17 @@ not.
 
 Here:
 * nothing is told while a report is open;
-* a report closed Done gives one Director notice on the reporting board, with the commit and whether the reporter's
-  release contains it -- and the upgrade steps when it does not; a second pass tells nothing more;
-* a cancelled report gives its Director's reason;
+* a report closed Done on a commit the reporter's release contains gives one Director notice on the reporting board,
+  with the commit; a second pass tells nothing more;
+* SYRD-868: one closed Done on a commit neither the reporter's release nor the host's installed one contains is
+  recorded with no notice, then or later (the next install's notice names it); closed again after a reopen, the same;
+  one whose fix was installed before it was Done (Audit, round 1) is told once, with that release, and the upgrade to
+  it tells nothing more;
+* a cancelled report gives its Director's reason, a commit or none; a Done close with no commit, or on a commit
+  whether the release contains cannot be told, gives one notice each;
+* SYRD-868, the Director's cases: a no-code close (the board's own no-code submission, then Done) carries the reason
+  that submission recorded -- the configuration step -- and a won't-fix closed as Done with no commit carries its
+  Director's latest comment; no release will tell either reporter anything;
 * a report reopened and closed again tells again, once;
 * a close older than 30 days is recorded, not told; another project's report is never told to this one;
 * the read refuses a missing or shared credential and gives each project its own reports only;
@@ -63,8 +71,9 @@ def git(repo: Path, *args: str) -> str:
                           env=env).stdout.strip()
 
 
-def history(scratch: Path) -> tuple[Path, str, str, str]:
-    """A repository: release R contains commit IN; commit OUT is on a branch R does not have."""
+def history(scratch: Path) -> tuple[Path, str, str, str, str]:
+    """A repository: release R contains commit IN; commit OUT is on a branch R does not have, whose release R1
+    contains it."""
     repo = scratch / "control"
     repo.mkdir()
     git(repo, "init", "-q", "-b", "main")
@@ -76,7 +85,8 @@ def history(scratch: Path) -> tuple[Path, str, str, str]:
     git(repo, "checkout", "-q", "-b", "side", "HEAD~2")
     git(repo, "commit", "-q", "--allow-empty", "-m", "out")
     outside = git(repo, "rev-parse", "HEAD")
-    return repo / ".git", release, inside, outside
+    git(repo, "commit", "-q", "--allow-empty", "-m", "release 1")
+    return repo / ".git", release, inside, outside, git(repo, "rev-parse", "HEAD")
 
 
 def report(board, admin_url: str, ticket: str, project: str, *, title: str) -> None:
@@ -116,6 +126,17 @@ def authors(board, ticket: str) -> str:
     return board.sql(f"SELECT string_agg(who, ',') FROM ticket_board.ticket_comments WHERE ticket_id = '{ticket}';")
 
 
+def comments(board, ticket: str) -> str:
+    return board.sql("SELECT string_agg(who || ': ' || text, ' || ' ORDER BY position) FROM ticket_board.ticket_comments "
+                     f"WHERE ticket_id = '{ticket}';")
+
+
+def no_code_state(board) -> str:
+    return board.sql("SELECT (SELECT count(*) FROM ticket_board.ticket_no_code_reasons)::text || ' ' || "
+                     "(SELECT count(*) FROM pg_trigger WHERE tgname = 'tickets_z_no_code_reason')::text;") + " " + \
+        comments(board, "PGU-16")
+
+
 def queue_state(board) -> str:
     """What the board queued and traced, for a failure's message."""
     queue = board.sql("SELECT string_agg(id || ':' || kind || ':' || target_role || ':' || coalesce(payload->>'kind', '') "
@@ -149,7 +170,7 @@ def test_report_close_notices() -> None:
                            initdb_args=("--username=postgres", "--encoding=UTF8")) as cluster, \
             tempfile.TemporaryDirectory(prefix="syrd827.") as raw:
         scratch = Path(raw)
-        git_dir, release, inside, outside = history(scratch)
+        git_dir, release, inside, outside, carrying = history(scratch)
         os.environ["TICKET_BOARD_COMMIT_GIT_DIR"] = str(git_dir)  # the upstream board's own commit repository
         up_admin = urs.build_board(fixture, cluster, ROOT, "up")
         up = urs.Board(fixture, cluster, up_admin, "up", "u")
@@ -185,7 +206,7 @@ def test_report_close_notices() -> None:
             log.addHandler(records)
             log.setLevel(logging.INFO)
             listener = SimpleNamespace(report_closures=True, project="sapi", logger=log,
-                                       _report_closure_build=release)
+                                       _report_closure_build=release, _report_closure_installed=release)
 
             with psycopg.connect(rep.listener_url, autocommit=True) as conn:  # as the listener connects
                 def tell() -> list[str]:
@@ -197,6 +218,8 @@ def test_report_close_notices() -> None:
                 report(up, up_admin, "PGU-9", "sapi", title="A duplicate")
                 report(up, up_admin, "PGU-10", "sapi", title="Long ago")
                 report(up, up_admin, "PGU-11", "mefp", title="A report of another project")
+                for ticket in ("PGU-12", "PGU-13", "PGU-14", "PGU-15", "PGU-16", "PGU-18"):
+                    report(up, up_admin, ticket, "sapi", title=f"Report {ticket}")
                 check(tell() == [] and rep.sql("SELECT count(*) FROM ticket_board.report_closures;") == "0",
                       "nothing is told, or recorded, while every report is open")
 
@@ -210,11 +233,11 @@ def test_report_close_notices() -> None:
                 check(tell() == [], "and the next pass tells nothing more")
 
                 end(up, "PGU-8", "done", outside)
-                told = tell()
-                check(len(told) == 1 and outside in told[0] and "does not contain it yet" in told[0]
-                      and "switchyard privileged-action sapi upgrade-tenant-release commit=<that release>" in told[0]
-                      and "switchyard release-status sapi" in told[0],
-                      f"a commit the release does not have: said, with the upgrade steps: {told}")
+                check(tell() == [] and tell() == [] and rep.sql(
+                          "SELECT string_agg(close_key || ':' || told::text, ',') FROM ticket_board.report_closures "
+                          "WHERE ticket_id = 'PGU-8';") == "done#0:false",
+                      "SYRD-868: a commit the release does not have: recorded, and no notice, then or later -- the "
+                      "release that carries it names it")
 
                 fixture.TEST_WRITE_TOKEN = up.server.write_token  # the rig keeps one token: the last board built's
                 commented = up.act("PGU-9", "add_comment", "director", text="Won't fix: a duplicate of PGU-7.")
@@ -223,6 +246,66 @@ def test_report_close_notices() -> None:
                 told = tell()
                 check(len(told) == 1 and "is now cancelled" in told[0] and "Won't fix: a duplicate of PGU-7." in told[0],
                       f"a cancelled report: its Director's reason: {told} {str(commented)[:300]} {authors(up, 'PGU-9')}")
+
+                end(up, "PGU-12", "done", "0" * 40)  # a commit no repository of the upstream board's has
+                # A no-code close, through the board's own no-code submission, then Done.
+                # PGU-13 was filed exempt, as a report may be; PGU-16 was not, so the no-code move exempts it.
+                up.sql("SET session_replication_role = replica; UPDATE ticket_board.tickets SET state = 'in_progress', "
+                       "assignee = CASE id WHEN 'PGU-13' THEN 'main' ELSE 'app' END, commit_exempt = (id = 'PGU-13') "
+                       "WHERE id IN ('PGU-13', 'PGU-16');")
+                config = "Only configuration: set TICKET_BOARD_REPORT_CLOSE_SECONDS=300 in the tenant's board env."
+                other = "Only configuration: give the listener unit Restart=always."
+                fixture.TEST_WRITE_TOKEN = up.server.write_token
+                submitted = up.act("PGU-13", "submit_to_audit_without_commit", "main", reason=config)
+                exempted = up.act("PGU-16", "submit_to_audit_without_commit", "app", reason=other)
+                later = up.act("PGU-13", "add_comment", "audit", text="Audit: no code, as said.")
+                won_t = up.act("PGU-15", "add_comment", "director", text="Won't fix: this works as designed.")
+                # An ordinary move of an exempt ticket is no no-code move: what it leaves newest is not its reason.
+                chatter = up.act("PGU-15", "add_comment", "ops", text="Ops: looking at it.")
+                routed = up.act("PGU-15", "route", "director", state="in_progress", assignee="ops")
+                routed_to = up.sql("SELECT state || ':' || commit_exempt::text FROM ticket_board.tickets WHERE id = 'PGU-15';")
+                fixture.TEST_WRITE_TOKEN = rep.server.write_token
+                end(up, "PGU-13", "done")
+                end(up, "PGU-14", "cancelled", outside)
+                end(up, "PGU-15", "done")
+                end(up, "PGU-16", "done")
+                told = tell()
+                said = {ticket: [m for m in told if f" {ticket} " in m] for ticket in ("PGU-12", "PGU-13", "PGU-14",
+                                                                                       "PGU-15", "PGU-16")}
+                check(all("ok" in answer for answer in (submitted, exempted, later, won_t, chatter, routed)) and len(told) == 5
+                      and len(said["PGU-12"]) == 1 and "could not be told" in said["PGU-12"][0]
+                      and len(said["PGU-14"]) == 1 and "is now cancelled" in said["PGU-14"][0],
+                      f"where no release will tell -- cannot be told, no commit, cancelled with a commit the release "
+                      f"lacks -- one notice each: {[a for a in (submitted, exempted, later, won_t, chatter, routed) if 'ok' not in a]} "
+                      f"{no_code_state(up)}")
+                check(len(said["PGU-13"]) == 1 and "closed with no commit, so no release will carry it" in said["PGU-13"][0]
+                      and f"Reason, as its board recorded it: {config}" in said["PGU-13"][0],
+                      f"a no-code close: its notice carries the reason its no-code submission recorded: {said['PGU-13']} "
+                      f"{comments(up, 'PGU-13')}")
+                check(len(said["PGU-16"]) == 1 and f"Reason, as its board recorded it: {other}" in said["PGU-16"][0],
+                      f"and one the no-code move made exempt: {said['PGU-16']} {comments(up, 'PGU-16')}")
+                check(len(said["PGU-15"]) == 1 and "Reason, as its board recorded it: Won't fix: this works as designed."
+                      in said["PGU-15"][0] and routed_to == "in_progress:true",
+                      f"a won't-fix closed as Done, routed on the way: its Director's reason: {said['PGU-15']} {routed_to}")
+
+                reopen(up, "PGU-8")
+                end(up, "PGU-8", "done", outside)
+                check(tell() == [] and rep.sql("SELECT string_agg(close_key || ':' || told::text, ',' ORDER BY close_key) "
+                                               "FROM ticket_board.report_closures WHERE ticket_id = 'PGU-8';")
+                      == "done#0:false,done#1:false", "reopened and closed again outside the release: the same")
+
+                # Audit's ordering: the release carrying the fix installed before the report is Done, then the upgrade.
+                listener._report_closure_installed = carrying
+                end(up, "PGU-18", "done", outside)
+                told = tell()
+                check(len(told) == 1 and " PGU-18 " in told[0]
+                      and f"release {carrying}, installed on this host, does" in told[0]
+                      and f"switchyard privileged-action sapi deploy-release commit={carrying}" in told[0],
+                      f"a fix installed before its report was Done: told now, with that release -- that install's "
+                      f"notice could not name it: {told}")
+                listener._report_closure_build = carrying  # the reporter upgrades to it
+                check(tell() == [], "and the upgrade tells nothing more: exactly one notice")
+                listener._report_closure_build = listener._report_closure_installed = release
 
                 reopen(up, "PGU-7")
                 check(tell() == [], "a reopened report is open again: nothing is told")
@@ -237,8 +320,8 @@ def test_report_close_notices() -> None:
                                                "WHERE ticket_id = 'PGU-10';") == "false"
                       and rep.sql("SELECT count(*) FROM ticket_board.report_closures WHERE ticket_id = 'PGU-11';") == "0",
                       "a close older than 30 days is recorded, not told; another project's is neither")
-                check(rep.sql("SELECT count(*) FROM ticket_board.report_closures WHERE told;") == "4",
-                      "four closes told in all: PGU-7 twice, PGU-8, PGU-9")
+                check(rep.sql("SELECT count(*) FROM ticket_board.report_closures WHERE told;") == "9",
+                      "nine closes told in all: PGU-7 twice, PGU-9, PGU-12 to PGU-16, PGU-18")
                 check(not [line for line in records.lines if line.startswith(("ERROR", "WARNING"))],
                       f"and no pass failed or warned along the way: {records.lines}")
 
@@ -270,18 +353,25 @@ def test_report_close_notices() -> None:
                     {"id": "SYRD-43", "state": "cancelled", "commit_hash": "", "reopens": 0, "title": hostile,
                      "reason": "first line\x1b]0;owned\x07\nsecond line\r\x7f\u0085done"}]},
                 "http://root2.test": {"reports": [
+                    # Not in the reporter's release, and whether the installed one has it cannot be told: told.
                     {"id": "ROOT-5", "state": "done", "commit_hash": outside, "reopens": 0, "title": "from the next ancestor",
-                     "release_contains": False}]},
+                     "release_contains": False, "installed_contains": None},
+                    # An answer that says not contained with no commit to contain: no release will carry it.
+                    {"id": "ROOT-6", "state": "done", "commit_hash": "", "reopens": 0, "title": "no commit",
+                     "release_contains": False, "installed_contains": False},
+                    # Not installed, and whether the reporter's release has it cannot be told: told.
+                    {"id": "ROOT-7", "state": "done", "commit_hash": outside, "reopens": 0, "title": "unknown here",
+                     "release_contains": None, "installed_contains": False}]},
             }
             records.lines.clear()
             with psycopg.connect(rep.listener_url, autocommit=True) as conn:
                 two = {**environ, "SWITCHYARD_PROJECT_REGISTRY_DIR": str(chained)}
                 told = []
                 for _ in range(2):
-                    report_closure.run(listener, conn, environ=two, fetch=lambda url, token, build: answers[url])
+                    report_closure.run(listener, conn, environ=two, fetch=lambda url, token, build, installed: answers[url])
                     told += [m for t, m in rep.one_pass() if t == "pgu-director:0.0"]
             warned = [line for line in records.lines if line.startswith("WARNING")]
-            check(sorted(m.split()[2] for m in told) == ["ROOT-5", "SYRD-42", "SYRD-43"],
+            check(sorted(m.split()[2] for m in told) == ["ROOT-5", "ROOT-6", "ROOT-7", "SYRD-42", "SYRD-43"],
                   f"the valid closes beside a bad entry, and from the next ancestor, are told: {told} {records.lines}")
             joined = "\n".join(warned)
             check(len(warned) == 5 and "'syrd-40' is malformed" in joined and "'SYRD-41' was refused by this board" in joined
@@ -335,6 +425,20 @@ def test_report_close_notices() -> None:
             up.close()
 
 
+def test_the_installed_release_is_read_from_its_link() -> None:
+    from scripts.ticket_board import report_closure
+
+    with tempfile.TemporaryDirectory(prefix="syrd868.") as raw:
+        link, commit = Path(raw) / "current", "d" * 40
+        link.symlink_to(Path(raw) / "releases" / commit)
+        named = report_closure.installed_release(link)
+        link.unlink()
+        link.symlink_to(Path(raw) / "releases" / "staging")
+        check(named == commit and report_closure.installed_release(link) == ""
+              and report_closure.installed_release(Path(raw) / "none") == "",
+              "the host's installed release is the exact commit its link names; anything else names none")
+
+
 def test_the_listener_service_alone_turns_it_on() -> None:
     text = (ROOT / "scripts/ticket_board/notify_listener.py").read_text(encoding="utf-8")
     check("listener.report_closures = True" in text and "report_closure.run(self, conn)" in text,
@@ -343,6 +447,7 @@ def test_the_listener_service_alone_turns_it_on() -> None:
 
 def main() -> int:
     test_the_listener_service_alone_turns_it_on()
+    test_the_installed_release_is_read_from_its_link()
     test_report_close_notices()
     print(f"report_close_notice_test: {CHECKS} checks ok")
     return 0

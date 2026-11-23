@@ -255,8 +255,11 @@ def test_the_declared_refusal_can_be_followed() -> None:
     # "replace the Director's mark_done ... with the Director's route from director_review to that stage"
     at = moves.index(close)
     moves[at:at + 1] = [{**close, "to": "vcs", "action": "route", "label": "Route", "require_commit": False}]
-    # "add mark_done from that stage to done, with main as its actor and the commit it requires"
-    moves.append({**close, "from": "vcs", "actors": ["main"]})
+    # "add mark_done from that stage to done, with main as its actor and the commit it requires" -- the commit only
+    # because the text says so (SYRD-863): the board accepts a close without one, checked below.
+    requires_commit = "with main as its actor and the commit it requires" in said
+    check(requires_commit, "the refusal says the role's mark_done requires the commit, as the shipped close does")
+    moves.append({**close, "from": "vcs", "actors": ["main"], "require_commit": requires_commit})
     # "give the Director the same defer and cancel from that stage as from director_review"
     moves.extend({**t, "from": "vcs"} for t in list(moves) if t["from"] == "director_review"
                  and t["action"] in ("defer", "cancel"))
@@ -280,6 +283,21 @@ def test_the_declared_refusal_can_be_followed() -> None:
           == {("director_review", "vcs", "route", ("director",)), ("vcs", "done", "mark_done", ("main",)),
               ("vcs", "backlog", "defer", ("director",)), ("vcs", "cancelled", "cancel", ("director",))},
           f"followed as written, the document validates with main closing from vcs: {why}")
+    closing = [t for t in (declared or {}).get("transitions", []) if t["from"] == "vcs" and t["action"] == "mark_done"]
+    check(closing and closing[0]["require_commit"] is True and close["require_commit"] is True,
+          f"and the role's close requires the commit, as the Director's did: {closing}")
+    # What the clause prevents: the board itself accepts a close that records no commit.
+    loose = json.loads(json.dumps(document))
+    for move in loose["transitions"]:
+        if move["from"] == "vcs" and move["action"] == "mark_done":
+            move["require_commit"] = False
+    try:
+        accepted = validate(loose)
+    except ValueError as exc:
+        accepted, why = None, str(exc)
+    check(accepted and not next(t for t in accepted["transitions"]
+                                if t["from"] == "vcs" and t["action"] == "mark_done")["require_commit"],
+          "without the clause the board would accept a close with no commit, so the clause is what keeps it")
 
 
 # --- artifacts and SQL ----------------------------------------------------------------------------------------------

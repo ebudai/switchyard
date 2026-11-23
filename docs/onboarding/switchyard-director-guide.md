@@ -960,7 +960,10 @@ gives you at most one notice on your own board; one a release will carry gives n
 notice names the upstream ticket, its title and its final state:
 - **Done:** the commit, and that your board's release already contains it. If whether your
   release contains the commit cannot be told, it says that and gives
-  `switchyard release-status <project>`.
+  `switchyard release-status <project>`. If your release does not contain it but whether the
+  release installed on the host does cannot be told (for example, an upstream board from before
+  this check), it says your release lacks it and gives `switchyard release-status <project>` and
+  the three privileged actions, to run once a release on this host contains it.
 - **Done with no commit** (a no-code close, for example only a configuration change, or a
   won't-fix closed as done): no release will tell you anything, so the notice carries the reason.
   That is the reason the upstream no-code submission recorded, or else the upstream Director's

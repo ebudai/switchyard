@@ -114,6 +114,10 @@ class Host:
             assert argv[1:4] == ["-u", "postgres", "--"] and argv[4:6] == ["env", "-i"] and _kwargs.get("cwd") == "/"
             self.steps.append("read declared workflow")
             return result(0, json.dumps({"project": "porter", "roles": [], "stages": []}))
+        if argv[0] == "runuser" and "ticket_board.workflow_stages" in text:
+            # SYRD-866: and its live board's stages, the same way; part of that read.
+            assert argv[1:4] == ["-u", "postgres", "--"] and argv[4:6] == ["env", "-i"] and _kwargs.get("cwd") == "/"
+            return result(0, "")
         if argv[0] == "runuser" and "release_smoke.py" in text:
             # SYRD-854: the release smoke, as the tenant owner, against root's installed release of the commit.
             assert argv[1:4] == ["-u", getpass.getuser(), "--"] and str(self.trusted_release) in argv, argv

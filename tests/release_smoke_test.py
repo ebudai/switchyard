@@ -23,6 +23,10 @@ from the repository root, where `scripts.ticket_board` imports; the served proce
    upgrade_phases_boundary_test's stand-ins) asks it on root's pinned dry run only, and fails on its reason.
 3. The deploy's watch (`tenant_release_deploy.listener_holds`): a listener that stays up and logged LISTEN
    established holds; one that restarts, or stays up without LISTEN, does not.
+4. SYRD-866, the live board's stages (tests/fixtures/syrd866_workflows: sapi's, mefp's and syrd's declared workflows
+   and live stages, read from their boards): 79280dab's own smoke refuses sapi's, which has no `inspection`, as
+   sapi's preview-upgrade did; on HEAD all three are READY. A workflow that omits a stage its live board has is
+   still refused, a default stage or one the throwaway board never had, and root's entry reads the live stages.
 """
 
 from __future__ import annotations
@@ -48,6 +52,8 @@ for extra in (str(ROOT), str(ROOT / "tests")):
 from scripts import release_smoke, tenant_release_deploy  # noqa: E402
 
 BROKEN = "bceacabfeb57f42d5dd5b5de85daae07d0663952"  # the release that crash-looped syrd's listener
+BASE = "79280dab3b326d41ae1048464516b4fe2b8c35ea"  # the release sapi's preview-upgrade found NOT READY (SYRD-866)
+FIXTURES = ROOT / "tests" / "fixtures" / "syrd866_workflows"
 CHECKS = 0
 
 
@@ -205,12 +211,15 @@ class Runuser:
     """`runuser`, as the stand-in for root's: the postgres read answers the declared workflow; the owner's run is
     the same argv, run as this account."""
 
-    def __init__(self, declared: str):
+    def __init__(self, declared: str, stages: list[str] | None = None):
         self.declared, self.calls = declared, []
+        self.stages = [s["name"] for s in json.loads(declared)["stages"]] if stages is None and declared else stages
 
     def __call__(self, argv, **kwargs):
         self.calls.append(list(argv))
         if argv[:4] == ["runuser", "-u", "postgres", "--"]:
+            if "ticket_board.workflow_stages" in argv[-1]:
+                return subprocess.CompletedProcess(argv, 0, "".join(f"{name}\n" for name in self.stages or []), "")
             return subprocess.CompletedProcess(argv, 0, self.declared, "")
         assert argv[:4] == ["runuser", "-u", getpass.getuser(), "--"], argv
         return subprocess.run(argv[4:], capture_output=True, text=True, timeout=kwargs.get("timeout"))
@@ -269,6 +278,65 @@ def test_root_entries(tmp: Path, head: Path) -> None:
               "a tenant already on the release has nothing to switch to and is not smoked")
     finally:
         privileged_operations.trusted_release_root = saved
+
+
+def tenant(name: str) -> dict:
+    return json.loads((FIXTURES / f"{name}.json").read_text())
+
+
+def test_live_stages(tmp: Path, head: Path) -> None:
+    sapi = tenant("sapi")
+    document = tmp / "sapi.json"
+    document.write_text(json.dumps(sapi["document"]))
+    base = archive(BASE, tmp / "base")
+    done = subprocess.run([sys.executable, "-I", "-B", str(base / "scripts/release_smoke.py"), "--release", str(base),
+                           "--project", "sapi", "--workflow", str(document)], capture_output=True, text=True,
+                          timeout=release_smoke.STEP_SECONDS * 4)
+    check(done.returncode == 1 and "release smoke: NOT READY" in done.stdout
+          and "configure_workflow's dry run of the declared workflow failed (HTTP 400)" in done.stdout
+          and "configuration omits an existing stage" in done.stdout and "inspection" not in sapi["live_stages"],
+          f"79280dab's own smoke refuses sapi's declared workflow, which has no inspection: {done.stdout[-1500:]}")
+
+    for name in ("sapi", "mefp", "syrd"):
+        fixture, said = tenant(name), []
+        problems = release_smoke.smoke(head, project=name, document=fixture["document"],
+                                       live_stages=fixture["live_stages"], say=said.append)
+        check(not problems and "release smoke: configure_workflow dry-runs the declared workflow" in said
+              and any("its Publisher recorded" in line for line in said),
+              f"{name}'s declared workflow, on its live board's stages, is READY: {problems[-2:]} {said}")
+        gone = [stage for stage in ("inspection",) if stage not in fixture["live_stages"]]
+        check(not gone or f"release smoke: the tenant's live board has no {gone[0]}; each trial removes it from the "
+              "throwaway board" in said, f"and {name}'s says which default stages its trials remove: {said}")
+    done = subprocess.run([sys.executable, "-I", "-B", str(ROOT / "scripts/release_smoke.py"), "--release", str(head),
+                           "--project", "sapi", "--workflow", str(document)], capture_output=True, text=True,
+                          timeout=release_smoke.STEP_SECONDS * 4)
+    check(done.returncode == 0 and "release smoke: READY" in done.stdout.splitlines(),
+          f"by hand, with no --stages, the live stages are the declared workflow's own: {done.stdout[-1500:]}")
+
+    for extra in ("inspection", "uat_delivery"):  # seeded on the throwaway board too; one it never had
+        problems = release_smoke.smoke(head, project="sapi", document=sapi["document"],
+                                       live_stages=sapi["live_stages"] + [extra], say=[].append)
+        joined = "\n".join(problems)
+        check("configuration omits an existing stage; preserve it or explicitly request removal" in joined
+              and (extra == "inspection" or f"the declared workflow omits the live board's stage {extra}, which its "
+                                             "board refuses" in joined)
+              and "the declared workflow with the plan gate" in joined,
+              f"a workflow that omits the live board's stage {extra} is still refused, every trial of it: {joined}")
+
+    said = []
+    runner = Runuser(json.dumps(sapi["document"]), sapi["live_stages"])
+    problems = release_smoke.run_as(head, project="sapi", owner=getpass.getuser(), database="sapi_ticket_board",
+                                    python=sys.executable, runner=runner, say=said.append)
+    stage_read, owner_run = runner.calls[1], runner.calls[-1]
+    check(not problems and stage_read[:6] == ["runuser", "-u", "postgres", "--", "env", "-i"]
+          and stage_read[-1] == "SELECT name FROM ticket_board.workflow_stages ORDER BY rank"
+          and "sapi_ticket_board" in stage_read and "--stages" in owner_run,
+          f"root reads the live board's stages as postgres and hands them to the smoke: {problems} {runner.calls}")
+    runner = Runuser(json.dumps(sapi["document"]), sapi["live_stages"] + ["uat_delivery"])
+    problems = release_smoke.run_as(head, project="sapi", owner=getpass.getuser(), database="sapi_ticket_board",
+                                    python=sys.executable, runner=runner, say=said.append)
+    check(problems and "omits the live board's stage uat_delivery" in problems[0],
+          f"and the smoke judges the workflow by them: {problems}")
 
 
 def test_preview_hook() -> None:
@@ -340,6 +408,7 @@ def main() -> int:
         tmp = Path(name)
         head = test_releases(tmp)
         test_root_entries(tmp, head)
+        test_live_stages(tmp, head)
         test_killed(head)
         test_preview_hook()
         test_watch(tmp)

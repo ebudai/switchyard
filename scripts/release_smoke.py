@@ -18,6 +18,10 @@ of the repository on the path -- against a database of its own, and answers READ
    declared workflow and for that workflow with each optional composer the release ships -- the documentation gate,
    Router, the Publisher, the research stage and the plan gate -- composed by the release's own code. A composer
    that declines the workflow (it is already enabled, say) is reported and is not a failure; anything else is.
+   The throwaway board is seeded with the default stages, and the tenant's live board has the stages its workflow
+   left it (SYRD-866: sapi removed `inspection` long ago, and every dry run was refused for omitting it). So each
+   trial, and the apply in 4, also removes the default stages the live board does not have -- on the throwaway board
+   alone -- and a trial that omits a stage the live board does have is refused, as the live board would refuse it.
 4. With the Publisher declared and one ticket waiting in publication, the release's real
    `scripts/ticket-board-notify-listener` establishes LISTEN and its Publisher records an outcome for that ticket,
    which it reaches only after the workflow validated (`validate_publisher`), and it is still running.
@@ -372,9 +376,25 @@ def tail(path: Path, size: int = 3000) -> str:
 # -- the smoke ----------------------------------------------------------------------------------------------------
 
 
+def as_live(candidate: dict[str, Any], seeded: list[str], live: list[str]) -> tuple[dict[str, Any], list[str]]:
+    """`candidate` as the tenant's live board takes it, tried on a board seeded with `seeded` (SYRD-866).
+
+    Returns the candidate with the seeded stages the live board does not have added to its `remove_stages` (the
+    throwaway board's alone: the tenant's document is not changed), and the live stages it omits without removing
+    them, which the live board refuses ("configuration omits an existing stage")."""
+    named = {stage.get("name") for stage in candidate.get("stages", [])}
+    removed = list(candidate.get("remove_stages") or [])
+    omitted = [name for name in live if name not in named and name not in removed]
+    return {**candidate, "remove_stages": removed + [name for name in seeded
+                                                       if name not in live and name not in removed]}, omitted
+
+
 def smoke(release: Path, *, project: str, document: dict[str, Any] | None, python: str = "/usr/bin/python3",
-          say: Callable[[str], None] = print) -> list[str]:
-    """Every step against `release`; returns what failed, empty when it is READY. Runs as an unprivileged account."""
+          say: Callable[[str], None] = print, live_stages: list[str] | None = None) -> list[str]:
+    """Every step against `release`; returns what failed, empty when it is READY. Runs as an unprivileged account.
+
+    `live_stages` are the stages of the tenant's live board, in order; by default, the declared workflow's own,
+    which a board that applied it has. With no declared workflow the example's board is the release's own."""
     release = release.resolve()
     problems = check_imports(release, python)
     if problems:
@@ -387,6 +407,9 @@ def smoke(release: Path, *, project: str, document: dict[str, Any] | None, pytho
         document = json.loads((release / "examples" / "workflows" / "inspection.json").read_text(encoding="utf-8"))
         say(f"release smoke: the tenant declares no workflow; using the release's example workflow, whose board is "
             f"{document.get('project')!r}")
+        live_stages = None
+    elif live_stages is None:
+        live_stages = [str(stage.get("name")) for stage in document.get("stages", [])]
     board_project = str(document.get("project") or project)
     scratch = Path(tempfile.mkdtemp(prefix="sy-smoke-", dir="/tmp"))  # short: a Unix socket path lives under it
     say(f"release smoke: working in {scratch}")
@@ -404,6 +427,13 @@ def smoke(release: Path, *, project: str, document: dict[str, Any] | None, pytho
         cluster = Cluster(scratch)
         build_board(cluster, release)
         say("release smoke: a throwaway board was built from the release's schema, migrations and grants")
+        seeded = [name for name in cluster.sql("SELECT string_agg(name, ',' ORDER BY rank) "
+                                               "FROM ticket_board.workflow_stages").split(",") if name]
+        live = seeded if live_stages is None else list(live_stages)
+        gone = [name for name in seeded if name not in live]
+        if gone:
+            say(f"release smoke: the tenant's live board has no {', '.join(gone)}; each trial removes "
+                f"{'it' if len(gone) == 1 else 'them'} from the throwaway board")
         env = {"PATH": f"{scratch / 'shim'}:/usr/bin:/bin", "HOME": str(scratch / "home"), "LANG": "C.UTF-8",
                "TMUX_TMPDIR": str(scratch / "tmux"), "TMPDIR": str(scratch), "TICKET_BOARD_PROJECT": board_project}
         port, sock = _free_port(), scratch / "board.sock"
@@ -433,6 +463,12 @@ def smoke(release: Path, *, project: str, document: dict[str, Any] | None, pytho
             else:
                 trials.append((f"the declared workflow with the {name}", result))
         for label, candidate in trials:
+            candidate, omitted = as_live(candidate, seeded, live)
+            if omitted:
+                problems.append(f"{label} omits the live board's stage{'s' if len(omitted) > 1 else ''} "
+                                f"{', '.join(omitted)}, which its board refuses: configuration omits an existing "
+                                "stage; preserve it or explicitly request removal")
+                continue
             status, answer = post(sock, "/api/tickets/actions/configure_workflow",
                                   {"document": candidate, "expected_revision": 0, "dry_run": True})
             if status != 200 or not isinstance(answer, dict) or answer.get("dry_run") is not True:
@@ -443,6 +479,7 @@ def smoke(release: Path, *, project: str, document: dict[str, Any] | None, pytho
             return problems + [f"the board's log:\n{tail(board_log)}"]
 
         publishing = next((doc for label, doc in trials if label.endswith("Publisher")), None) or document
+        publishing = as_live(publishing, seeded, live)[0]
         status, answer = post(sock, "/api/tickets/actions/configure_workflow",
                               {"document": publishing, "expected_revision": 0, "dry_run": False})
         if status != 200:
@@ -506,7 +543,8 @@ def smoke(release: Path, *, project: str, document: dict[str, Any] | None, pytho
 def run_as(release: Path, *, project: str, owner: str, database: str, python: str = "/usr/bin/python3",
            runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
            say: Callable[[str], None] = print) -> list[str]:
-    """Root's entry: the tenant's declared workflow from `database`, read as `postgres`, then this program as `owner`.
+    """Root's entry: the tenant's declared workflow and its live board's stages from `database`, read as `postgres`,
+    then this program as `owner`.
 
     Returns what failed, empty when the release is READY. Nothing live is written."""
     read = runner(["runuser", "-u", "postgres", "--", "env", "-i", "PATH=/usr/bin:/bin", "LANG=C.UTF-8",
@@ -517,6 +555,14 @@ def run_as(release: Path, *, project: str, owner: str, database: str, python: st
         return [f"reading {project}'s declared workflow from {database} failed (exit {read.returncode}): "
                 f"{str(read.stderr or '').strip()[-600:]}"]
     declared = str(read.stdout or "").strip()
+    stages = declared and runner(["runuser", "-u", "postgres", "--", "env", "-i", "PATH=/usr/bin:/bin", "LANG=C.UTF-8",
+                                  "psql", "-X", "-At", "-d", database, "-c",
+                                  "SELECT name FROM ticket_board.workflow_stages ORDER BY rank"],
+                                 cwd="/", stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                 timeout=STEP_SECONDS)
+    if stages and stages.returncode != 0:
+        return [f"reading {project}'s live stages from {database} failed (exit {stages.returncode}): "
+                f"{str(stages.stderr or '').strip()[-600:]}"]
     with tempfile.TemporaryDirectory(prefix=f"switchyard-{project}-smoke.") as hand:
         os.chmod(hand, 0o755)
         argv = ["runuser", "-u", owner, "--", "env", "-i", "PATH=/usr/bin:/bin", "LANG=C.UTF-8", "TMPDIR=/tmp",
@@ -527,6 +573,10 @@ def run_as(release: Path, *, project: str, owner: str, database: str, python: st
             workflow.write_text(declared)
             workflow.chmod(0o644)
             argv += ["--workflow", str(workflow)]
+            live = Path(hand) / "stages.json"
+            live.write_text(json.dumps(str(stages.stdout or "").split()))
+            live.chmod(0o644)
+            argv += ["--stages", str(live)]
         done = runner(argv, cwd="/", stdin=subprocess.DEVNULL, capture_output=True, text=True,
                       timeout=STEP_SECONDS * 4)
     out = str(done.stdout or "")
@@ -591,6 +641,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--project", required=True,
                         help="a name for the throwaway board (any name; nothing live is read)")
     parser.add_argument("--workflow", default="", help="the tenant's declared workflow (JSON); default: the example")
+    parser.add_argument("--stages", default="",
+                        help="the tenant's live board's stages (a JSON list); default: the declared workflow's own")
     parser.add_argument("--python", default="/usr/bin/python3", help="the interpreter the release's units name")
     args = parser.parse_args(argv)
     if os.geteuid() == 0:
@@ -605,8 +657,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     document = json.loads(Path(args.workflow).read_text(encoding="utf-8")) if args.workflow else None
+    live = json.loads(Path(args.stages).read_text(encoding="utf-8")) if args.stages else None
     problems = smoke(Path(args.release), project=args.project, document=document, python=args.python,
-                     say=lambda line: print(line, flush=True))
+                     say=lambda line: print(line, flush=True), live_stages=live)
     if problems:
         print("release smoke: NOT READY")
         print("\n".join(problems))

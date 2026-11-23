@@ -104,9 +104,10 @@ and dashes in CLI subcommands.
   change, and before the Director's Final Sign-Off, run the release smoke on
   the candidate: `git archive <candidate> scripts examples | tar -x -C <dir>`,
   then `python3 -I -B scripts/release_smoke.py --release <dir> --project <any
-  name>` (READY or NOT READY; `--workflow <file>` for a declared workflow).
-  Repository-root suites are not evidence for served code. deploy-release runs
-  the same smoke before it changes anything.
+  name>` (READY or NOT READY; `--workflow <file>` for a declared workflow,
+  `--stages <file>` for its live board's stages). Repository-root suites are
+  not evidence for served code. deploy-release runs the same smoke before it
+  changes anything.
 - The same candidates, and any that change install or deploy tooling, are also
   installed in a disposable VM before Audit signs off and before Final Sign-Off:
   `tests/vm_kit/vm_kit.py check --commit <candidate> --keep-logs <dir>`, plus

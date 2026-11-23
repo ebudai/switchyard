@@ -90,8 +90,9 @@ suites run it from the repository root, where `scripts.ticket_board` imports, an
 served processes do not. When a candidate touches it, run the release smoke on the
 candidate before you sign, and read Audit's run of it: `git archive <candidate> scripts
 examples | tar -x -C <dir>`, then `python3 -I -B scripts/release_smoke.py --release <dir>
---project <any name>` (`--workflow <file>` smokes a declared workflow). NOT READY
-is a kick-back, whatever the suites said ([the release smoke](../syrd-854-release-smoke.md)).
+--project <any name>` (`--workflow <file>` smokes a declared workflow, `--stages <file>`
+gives its live board's stages). NOT READY is a kick-back, whatever the suites said
+([the release smoke](../syrd-854-release-smoke.md)).
 
 The same candidates, and any that change install or deploy tooling, are installed in a
 disposable VM before Final Sign-Off. Read Audit's VM evidence. When it is missing, or the

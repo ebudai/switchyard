@@ -53,6 +53,19 @@ database of its own and answers READY or NOT READY.
 
    A composer that declines the workflow, for example because it is already
    enabled, is reported and is not a failure. Anything else is.
+
+   **The live board's stages (SYRD-866).** The throwaway board starts with the
+   default stages. A tenant's live board has the stages its declared workflow
+   left it: sapi removed `inspection` long ago, so on 79280dab every dry run of
+   sapi's workflow was refused ("configuration omits an existing stage"), and
+   sapi could not take the release. Root now also reads the live board's stages
+   as `postgres` and hands them to the smoke (`--stages`). Every trial, and the
+   apply in step 4, then:
+   - also removes the default stages the live board does not have. This is on the
+     throwaway board alone: the tenant's document and live board are not
+     changed;
+   - is refused if it omits a stage the live board does have, in the board's own
+     words, as the live board would refuse it.
 4. **Listener.** The workflow with the Publisher is applied and one ticket waits
    in publication. The release's real `ticket-board-notify-listener` must then:
    - establish LISTEN;
@@ -171,9 +184,11 @@ git archive <candidate> scripts examples | tar -x -C "$dir"
 python3 -I -B scripts/release_smoke.py --release "$dir" --project <any name>
 ```
 
-Add `--workflow <file>` to smoke a tenant's declared workflow. Repository-root
-suites import `scripts.ticket_board`, so they are no evidence for what the
-served processes import. The disposable-VM review for Audit is its own ticket.
+Add `--workflow <file>` to smoke a tenant's declared workflow, and
+`--stages <file>` (a JSON list) for its live board's stages. Without
+`--stages`, they are the workflow's own, which a board that applied it has.
+Repository-root suites import `scripts.ticket_board`, so they are no evidence
+for what the served processes import. The disposable-VM review for Audit is its own ticket.
 
 ## Tests
 
@@ -187,6 +202,15 @@ served processes import. The disposable-VM review for Audit is its own ticket.
 
   It also covers root's `run_as`, `for_tenant` and `preview` through a stand-in
   `runuser`, preview-upgrade's hook, and the watch.
+
+  For the live board's stages (SYRD-866), it uses sapi's, mefp's and syrd's
+  declared workflows and live stages, read from their boards
+  (`tests/fixtures/syrd866_workflows`):
+  - 79280dab's own smoke refuses sapi's;
+  - all three are READY on HEAD;
+  - a workflow that omits a live stage is still refused, whether the stage is a
+    default one or one the throwaway board never had;
+  - root's entry reads the live stages and passes them to the smoke.
 - `tests/catalogued_deploy_release_test.py` covers the deploy:
   - the smoke refuses before anything live changes;
   - a listener that crash-loops is reverted (3), and its previous release holds;

@@ -1,0 +1,1223 @@
+{
+ "read": "2026-11-23, GET /api/workflow and /api/board's states on the tenant's own board",
+ "revision": 27,
+ "live_stages": [
+  "draft",
+  "backlog",
+  "analysis",
+  "in_progress",
+  "documentation",
+  "audit",
+  "dat",
+  "user_review",
+  "director_review",
+  "done",
+  "cancelled"
+ ],
+ "document": {
+  "flags": {
+   "needs_audit": {
+    "kind": "gate",
+    "default": true
+   },
+   "user_signoff": {
+    "kind": "signoff",
+    "default": false
+   },
+   "audit_signoff": {
+    "kind": "signoff",
+    "default": false
+   },
+   "inspector_signoff": {
+    "kind": "signoff",
+    "default": false
+   },
+   "needs_user_signoff": {
+    "kind": "gate",
+    "default": false
+   },
+   "needs_documentation": {
+    "kind": "gate",
+    "default": false
+   },
+   "documentation_signoff": {
+    "kind": "signoff",
+    "default": false
+   }
+  },
+  "queue": {
+   "stage": "backlog",
+   "assignee": "unassigned"
+  },
+  "roles": [
+   {
+    "kind": "system",
+    "name": "director",
+    "slot": 1,
+    "label": "Director",
+    "active": true,
+    "target": "sapi-director:0.0",
+    "runtime": "claude",
+    "onboarding": null,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role",
+     "set_blockers",
+     "set_manually_controlled",
+     "merge",
+     "dismiss_notification",
+     "crop_attachment",
+     "reassign",
+     "director_edit",
+     "resolve_publication",
+     "recover_stalled_ticket"
+    ],
+    "onboarding_prompt": "Your director session just started fresh. Read the onboarding packet first: /home/sapi-agent/Projects/stellaris_api/docs/onboarding. Start with /home/sapi-agent/Projects/stellaris_api/docs/onboarding/switchyard-director-guide.md."
+   },
+   {
+    "kind": "implementer",
+    "name": "main",
+    "slot": 3,
+    "label": "Main",
+    "active": true,
+    "target": "sapi-main:0.0",
+    "runtime": "codex",
+    "onboarding": null,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role",
+     "request_publication"
+    ]
+   },
+   {
+    "kind": "implementer",
+    "name": "ops",
+    "slot": 4,
+    "label": "Ops",
+    "active": true,
+    "target": "sapi-ops:0.0",
+    "runtime": "codex",
+    "onboarding": null,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role",
+     "request_publication"
+    ],
+    "presentation_label": "Ops"
+   },
+   {
+    "kind": "reviewer",
+    "name": "audit",
+    "slot": 2,
+    "label": "Audit",
+    "active": true,
+    "target": "sapi-audit:0.0",
+    "runtime": "claude",
+    "ephemeral": false,
+    "onboarding": null,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role"
+    ]
+   },
+   {
+    "kind": "draft",
+    "name": "designer",
+    "slot": 0,
+    "label": "Designer",
+    "active": true,
+    "target": "sapi-designer:0.0",
+    "runtime": "claude",
+    "onboarding": null,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role"
+    ]
+   },
+   {
+    "kind": "user",
+    "name": "user",
+    "slot": null,
+    "label": "User",
+    "active": true,
+    "target": null,
+    "runtime": null,
+    "onboarding": null,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role"
+    ]
+   },
+   {
+    "kind": "system",
+    "name": "unassigned",
+    "slot": null,
+    "label": "Unassigned",
+    "active": false,
+    "target": null,
+    "runtime": null,
+    "onboarding": null,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role"
+    ]
+   },
+   {
+    "kind": "reviewer",
+    "name": "librarian",
+    "slot": 5,
+    "label": "Librarian",
+    "active": true,
+    "serial": false,
+    "target": "sapi-librarian:0.0",
+    "runtime": "claude",
+    "ephemeral": true,
+    "capabilities": [
+     "add_comment"
+    ],
+    "template_role": "audit",
+    "onboarding_prompt": "You are the Librarian. You keep this project's documentation consistent with the work that reaches you, and nothing else. Load the switchyard-librarian skill now and follow it; it is your full guide.\n\nA ticket reaches you, in the Documentation stage, only when the Director asked for documentation review. Read that one ticket and its candidate, and nothing else:\n\n    ticket-board-read ticket <ID> --json\n    git show --stat <commit_hash>; git diff <commit_hash>~1 <commit_hash>\n\nCheck every surface a person reads about what the ticket adds, changes or retires: CLI help and usage text, the operator, Director and board guides, onboarding documents, project documentation, examples, and instructions the change made stale or contradictory. Then make exactly one decision:\n\n    ticket-board-write documentation-no-change <ID> --reason \"<why nothing a person reads needs to change>\"\n    ticket-board-write documentation-kick-back <ID> --reason \"<the concrete findings>\"\n    ticket-board-write documentation-sign-off <ID> --commit <your commit>\n\nTo edit, commit documents only -- Markdown, reStructuredText or AsciiDoc files outside test data, and text or images under docs/ -- as ordinary files, on a branch named after the ticket, with the submitted candidate as its sole parent; publish it with `switchyard-publish-candidate <ID> --commit <your commit>`, which chooses the ticket's documentation ref; then sign off naming it. Your commit becomes the candidate, and every later review starts again on it. Never change product code, tests, behaviour or configuration -- the board refuses a commit that changes anything but documents -- so help text in code and example configurations are the implementer's: kick back with the exact wording they need. Never rebase, merge, force-push or choose a ref or remote; when the documentation cannot be made true that way, or your commit cannot be formed or published, kick the ticket back with what is wrong.\n\nYou do not route, reassign, integrate, publish a release, merge, accept, close, or touch any other ticket, and you use no other board operation. When your decision is recorded, stop and wait for the next notification.",
+    "presentation_label": "Librarian"
+   }
+  ],
+  "schema": "switchyard.workflow.v1",
+  "stages": [
+   {
+    "gate": null,
+    "kind": "draft",
+    "name": "draft",
+    "label": "Draft",
+    "notify": {
+     "kind": "assignee",
+     "role": null
+    },
+    "owners": [
+     "designer"
+    ],
+    "signoff": null,
+    "skip_to": null,
+    "terminal": false
+   },
+   {
+    "gate": null,
+    "kind": "draft",
+    "name": "backlog",
+    "label": "Backlog",
+    "notify": {
+     "kind": "none",
+     "role": null
+    },
+    "owners": [],
+    "signoff": null,
+    "skip_to": null,
+    "terminal": false
+   },
+   {
+    "gate": null,
+    "kind": "system",
+    "name": "analysis",
+    "label": "Triage",
+    "notify": {
+     "kind": "assignee",
+     "role": null
+    },
+    "owners": [
+     "director"
+    ],
+    "signoff": null,
+    "skip_to": null,
+    "terminal": false
+   },
+   {
+    "gate": null,
+    "kind": "implementation",
+    "name": "in_progress",
+    "label": "Implementation",
+    "notify": {
+     "kind": "assignee",
+     "role": null
+    },
+    "owners": [
+     "main",
+     "ops"
+    ],
+    "signoff": null,
+    "skip_to": null,
+    "terminal": false
+   },
+   {
+    "gate": "needs_documentation",
+    "kind": "review",
+    "name": "documentation",
+    "label": "Documentation",
+    "notify": {
+     "kind": "assignee",
+     "role": null
+    },
+    "owners": [
+     "librarian"
+    ],
+    "signoff": "documentation_signoff",
+    "skip_to": "audit",
+    "terminal": false
+   },
+   {
+    "gate": "needs_audit",
+    "kind": "review",
+    "name": "audit",
+    "label": "Audit",
+    "notify": {
+     "kind": "assignee",
+     "role": null
+    },
+    "owners": [
+     "audit"
+    ],
+    "signoff": "audit_signoff",
+    "skip_to": "dat",
+    "terminal": false
+   },
+   {
+    "gate": "needs_user_signoff",
+    "kind": "review",
+    "name": "dat",
+    "label": "DAT",
+    "notify": {
+     "kind": "assignee",
+     "role": null
+    },
+    "owners": [
+     "director"
+    ],
+    "signoff": null,
+    "skip_to": "director_review",
+    "terminal": false
+   },
+   {
+    "gate": "needs_user_signoff",
+    "kind": "review",
+    "name": "user_review",
+    "label": "UAT",
+    "notify": {
+     "kind": "none",
+     "role": null
+    },
+    "owners": [
+     "user"
+    ],
+    "signoff": "user_signoff",
+    "skip_to": "director_review",
+    "terminal": false
+   },
+   {
+    "gate": null,
+    "kind": "review",
+    "name": "director_review",
+    "label": "Final Sign-Off",
+    "notify": {
+     "kind": "assignee",
+     "role": null
+    },
+    "owners": [
+     "director"
+    ],
+    "signoff": null,
+    "skip_to": null,
+    "terminal": false
+   },
+   {
+    "gate": null,
+    "kind": "system",
+    "name": "done",
+    "label": "Done",
+    "notify": {
+     "kind": "none",
+     "role": null
+    },
+    "owners": [],
+    "signoff": null,
+    "skip_to": null,
+    "terminal": true
+   },
+   {
+    "gate": null,
+    "kind": "system",
+    "name": "cancelled",
+    "label": "Cancelled",
+    "notify": {
+     "kind": "none",
+     "role": null
+    },
+    "owners": [],
+    "signoff": null,
+    "skip_to": null,
+    "terminal": true
+   }
+  ],
+  "project": "sapi",
+  "reassign": {},
+  "migrations": {
+   "director_onboarding": true,
+   "legacy_workflow_declared": true
+  },
+  "board_stall": {
+   "threshold_seconds": 4500
+  },
+  "transitions": [
+   {
+    "to": "analysis",
+    "from": "draft",
+    "label": "Release draft",
+    "action": "release_draft",
+    "actors": [
+     "designer",
+     "director",
+     "user"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "cancelled",
+    "from": "draft",
+    "label": "Cancel",
+    "action": "cancel",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [
+     "inspector_signoff",
+     "audit_signoff",
+     "user_signoff"
+    ],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "in_progress",
+    "from": "analysis",
+    "label": "Route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "in_progress",
+    "from": "analysis",
+    "label": "Start work",
+    "action": "start_work",
+    "actors": [
+     "main",
+     "ops"
+    ],
+    "primitive": "move",
+    "owner_scoped": true,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "user_review",
+    "from": "analysis",
+    "label": "Route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "cancelled",
+    "from": "analysis",
+    "label": "Cancel",
+    "action": "cancel",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [
+     "inspector_signoff",
+     "audit_signoff",
+     "user_signoff"
+    ],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "documentation",
+    "from": "in_progress",
+    "label": "Submit to audit",
+    "action": "submit_to_audit",
+    "actors": [
+     "main",
+     "ops"
+    ],
+    "primitive": "move",
+    "owner_scoped": true,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": true,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "documentation",
+    "from": "in_progress",
+    "label": "Complete without code",
+    "action": "submit_to_audit_without_commit",
+    "actors": [
+     "main",
+     "ops"
+    ],
+    "primitive": "move",
+    "owner_scoped": true,
+    "allow_no_code": true,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": true,
+    "relays_decision_of": null
+   },
+   {
+    "to": "analysis",
+    "from": "in_progress",
+    "label": "Kick back to triage",
+    "action": "implementer_kick_back",
+    "actors": [
+     "main",
+     "ops"
+    ],
+    "primitive": "move",
+    "owner_scoped": true,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": true,
+    "relays_decision_of": null
+   },
+   {
+    "to": "analysis",
+    "from": "in_progress",
+    "label": "Route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "cancelled",
+    "from": "in_progress",
+    "label": "Cancel",
+    "action": "cancel",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [
+     "inspector_signoff",
+     "audit_signoff",
+     "user_signoff"
+    ],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "dat",
+    "from": "audit",
+    "label": "Audit sign-off",
+    "action": "audit_sign_off",
+    "actors": [
+     "audit"
+    ],
+    "primitive": "approve",
+    "owner_scoped": true,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "in_progress",
+    "from": "audit",
+    "label": "Audit kick-back",
+    "action": "audit_kick_back",
+    "actors": [
+     "audit"
+    ],
+    "primitive": "return",
+    "owner_scoped": true,
+    "allow_no_code": false,
+    "clear_signoffs": [
+     "audit_signoff",
+     "user_signoff"
+    ],
+    "require_commit": false,
+    "require_reason": true,
+    "relays_decision_of": null
+   },
+   {
+    "to": "in_progress",
+    "from": "audit",
+    "label": "Route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "analysis",
+    "from": "audit",
+    "label": "Route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "cancelled",
+    "from": "audit",
+    "label": "Cancel",
+    "action": "cancel",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [
+     "inspector_signoff",
+     "audit_signoff",
+     "user_signoff"
+    ],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "user_review",
+    "from": "dat",
+    "label": "DAT sign-off",
+    "action": "director_dat_sign_off",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "in_progress",
+    "from": "dat",
+    "label": "DAT kick-back",
+    "action": "director_dat_kick_back",
+    "actors": [
+     "director"
+    ],
+    "primitive": "return",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [
+     "audit_signoff",
+     "user_signoff"
+    ],
+    "require_commit": false,
+    "require_reason": true,
+    "relays_decision_of": null
+   },
+   {
+    "to": "in_progress",
+    "from": "dat",
+    "label": "Route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "analysis",
+    "from": "dat",
+    "label": "Route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "cancelled",
+    "from": "dat",
+    "label": "Cancel",
+    "action": "cancel",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [
+     "inspector_signoff",
+     "audit_signoff",
+     "user_signoff"
+    ],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "director_review",
+    "from": "user_review",
+    "label": "User sign-off",
+    "action": "user_sign_off",
+    "actors": [
+     "user"
+    ],
+    "primitive": "approve",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "audit",
+    "from": "user_review",
+    "label": "Route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "analysis",
+    "from": "user_review",
+    "label": "Reopen",
+    "action": "user_reopen",
+    "actors": [
+     "user"
+    ],
+    "primitive": "reopen",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "analysis",
+    "from": "user_review",
+    "label": "Route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "cancelled",
+    "from": "user_review",
+    "label": "Cancel",
+    "action": "cancel",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [
+     "inspector_signoff",
+     "audit_signoff",
+     "user_signoff"
+    ],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "done",
+    "from": "director_review",
+    "label": "Mark done",
+    "action": "mark_done",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": true,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "in_progress",
+    "from": "director_review",
+    "label": "Route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "analysis",
+    "from": "director_review",
+    "label": "Reopen",
+    "action": "user_reopen",
+    "actors": [
+     "user"
+    ],
+    "primitive": "reopen",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "analysis",
+    "from": "director_review",
+    "label": "Route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "cancelled",
+    "from": "director_review",
+    "label": "Cancel",
+    "action": "cancel",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [
+     "inspector_signoff",
+     "audit_signoff",
+     "user_signoff"
+    ],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "analysis",
+    "from": "done",
+    "label": "Reopen",
+    "action": "user_reopen",
+    "actors": [
+     "user"
+    ],
+    "primitive": "reopen",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "analysis",
+    "from": "done",
+    "label": "Route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "reopen",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "analysis",
+    "from": "cancelled",
+    "label": "Route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "reopen",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "backlog",
+    "from": "draft",
+    "label": "Defer",
+    "action": "defer",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "backlog",
+    "from": "analysis",
+    "label": "Defer",
+    "action": "defer",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "backlog",
+    "from": "in_progress",
+    "label": "Defer",
+    "action": "defer",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "backlog",
+    "from": "audit",
+    "label": "Defer",
+    "action": "defer",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "backlog",
+    "from": "dat",
+    "label": "Defer",
+    "action": "defer",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "backlog",
+    "from": "user_review",
+    "label": "Defer",
+    "action": "defer",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "backlog",
+    "from": "director_review",
+    "label": "Defer",
+    "action": "defer",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "analysis",
+    "from": "backlog",
+    "label": "Route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "audit",
+    "from": "documentation",
+    "label": "Sign off with documentation commit",
+    "action": "documentation_sign_off",
+    "actors": [
+     "librarian"
+    ],
+    "primitive": "approve",
+    "owner_scoped": true,
+    "allow_no_code": false,
+    "clear_signoffs": [
+     "audit_signoff",
+     "inspector_signoff",
+     "user_signoff"
+    ],
+    "require_commit": true,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "audit",
+    "from": "documentation",
+    "label": "Approve: no documentation change",
+    "action": "documentation_no_change",
+    "actors": [
+     "librarian"
+    ],
+    "primitive": "approve",
+    "owner_scoped": true,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": true,
+    "relays_decision_of": null
+   },
+   {
+    "to": "in_progress",
+    "from": "documentation",
+    "label": "Return documentation findings",
+    "action": "documentation_kick_back",
+    "actors": [
+     "librarian"
+    ],
+    "primitive": "return",
+    "owner_scoped": true,
+    "allow_no_code": false,
+    "clear_signoffs": [
+     "audit_signoff",
+     "documentation_signoff",
+     "inspector_signoff",
+     "user_signoff"
+    ],
+    "require_commit": false,
+    "require_reason": true,
+    "relays_decision_of": null
+   },
+   {
+    "to": "cancelled",
+    "from": "documentation",
+    "label": "Cancel",
+    "action": "cancel",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [
+     "inspector_signoff",
+     "audit_signoff",
+     "user_signoff"
+    ],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "backlog",
+    "from": "documentation",
+    "label": "Defer",
+    "action": "defer",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "documentation",
+    "from": "audit",
+    "label": "Return documentation-only findings",
+    "action": "audit_documentation_kick_back",
+    "actors": [
+     "audit"
+    ],
+    "primitive": "return",
+    "owner_scoped": true,
+    "allow_no_code": false,
+    "clear_signoffs": [
+     "audit_signoff",
+     "documentation_signoff",
+     "user_signoff"
+    ],
+    "require_commit": false,
+    "require_reason": true,
+    "relays_decision_of": null
+   }
+  ],
+  "remove_stages": []
+ }
+}

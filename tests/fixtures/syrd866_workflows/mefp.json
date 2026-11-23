@@ -1,0 +1,1786 @@
+{
+ "read": "2026-11-23, GET /api/workflow and /api/board's states on the tenant's own board",
+ "revision": 226,
+ "live_stages": [
+  "draft",
+  "backlog",
+  "pull_ready_source_first",
+  "analysis",
+  "in_progress",
+  "audit",
+  "uat_delivery",
+  "dat",
+  "user_review",
+  "director_review",
+  "done",
+  "cancelled"
+ ],
+ "document": {
+  "flags": {
+   "needs_audit": {
+    "kind": "gate",
+    "default": true
+   },
+   "user_signoff": {
+    "kind": "signoff",
+    "default": false
+   },
+   "audit_signoff": {
+    "kind": "signoff",
+    "default": false
+   },
+   "inspector_signoff": {
+    "kind": "signoff",
+    "default": false
+   },
+   "needs_user_signoff": {
+    "kind": "gate",
+    "default": false
+   }
+  },
+  "queue": {
+   "stage": "pull_ready_source_first",
+   "assignee": "unassigned"
+  },
+  "roles": [
+   {
+    "kind": "system",
+    "name": "director",
+    "slot": 0,
+    "label": "Director",
+    "active": true,
+    "target": "mefp-director:0.0",
+    "runtime": "codex",
+    "onboarding": null,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role",
+     "set_blockers",
+     "set_manually_controlled",
+     "merge",
+     "dismiss_notification",
+     "crop_attachment",
+     "reassign",
+     "director_edit",
+     "resolve_publication",
+     "recover_stalled_ticket"
+    ],
+    "onboarding_prompt": "Your director session just started fresh. Read the onboarding packet first: /home/stellaris-agent/stellaris-bugfix/docs/onboarding. Start with /home/stellaris-agent/stellaris-bugfix/docs/onboarding/switchyard-director-guide.md."
+   },
+   {
+    "kind": "implementer",
+    "name": "main",
+    "slot": 2,
+    "label": "Main",
+    "active": true,
+    "target": "mefp-main:0.0",
+    "runtime": "codex",
+    "onboarding": null,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role",
+     "request_publication"
+    ]
+   },
+   {
+    "kind": "implementer",
+    "name": "ops",
+    "slot": 3,
+    "label": "Ops",
+    "active": true,
+    "target": "mefp-ops:0.0",
+    "runtime": "codex",
+    "onboarding": null,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role",
+     "request_publication"
+    ],
+    "onboarding_prompt": "Read switchyard-board and the whole ticket. In uat_delivery, stage ONLY the exact independently audited commit/archive, never a newer checkout or assumed main version. Preserve archive/source pins and UAT START HERE. Use a disposable git archive extraction if the candidate is not merged; no pre-UAT integration is required. Existing reversible inbox/export path only; no Eric Steam/game/saves/desktop or quarantined lane access. Record exact candidate SHA, archive SHA, delivery/install instructions and rollback on that SAME ticket. Use deliver_uat_candidate with the exact commit and a delivery reason to move it to User UAT; this is a move, not approval. Findings without a usable candidate or <=10 minute honest oracle go through return_delivery_finding to Director Analysis, not empty UAT. Gameplay remains UNKNOWN and production disabled. Main is infrastructure only, Luna workers fix game bugs. Do not wait on Eric or ask Director to re-audit before delivery; final Director review/integration follows User acceptance.",
+    "presentation_label": "Ops"
+   },
+   {
+    "kind": "reviewer",
+    "name": "audit",
+    "slot": 1,
+    "label": "Audit",
+    "active": true,
+    "serial": true,
+    "target": "mefp-audit:0.0",
+    "runtime": "claude",
+    "ephemeral": false,
+    "onboarding": null,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role"
+    ]
+   },
+   {
+    "kind": "reviewer",
+    "name": "audit-2",
+    "slot": null,
+    "label": "Audit 2",
+    "active": true,
+    "serial": true,
+    "target": "mefp-audit-2:0.0",
+    "runtime": "codex",
+    "ephemeral": true,
+    "onboarding": null,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role"
+    ],
+    "template_role": "audit"
+   },
+   {
+    "kind": "draft",
+    "name": "designer",
+    "slot": null,
+    "label": "Designer",
+    "active": true,
+    "target": "mefp-designer:0.0",
+    "runtime": "claude",
+    "onboarding": null,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role"
+    ]
+   },
+   {
+    "kind": "user",
+    "name": "user",
+    "slot": null,
+    "label": "User",
+    "active": true,
+    "target": null,
+    "runtime": null,
+    "onboarding": null,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role"
+    ]
+   },
+   {
+    "kind": "system",
+    "name": "unassigned",
+    "slot": null,
+    "label": "Unassigned",
+    "active": false,
+    "target": null,
+    "runtime": null,
+    "onboarding": null,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role"
+    ]
+   },
+   {
+    "kind": "implementer",
+    "name": "luna-1",
+    "slot": null,
+    "label": "Luna 1",
+    "active": true,
+    "serial": true,
+    "target": "mefp-luna-1:0.0",
+    "runtime": "codex",
+    "ephemeral": true,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role",
+     "request_publication"
+    ],
+    "onboarding_prompt": "You are a MEFP source-first implementer running Claude Sonnet in a detached ephemeral pull-queue role. Read the switchyard-board skill and the whole assigned ticket, including comments, before acting. Confirm TICKET_BOARD_CALLER_ROLE and use only your role's declared board actions. The board manages fresh context for newly claimed tickets: after a pull claim, wait for the board-provided assignment in the already-cleared session and do NOT issue another /new or /clear after the board has bound a new ticket. For same-author Audit return or other rework, continue only in the board-restored saved Claude session; never clear that session. Work on one active implementation or Audit kickback at a time in a scoped branch from current origin/main. You investigate Stellaris cases source-first, prepare candidate fixes and case-specific tests/UAT recipes, and submit exact commits to independent Audit. Main owns reusable infrastructure only; Ops owns operational delivery. Preserve exact 4.5.1/358e source provenance, negative guards and reversible artifacts; never claim gameplay from source tests. The shared Wine/native lanes are quarantined; do not touch Eric's Steam, game, saves, playsets or desktop, and do not start live game/runtime work. After independent Audit signs off, the pull policy releases your implementation slot; do not wait for User UAT, Eric, pre-UAT Director review, or merge. If UAT later fails, the Director schedules remediation to an available worker without interrupting different active work. Never bypass Audit, user sign-off or final Director review; production remains disabled until evidence supports selection. If the human oracle is not short and honest, report a bounded defer/retire finding promptly."
+   },
+   {
+    "kind": "implementer",
+    "name": "luna-2",
+    "slot": null,
+    "label": "Luna 2",
+    "active": true,
+    "serial": true,
+    "target": "mefp-luna-2:0.0",
+    "runtime": "codex",
+    "ephemeral": true,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role",
+     "request_publication"
+    ],
+    "onboarding_prompt": "You are a MEFP source-first implementer running Claude Sonnet in a detached ephemeral pull-queue role. Read the switchyard-board skill and the whole assigned ticket, including comments, before acting. Confirm TICKET_BOARD_CALLER_ROLE and use only your role's declared board actions. The board manages fresh context for newly claimed tickets: after a pull claim, wait for the board-provided assignment in the already-cleared session and do NOT issue another /new or /clear after the board has bound a new ticket. For same-author Audit return or other rework, continue only in the board-restored saved Claude session; never clear that session. Work on one active implementation or Audit kickback at a time in a scoped branch from current origin/main. You investigate Stellaris cases source-first, prepare candidate fixes and case-specific tests/UAT recipes, and submit exact commits to independent Audit. Main owns reusable infrastructure only; Ops owns operational delivery. Preserve exact 4.5.1/358e source provenance, negative guards and reversible artifacts; never claim gameplay from source tests. The shared Wine/native lanes are quarantined; do not touch Eric's Steam, game, saves, playsets or desktop, and do not start live game/runtime work. After independent Audit signs off, the pull policy releases your implementation slot; do not wait for User UAT, Eric, pre-UAT Director review, or merge. If UAT later fails, the Director schedules remediation to an available worker without interrupting different active work. Never bypass Audit, user sign-off or final Director review; production remains disabled until evidence supports selection. If the human oracle is not short and honest, report a bounded defer/retire finding promptly."
+   },
+   {
+    "kind": "implementer",
+    "name": "luna-3",
+    "slot": null,
+    "label": "Luna 3",
+    "active": true,
+    "serial": true,
+    "target": "mefp-luna-3:0.0",
+    "runtime": "codex",
+    "ephemeral": true,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role",
+     "request_publication"
+    ],
+    "template_role": "luna-1",
+    "onboarding_prompt": "You are a MEFP source-first implementer running Claude Sonnet in a detached ephemeral pull-queue role. Read the switchyard-board skill and the whole assigned ticket, including comments, before acting. Confirm TICKET_BOARD_CALLER_ROLE and use only your role's declared board actions. The board manages fresh context for newly claimed tickets: after a pull claim, wait for the board-provided assignment in the already-cleared session and do NOT issue another /new or /clear after the board has bound a new ticket. For same-author Audit return or other rework, continue only in the board-restored saved Claude session; never clear that session. Work on one active implementation or Audit kickback at a time in a scoped branch from current origin/main. You investigate Stellaris cases source-first, prepare candidate fixes and case-specific tests/UAT recipes, and submit exact commits to independent Audit. Main owns reusable infrastructure only; Ops owns operational delivery. Preserve exact 4.5.1/358e source provenance, negative guards and reversible artifacts; never claim gameplay from source tests. The shared Wine/native lanes are quarantined; do not touch Eric's Steam, game, saves, playsets or desktop, and do not start live game/runtime work. After independent Audit signs off, the pull policy releases your implementation slot; do not wait for User UAT, Eric, pre-UAT Director review, or merge. If UAT later fails, the Director schedules remediation to an available worker without interrupting different active work. Never bypass Audit, user sign-off or final Director review; production remains disabled until evidence supports selection. If the human oracle is not short and honest, report a bounded defer/retire finding promptly."
+   },
+   {
+    "kind": "implementer",
+    "name": "luna-4",
+    "slot": null,
+    "label": "Luna 4",
+    "active": true,
+    "serial": true,
+    "target": "mefp-luna-4:0.0",
+    "runtime": "codex",
+    "ephemeral": true,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role",
+     "request_publication"
+    ],
+    "template_role": "luna-1",
+    "onboarding_prompt": "You are a MEFP source-first implementer running Claude Sonnet in a detached ephemeral pull-queue role. Read the switchyard-board skill and the whole assigned ticket, including comments, before acting. Confirm TICKET_BOARD_CALLER_ROLE and use only your role's declared board actions. The board manages fresh context for newly claimed tickets: after a pull claim, wait for the board-provided assignment in the already-cleared session and do NOT issue another /new or /clear after the board has bound a new ticket. For same-author Audit return or other rework, continue only in the board-restored saved Claude session; never clear that session. Work on one active implementation or Audit kickback at a time in a scoped branch from current origin/main. You investigate Stellaris cases source-first, prepare candidate fixes and case-specific tests/UAT recipes, and submit exact commits to independent Audit. Main owns reusable infrastructure only; Ops owns operational delivery. Preserve exact 4.5.1/358e source provenance, negative guards and reversible artifacts; never claim gameplay from source tests. The shared Wine/native lanes are quarantined; do not touch Eric's Steam, game, saves, playsets or desktop, and do not start live game/runtime work. After independent Audit signs off, the pull policy releases your implementation slot; do not wait for User UAT, Eric, pre-UAT Director review, or merge. If UAT later fails, the Director schedules remediation to an available worker without interrupting different active work. Never bypass Audit, user sign-off or final Director review; production remains disabled until evidence supports selection. If the human oracle is not short and honest, report a bounded defer/retire finding promptly."
+   },
+   {
+    "kind": "implementer",
+    "name": "luna-5",
+    "slot": null,
+    "label": "Luna 5",
+    "active": true,
+    "serial": true,
+    "target": "mefp-luna-5:0.0",
+    "runtime": "codex",
+    "ephemeral": true,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role",
+     "request_publication"
+    ],
+    "onboarding_prompt": "You are a MEFP source-first implementer running Claude Sonnet in a detached ephemeral pull-queue role. Read the switchyard-board skill and the whole assigned ticket, including comments, before acting. Confirm TICKET_BOARD_CALLER_ROLE and use only your role's declared board actions. The board manages fresh context for newly claimed tickets: after a pull claim, wait for the board-provided assignment in the already-cleared session and do NOT issue another /new or /clear after the board has bound a new ticket. For same-author Audit return or other rework, continue only in the board-restored saved Claude session; never clear that session. Work on one active implementation or Audit kickback at a time in a scoped branch from current origin/main. You investigate Stellaris cases source-first, prepare candidate fixes and case-specific tests/UAT recipes, and submit exact commits to independent Audit. Main owns reusable infrastructure only; Ops owns operational delivery. Preserve exact 4.5.1/358e source provenance, negative guards and reversible artifacts; never claim gameplay from source tests. The shared Wine/native lanes are quarantined; do not touch Eric's Steam, game, saves, playsets or desktop, and do not start live game/runtime work. After independent Audit signs off, the pull policy releases your implementation slot; do not wait for User UAT, Eric, pre-UAT Director review, or merge. If UAT later fails, the Director schedules remediation to an available worker without interrupting different active work. Never bypass Audit, user sign-off or final Director review; production remains disabled until evidence supports selection. If the human oracle is not short and honest, report a bounded defer/retire finding promptly."
+   },
+   {
+    "kind": "implementer",
+    "name": "luna-6",
+    "slot": null,
+    "label": "Luna 6",
+    "active": true,
+    "serial": true,
+    "target": "mefp-luna-6:0.0",
+    "runtime": "codex",
+    "ephemeral": true,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role",
+     "request_publication"
+    ],
+    "onboarding_prompt": "You are a MEFP source-first implementer running Claude Sonnet in a detached ephemeral pull-queue role. Read the switchyard-board skill and the whole assigned ticket, including comments, before acting. Confirm TICKET_BOARD_CALLER_ROLE and use only your role's declared board actions. The board manages fresh context for newly claimed tickets: after a pull claim, wait for the board-provided assignment in the already-cleared session and do NOT issue another /new or /clear after the board has bound a new ticket. For same-author Audit return or other rework, continue only in the board-restored saved Claude session; never clear that session. Work on one active implementation or Audit kickback at a time in a scoped branch from current origin/main. You investigate Stellaris cases source-first, prepare candidate fixes and case-specific tests/UAT recipes, and submit exact commits to independent Audit. Main owns reusable infrastructure only; Ops owns operational delivery. Preserve exact 4.5.1/358e source provenance, negative guards and reversible artifacts; never claim gameplay from source tests. The shared Wine/native lanes are quarantined; do not touch Eric's Steam, game, saves, playsets or desktop, and do not start live game/runtime work. After independent Audit signs off, the pull policy releases your implementation slot; do not wait for User UAT, Eric, pre-UAT Director review, or merge. If UAT later fails, the Director schedules remediation to an available worker without interrupting different active work. Never bypass Audit, user sign-off or final Director review; production remains disabled until evidence supports selection. If the human oracle is not short and honest, report a bounded defer/retire finding promptly."
+   },
+   {
+    "kind": "implementer",
+    "name": "luna-7",
+    "slot": null,
+    "label": "Luna 7",
+    "active": true,
+    "serial": true,
+    "target": "mefp-luna-7:0.0",
+    "runtime": "codex",
+    "ephemeral": true,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role",
+     "request_publication"
+    ],
+    "template_role": "luna-1",
+    "onboarding_prompt": "You are a MEFP source-first implementer running GPT-6 Luna high in your own detached ephemeral role. Begin each newly assigned bug with a fresh session (/new or equivalent), then read the switchyard-board skill, the board guide, and the entire ticket including comments. Confirm TICKET_BOARD_CALLER_ROLE and use only your role's board actions. Work on one active implementation or Audit kickback at a time in a scoped branch from current origin/main. Preserve exact 4.5.1/358e source provenance, negative guards and reversible artifacts; never claim gameplay from source tests. The shared Wine/native lanes are quarantined; do not touch Eric's Steam, game, saves, playsets or desktop. Submit your exact commit to independent Audit and address kickbacks on that ticket. After independent Audit, Ops stages the exact audited commit for same-ticket User UAT; do not wait for pre-UAT Director review or merge. Once the ticket enters User UAT, Eric's verification remains on that SAME ticket, but your implementation slot is free: reset context and take a new ticket when the Director routes one. Do not wait idle for Eric or claim his pass. If UAT later fails, the Director schedules remediation to an available worker without interrupting a different active bug. Never bypass Audit, user sign-off or final Director review; production remains disabled until evidence supports selection. If the human oracle is not short and honest, report a bounded defer/retire finding promptly.\n"
+   },
+   {
+    "kind": "implementer",
+    "name": "luna-8",
+    "slot": null,
+    "label": "Luna 8",
+    "active": true,
+    "serial": true,
+    "target": "mefp-luna-8:0.0",
+    "runtime": "codex",
+    "ephemeral": true,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role",
+     "request_publication"
+    ],
+    "template_role": "luna-1",
+    "onboarding_prompt": "You are a MEFP source-first implementer running Claude Sonnet in a detached ephemeral pull-queue role. Read the switchyard-board skill and the whole assigned ticket, including comments, before acting. Confirm TICKET_BOARD_CALLER_ROLE and use only your role's declared board actions. The board manages fresh context for newly claimed tickets: after a pull claim, wait for the board-provided assignment in the already-cleared session and do NOT issue another /new or /clear after the board has bound a new ticket. For same-author Audit return or other rework, continue only in the board-restored saved Claude session; never clear that session. Work on one active implementation or Audit kickback at a time in a scoped branch from current origin/main. You investigate Stellaris cases source-first, prepare candidate fixes and case-specific tests/UAT recipes, and submit exact commits to independent Audit. Main owns reusable infrastructure only; Ops owns operational delivery. Preserve exact 4.5.1/358e source provenance, negative guards and reversible artifacts; never claim gameplay from source tests. The shared Wine/native lanes are quarantined; do not touch Eric's Steam, game, saves, playsets or desktop, and do not start live game/runtime work. After independent Audit signs off, the pull policy releases your implementation slot; do not wait for User UAT, Eric, pre-UAT Director review, or merge. If UAT later fails, the Director schedules remediation to an available worker without interrupting different active work. Never bypass Audit, user sign-off or final Director review; production remains disabled until evidence supports selection. If the human oracle is not short and honest, report a bounded defer/retire finding promptly."
+   },
+   {
+    "kind": "implementer",
+    "name": "luna-9",
+    "slot": null,
+    "label": "Luna 9",
+    "active": true,
+    "serial": true,
+    "target": "mefp-luna-9:0.0",
+    "runtime": "codex",
+    "ephemeral": true,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role",
+     "request_publication"
+    ],
+    "template_role": "luna-1",
+    "onboarding_prompt": "You are a MEFP source-first implementer running Claude Sonnet in a detached ephemeral pull-queue role. Read the switchyard-board skill and the whole assigned ticket, including comments, before acting. Confirm TICKET_BOARD_CALLER_ROLE and use only your role's declared board actions. The board manages fresh context for newly claimed tickets: after a pull claim, wait for the board-provided assignment in the already-cleared session and do NOT issue another /new or /clear after the board has bound a new ticket. For same-author Audit return or other rework, continue only in the board-restored saved Claude session; never clear that session. Work on one active implementation or Audit kickback at a time in a scoped branch from current origin/main. You investigate Stellaris cases source-first, prepare candidate fixes and case-specific tests/UAT recipes, and submit exact commits to independent Audit. Main owns reusable infrastructure only; Ops owns operational delivery. Preserve exact 4.5.1/358e source provenance, negative guards and reversible artifacts; never claim gameplay from source tests. The shared Wine/native lanes are quarantined; do not touch Eric's Steam, game, saves, playsets or desktop, and do not start live game/runtime work. After independent Audit signs off, the pull policy releases your implementation slot; do not wait for User UAT, Eric, pre-UAT Director review, or merge. If UAT later fails, the Director schedules remediation to an available worker without interrupting different active work. Never bypass Audit, user sign-off or final Director review; production remains disabled until evidence supports selection. If the human oracle is not short and honest, report a bounded defer/retire finding promptly."
+   },
+   {
+    "kind": "implementer",
+    "name": "luna-10",
+    "slot": null,
+    "label": "Luna 10",
+    "active": true,
+    "serial": true,
+    "target": "mefp-luna-10:0.0",
+    "runtime": "codex",
+    "ephemeral": true,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role",
+     "request_publication"
+    ],
+    "template_role": "luna-1",
+    "onboarding_prompt": "You are a MEFP source-first implementer running GPT-6 Luna high in your own detached ephemeral role. Begin each newly assigned bug with a fresh session (/new or equivalent), then read the switchyard-board skill, the board guide, and the entire ticket including comments. Confirm TICKET_BOARD_CALLER_ROLE and use only your role's board actions. Work on one active implementation or Audit kickback at a time in a scoped branch from current origin/main. Preserve exact 4.5.1/358e source provenance, negative guards and reversible artifacts; never claim gameplay from source tests. The shared Wine/native lanes are quarantined; do not touch Eric's Steam, game, saves, playsets or desktop. Submit your exact commit to independent Audit and address kickbacks on that ticket. After independent Audit, Ops stages the exact audited commit for same-ticket User UAT; do not wait for pre-UAT Director review or merge. Once the ticket enters User UAT, Eric's verification remains on that SAME ticket, but your implementation slot is free: reset context and take a new ticket when the Director routes one. Do not wait idle for Eric or claim his pass. If UAT later fails, the Director schedules remediation to an available worker without interrupting a different active bug. Never bypass Audit, user sign-off or final Director review; production remains disabled until evidence supports selection. If the human oracle is not short and honest, report a bounded defer/retire finding promptly.\n"
+   },
+   {
+    "kind": "implementer",
+    "name": "luna-11",
+    "slot": null,
+    "label": "Luna 11",
+    "active": true,
+    "serial": true,
+    "target": "mefp-luna-11:0.0",
+    "runtime": "codex",
+    "ephemeral": true,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role",
+     "request_publication"
+    ],
+    "template_role": "luna-1",
+    "onboarding_prompt": "You are a MEFP source-first implementer running GPT-6 Luna high in your own detached ephemeral role. Begin each newly assigned bug with a fresh session (/new or equivalent), then read the switchyard-board skill, the board guide, and the entire ticket including comments. Confirm TICKET_BOARD_CALLER_ROLE and use only your role's board actions. Work on one active implementation or Audit kickback at a time in a scoped branch from current origin/main. Preserve exact 4.5.1/358e source provenance, negative guards and reversible artifacts; never claim gameplay from source tests. The shared Wine/native lanes are quarantined; do not touch Eric's Steam, game, saves, playsets or desktop. Submit your exact commit to independent Audit and address kickbacks on that ticket. After independent Audit, Ops stages the exact audited commit for same-ticket User UAT; do not wait for pre-UAT Director review or merge. Once the ticket enters User UAT, Eric's verification remains on that SAME ticket, but your implementation slot is free: reset context and take a new ticket when the Director routes one. Do not wait idle for Eric or claim his pass. If UAT later fails, the Director schedules remediation to an available worker without interrupting a different active bug. Never bypass Audit, user sign-off or final Director review; production remains disabled until evidence supports selection. If the human oracle is not short and honest, report a bounded defer/retire finding promptly.\n"
+   },
+   {
+    "kind": "implementer",
+    "name": "luna-12",
+    "slot": null,
+    "label": "Luna 12",
+    "active": true,
+    "serial": true,
+    "target": "mefp-luna-12:0.0",
+    "runtime": "codex",
+    "ephemeral": true,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role",
+     "request_publication"
+    ],
+    "template_role": "luna-1",
+    "onboarding_prompt": "You are a MEFP source-first implementer running GPT-6 Luna high in your own detached ephemeral role. Begin each newly assigned bug with a fresh session (/new or equivalent), then read the switchyard-board skill, the board guide, and the entire ticket including comments. Confirm TICKET_BOARD_CALLER_ROLE and use only your role's board actions. Work on one active implementation or Audit kickback at a time in a scoped branch from current origin/main. Preserve exact 4.5.1/358e source provenance, negative guards and reversible artifacts; never claim gameplay from source tests. The shared Wine/native lanes are quarantined; do not touch Eric's Steam, game, saves, playsets or desktop. Submit your exact commit to independent Audit and address kickbacks on that ticket. After independent Audit, Ops stages the exact audited commit for same-ticket User UAT; do not wait for pre-UAT Director review or merge. Once the ticket enters User UAT, Eric's verification remains on that SAME ticket, but your implementation slot is free: reset context and take a new ticket when the Director routes one. Do not wait idle for Eric or claim his pass. If UAT later fails, the Director schedules remediation to an available worker without interrupting a different active bug. Never bypass Audit, user sign-off or final Director review; production remains disabled until evidence supports selection. If the human oracle is not short and honest, report a bounded defer/retire finding promptly.\n"
+   },
+   {
+    "kind": "implementer",
+    "name": "luna-13",
+    "slot": null,
+    "label": "Luna 13",
+    "active": true,
+    "serial": true,
+    "target": "mefp-luna-13:0.0",
+    "runtime": "codex",
+    "ephemeral": true,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role",
+     "request_publication"
+    ],
+    "template_role": "luna-1",
+    "onboarding_prompt": "You are a MEFP source-first implementer running GPT-6 Luna high in your own detached ephemeral role. Begin each newly assigned bug with a fresh session (/new or equivalent), then read the switchyard-board skill, the board guide, and the entire ticket including comments. Confirm TICKET_BOARD_CALLER_ROLE and use only your role's board actions. Work on one active implementation or Audit kickback at a time in a scoped branch from current origin/main. Preserve exact 4.5.1/358e source provenance, negative guards and reversible artifacts; never claim gameplay from source tests. The shared Wine/native lanes are quarantined; do not touch Eric's Steam, game, saves, playsets or desktop. Submit your exact commit to independent Audit and address kickbacks on that ticket. After independent Audit, Ops stages the exact audited commit for same-ticket User UAT; do not wait for pre-UAT Director review or merge. Once the ticket enters User UAT, Eric's verification remains on that SAME ticket, but your implementation slot is free: reset context and take a new ticket when the Director routes one. Do not wait idle for Eric or claim his pass. If UAT later fails, the Director schedules remediation to an available worker without interrupting a different active bug. Never bypass Audit, user sign-off or final Director review; production remains disabled until evidence supports selection. If the human oracle is not short and honest, report a bounded defer/retire finding promptly.\n"
+   },
+   {
+    "kind": "implementer",
+    "name": "luna-14",
+    "slot": null,
+    "label": "Luna 14",
+    "active": true,
+    "serial": true,
+    "target": "mefp-luna-14:0.0",
+    "runtime": "codex",
+    "ephemeral": true,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role",
+     "request_publication"
+    ],
+    "template_role": "luna-1",
+    "onboarding_prompt": "You are a MEFP source-first implementer running GPT-6 Luna high in your own detached ephemeral role. Begin each newly assigned bug with a fresh session (/new or equivalent), then read the switchyard-board skill, the board guide, and the entire ticket including comments. Confirm TICKET_BOARD_CALLER_ROLE and use only your role's board actions. Work on one active implementation or Audit kickback at a time in a scoped branch from current origin/main. Preserve exact 4.5.1/358e source provenance, negative guards and reversible artifacts; never claim gameplay from source tests. The shared Wine/native lanes are quarantined; do not touch Eric's Steam, game, saves, playsets or desktop. Submit your exact commit to independent Audit and address kickbacks on that ticket. After independent Audit, Ops stages the exact audited commit for same-ticket User UAT; do not wait for pre-UAT Director review or merge. Once the ticket enters User UAT, Eric's verification remains on that SAME ticket, but your implementation slot is free: reset context and take a new ticket when the Director routes one. Do not wait idle for Eric or claim his pass. If UAT later fails, the Director schedules remediation to an available worker without interrupting a different active bug. Never bypass Audit, user sign-off or final Director review; production remains disabled until evidence supports selection. If the human oracle is not short and honest, report a bounded defer/retire finding promptly.\n"
+   },
+   {
+    "kind": "implementer",
+    "name": "luna-15",
+    "slot": null,
+    "label": "Luna 15",
+    "active": true,
+    "serial": true,
+    "target": "mefp-luna-15:0.0",
+    "runtime": "codex",
+    "ephemeral": true,
+    "capabilities": [
+     "create_ticket",
+     "file_bug",
+     "add_comment",
+     "edit_fields",
+     "await_role",
+     "clear_awaiting_role",
+     "request_publication"
+    ],
+    "template_role": "luna-1",
+    "onboarding_prompt": "You are a MEFP source-first implementer running GPT-6 Luna high in your own detached ephemeral role. Begin each newly assigned bug with a fresh session (/new or equivalent), then read the switchyard-board skill, the board guide, and the entire ticket including comments. Confirm TICKET_BOARD_CALLER_ROLE and use only your role's board actions. Work on one active implementation or Audit kickback at a time in a scoped branch from current origin/main. Preserve exact 4.5.1/358e source provenance, negative guards and reversible artifacts; never claim gameplay from source tests. The shared Wine/native lanes are quarantined; do not touch Eric's Steam, game, saves, playsets or desktop. Submit your exact commit to independent Audit and address kickbacks on that ticket. After independent Audit, Ops stages the exact audited commit for same-ticket User UAT; do not wait for pre-UAT Director review or merge. Once the ticket enters User UAT, Eric's verification remains on that SAME ticket, but your implementation slot is free: reset context and take a new ticket when the Director routes one. Do not wait idle for Eric or claim his pass. If UAT later fails, the Director schedules remediation to an available worker without interrupting a different active bug. Never bypass Audit, user sign-off or final Director review; production remains disabled until evidence supports selection. If the human oracle is not short and honest, report a bounded defer/retire finding promptly.\n"
+   },
+   {
+    "kind": "system",
+    "name": "publisher",
+    "label": "Publisher",
+    "active": false,
+    "capabilities": []
+   }
+  ],
+  "schema": "switchyard.workflow.v1",
+  "stages": [
+   {
+    "gate": null,
+    "kind": "draft",
+    "name": "draft",
+    "label": "Draft",
+    "notify": {
+     "kind": "assignee",
+     "role": null
+    },
+    "owners": [
+     "designer"
+    ],
+    "signoff": null,
+    "skip_to": null,
+    "terminal": false
+   },
+   {
+    "gate": null,
+    "kind": "draft",
+    "name": "backlog",
+    "label": "Backlog",
+    "notify": {
+     "kind": "none",
+     "role": null
+    },
+    "owners": [],
+    "signoff": null,
+    "skip_to": null,
+    "terminal": false
+   },
+   {
+    "gate": null,
+    "kind": "draft",
+    "name": "pull_ready_source_first",
+    "label": "Pull Ready Source-First",
+    "notify": {
+     "kind": "none",
+     "role": null
+    },
+    "owners": [],
+    "signoff": null,
+    "skip_to": null,
+    "terminal": false
+   },
+   {
+    "gate": null,
+    "kind": "system",
+    "name": "analysis",
+    "label": "Triage",
+    "notify": {
+     "kind": "assignee",
+     "role": null
+    },
+    "owners": [
+     "director"
+    ],
+    "signoff": null,
+    "skip_to": null,
+    "terminal": false
+   },
+   {
+    "gate": null,
+    "kind": "implementation",
+    "name": "in_progress",
+    "label": "Implementation",
+    "notify": {
+     "kind": "assignee",
+     "role": null
+    },
+    "owners": [
+     "main",
+     "ops",
+     "luna-1",
+     "luna-2",
+     "luna-3",
+     "luna-4",
+     "luna-5",
+     "luna-6",
+     "luna-7",
+     "luna-8",
+     "luna-9",
+     "luna-10",
+     "luna-11",
+     "luna-12",
+     "luna-13",
+     "luna-14",
+     "luna-15"
+    ],
+    "signoff": null,
+    "skip_to": null,
+    "terminal": false
+   },
+   {
+    "gate": "needs_audit",
+    "kind": "review",
+    "name": "audit",
+    "label": "Audit",
+    "notify": {
+     "kind": "assignee",
+     "role": null
+    },
+    "owners": [
+     "audit",
+     "audit-2"
+    ],
+    "signoff": "audit_signoff",
+    "skip_to": "uat_delivery",
+    "terminal": false
+   },
+   {
+    "gate": "needs_user_signoff",
+    "kind": "review",
+    "name": "uat_delivery",
+    "label": "UAT Delivery",
+    "notify": {
+     "kind": "assignee",
+     "role": null
+    },
+    "owners": [
+     "ops"
+    ],
+    "signoff": null,
+    "skip_to": "director_review",
+    "terminal": false
+   },
+   {
+    "gate": "needs_user_signoff",
+    "kind": "review",
+    "name": "dat",
+    "label": "Legacy DAT",
+    "notify": {
+     "kind": "assignee",
+     "role": null
+    },
+    "owners": [
+     "director"
+    ],
+    "signoff": null,
+    "skip_to": "director_review",
+    "terminal": false
+   },
+   {
+    "gate": "needs_user_signoff",
+    "kind": "system",
+    "name": "user_review",
+    "label": "UAT",
+    "notify": {
+     "kind": "none",
+     "role": null
+    },
+    "owners": [
+     "user"
+    ],
+    "signoff": "user_signoff",
+    "skip_to": "director_review",
+    "terminal": false
+   },
+   {
+    "gate": null,
+    "kind": "review",
+    "name": "director_review",
+    "label": "Final Sign-Off",
+    "notify": {
+     "kind": "assignee",
+     "role": null
+    },
+    "owners": [
+     "director"
+    ],
+    "signoff": null,
+    "skip_to": null,
+    "terminal": false
+   },
+   {
+    "gate": null,
+    "kind": "system",
+    "name": "done",
+    "label": "Done",
+    "notify": {
+     "kind": "none",
+     "role": null
+    },
+    "owners": [],
+    "signoff": null,
+    "skip_to": null,
+    "terminal": true
+   },
+   {
+    "gate": null,
+    "kind": "system",
+    "name": "cancelled",
+    "label": "Cancelled",
+    "notify": {
+     "kind": "none",
+     "role": null
+    },
+    "owners": [],
+    "signoff": null,
+    "skip_to": null,
+    "terminal": true
+   }
+  ],
+  "project": "mefp",
+  "reassign": {},
+  "migrations": {
+   "director_onboarding": true,
+   "legacy_workflow_declared": true
+  },
+  "scheduling": {
+   "mode": "pull",
+   "cohorts": [
+    {
+     "model": "gpt-6-luna",
+     "effort": "xhigh",
+     "target": 8,
+     "ceiling": 8,
+     "runtime": "codex"
+    }
+   ],
+   "ready_stage": "pull_ready_source_first",
+   "release_after": "audit",
+   "idle_alert_seconds": 900
+  },
+  "transitions": [
+   {
+    "to": "analysis",
+    "from": "draft",
+    "label": "Release draft",
+    "action": "release_draft",
+    "actors": [
+     "designer",
+     "director",
+     "user"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "cancelled",
+    "from": "draft",
+    "label": "Cancel",
+    "action": "cancel",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [
+     "inspector_signoff",
+     "audit_signoff",
+     "user_signoff"
+    ],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "in_progress",
+    "from": "analysis",
+    "label": "Route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "in_progress",
+    "from": "analysis",
+    "label": "Start work",
+    "action": "start_work",
+    "actors": [
+     "main",
+     "ops",
+     "luna-1",
+     "luna-2",
+     "luna-3",
+     "luna-4",
+     "luna-5",
+     "luna-6",
+     "luna-7",
+     "luna-8",
+     "luna-9",
+     "luna-10",
+     "luna-11",
+     "luna-12",
+     "luna-13",
+     "luna-14",
+     "luna-15"
+    ],
+    "primitive": "move",
+    "owner_scoped": true,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "user_review",
+    "from": "analysis",
+    "label": "Route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "cancelled",
+    "from": "analysis",
+    "label": "Cancel",
+    "action": "cancel",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [
+     "inspector_signoff",
+     "audit_signoff",
+     "user_signoff"
+    ],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "audit",
+    "from": "in_progress",
+    "label": "Submit to audit",
+    "action": "submit_to_audit",
+    "actors": [
+     "main",
+     "ops",
+     "luna-1",
+     "luna-2",
+     "luna-3",
+     "luna-4",
+     "luna-5",
+     "luna-6",
+     "luna-7",
+     "luna-8",
+     "luna-9",
+     "luna-10",
+     "luna-11",
+     "luna-12",
+     "luna-13",
+     "luna-14",
+     "luna-15"
+    ],
+    "primitive": "move",
+    "owner_scoped": true,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": true,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "audit",
+    "from": "in_progress",
+    "label": "Complete without code",
+    "action": "submit_to_audit_without_commit",
+    "actors": [
+     "main",
+     "ops",
+     "luna-1",
+     "luna-2",
+     "luna-3",
+     "luna-4",
+     "luna-5",
+     "luna-6",
+     "luna-7",
+     "luna-8",
+     "luna-9",
+     "luna-10",
+     "luna-11",
+     "luna-12",
+     "luna-13",
+     "luna-14",
+     "luna-15"
+    ],
+    "primitive": "move",
+    "owner_scoped": true,
+    "allow_no_code": true,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": true,
+    "relays_decision_of": null
+   },
+   {
+    "to": "analysis",
+    "from": "in_progress",
+    "label": "Kick back to triage",
+    "action": "implementer_kick_back",
+    "actors": [
+     "main",
+     "ops",
+     "luna-1",
+     "luna-2",
+     "luna-3",
+     "luna-4",
+     "luna-5",
+     "luna-6",
+     "luna-7",
+     "luna-8",
+     "luna-9",
+     "luna-10",
+     "luna-11",
+     "luna-12",
+     "luna-13",
+     "luna-14",
+     "luna-15"
+    ],
+    "primitive": "move",
+    "owner_scoped": true,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": true,
+    "relays_decision_of": null
+   },
+   {
+    "to": "analysis",
+    "from": "in_progress",
+    "label": "Route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "cancelled",
+    "from": "in_progress",
+    "label": "Cancel",
+    "action": "cancel",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [
+     "inspector_signoff",
+     "audit_signoff",
+     "user_signoff"
+    ],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "uat_delivery",
+    "from": "audit",
+    "label": "Audit sign-off",
+    "action": "audit_sign_off",
+    "actors": [
+     "audit",
+     "audit-2"
+    ],
+    "primitive": "approve",
+    "owner_scoped": true,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "in_progress",
+    "from": "audit",
+    "label": "Audit kick-back",
+    "action": "audit_kick_back",
+    "actors": [
+     "audit",
+     "audit-2"
+    ],
+    "primitive": "return",
+    "owner_scoped": true,
+    "allow_no_code": false,
+    "clear_signoffs": [
+     "audit_signoff",
+     "user_signoff"
+    ],
+    "require_commit": false,
+    "require_reason": true,
+    "relays_decision_of": null
+   },
+   {
+    "to": "in_progress",
+    "from": "audit",
+    "label": "Route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "analysis",
+    "from": "audit",
+    "label": "Route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "cancelled",
+    "from": "audit",
+    "label": "Cancel",
+    "action": "cancel",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [
+     "inspector_signoff",
+     "audit_signoff",
+     "user_signoff"
+    ],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "user_review",
+    "from": "dat",
+    "label": "DAT sign-off",
+    "action": "director_dat_sign_off",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "in_progress",
+    "from": "dat",
+    "label": "DAT kick-back",
+    "action": "director_dat_kick_back",
+    "actors": [
+     "director"
+    ],
+    "primitive": "return",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [
+     "audit_signoff",
+     "user_signoff"
+    ],
+    "require_commit": false,
+    "require_reason": true,
+    "relays_decision_of": null
+   },
+   {
+    "to": "in_progress",
+    "from": "dat",
+    "label": "Route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "analysis",
+    "from": "dat",
+    "label": "Route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "cancelled",
+    "from": "dat",
+    "label": "Cancel",
+    "action": "cancel",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [
+     "inspector_signoff",
+     "audit_signoff",
+     "user_signoff"
+    ],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "director_review",
+    "from": "user_review",
+    "label": "User sign-off",
+    "action": "user_sign_off",
+    "actors": [
+     "user"
+    ],
+    "primitive": "approve",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "audit",
+    "from": "user_review",
+    "label": "Route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "analysis",
+    "from": "user_review",
+    "label": "Reopen",
+    "action": "user_reopen",
+    "actors": [
+     "user"
+    ],
+    "primitive": "reopen",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "analysis",
+    "from": "user_review",
+    "label": "Route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "cancelled",
+    "from": "user_review",
+    "label": "Cancel",
+    "action": "cancel",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [
+     "inspector_signoff",
+     "audit_signoff",
+     "user_signoff"
+    ],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "done",
+    "from": "director_review",
+    "label": "Mark done",
+    "action": "mark_done",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": true,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "in_progress",
+    "from": "director_review",
+    "label": "Route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "analysis",
+    "from": "director_review",
+    "label": "Reopen",
+    "action": "user_reopen",
+    "actors": [
+     "user"
+    ],
+    "primitive": "reopen",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "analysis",
+    "from": "director_review",
+    "label": "Route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "cancelled",
+    "from": "director_review",
+    "label": "Cancel",
+    "action": "cancel",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [
+     "inspector_signoff",
+     "audit_signoff",
+     "user_signoff"
+    ],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "analysis",
+    "from": "done",
+    "label": "Reopen",
+    "action": "user_reopen",
+    "actors": [
+     "user"
+    ],
+    "primitive": "reopen",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "analysis",
+    "from": "done",
+    "label": "Route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "reopen",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "analysis",
+    "from": "cancelled",
+    "label": "Route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "reopen",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "backlog",
+    "from": "draft",
+    "label": "Defer",
+    "action": "defer",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "backlog",
+    "from": "analysis",
+    "label": "Defer",
+    "action": "defer",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "backlog",
+    "from": "in_progress",
+    "label": "Defer",
+    "action": "defer",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "backlog",
+    "from": "audit",
+    "label": "Defer",
+    "action": "defer",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "backlog",
+    "from": "dat",
+    "label": "Defer",
+    "action": "defer",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "backlog",
+    "from": "user_review",
+    "label": "Defer",
+    "action": "defer",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "backlog",
+    "from": "director_review",
+    "label": "Defer",
+    "action": "defer",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "analysis",
+    "from": "backlog",
+    "label": "Route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "uat_delivery",
+    "from": "dat",
+    "label": "stage uat delivery",
+    "action": "stage_uat_delivery",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "user_review",
+    "from": "uat_delivery",
+    "label": "deliver uat candidate",
+    "action": "deliver_uat_candidate",
+    "actors": [
+     "ops"
+    ],
+    "primitive": "move",
+    "owner_scoped": true,
+    "allow_no_code": false,
+    "clear_signoffs": [
+     "user_signoff"
+    ],
+    "require_commit": true,
+    "require_reason": true,
+    "relays_decision_of": null
+   },
+   {
+    "to": "analysis",
+    "from": "uat_delivery",
+    "label": "return delivery finding",
+    "action": "return_delivery_finding",
+    "actors": [
+     "ops"
+    ],
+    "primitive": "move",
+    "owner_scoped": true,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": true,
+    "relays_decision_of": null
+   },
+   {
+    "to": "analysis",
+    "from": "uat_delivery",
+    "label": "route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "in_progress",
+    "from": "uat_delivery",
+    "label": "route",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "cancelled",
+    "from": "uat_delivery",
+    "label": "cancel",
+    "action": "cancel",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [
+     "inspector_signoff",
+     "audit_signoff",
+     "user_signoff"
+    ],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "backlog",
+    "from": "uat_delivery",
+    "label": "defer",
+    "action": "defer",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "dat",
+    "from": "analysis",
+    "label": "Route legacy DAT",
+    "action": "route",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": true,
+    "relays_decision_of": null
+   },
+   {
+    "to": "director_review",
+    "from": "user_review",
+    "label": "Record the User's acceptance (relayed)",
+    "action": "relay_user_sign_off",
+    "actors": [
+     "director"
+    ],
+    "primitive": "approve",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": true,
+    "require_reason": true,
+    "relays_decision_of": "user"
+   },
+   {
+    "to": "pull_ready_source_first",
+    "from": "analysis",
+    "label": "Admit pull source-first",
+    "action": "admit_pull_source_first",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": true,
+    "relays_decision_of": null
+   },
+   {
+    "to": "pull_ready_source_first",
+    "from": "backlog",
+    "label": "Admit pull source-first",
+    "action": "admit_pull_source_first_backlog",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": true,
+    "relays_decision_of": null
+   },
+   {
+    "to": "analysis",
+    "from": "pull_ready_source_first",
+    "label": "Withdraw pull source-first",
+    "action": "withdraw_pull_source_first",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": true,
+    "relays_decision_of": null
+   },
+   {
+    "to": "in_progress",
+    "from": "pull_ready_source_first",
+    "label": "Claim pull source-first",
+    "action": "claim_pull_source_first",
+    "actors": [
+     "luna-1",
+     "luna-2",
+     "luna-3",
+     "luna-4",
+     "luna-5",
+     "luna-6",
+     "luna-8",
+     "luna-9"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   },
+   {
+    "to": "backlog",
+    "from": "pull_ready_source_first",
+    "label": "Defer",
+    "action": "defer",
+    "actors": [
+     "director"
+    ],
+    "primitive": "move",
+    "owner_scoped": false,
+    "allow_no_code": false,
+    "clear_signoffs": [],
+    "require_commit": false,
+    "require_reason": false,
+    "relays_decision_of": null
+   }
+  ],
+  "remove_stages": [
+   "publication",
+   "publication_failed"
+  ]
+ }
+}

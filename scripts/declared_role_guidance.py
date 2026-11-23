@@ -73,3 +73,24 @@ def declared_workflow_add_role_refusal(config: Any, *, config_path: Path, role_n
         "--model <model> --effort <effort>",
     ]
     return "\n".join(lines)
+
+
+def declared_workflow_vcs_close_refusal(config: Any, *, config_path: Path, role_name: str) -> str:
+    """The refusal for `set-vcs-close-role` on a declared-workflow tenant, naming what to run instead (SYRD-860).
+
+    Every tenant `switchyard new` makes now declares its workflow, so this is no longer only an older tenant's case:
+    the close is a stage and a move in the document, changed and applied as any other."""
+    project = str(config.project)
+    workflow = shlex.quote(str(Path(__file__).resolve().parent / "ticket-board-workflow"))
+    cfg = shlex.quote(str(config_path))
+    return "\n".join([
+        f"switchyard: {project} runs a declared workflow: its stages and moves are its workflow document's, so "
+        "set-vcs-close-role changes none of them. Nothing was changed.",
+        f"To give {role_name} the final close: in the workflow document, add a stage owned by {role_name} (for example "
+        f"`vcs`, labelled VCS) between director_review and done, move director_review's approval into it, and make "
+        f"{role_name} the actor of mark_done from it to done; then review and apply the document. "
+        f"`{workflow} show` prints the active document and its revision:",
+        f"  {workflow} apply --config {cfg} --document <document.json> --expected-revision <revision> --dry-run",
+        f"  {workflow} apply --config {cfg} --document <document.json> --expected-revision <revision> "
+        "--journal <before.json>",
+    ])

@@ -205,8 +205,9 @@ def test_the_plan_refusals_before_anything_is_built() -> None:
         (config("main", project="pgu"), "main", {}, False,
          "team-launcher: pgu uses the full built-in workflow; set-vcs-close-role is only for provisioned projects"),
         (config("main"), "ops", {}, False, "team-launcher: VCS close role 'ops' does not exist in project p356"),
-        (config("main"), "main", {"workflow": {"x": 1}}, False, "use ticket-board-workflow apply to update configured roles and stages"),
-        (config("main"), "main", {}, True, "use ticket-board-workflow apply to update configured roles and stages"),
+        # SYRD-860: a declared workflow -- every new tenant's -- is refused with that tenant's path, not a bare pointer.
+        (config("main"), "main", {"workflow": {"x": 1}}, False, "DECLARED"),
+        (config("main"), "main", {}, True, "DECLARED"),
     ]
     for cfg, role, data, config_workflow, expected in cases:
         built: list = []
@@ -215,7 +216,14 @@ def test_the_plan_refusals_before_anything_is_built() -> None:
                 m._project_plan_for_vcs_close_role(cfg, config_path=Path("/c.json"), role_name=role); raised = None
             except SystemExit as exc:
                 raised = str(exc)
-        check(raised == expected and built == [], f"{role!r}: {raised}")
+        if expected == "DECLARED":
+            ok = (raised or "").startswith(f"switchyard: {PROJECT} runs a declared workflow") and all(
+                part in raised for part in ("Nothing was changed.", "add a stage owned by main", "mark_done",
+                                            "ticket-board-workflow apply --config /c.json --document <document.json>",
+                                            "--dry-run", "ticket-board-workflow show"))
+        else:
+            ok = raised == expected
+        check(ok and built == [], f"{role!r}: {raised}")
 
 
 # --- artifacts and SQL ----------------------------------------------------------------------------------------------

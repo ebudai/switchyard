@@ -12,6 +12,7 @@ from pathlib import Path as _Path
 _sys.path.insert(0, str(_Path(__file__).resolve().parent))
 import host_state_guard  # noqa: E402  - before any production module: no host state (SYRD-808)
 host_state_guard.install()
+import re
 import stat
 from unittest.mock import patch
 
@@ -89,14 +90,10 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
     assert config["worktree_base"] == f"/home/{current_user}/porter-worktrees"
     assert config["session_dir"] == f"/home/{current_user}/.local/state/porter-ticket-board/pane-sessions"
     assert not config["session_dir"].startswith("/run/")
-    assert [role["role"] for role in config["roles"]] == ["designer", "director", "audit", "app", "main"]
-    assert [role["tmux_session"] for role in config["roles"]] == [
-        "porter-designer",
-        "porter-director",
-        "porter-audit",
-        "porter-app",
-        "porter-main",
-    ]
+    # SYRD-860: a new tenant declares its workflow, so its roles are projected in the document's order.
+    assert [role["role"] for role in config["roles"]] == ["director", "main", "app", "audit", "designer"]
+    assert [role["tmux_session"] for role in config["roles"]] == [f"porter-{r}" for r in ("director", "main", "app",
+                                                                                          "audit", "designer")]
     assert {role["role"]: role["cli"] for role in config["roles"]} == {
         "designer": ["claude"],
         "director": ["claude"],
@@ -105,25 +102,25 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
         "main": ["codex"],
     }
     assert {"designer", "director", "main", "app", "audit"} <= {role["role"] for role in config["roles"]}
-    assert "('in_progress', 'Implementation', 2, ARRAY['main', 'app']::text[]" in workflow_sql
-    assert "('in_progress', 'analysis', 'route', ARRAY['director']::text[]" in workflow_sql
-    assert "('done', 'Done', 9, ARRAY[]::text[], NULL, NULL, NULL, true)" in workflow_sql
-    assert "('cancelled', 'Cancelled', 10, ARRAY[]::text[], NULL, NULL, NULL, true)" in workflow_sql
-    assert "('audit', 'analysis', 'route', ARRAY['director']::text[]" in workflow_sql
-    assert "('audit', 'in_progress', 'audit_kick_back', ARRAY['audit']::text[]" in workflow_sql
-    assert "('director_review', 'analysis', 'route', ARRAY['director']::text[]" in workflow_sql
-    assert "('director_review', 'analysis', 'user_reopen', ARRAY['user']::text[]" in workflow_sql
-    assert "('director_review', 'in_progress', 'route', ARRAY['director']::text[]" in workflow_sql
-    assert "('director_review', 'done', 'mark_done', ARRAY['director']::text[]" in workflow_sql
-    assert "('director_review', 'cancelled', 'cancel', ARRAY['director']::text[]" in workflow_sql
-    assert "('done', 'analysis', 'route', ARRAY['director']::text[]" in workflow_sql
-    assert "('done', 'analysis', 'user_reopen', ARRAY['user']::text[]" in workflow_sql
-    assert "('cancelled', 'analysis', 'route', ARRAY['director']::text[]" in workflow_sql
+    # SYRD-860: declared, not seeded as rows: the document the plan describes, with the rows' stages, owners, moves.
+    assert "SELECT ticket_board.apply_declared_workflow(ticket_board.provisioned_workflow(" in workflow_sql
+    assert "DELETE FROM ticket_board.workflow_stages" not in workflow_sql
+    declared = json.loads(re.search(r"provisioned_workflow\('(.*?)'::jsonb\)", workflow_sql, re.S).group(1)
+                          .replace("''", "'"))
+    stages = {stage["name"]: stage for stage in declared["stages"]}
+    assert sorted(stages["in_progress"]["owners"]) == ["app", "main"]
+    assert {"analysis", "in_progress", "audit", "director_review", "done", "cancelled"} <= set(stages)
+    moves = {(t["from"], t["to"], t["action"]): t["actors"] for t in declared["transitions"]}
+    for move, actors in ((("analysis", "in_progress", "route"), ["director"]),
+                         (("audit", "in_progress", "audit_kick_back"), ["audit"]),
+                         (("director_review", "done", "mark_done"), ["director"]),
+                         (("director_review", "cancelled", "cancel"), ["director"])):
+        assert actors[0] in moves.get(move, []), (move, moves.get(move))
     assert len(team_launcher._layout_leaves(layout)) == 5
-    assert [role.role for role in loaded_config.roles] == ["designer", "director", "audit", "app", "main"]
-    assert loaded_config.roles[0].target == "porter-designer:0.0"
-    assert loaded_config.roles[3].target == "porter-app:0.0"
-    assert loaded_config.roles[4].target == "porter-main:0.0"
+    assert [role.role for role in loaded_config.roles] == ["director", "main", "app", "audit", "designer"]
+    assert loaded_config.roles[0].target == "porter-director:0.0"
+    assert loaded_config.roles[2].target == "porter-app:0.0"
+    assert loaded_config.roles[1].target == "porter-main:0.0"
     assert loaded_config.control_repository == Path(config["control_repository"])
     assert loaded_config.worktree_base == Path(config["worktree_base"])
     assert loaded_config.session_dir == Path(config["session_dir"])
@@ -152,18 +149,18 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
     assert launch_plan["project"] == "porter"
     assert launch_plan["mode"] == "attach-or-start"
     assert [role["target"] for role in launch_plan["roles"]] == [
-        "porter-designer:0.0",
         "porter-director:0.0",
-        "porter-audit:0.0",
-        "porter-app:0.0",
         "porter-main:0.0",
+        "porter-app:0.0",
+        "porter-audit:0.0",
+        "porter-designer:0.0",
     ]
     assert [role["workdir"] for role in launch_plan["roles"]] == [
-        f"/home/{current_user}/porter-worktrees/designer",
         f"/home/{current_user}/porter-worktrees/director",
-        f"/home/{current_user}/porter-worktrees/audit",
-        f"/home/{current_user}/porter-worktrees/app",
         f"/home/{current_user}/porter-worktrees/main",
+        f"/home/{current_user}/porter-worktrees/app",
+        f"/home/{current_user}/porter-worktrees/audit",
+        f"/home/{current_user}/porter-worktrees/designer",
     ]
     cli_env_entries = _env_entries(cli_command_for_role(loaded_config.roles[0], session_dir=loaded_config.session_dir))
     assert f"TICKET_BOARD_PANE_SESSION_DIR={config['session_dir']}" in cli_env_entries

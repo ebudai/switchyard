@@ -19,12 +19,12 @@ one plainly labelled menu choice, default **off**:
   record, so none of them can ask differently or turn Router on by itself.
   A hand-written record that turns Router on without a model or effort gets
   Router's default for what it leaves out (SYRD-787).
-* **Applied** by `new_project_command`. A project with Router off is
-  provisioned exactly as before: no Router role, no transition, no pane or
-  session, no cost. A project with Router on starts with a declared
-  workflow: the one its plan describes (composed by `legacy_workflow` the way
-  `switchyard migrate-workflow` composes it, or the operator's own
-  `--workflow-config`), with Router added by the audited
+* **Applied** by `new_project_command`. Every new project starts with a
+  declared workflow (SYRD-860): the one its plan describes (composed by
+  `legacy_workflow` the way `switchyard migrate-workflow` composes it, or the
+  operator's own `--workflow-config`). A project with Router off has no Router
+  role, no transition, no pane or session, no cost; with Router on, Router is
+  added to that workflow by the audited
   `router_setup.with_router`. Root records that document like any declared
   workflow, so `resume-provision` rebuilds the same board. The launcher entry
   is projected from it, detached, and given Router's chosen model and effort
@@ -284,9 +284,23 @@ def plan_with_router(
     return dataclasses.replace(plan, workflow=validate(document, project=plan.project))
 
 
+def declared_by_default(plan: Any, *, role_clis: Sequence[tuple[str, str]], repository: Path,
+                        print_func: Callable[[str], None] = print) -> Any:
+    """`plan` declaring a workflow: its own, or else the one its plan describes (`plan_document`), validated.
+
+    Every new tenant declares one (SYRD-860), so the composers work on it at once."""
+    from scripts.ticket_board.workflow_config import validate
+
+    if plan.workflow is not None:
+        return plan
+    document = plan_document(plan, role_clis=role_clis, repository=repository, label="", print_func=print_func)
+    return dataclasses.replace(plan, workflow=validate(document, project=plan.project))
+
+
 def plan_document(plan: Any, *, role_clis: Sequence[tuple[str, str]], repository: Path, label: str,
                   print_func: Callable[[str], None] = print) -> dict[str, Any]:
-    """The declared workflow `plan`'s rows describe, for an option that needs one (Router; SYRD-624's gate).
+    """The declared workflow `plan`'s rows describe: every new tenant's (SYRD-860), and the base an option composes
+    onto (Router; SYRD-624's gate). `label` names the option, or is "" for the tenant's own.
 
     Composed as `migrate-workflow` composes it, naming in `remove_stages` the
     seeded stages it does not use, and seeded with director onboarding.
@@ -319,7 +333,8 @@ def plan_document(plan: Any, *, role_clis: Sequence[tuple[str, str]], repository
             panes=panes,
         )
     except legacy_workflow.LegacyWorkflowRefused as exc:
-        raise SystemExit(f"switchyard: {label} needs a declared workflow, and this project's could not be composed: {exc}") from None
+        raise SystemExit(f"switchyard: {label or plan.project} needs a declared workflow, and this project's could not "
+                         f"be composed: {exc}") from None
     document = composed.document
     # A fresh board's schema seeds the shipped stage set. The default seed
     # replaces it wholesale; a declared document must name each stage it
@@ -327,7 +342,8 @@ def plan_document(plan: Any, *, role_clis: Sequence[tuple[str, str]], repository
     document["remove_stages"] = sorted(
         {stage["name"] for stage in canonical["stages"]} - {stage["name"] for stage in document["stages"]}
     )
-    print_func(f"switchyard: {label}: {plan.project} starts with a declared workflow, the one its plan describes plus {label}.")
+    print_func(f"switchyard: {label}: {plan.project} starts with a declared workflow, the one its plan describes plus {label}."
+               if label else f"switchyard: {plan.project} starts with a declared workflow, the one its plan describes.")
     for difference in composed.differences:
         print_func(f"switchyard:   unlike an undeclared board: {difference}")
     return launcher.seed_director_onboarding(document, repository)[0]
@@ -358,12 +374,19 @@ def record_router_runtime(config_path: Path, artifact_path: Path | None, *, rout
     _rewrite(config_path, payload, owner_user=owner_user)
     if artifact_path is not None:
         # Read, never first looked at by path: only a read that finds nothing there makes it absent (Audit of 94b20405).
-        try:
-            artifact = _read(artifact_path, owner_user)
-        except FileNotFoundError:
-            artifact = None
-        if artifact is not None and artifact.pop("workflow", None) is not None:
-            _rewrite(artifact_path, artifact, owner_user=owner_user)
+        drop_artifact_workflow(artifact_path, owner_user=owner_user)
+
+
+def drop_artifact_workflow(artifact_path: Path, *, owner_user: str = "") -> None:
+    """The design artifact without the workflow the artifact writer copied into it: an artifact carrying one is
+    refused by `switchyard new --from`, so a retry would fail. The launcher config and root's record hold it."""
+    # Read, never first looked at by path: only a read that finds nothing there makes it absent (Audit of 94b20405).
+    try:
+        artifact = _read(artifact_path, owner_user)
+    except FileNotFoundError:
+        artifact = None
+    if artifact is not None and artifact.pop("workflow", None) is not None:
+        _rewrite(artifact_path, artifact, owner_user=owner_user)
 
 
 def _read(path: Path, owner_user: str) -> dict[str, Any]:

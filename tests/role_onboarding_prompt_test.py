@@ -867,7 +867,9 @@ def test_mutating_requires_an_active_configuration() -> None:
         )
         raise AssertionError("expected a refusal with no active configuration")
     except ValueError as exc:
-        assert "no workflow configuration is active" in str(exc)
+        # SYRD-860: the refusal names the step that gives the board one.
+        assert ("has no declared workflow" in str(exc) and "switchyard adopt-workflow" in str(exc)
+                and "switchyard finish-upgrade" in str(exc)), str(exc)
 
 
 # --- authorization surface ---------------------------------------------------

@@ -113,14 +113,19 @@ answered "no workflow configuration is active for this board". The stop was
 not the cause. A tenant the kit took all the way through `switchyard new`,
 every pane up, answered the same thing, with `/api/workflow` at
 `{"revision": 0, "document": null}`.
-- **The cause:** without `--workflow-config`, `switchyard new` seeds the legacy
+- **The cause:** without `--workflow-config`, `switchyard new` seeded the legacy
   default workflow (`workflow_seed: default-project`) as table rows, and
-  declares no document. A design artifact may not carry one either.
-- **What the kit does:** it passes the shipped example workflow, declared for
-  the tenant with every running role on the stand-in, and an artifact naming
-  exactly those roles. The board then runs a declared workflow, as syrd's does.
-- **Whether `switchyard new` should declare a workflow by default** is a
-  product question for its own ticket. This ticket does not change it.
+  declared no document. A design artifact may not carry one either.
+- **What the kit does:** it writes an artifact naming the shipped example
+  workflow's roles, every one on the stand-in, and runs `switchyard new` with no
+  `--workflow-config`. The board then runs the declared workflow `new` composes
+  for that plan, as every new tenant's does.
+- **Whether `switchyard new` should declare a workflow by default** was a
+  product question for its own ticket. SYRD-860 settled it: `switchyard new`
+  now declares the workflow its plan describes, so a tenant made without
+  `--workflow-config` takes the composers at once. The kit now makes its tenant
+  that way, so `check` proves the default
+  ([SYRD-860](syrd-860-declared-by-default.md)).
 
 ## What it does not cover
 

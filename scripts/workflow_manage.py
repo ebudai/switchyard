@@ -79,10 +79,23 @@ def apply_files(files: dict[Path, str], *, owner_user: str = "") -> None:
         raise
 
 
+def undeclared(parser: argparse.ArgumentParser) -> str:
+    """The refusal for a board that runs no declared workflow, naming the step that gives it one (SYRD-860).
+
+    A tenant provisioned before `switchyard new` declared one keeps its workflow as table rows; every composer
+    needs a document to compose onto."""
+    project = getattr(parser, "switchyard_project", "") or "<project>"
+    return (f"this board has no declared workflow, so there is nothing to compose onto: adopt one first. "
+            f"`switchyard adopt-workflow {project}` shows the document composed from the project's plan, "
+            f"`pkexec switchyard adopt-workflow {project} --apply` records it, "
+            f"`pkexec switchyard migrate-workflow {project} --apply` hands it to the Director, and "
+            f"`switchyard finish-upgrade {project}`, run from the Director's pane, installs it on the board")
+
+
 def _role_named(current: dict, name: str, parser: argparse.ArgumentParser) -> dict:
     document = current.get("document")
     if not document:
-        parser.error("no workflow configuration is active for this board")
+        parser.error(undeclared(parser))
     for role in document["roles"]:
         if role.get("name") == name:
             return role
@@ -113,7 +126,7 @@ def _document_with_role_prompt(current: dict, args, parser: argparse.ArgumentPar
         parser.error(f"{args.operation} requires --role")
     document = copy.deepcopy(current["document"]) if current.get("document") else None
     if document is None:
-        parser.error("no workflow configuration is active for this board")
+        parser.error(undeclared(parser))
     _role_named({"document": document}, args.role, parser)
     for role in document["roles"]:
         if role.get("name") != args.role:
@@ -131,7 +144,7 @@ def _document_with_design_stage(current: dict, parser: argparse.ArgumentParser) 
     from scripts.ticket_board.design_stage import designer_unreachable, with_design_stage
 
     if not current.get("document"):
-        parser.error("no workflow configuration is active for this board")
+        parser.error(undeclared(parser))
     try:
         document = with_design_stage(current["document"])
     except ValueError as exc:
@@ -150,7 +163,7 @@ def _document_with_router(current: dict, args: argparse.Namespace, parser: argpa
     from scripts.ticket_board.router_setup import with_router, without_router
 
     if not current.get("document"):
-        parser.error("no workflow configuration is active for this board")
+        parser.error(undeclared(parser))
     try:
         if args.operation == "disable-router":
             if args.model or args.effort:
@@ -193,7 +206,7 @@ def _document_with_designer_implementation(current: dict, args: argparse.Namespa
     from scripts.ticket_board.designer_implementation import with_designer_implementation
 
     if not current.get("document"):
-        parser.error("no workflow configuration is active for this board")
+        parser.error(undeclared(parser))
     try:
         return with_designer_implementation(current["document"], routing_flag=args.routing_flag)
     except ValueError as exc:
@@ -206,7 +219,7 @@ def _document_with_documentation_gate(current: dict, args: argparse.Namespace, p
         free_visible_slot, with_documentation_gate, without_documentation_gate)
 
     if not current.get("document"):
-        parser.error("no workflow configuration is active for this board")
+        parser.error(undeclared(parser))
     try:
         if args.operation == "disable-documentation-gate":
             return without_documentation_gate(current["document"])
@@ -232,7 +245,7 @@ def _document_with_research_stage(current: dict, args: argparse.Namespace, parse
     from scripts.ticket_board.research_stage import DEFAULT_DIRECTORY, with_research_stage, without_research_stage
 
     if not current.get("document"):
-        parser.error("no workflow configuration is active for this board")
+        parser.error(undeclared(parser))
     try:
         if args.operation == "disable-research-stage":
             if args.role or args.runtime or args.template_role or args.research_directory:
@@ -266,7 +279,7 @@ def _document_with_plan_gate(current: dict, args: argparse.Namespace, parser: ar
                                                 without_plan_gate)
 
     if not current.get("document"):
-        parser.error("no workflow configuration is active for this board")
+        parser.error(undeclared(parser))
     try:
         if args.operation == "disable-plan-gate":
             if args.owner or args.runtime or args.template_role or args.plan_file or args.decision_log or args.max_lines:
@@ -297,7 +310,7 @@ def _document_with_publisher(current: dict, args: argparse.Namespace, parser: ar
     from scripts.ticket_board.publisher_stage import with_publisher, without_publisher
 
     if not current.get("document"):
-        parser.error("no workflow configuration is active for this board")
+        parser.error(undeclared(parser))
     try:
         if args.operation == "disable-publisher":
             return without_publisher(current["document"])
@@ -509,6 +522,12 @@ def refuse_root_write(operation: str) -> None:
     )
 
 
+def _named_project(config: Path | None) -> str:
+    """The project a launcher config belongs to, from its name (`<project>.json`): never opened here, since as root a
+    tenant's file is read only by descriptor (SYRD-611)."""
+    return Path(config).stem if config else ""
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -590,6 +609,7 @@ def main(argv=None):
         help="read the onboarding prompt from a file, or from stdin when given as -",
     )
     args = parser.parse_args(argv)
+    parser.switchyard_project = _named_project(args.config)  # for the refusals that name the adopt step
     refuse_root_write(args.operation)
     if args.operation == "prepare-role":
         if not args.config or not args.role:
@@ -787,6 +807,13 @@ def main(argv=None):
             board_url=args.board_url,
             socket_path=args.socket,
             **({"caller_role": args.caller_role} if args.caller_role else {}),
+        )
+    if getattr(client, "caller_role", None) is not None and not str(client.caller_role).strip():
+        # Even a dry run is the board's own check, asked as a role: outside a role pane there is none, and the write
+        # client's ValueError ended the command in a traceback (SYRD-860).
+        parser.error(
+            f"{args.operation} asks the board as the Director: run it from the Director's pane "
+            "(TICKET_BOARD_CALLER_ROLE is not set here)"
         )
     if rollback_baseline is not current:
         client.configure_workflow(

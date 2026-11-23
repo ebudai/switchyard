@@ -213,12 +213,18 @@ def new_project_command(
         include_audit=include_audit,
         audit_roles=audit_roles,
     )
+    # Every new tenant declares a workflow (SYRD-860): the one its plan describes, composed as adopt-workflow composes
+    # one for an older tenant, so the composers -- research stage, plan gate, Router, documentation gate, Publisher --
+    # work on it at once. `--workflow-config`, or a workflow an artifact carries, is used instead; the options below
+    # compose onto whichever it is. The legacy table seed stays only for tenants provisioned before.
+    from scripts import router_onboarding
+
+    plan = router_onboarding.declared_by_default(plan, role_clis=role_clis, repository=effective_repository,
+                                                 print_func=print_func)
     # Router, when the design chose it, is declared before anything is rendered,
     # so the packet, root's record and the launcher config all carry it (SYRD-599).
     router = design_artifact.router if design_artifact is not None else ()
     if router:
-        from scripts import router_onboarding
-
         plan = router_onboarding.plan_with_router(
             plan, router=router, role_clis=role_clis, repository=effective_repository, print_func=print_func
         )
@@ -370,6 +376,10 @@ def new_project_command(
                                                           owner_user=plan.owner_user)
     if research:
         research_onboarding.record_researcher_runtime(config_path, research=research, owner_user=plan.owner_user)
+    if design_artifact is not None and from_artifact is not None:
+        # The artifact writer copies the declared workflow into the design artifact, which may not carry one; every
+        # tenant now has one, so take it out again, or a retry `switchyard new --from` refuses it (SYRD-860).
+        router_onboarding.drop_artifact_workflow(from_artifact, owner_user=plan.owner_user)
     commands_path = artifact_dir / "operator-commands.sh"
     # The complete role-isolation handoff -- accounts, ownership, runtime,
     # tooling AND credential seeding -- is written beside the other artifacts, so

@@ -423,6 +423,13 @@ def compose_legacy_workflow(
         pane = panes.get(role["name"]) or {}
         for field in ("runtime", "target", "slot"):
             role[field] = pane.get(field)
+    # A shipped role's model template is another shipped role -- the inspector's is the designer -- which this
+    # tenant may not run: a template it does not have is refused by the validator, so it is dropped (SYRD-860; a
+    # second Audit role with no designer could not be declared at all).
+    declared_names = {role["name"] for role in roles}
+    for role in roles:
+        if role.get("template_role") is not None and role["template_role"] not in declared_names:
+            role.pop("template_role")
     # A stage that notifies owners with no pane here was never delivered to on
     # the legacy board either: there was no pane to reach. The validator will
     # not declare a notice nobody can receive, so such a stage is declared

@@ -47,7 +47,10 @@ def _project_plan_for_vcs_close_role(
         raise SystemExit(f"team-launcher: VCS close role {role!r} does not exist in project {config.project}")
     plan_data = launcher._plan_data_from_config(config, config_path)
     if plan_data.get("workflow") or launcher._load_json(config_path).get("workflow"):
-        raise SystemExit("use ticket-board-workflow apply to update configured roles and stages")
+        # Refused before anything is written, naming this tenant's path: every new tenant declares one (SYRD-860).
+        from scripts.declared_role_guidance import declared_workflow_vcs_close_refusal
+
+        raise SystemExit(declared_workflow_vcs_close_refusal(config, config_path=config_path, role_name=role))
     audit_roles = launcher._configured_audit_roles(config, plan_data=plan_data)
     implementer_roles = launcher._configured_implementer_roles(config, plan_data=plan_data)
     include_designer = any(configured.role == "designer" for configured in config.roles)

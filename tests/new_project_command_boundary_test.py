@@ -215,7 +215,7 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
     import contextlib, dataclasses, json, os, shutil, tempfile
     from pathlib import Path as _P
     from types import SimpleNamespace
-    from scripts import owner_writes, root_packet, workflow_launcher
+    from scripts import owner_writes, root_packet, router_onboarding, workflow_launcher
     calls: list = []
     printed: list = []
     tmp = _P(tempfile.mkdtemp(prefix="syrd426-")).resolve()
@@ -279,6 +279,10 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
              "DEFAULT_PROJECT_IMPLEMENTER_ROLES", "_resolve_project_path"]
     saved = {n: getattr(t, n) for n in names}
     saved_assign, saved_geteuid = workflow_launcher.assign_projection_owner, os.geteuid
+    # SYRD-860's declared default workflow and the artifact clean-up after it are not the baseline's: their own
+    # suites cover them (team_launcher_new_project_test, router_onboarding_test). Here they are stood in, unrecorded,
+    # so every call the baseline made is still compared as it was.
+    saved_default = (router_onboarding.declared_by_default, router_onboarding.drop_artifact_workflow)
     saved_root_packet = (root_packet.stage_root_packet, root_packet.publish_packet_record, root_packet.trusted_launcher,
                          root_packet.root_controlled)
     saved_owner_writes = (owner_writes.root_writes_in, owner_writes.root_alone_directory, owner_writes.new_owner_refusal)
@@ -409,6 +413,8 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
         for n, f in on_launcher.items():
             setattr(t, n, f)
         workflow_launcher.assign_projection_owner = lambda config, config_path, *, runner: note("assign_projection_owner", config, config_path, runner=runner)
+        router_onboarding.declared_by_default = lambda plan, **_kwargs: plan
+        router_onboarding.drop_artifact_workflow = lambda *_args, **_kwargs: None
         root_packet.stage_root_packet, root_packet.publish_packet_record = stage, publish_record
         root_packet.trusted_launcher, root_packet.root_controlled = trusted_launcher, root_controlled
         os.geteuid = lambda: spec.get("euid", 1426)
@@ -444,6 +450,7 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
     finally:
         os.geteuid = saved_geteuid
         workflow_launcher.assign_projection_owner = saved_assign
+        router_onboarding.declared_by_default, router_onboarding.drop_artifact_workflow = saved_default
         (root_packet.stage_root_packet, root_packet.publish_packet_record, root_packet.trusted_launcher,
          root_packet.root_controlled) = saved_root_packet
         owner_writes.root_writes_in, owner_writes.root_alone_directory, owner_writes.new_owner_refusal = saved_owner_writes

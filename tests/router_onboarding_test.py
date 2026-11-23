@@ -260,7 +260,7 @@ def test_provisioning_from_the_record(state: dict) -> None:
     write_artifact(on_artifact, tmp_path / "on", router=ROUTER)
     write_artifact(off_artifact, tmp_path / "off")
     code, printed = provision(on_artifact, tmp_path / "out-on")
-    check(code == 0 and "starts with a declared workflow, the one its plan describes plus Router" in printed,
+    check(code == 0 and "starts with a declared workflow, the one its plan describes" in printed,
           f"a Router project is provisioned and says how: {code} {printed[-400:]}")
     plan = json.loads((tmp_path / "out-on" / "plan.json").read_text())
     router = role(plan["workflow"], "router")
@@ -293,10 +293,14 @@ def test_provisioning_from_the_record(state: dict) -> None:
     off_plan = json.loads((tmp_path / "out-off" / "plan.json").read_text())
     off_sql = (tmp_path / "out-off" / "cerulean-workflow.sql").read_text()
     off_config = (tmp_path / "out-off" / "cerulean.json").read_text()
-    check(off_plan.get("workflow") is None and "apply_declared_workflow(" not in off_sql
-          and "router" not in off_sql.lower() and "router" not in off_config
-          and not (tmp_path / "out-off" / "workflow.json").exists(),
-          "off: no declared workflow, and nothing named Router in the SQL, the plan or the launcher config")
+    # SYRD-860: off still declares a workflow -- every new tenant does -- with no Router in it.
+    off_roles = [role["name"] for role in (off_plan.get("workflow") or {}).get("roles", [])]
+    check(off_plan.get("workflow") and "apply_declared_workflow(" in off_sql and "router" not in off_roles
+          and "router" not in off_config and (tmp_path / "out-off" / "workflow.json").exists(),
+          f"off: the declared workflow its plan describes, and nothing named Router in it or the launcher config: "
+          f"{off_roles}")
+    check("workflow" not in json.loads(off_artifact.read_text()),
+          "and the design artifact carries no workflow afterwards, so a retry `switchyard new --from` accepts it")
     state.update(off_sql=off_sql)
 
     full_artifact = tmp_path / "full" / ".switchyard" / "cerulean.project.json"
@@ -438,7 +442,33 @@ def exercise_boards(cluster, state: dict) -> None:
         said = apply(board, state["off_sql"])
         check(said == "", f"and the off plan's: {said}")
         declared = t.psql(board.admin, "SELECT count(*) FROM ticket_board.workflow_configuration WHERE document IS NOT NULL;")
-        check(declared == "0", f"the board created with Router off declares nothing: {declared}")
+        stored = board.document()
+        # SYRD-860: every new tenant declares a workflow, Router or not.
+        check(declared == "1" and stored and "router" not in {r["name"] for r in stored["roles"]},
+              f"the board created with Router off declares the workflow its plan describes, with no Router: {declared}")
+        # SYRD-860: so the composers work on it at once, through the real command, as the Director runs it.
+        import functools
+        import urllib.request
+        from scripts import workflow_manage
+
+        with urllib.request.urlopen(board.base + "/api/workflow") as response:
+            check(json.load(response)["revision"] > 0, "GET /api/workflow answers a declared revision")
+        saved_client = workflow_manage.TicketBoardWriteClient
+        workflow_manage.TicketBoardWriteClient = functools.partial(
+            saved_client, write_token=board.server.write_token, caller_role="director")
+        try:
+            for operation, extra in (("enable-research-stage", ["--role", "main"]),
+                                     ("enable-plan-gate", ["--owner", "main"])):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                    try:
+                        code = workflow_manage.main([operation, "--board-url", board.base, "--dry-run", "--config",
+                                                     str(state["tmp"] / "out-off" / "cerulean.json"), *extra])
+                    except SystemExit as exc:
+                        code = exc.code
+                check(code in (0, None), f"`{operation} --dry-run` succeeds on a new tenant's board: {out.getvalue()[-600:]}")
+        finally:
+            workflow_manage.TicketBoardWriteClient = saved_client
     finally:
         board.close()
 

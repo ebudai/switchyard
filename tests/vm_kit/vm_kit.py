@@ -413,9 +413,8 @@ def install(root: Path, name: str, *, repo: Path, commit: str) -> str:
 def tenant_workflow(repo: Path, slug: str) -> dict:
     """The shipped example workflow, declared for this slug, every role that runs on the stand-in Codex.
 
-    Declared, as a production tenant's is: without `--workflow-config`, `switchyard new` seeds the legacy default
-    workflow as table rows, and `/api/workflow` answers null -- so every composer (research-stage, plan-gate,
-    router-role, documentation-gate, publisher) refuses with "no workflow configuration is active"."""
+    The source of the artifact's roles. The tenant is made without `--workflow-config`, as a production tenant is:
+    since SYRD-860 `switchyard new` declares the workflow its plan describes, so `check` proves that default."""
     document = json.loads((repo / "examples" / "workflows" / "inspection.json").read_text())
     document["project"] = slug
     for role in document["roles"]:
@@ -462,17 +461,15 @@ def tenant(root: Path, name: str, slug: str, *, repo: Path) -> None:
         raise KitError(f"a test tenant's slug is lower-case letters and digits, starting with a letter: {slug!r}")
     directory, info = live(root, name)
     with tempfile.TemporaryDirectory(dir=directory) as scratch:
-        workflow = Path(scratch) / f"{slug}-workflow.json"
         document = tenant_workflow(repo, slug)
-        workflow.write_text(json.dumps(document, indent=1) + "\n")
         artifact = Path(scratch) / f"{slug}-project.json"
         artifact.write_text(json.dumps(tenant_artifact(slug, document), indent=1) + "\n")
         design = Path(scratch) / f"{slug}-DESIGN.md"
         design.write_text(f"# {slug}\n\nA disposable review tenant (tests/vm_kit).\n")
-        push(directory, info, [workflow, artifact, design], "")
+        push(directory, info, [artifact, design], "")
     say(f"{name}: switchyard new {slug} (stand-in CLIs; no sign-in to wait for)")
-    argv = ["sudo", "switchyard", "new", "--from", f"/home/{USER}/{slug}-project.json",
-            "--workflow-config", f"/home/{USER}/{slug}-workflow.json", "--yes", "--headless",
+    # No --workflow-config: the default declaration is what a production tenant gets (SYRD-860).
+    argv = ["sudo", "switchyard", "new", "--from", f"/home/{USER}/{slug}-project.json", "--yes", "--headless",
             "--layout", "viewer", "--agent-cli-policy", "require-host-wide", "--no-upstream-report"]
     script = tenant_script(slug, argv)
     done = remote_script(directory, info, script, timeout=1500, check=False, capture=True)

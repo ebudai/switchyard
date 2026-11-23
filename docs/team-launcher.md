@@ -1868,7 +1868,10 @@ but custom names are accepted when they match the role-name rules. The selected 
 written to both the board provisioning plan and the generated launcher config,
 and each role's selected CLI is recorded in the `switchyard.project.v1`
 artifact. The artifact still must not preconfigure workflow stages or
-transitions.
+transitions. Every new project starts with a declared workflow: the one its plan
+describes, composed the way `adopt-workflow` composes one for an older project,
+unless `--workflow-config` (or a workflow a non-design artifact carries) gives
+one. The options below are added to it ([SYRD-860](syrd-860-declared-by-default.md)).
 
 **Router is a choice here, off by default (SYRD-599).** With two or more
 implementers, after every role's runtime, model and effort, `new` asks:
@@ -1891,13 +1894,11 @@ An artifact without the field, or with `{"enabled": false}`, means off; one writ
 Noninteractively, `team-launcher <project> design --router-runtime <cli> [--router-model M] [--router-effort E]`
 records it; without those flags it is off.
 
-A project with Router on starts with a declared workflow. That is the one its
-plan describes, composed the way `migrate-workflow` composes it, or your own
-`--workflow-config`. Router is added to it by the same `with_router`
+With Router on, Router is added to the project's declared workflow (the one its
+plan describes, or your own `--workflow-config`) by the same `with_router`
 `switchyard router-role <project> enable` uses, and Router starts detached with
 the other roles, its session record reported with theirs. A project with Router
-off is provisioned exactly as before, with no Router role, transition, session or
-cost. Router's runtime goes through the same agent CLI checks as every role's: the
+off has no Router role, transition, session or cost. Router's runtime goes through the same agent CLI checks as every role's: the
 host-wide check before anything is created, where a runtime only Router uses can be
 promoted or switched (a switch drops the old runtime's model and is recorded in
 `project.router`), and the owner-account check once the account exists.
@@ -1926,11 +1927,11 @@ recorded in the design artifact as `project.documentation = {"gate": "director"}
 or `{"gate": "librarian", "runtime": ..., "model": ..., "effort": ...}`; no field,
 or `{"gate": "off"}`, means off. Noninteractively, `team-launcher <project> design
 --documentation-gate director` or `--librarian-runtime <cli> [--librarian-model M]
-[--librarian-effort E]` records it. A project with the gate starts with a declared
-workflow, as with Router (both, when both are chosen), with the gate added by the
-same `with_documentation_gate` that `switchyard documentation-gate <project>
-enable` uses. A Librarian takes the window's next free display slot, and runs in the background only when all
-six are taken (SYRD-781); its runtime goes through the same agent CLI checks. Off is provisioned as before, and
+[--librarian-effort E]` records it. With the gate on, it is added to the project's
+declared workflow (with Router too, when both are chosen) by the same
+`with_documentation_gate` that `switchyard documentation-gate <project> enable`
+uses. A Librarian takes the window's next free display slot, and runs in the background only when all
+six are taken (SYRD-781); its runtime goes through the same agent CLI checks. Off adds no gate, and
 `switchyard upgrade` never turns it on. The current operating contract is the
 [Librarian guide](onboarding/switchyard-librarian-guide.md), this section and
 `switchyard documentation-gate --help`; [SYRD-624](syrd-624-documentation-gate.md)

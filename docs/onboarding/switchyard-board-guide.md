@@ -35,7 +35,12 @@ and infrastructure, `app` for application/UI work, `research` for investigation 
 design support, and `perf` for measurement and performance work.
 
 To add an implementer role after a project exists, use the Switchyard source
-checkout's role command instead of editing the provision files by hand:
+checkout's role command instead of editing the provision files by hand. It is for a
+project whose workflow is table rows, one made before `switchyard new` declared a
+workflow for every project. On a project that declares its workflow, which is every
+project made since, `add-role` changes nothing and names that project's path: a pool
+worker through `switchyard worker-pool`, or a role added to the workflow document and
+applied with `ticket-board-workflow apply`.
 
 ```bash
 switchyard add-role <project> <role> --cli codex
@@ -56,7 +61,8 @@ implementation tickets and call implementer operations, regenerating the layout
 only because `--relayout` gives explicit consent. Existing roles are left
 running.
 
-To move the final close after sign-off to an existing role, use:
+To move the final close after sign-off to an existing role on a project whose workflow is
+table rows, use:
 
 ```bash
 switchyard set-vcs-close-role <project> <role>
@@ -65,7 +71,10 @@ switchyard set-vcs-close-role <project> <role>
 The role must already exist in that project. The command inserts the generated
 `VCS` stage before `Done`, changes `mark_done` to that role, updates the board
 unit's operation-role environment, and restarts the tenant board. It is not
-available for the built-in `pgu` board.
+available for the built-in `pgu` board. On a project that declares its workflow, it
+changes nothing and names the path: add a stage owned by the role between
+`director_review` and `done`, give it the approval and `mark_done`, and apply the
+document with `ticket-board-workflow apply`.
 
 ---
 

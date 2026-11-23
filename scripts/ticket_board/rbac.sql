@@ -161,6 +161,8 @@ GRANT EXECUTE ON FUNCTION ticket_board.record_notification_trace(text, bigint, t
 GRANT EXECUTE ON FUNCTION ticket_board.role_session_clear_pending(text, text) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.record_role_session_clear(text, text) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.note_report_closed(text, text, text, text, text, text, boolean) TO ticket_board_listener;  -- SYRD-827
+-- SYRD-869: which closes it recorded without a notice, and which releases this board was told of.
+GRANT SELECT ON ticket_board.report_closures, ticket_board.release_notices TO ticket_board_listener;
 REVOKE ALL ON FUNCTION ticket_board.ticket_test_tier(text) FROM PUBLIC;  -- SYRD-836: the hand-off's test tier
 GRANT EXECUTE ON FUNCTION ticket_board.ticket_test_tier(text) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.notify_idle_stall_nudges(jsonb, timestamptz, interval, interval, integer, jsonb) TO ticket_board_listener;

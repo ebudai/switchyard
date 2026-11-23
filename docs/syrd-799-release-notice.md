@@ -52,6 +52,14 @@ release notice must say so, or the link is lost:
   contains is announced, with that release's commit in the three actions. A close where either answer is unknown is
   announced too. No ordering of install, Done and upgrade is silent. A Done close followed by an install within one
   listener poll (15 minutes) can give both notices.
+- **An install that told the reporter nothing (SYRD-869).** ./install can list a tenant as not told (not
+  registered, no ticket to carry the notice, a board from before release notices), so a silent close stays pending.
+  The listener sends `&noticed=<the newest release in its board's release_notices>` (releases follow main, so the
+  newest carries whatever an older one did), and the board answers `noticed_contains`. A close recorded without a
+  notice is told late, once (close key `done_installed#<reopens>`), when the installed release contains it, the
+  reporter's does not, and the noticed one is not known to. A release notice recorded for a release that carries it,
+  or the reporter's own release carrying it, ends it quietly. rbac.sql lets the listener read `report_closures` and
+  `release_notices` for this.
 
 - **Where it comes from.** Root reads every tenant board on the host as the database superuser, the same way it makes
   its one write: each ticket in `report_provenance` that is done on a closing commit, with the reporting project the

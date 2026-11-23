@@ -971,7 +971,9 @@ notice names the upstream ticket, its title and its final state:
 - **Done on a commit no release on this host contains yet: no notice.** Neither your release
   nor the one installed on the host has the fix, so the next install will carry it, and that
   release's "ready" notice names it: "This release resolves your report <ID> on <board>'s
-  board". The close is recorded, so it is never announced later either.
+  board". If that install does not tell your board (your project is not registered, say), a later
+  pass that finds the installed release carrying the fix tells you once, naming that release.
+  Otherwise the close is never announced.
 - **Done on a commit a release installed on this host already contains, but yours does not:**
   one notice now. It names that release and gives the three privileged actions with its commit.
   That install's notice went out before the report was done, so it could not name it.

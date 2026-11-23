@@ -16,6 +16,10 @@ Here:
   recorded with no notice, then or later (the next install's notice names it); closed again after a reopen, the same;
   one whose fix was installed before it was Done (Audit, round 1) is told once, with that release, and the upgrade to
   it tells nothing more;
+* SYRD-869: a close recorded without a notice is told once, late, when the installed release comes to carry it and
+  no release notice for such a release reached this board (the install did not tell it); not when one did, nor once
+  this board's release carries it; the listener re-reads the host's installed-release link every pass; and the read
+  refuses an installed or noticed value that is not a full commit hash;
 * a cancelled report gives its Director's reason, a commit or none; a Done close with no commit, or on a commit
   whether the release contains cannot be told, gives one notice each;
 * SYRD-868, the Director's cases: a no-code close (the board's own no-code submission, then Done) carries the reason
@@ -42,6 +46,7 @@ import sys
 import tempfile
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
@@ -112,8 +117,9 @@ def reopen(board, ticket: str) -> None:
               f"WHERE id = '{ticket}';")
 
 
-def read_status(base: str, token: str | None, release: str = "") -> tuple[int, object]:
-    url = f"{base}/api/report-status" + (f"?release={release}" if release else "")
+def read_status(base: str, token: str | None, release: str = "", **more: str) -> tuple[int, object]:
+    asked = urllib.parse.urlencode({**({"release": release} if release else {}), **more})
+    url = f"{base}/api/report-status" + (f"?{asked}" if asked else "")
     req = urllib.request.Request(url, headers={"X-Ticket-Board-Report-Token": token} if token else {})
     try:
         with urllib.request.urlopen(req, timeout=10) as response:
@@ -218,7 +224,7 @@ def test_report_close_notices() -> None:
                 report(up, up_admin, "PGU-9", "sapi", title="A duplicate")
                 report(up, up_admin, "PGU-10", "sapi", title="Long ago")
                 report(up, up_admin, "PGU-11", "mefp", title="A report of another project")
-                for ticket in ("PGU-12", "PGU-13", "PGU-14", "PGU-15", "PGU-16", "PGU-18"):
+                for ticket in ("PGU-12", "PGU-13", "PGU-14", "PGU-15", "PGU-16", "PGU-18", "PGU-19", "PGU-21"):
                     report(up, up_admin, ticket, "sapi", title=f"Report {ticket}")
                 check(tell() == [] and rep.sql("SELECT count(*) FROM ticket_board.report_closures;") == "0",
                       "nothing is told, or recorded, while every report is open")
@@ -295,17 +301,55 @@ def test_report_close_notices() -> None:
                       == "done#0:false,done#1:false", "reopened and closed again outside the release: the same")
 
                 # Audit's ordering: the release carrying the fix installed before the report is Done, then the upgrade.
+                # It is also the install PGU-8 waited on, and it told this board nothing (SYRD-869).
                 listener._report_closure_installed = carrying
                 end(up, "PGU-18", "done", outside)
                 told = tell()
-                check(len(told) == 1 and " PGU-18 " in told[0]
-                      and f"release {carrying}, installed on this host, does" in told[0]
-                      and f"switchyard privileged-action sapi deploy-release commit={carrying}" in told[0],
+                said = {ticket: [m for m in told if f" {ticket} " in m] for ticket in ("PGU-18", "PGU-8")}
+                installed_line = f"release {carrying}, installed on this host, does"
+                check(len(told) == 2 and len(said["PGU-18"]) == 1 and installed_line in said["PGU-18"][0]
+                      and f"switchyard privileged-action sapi deploy-release commit={carrying}" in said["PGU-18"][0],
                       f"a fix installed before its report was Done: told now, with that release -- that install's "
                       f"notice could not name it: {told}")
+                check(len(said["PGU-8"]) == 1 and installed_line in said["PGU-8"][0],
+                      f"SYRD-869: PGU-8, kept silent for the install that carries it, which told this board nothing: "
+                      f"told now, once, with that release: {told}")
+                check(tell() == [], "the next pass, the reporter not yet upgraded, tells nothing more")
                 listener._report_closure_build = carrying  # the reporter upgrades to it
-                check(tell() == [], "and the upgrade tells nothing more: exactly one notice")
+                check(tell() == [], "and the upgrade tells nothing more: exactly one notice each")
                 listener._report_closure_build = listener._report_closure_installed = release
+
+                # PGU-21 waits on an install too. The reporter's release coming to carry it ends that quietly; and a
+                # release notice this board recorded for a release carrying it named it, so that ends it too.
+                end(up, "PGU-21", "done", outside)
+                check(tell() == [], "PGU-21: neither release carries it: silent")
+                listener._report_closure_build = listener._report_closure_installed = carrying
+                check(tell() == [], "this board's release carries it: nothing owed")
+                listener._report_closure_build = release
+                rep.sql("INSERT INTO ticket_board.release_notices (commit, current_release, anchor_ticket) "
+                        f"VALUES ('{carrying}', '{release}', 'PGU-1');")
+                check(tell() == [], "a release notice reached this board for the release carrying it: nothing owed")
+                listener._report_closure_installed = release
+
+                # The listener reads the installed release afresh each pass, from the link alone (Audit's M2).
+                link = scratch / "installed-current"
+                link.symlink_to(scratch / "releases" / release)
+                fresh = SimpleNamespace(report_closures=True, project="sapi", logger=log, _report_closure_build=release)
+                seen_link = report_closure.INSTALLED_RELEASE
+                report_closure.INSTALLED_RELEASE = link
+                try:
+                    report_closure.run(fresh, conn, environ=environ)
+                    first = [m for t, m in rep.one_pass() if t == "pgu-director:0.0"]
+                    link.unlink()
+                    link.symlink_to(scratch / "releases" / carrying)  # ./install, between two passes
+                    end(up, "PGU-19", "done", outside)
+                    report_closure.run(fresh, conn, environ=environ)
+                    second = [m for t, m in rep.one_pass() if t == "pgu-director:0.0"]
+                finally:
+                    report_closure.INSTALLED_RELEASE = seen_link
+                check(first == [] and len(second) == 1 and " PGU-19 " in second[0] and installed_line in second[0],
+                      f"the link moved between passes: the next pass judges by the release it names now: {first} "
+                      f"{second}")
 
                 reopen(up, "PGU-7")
                 check(tell() == [], "a reopened report is open again: nothing is told")
@@ -320,8 +364,8 @@ def test_report_close_notices() -> None:
                                                "WHERE ticket_id = 'PGU-10';") == "false"
                       and rep.sql("SELECT count(*) FROM ticket_board.report_closures WHERE ticket_id = 'PGU-11';") == "0",
                       "a close older than 30 days is recorded, not told; another project's is neither")
-                check(rep.sql("SELECT count(*) FROM ticket_board.report_closures WHERE told;") == "9",
-                      "nine closes told in all: PGU-7 twice, PGU-9, PGU-12 to PGU-16, PGU-18")
+                check(rep.sql("SELECT count(*) FROM ticket_board.report_closures WHERE told;") == "11",
+                      "eleven closes told in all: PGU-7 twice, PGU-8 late, PGU-9, PGU-12 to PGU-16, PGU-18, PGU-19")
                 check(not [line for line in records.lines if line.startswith(("ERROR", "WARNING"))],
                       f"and no pass failed or warned along the way: {records.lines}")
 
@@ -368,7 +412,7 @@ def test_report_close_notices() -> None:
                 two = {**environ, "SWITCHYARD_PROJECT_REGISTRY_DIR": str(chained)}
                 told = []
                 for _ in range(2):
-                    report_closure.run(listener, conn, environ=two, fetch=lambda url, token, build, installed: answers[url])
+                    report_closure.run(listener, conn, environ=two, fetch=lambda url, token, build, *_: answers[url])
                     told += [m for t, m in rep.one_pass() if t == "pgu-director:0.0"]
             warned = [line for line in records.lines if line.startswith("WARNING")]
             check(sorted(m.split()[2] for m in told) == ["ROOT-5", "ROOT-6", "ROOT-7", "SYRD-42", "SYRD-43"],
@@ -394,6 +438,16 @@ def test_report_close_notices() -> None:
                   f"mefp's credential reads mefp's reports only: {said}")
             code, said = read_status(upstream, bound_token(BINDING, "sapi"), "not-a-commit")
             check(code == 400, f"a release that is not a commit: refused: {code} {said}")
+            for name in ("installed", "noticed"):  # SYRD-869: as release is; each goes to git
+                answers = {value: read_status(upstream, bound_token(BINDING, "sapi"), release, **{name: value})[0]
+                           for value in ("HEAD", carrying[:12], "--output=/tmp/x" + "a" * 25)}
+                check(set(answers.values()) == {400}, f"an {name} value that is not a full commit hash: refused: "
+                                                      f"{answers}")
+            code, said = read_status(upstream, bound_token(BINDING, "sapi"), release, installed=carrying,
+                                     noticed=release)
+            pgu8 = next((r for r in said["reports"] if r["id"] == "PGU-8"), {}) if code == 200 else {}
+            check(pgu8.get("installed_contains") is True and pgu8.get("noticed_contains") is False,
+                  f"and full ones are answered: {code} {pgu8}")
 
             # An unreachable upstream: nothing told, logged once.
             dead = scratch / "registry-dead"

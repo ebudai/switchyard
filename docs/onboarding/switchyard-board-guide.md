@@ -627,7 +627,9 @@ ticket-board-write report-follow-up --ticket SYRD-673 --kind supersession \
   there, and whether your release contains each closing commit. Each close gives your Director one
   notice, except a Done close on a commit neither your release nor the release installed on the
   host contains yet (SYRD-868): that one is recorded silently, and the next install's release
-  notice, which carries the fix, names the report instead. One the installed release already
+  notice, which carries the fix, names the report instead. Until such a notice reaches your board,
+  or your release carries the fix, the close stays pending (SYRD-869): if the installed release
+  comes to carry it and no notice came, it is told then, once. One the installed release already
   contains is told, with that release: its install's notice went out before the close. A
   close no release will follow carries its reason: a cancel, its Director's latest comment; a Done
   close with no commit, the reason its no-code submission recorded (kept by the board when the move

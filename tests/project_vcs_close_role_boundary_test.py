@@ -218,12 +218,68 @@ def test_the_plan_refusals_before_anything_is_built() -> None:
                 raised = str(exc)
         if expected == "DECLARED":
             ok = (raised or "").startswith(f"switchyard: {PROJECT} runs a declared workflow") and all(
-                part in raised for part in ("Nothing was changed.", "add a stage owned by main", "mark_done",
+                part in raised for part in ("Nothing was changed.", "add a copy of director_review's stage entry",
+                                            "its owners ([main]) changed and every other field as copied",
+                                            "replace the Director's mark_done from director_review to done with the "
+                                            "Director's route from director_review to that stage",
+                                            "add mark_done from that stage to done, with main as its actor",
+                                            "the same defer and cancel from that stage as from director_review",
                                             "ticket-board-workflow apply --config /c.json --document <document.json>",
                                             "--dry-run", "ticket-board-workflow show"))
         else:
             ok = raised == expected
         check(ok and built == [], f"{role!r}: {raised}")
+
+
+def test_the_declared_refusal_can_be_followed() -> None:
+    """SYRD-862: the steps the refusal names, taken as written on the shipped workflow, give a document the board
+    accepts -- they once named an approval director_review does not have."""
+    from scripts.declared_role_guidance import declared_workflow_vcs_close_refusal
+    from scripts.ticket_board.workflow_config import validate
+
+    said = declared_workflow_vcs_close_refusal(SimpleNamespace(project=PROJECT), config_path=Path("/c.json"),
+                                               role_name="main")
+    document = json.loads((ROOT / "examples" / "workflows" / "inspection.json").read_text(encoding="utf-8"))
+    moves = document["transitions"]
+    review = next(stage for stage in document["stages"] if stage["name"] == "director_review")
+    close = next(t for t in moves if t["from"] == "director_review" and t["to"] == "done" and t["action"] == "mark_done")
+    check(close["actors"] == ["director"] and close["require_commit"] and "the Director's mark_done" in said,
+          f"the shipped close is the Director's mark_done from director_review, which the refusal names: {close}")
+    # "add a copy of director_review's stage entry after it, with its name (for example `vcs`), its label (VCS) and its
+    # owners ([main]) changed and every other field as copied" -- a bare stage, without the copy, is refused below
+    check("add a copy of director_review's stage entry after it" in said, "the refusal says to copy the stage entry")
+    stages = document["stages"]
+    bare = json.loads(json.dumps(document))
+    bare["stages"].insert(stages.index(review) + 1, {"name": "vcs", "label": "VCS", "owners": ["main"]})
+    stages.insert(stages.index(review) + 1, {**review, "name": "vcs", "label": "VCS", "owners": ["main"]})
+    # "replace the Director's mark_done ... with the Director's route from director_review to that stage"
+    at = moves.index(close)
+    moves[at:at + 1] = [{**close, "to": "vcs", "action": "route", "label": "Route", "require_commit": False}]
+    # "add mark_done from that stage to done, with main as its actor and the commit it requires"
+    moves.append({**close, "from": "vcs", "actors": ["main"]})
+    # "give the Director the same defer and cancel from that stage as from director_review"
+    moves.extend({**t, "from": "vcs"} for t in list(moves) if t["from"] == "director_review"
+                 and t["action"] in ("defer", "cancel"))
+    try:
+        declared = validate(document)
+    except ValueError as exc:
+        declared, why = None, str(exc)
+    else:
+        why = ""
+    # The same moves on a bare stage entry (Audit, round 2): the board refuses it, which is why the copy is named.
+    bare["transitions"] = document["transitions"]
+    try:
+        validate(bare)
+        bare_refused = ""
+    except ValueError as exc:
+        bare_refused = str(exc)
+    check("stage fields must be explicit" in bare_refused,
+          f"a stage entry that is not the copy the refusal names is refused: {bare_refused!r}")
+    check(declared and {(t["from"], t["to"], t["action"], tuple(t["actors"])) for t in declared["transitions"]
+                        if "vcs" in (t["from"], t["to"])}
+          == {("director_review", "vcs", "route", ("director",)), ("vcs", "done", "mark_done", ("main",)),
+              ("vcs", "backlog", "defer", ("director",)), ("vcs", "cancelled", "cancel", ("director",))},
+          f"followed as written, the document validates with main closing from vcs: {why}")
 
 
 # --- artifacts and SQL ----------------------------------------------------------------------------------------------

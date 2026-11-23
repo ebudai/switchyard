@@ -47,7 +47,8 @@ whenever the plan has one. The seed is still used by:
 - **`render_add_role_sql` and `render_vcs_close_role_sql`.** They edit the rows of such tenants. Their callers,
   `switchyard add-role` and `set-vcs-close-role`, refuse a declared tenant, and every new tenant is one now. Each
   refusal names that tenant's path: `add-role` already did (SYRD-510); `set-vcs-close-role` now does too (the
-  stage, approval and `mark_done` to change in the document, and `ticket-board-workflow apply`). The board guide says
+  copy of director_review's stage entry to add, the Director's `mark_done` replaced by a `route` to it, the role's `mark_done` from it, the Director's
+  `defer` and `cancel` from it, and `ticket-board-workflow apply`; SYRD-862). The board guide says
   which projects each command is for.
 - **`adopt-workflow`'s legacy composition** (`propose_legacy_workflow_adoption`). It is how an older tenant gets a
   document, and it is gated on that seed.

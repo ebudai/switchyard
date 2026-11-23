@@ -72,9 +72,11 @@ The role must already exist in that project. The command inserts the generated
 `VCS` stage before `Done`, changes `mark_done` to that role, updates the board
 unit's operation-role environment, and restarts the tenant board. It is not
 available for the built-in `pgu` board. On a project that declares its workflow, it
-changes nothing and names the path: add a stage owned by the role between
-`director_review` and `done`, give it the approval and `mark_done`, and apply the
-document with `ticket-board-workflow apply`.
+changes nothing and names the path: add a copy of `director_review`'s stage entry
+after it, with its name, label and owners (the role) changed; replace the Director's `mark_done` from `director_review`
+with the Director's `route` to that stage; add `mark_done` from it to `done`, with the
+role as its actor; give the Director the same `defer` and `cancel` from it; and apply
+the document with `ticket-board-workflow apply`.
 
 ---
 

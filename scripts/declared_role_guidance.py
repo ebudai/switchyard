@@ -86,9 +86,13 @@ def declared_workflow_vcs_close_refusal(config: Any, *, config_path: Path, role_
     return "\n".join([
         f"switchyard: {project} runs a declared workflow: its stages and moves are its workflow document's, so "
         "set-vcs-close-role changes none of them. Nothing was changed.",
-        f"To give {role_name} the final close: in the workflow document, add a stage owned by {role_name} (for example "
-        f"`vcs`, labelled VCS) between director_review and done, move director_review's approval into it, and make "
-        f"{role_name} the actor of mark_done from it to done; then review and apply the document. "
+        f"To give {role_name} the final close, as the board's own VCS close does: in the workflow document, add a copy of "
+        f"director_review's stage entry after it, with its name (for example `vcs`), its label (VCS) and its owners "
+        f"([{role_name}]) changed and every other field as copied; replace the "
+        f"Director's mark_done from director_review to done with the Director's route from director_review to that "
+        f"stage; add mark_done from that stage to done, with {role_name} as its actor and the commit it requires; and "
+        "give the Director the same defer and cancel from that stage as from director_review. "
+        "Then review and apply the document. "
         f"`{workflow} show` prints the active document and its revision:",
         f"  {workflow} apply --config {cfg} --document <document.json> --expected-revision <revision> --dry-run",
         f"  {workflow} apply --config {cfg} --document <document.json> --expected-revision <revision> "

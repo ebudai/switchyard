@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -20,6 +21,28 @@ import time
 from pathlib import Path
 
 MARKER = Path("/etc/switchyard-test-vm")
+MARKER_TEXT = "switchyard-test-vm: a disposable review VM; stand-in agent CLIs are allowed here\n"
+MARKER_OWNER = 0  # root: the kit's first-boot seed writes it root:root
+
+
+def marker_holds(path: Path) -> bool:
+    """Whether `path` is the kit's marker: a regular file, root's, holding exactly the kit's text.
+
+    Opened once without following a link (and without blocking on a FIFO), and every check made on that open file,
+    so nothing can be swapped in between a look and the read."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return False
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != MARKER_OWNER:
+            return False
+        return os.read(descriptor, 4096).decode("utf-8", "replace") == MARKER_TEXT
+    except OSError:
+        return False
+    finally:
+        os.close(descriptor)
 
 
 def pane_environment(pid: int) -> dict[str, str]:
@@ -50,8 +73,9 @@ def main(argv: list[str]) -> int:
     head, command = argv[:argv.index("--")], argv[argv.index("--") + 1:]
     timeout = float(head[head.index("--timeout") + 1]) if "--timeout" in head else 600.0
     project, role = head[0], head[1]
-    if not MARKER.is_file():
-        raise SystemExit(f"role_run: refusing: not a switchyard-test-vm review VM ({MARKER} is missing)")
+    if not marker_holds(MARKER):
+        raise SystemExit(f"role_run: refusing: not a switchyard-test-vm review VM ({MARKER} is missing, not root's, "
+                         "or not the kit's)")
     if os.geteuid() != 0:
         raise SystemExit("role_run: run it with sudo: it reads the pane's environment and types as its account")
     found = panes(project, role)

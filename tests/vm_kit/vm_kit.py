@@ -18,9 +18,10 @@ Everything runs as the invoking account, never root, and nothing on the host is 
 
 **Every VM is bounded.** `boot` starts a supervisor in its own session, which runs qemu as its child (qemu dies with
 it). The supervisor powers the VM off at its lifetime (one hour by default) and, however qemu ends, removes the
-overlay, the seed and the VM's key. `down` asks the guest to power off, waits for the supervisor, then checks that
+overlay, the seed and the VM's keys. `down` asks the guest to power off, waits for the supervisor, then checks that
 neither process it started (the supervisor and qemu) still runs and that the overlay is gone, and says so. `check`
-always ends with `down`. The kit looks at no other process on the host.
+always ends with `down` for a VM it created. The kit looks at no other process on the host. ssh and scp believe only
+the guest host key the kit made and seeded, pinned in the VM's own known_hosts.
 
 **Test tenants get past sign-in with stand-in CLIs, not a flag** (`tests/vm_kit/standins/`). Each stand-in refuses
 to run unless the machine carries the marker only this kit's first-boot seed writes, so a stand-in copied anywhere
@@ -58,12 +59,17 @@ DEFAULT_LIFETIME = 3600
 #: before installing a missing one), and bc for the kit's timing.
 PACKAGES = ("python", "postgresql", "tmux", "git", "curl", "python-pillow", "python-psycopg", "acl", "polkit", "bc")
 USER = "operator"
+HOST_KEY = "host_ed25519"  # the guest's ssh host key, made on the host and seeded, so it can be pinned
 NAME_CHARS = set("abcdefghijklmnopqrstuvwxyz0123456789-")
 
 
 class KitError(SystemExit):
     def __init__(self, message: str) -> None:
         super().__init__(f"vm_kit: {message}")
+
+
+class NameTaken(KitError):
+    """A VM of that name already exists: someone else's to keep or take down."""
 
 
 def say(message: str) -> None:
@@ -168,24 +174,43 @@ def base_image(root: Path, explicit: str | None) -> Path:
 # --- boot --------------------------------------------------------------------------------------------------------
 
 
+def tool(argv: list[str], what: str) -> None:
+    """A host tool boot needs, its own words kept when it fails, so the real cause is the error."""
+    done = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True)
+    if done.returncode != 0:
+        raise KitError(f"{what}: `{argv[0]}` exited {done.returncode}: {(done.stderr or done.stdout).strip()[-1500:]}")
+
+
 def free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         return probe.getsockname()[1]
 
 
-def seed_iso(directory: Path, name: str, public_key: str) -> Path:
-    """The NoCloud seed: the operator account with this VM's key, and the marker the stand-ins require."""
-    seed = directory / "seed"
-    seed.mkdir()
-    (seed / "meta-data").write_text(f"instance-id: {name}-{int(time.time())}\nlocal-hostname: {name}\n")
-    user_data = {
+def cloud_config(directory: Path, name: str, public_key: str) -> dict:
+    """The first-boot cloud-config: the operator account with this VM's key, the guest's ssh host key and nothing
+    else (made on the host, so the host can pin it), and the root-owned marker the stand-ins require."""
+    return {
         "hostname": name,
         "users": [{"name": USER, "groups": ["wheel"], "sudo": "ALL=(ALL) NOPASSWD:ALL", "shell": "/bin/bash",
                    "lock_passwd": True, "ssh_authorized_keys": [public_key]}],
         "write_files": [{"path": MARKER, "permissions": "0644", "owner": "root:root", "content": MARKER_TEXT}],
         "growpart": {"mode": "auto", "devices": ["/"]},
+        # The guest's sshd answers with this key and no other; generated keys would be ones the host never saw.
+        "ssh_deletekeys": True,
+        "ssh_genkeytypes": [],
+        "ssh_keys": {"ed25519_private": (directory / HOST_KEY).read_text(),
+                     "ed25519_public": (directory / f"{HOST_KEY}.pub").read_text().strip()},
     }
+
+
+def seed_iso(directory: Path, name: str, public_key: str) -> Path:
+    """The NoCloud seed: the operator account with this VM's key, the guest's own ssh host key (made here, so the
+    host can pin it), and the marker the stand-ins require."""
+    seed = directory / "seed"
+    seed.mkdir()
+    (seed / "meta-data").write_text(f"instance-id: {name}-{int(time.time())}\nlocal-hostname: {name}\n")
+    user_data = cloud_config(directory, name, public_key)
     (seed / "user-data").write_text("#cloud-config\n" + json.dumps(user_data, indent=1) + "\n")
     tool = next((t for t in ("xorriso", "mkisofs", "genisoimage") if shutil.which(t)), None)
     if tool is None:
@@ -217,25 +242,48 @@ def boot(root: Path, name: str, *, image: str | None, cpus: int, mem: int, lifet
     if not os.access("/dev/kvm", os.R_OK | os.W_OK):
         raise KitError("/dev/kvm is not usable by this account")
     directory = vm_dir(root, name)
+    taken = NameTaken(f"{name} already exists at {directory}: `down {name}` first, or pick another name")
     if directory.exists():
-        raise KitError(f"{name} already exists at {directory}: `down {name}` first, or pick another name")
+        raise taken
     backing = base_image(root, image)
-    directory.mkdir(parents=True)
-    directory.chmod(0o700)
-    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"switchyard-test-vm-{name}",
-                    "-f", str(directory / "key")], check=True, stdin=subprocess.DEVNULL)
-    seed_iso(directory, name, (directory / "key.pub").read_text().strip())
-    subprocess.run(["qemu-img", "create", "-q", "-f", "qcow2", "-F", "qcow2", "-b", str(backing),
-                    str(directory / "overlay.qcow2"), "20G"], check=True, stdin=subprocess.DEVNULL)
-    info = {"name": name, "port": free_port(), "cpus": cpus, "mem": mem, "image": str(backing),
-            "lifetime": lifetime, "deadline": time.time() + lifetime, "booted_at": time.time()}
-    (directory / "vm.json").write_text(json.dumps(info, indent=1) + "\n")
-    with (directory / "supervisor.log").open("ab") as log:
-        supervisor = subprocess.Popen([sys.executable, "-I", "-B", str(Path(__file__).resolve()), "_supervise",
-                                       str(directory)], stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                                      start_new_session=True, close_fds=True)
-    info["supervisor"] = supervisor.pid
-    (directory / "vm.json").write_text(json.dumps(info, indent=1) + "\n")
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        directory.mkdir()  # atomically ours, or someone else's
+    except FileExistsError:
+        raise taken from None
+    supervisor: subprocess.Popen | None = None
+    try:
+        directory.chmod(0o700)
+        for key, comment in (("key", f"switchyard-test-vm-{name}"), (HOST_KEY, f"switchyard-test-vm-{name}-host")):
+            tool(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", comment, "-f", str(directory / key)],
+                 f"{name}: making its ssh keys")
+        pin_host_key(directory, name)
+        seed_iso(directory, name, (directory / "key.pub").read_text().strip())
+        tool(["qemu-img", "create", "-q", "-f", "qcow2", "-F", "qcow2", "-b", str(backing),
+              str(directory / "overlay.qcow2"), "20G"], f"{name}: making its overlay on {backing}")
+        info = {"name": name, "port": free_port(), "cpus": cpus, "mem": mem, "image": str(backing),
+                "lifetime": lifetime, "deadline": time.time() + lifetime, "booted_at": time.time()}
+        (directory / "vm.json").write_text(json.dumps(info, indent=1) + "\n")
+        with (directory / "supervisor.log").open("ab") as log:
+            # -s, not -I: no user site, and a suite's host-state guard still follows it (the supervisor runs as this
+            # account, so -I guarded no boundary).
+            supervisor = subprocess.Popen([sys.executable, "-s", "-B", str(Path(__file__).resolve()), "_supervise",
+                                           str(directory)], stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                          start_new_session=True, close_fds=True)
+        info["supervisor"] = supervisor.pid
+        (directory / "vm.json").write_text(json.dumps(info, indent=1) + "\n")
+    except BaseException:
+        # The directory is wholly this boot's. A supervisor it started is stopped first (it powers off and cleans
+        # up after itself); then nothing of the VM runs, and nothing of it is left for anyone to remove by hand.
+        if supervisor is not None:
+            supervisor.terminate()
+            try:
+                supervisor.wait(timeout=150)
+            except subprocess.TimeoutExpired:
+                supervisor.kill()  # its qemu dies with it (PR_SET_PDEATHSIG)
+                supervisor.wait()
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
     say(f"{name}: booting (ssh 127.0.0.1:{info['port']}, powered off by {time.ctime(info['deadline'])} at the latest)")
     deadline = time.monotonic() + wait
     while time.monotonic() < deadline:
@@ -247,7 +295,8 @@ def boot(root: Path, name: str, *, image: str | None, cpus: int, mem: int, lifet
             return info
         time.sleep(3)
     down(root, name)
-    raise KitError(f"{name}: no ssh within {wait}s; powered off")
+    raise KitError(f"{name}: no ssh within {wait}s (or the guest never showed the host key the kit seeded); "
+                   "powered off")
 
 
 def supervise(directory: Path) -> int:
@@ -287,11 +336,11 @@ def supervise(directory: Path) -> int:
     else:
         ended["reason"] = "the guest powered off"
     ended["qemu_exit"] = qemu.returncode
-    for leftover in ("overlay.qcow2", "seed.iso", "key", "key.pub", "qmp.sock"):
+    for leftover in ("overlay.qcow2", "seed.iso", "key", "key.pub", HOST_KEY, f"{HOST_KEY}.pub", "qmp.sock"):
         (directory / leftover).unlink(missing_ok=True)
     ended["at"] = time.time()
     (directory / "ended.json").write_text(json.dumps(ended) + "\n")
-    print(f"{time.ctime()} qemu exited {qemu.returncode}; overlay, seed and key removed ({ended['reason']})", flush=True)
+    print(f"{time.ctime()} qemu exited {qemu.returncode}; overlay, seed and keys removed ({ended['reason']})", flush=True)
     return 0
 
 
@@ -312,10 +361,25 @@ def qmp(directory: Path, command: str) -> bool:
 # --- talking to it -----------------------------------------------------------------------------------------------
 
 
+def pin_host_key(directory: Path, name: str) -> None:
+    """The per-VM known_hosts: the guest's host key under the VM's own alias, so ssh trusts that key alone."""
+    kind, key = (directory / f"{HOST_KEY}.pub").read_text().split()[:2]
+    (directory / "known_hosts").write_text(f"switchyard-test-vm-{name} {kind} {key}\n")
+
+
+def ssh_options(directory: Path, info: dict) -> list[str]:
+    """For ssh and scp alike. The port was free when boot picked it, but another account could bind it first: the
+    guest is believed only when it shows the host key the kit seeded, never one met for the first time. No ssh
+    config is read, the system's or the account's, so nothing there can loosen these options."""
+    return ["-F", "/dev/null", "-i", str(directory / "key"), "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={directory / 'known_hosts'}",
+            "-o", f"HostKeyAlias=switchyard-test-vm-{info['name']}", "-o", "HostKeyAlgorithms=ssh-ed25519",
+            "-o", "GlobalKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=5",
+            "-o", "ServerAliveInterval=30"]
+
+
 def ssh_base(directory: Path, info: dict) -> list[str]:
-    return ["ssh", "-q", "-i", str(directory / "key"), "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
-            "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=5",
-            "-o", "ServerAliveInterval=30", "-p", str(info["port"]), f"{USER}@127.0.0.1"]
+    return ["ssh", *ssh_options(directory, info), "-p", str(info["port"]), f"{USER}@127.0.0.1"]
 
 
 def ssh(directory: Path, info: dict, argv: list[str], *, timeout: float, check: bool = True, quiet: bool = False,
@@ -334,8 +398,7 @@ def ssh(directory: Path, info: dict, argv: list[str], *, timeout: float, check: 
 
 
 def push(directory: Path, info: dict, sources: list[Path], dest: str) -> None:
-    subprocess.run(["scp", "-q", "-i", str(directory / "key"), "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
-                    "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-P", str(info["port"]),
+    subprocess.run(["scp", "-q", *ssh_options(directory, info), "-P", str(info["port"]),
                     *map(str, sources), f"{USER}@127.0.0.1:{dest}"], check=True, stdin=subprocess.DEVNULL,
                    timeout=600)
 
@@ -510,7 +573,10 @@ def down(root: Path, name: str, *, wait: int = 150) -> None:
     directory = vm_dir(root, name)
     if not directory.exists():
         raise KitError(f"no VM named {name} in {root}")
-    info = read_info(directory)
+    try:
+        info = read_info(directory)
+    except SystemExit:  # a boot that stopped before recording anything: no process of it was ever started
+        info = {"name": name}
     supervisor = int(info.get("supervisor", 0))
     if pid_runs(supervisor, str(directory)):
         # The guest's own poweroff first (ssh ends 255 when the guest drops it, so its status says nothing), then
@@ -533,7 +599,8 @@ def down(root: Path, name: str, *, wait: int = 150) -> None:
     running = survivors(directory)
     if running:
         raise KitError(f"{name}: still running as {running}; nothing removed")
-    for leftover in ("overlay.qcow2", "seed.iso", "key", "key.pub", "qmp.sock", "qemu.pid"):
+    for leftover in ("overlay.qcow2", "seed.iso", "key", "key.pub", HOST_KEY, f"{HOST_KEY}.pub", "qmp.sock",
+                     "qemu.pid"):
         (directory / leftover).unlink(missing_ok=True)
     if (directory / "overlay.qcow2").exists():
         raise KitError(f"{name}: {directory / 'overlay.qcow2'} is still there")
@@ -543,7 +610,7 @@ def down(root: Path, name: str, *, wait: int = 150) -> None:
     except (OSError, ValueError):
         pass
     shutil.rmtree(directory)
-    say(f"{name}: gone (its supervisor and qemu have ended; overlay, seed and key removed"
+    say(f"{name}: gone (its supervisor and qemu have ended; overlay, seed and keys removed"
         + (f"; {ended['reason']}" if ended.get("reason") else "") + ")")
 
 
@@ -552,6 +619,7 @@ def list_vms(root: Path) -> None:
         try:
             info = read_info(directory)
         except SystemExit:
+            print(f"{directory.name}\tincomplete: never started (run `down {directory.name}` to remove it)")
             continue
         running = pid_runs(int(info.get("supervisor", 0)), str(directory))
         left = max(0, int(info["deadline"] - time.time()))
@@ -608,8 +676,21 @@ def delivery_probe(directory: Path, info: dict, slug: str, *, wait: float = 180)
 def check(root: Path, *, repo: Path, commit: str, name: str, slug: str, image: str | None, keep_logs: Path | None,
           lifetime: int) -> int:
     """Boot, install the commit, create a tenant, then prove: an active declared workflow, `research-stage enable
-    --dry-run` from the Director's pane, and a notification the listener really delivered. Always powers off."""
-    boot(root, name, image=image, cpus=4, mem=8192, lifetime=lifetime)
+    --dry-run` from the Director's pane, and a notification the listener really delivered. It always ends with
+    `down` for a VM it created, however it ends -- qemu dying during boot included -- and never touches a VM of the
+    same name that was there before it."""
+    directory = vm_dir(root, name)
+    try:
+        boot(root, name, image=image, cpus=4, mem=8192, lifetime=lifetime)
+    except NameTaken:
+        raise  # not ours: left exactly as it was
+    except BaseException:
+        if directory.exists():  # ours, half booted (qemu ended, or no ssh): taken down like any other
+            try:
+                down(root, name)
+            except BaseException as cleanup:  # said as well as the boot's own error, never instead of it
+                print(f"vm_kit: {name}: and taking it down failed too: {cleanup}", file=sys.stderr, flush=True)
+        raise
     try:
         sha = install(root, name, repo=repo, commit=commit)
         tenant(root, name, slug, repo=repo)

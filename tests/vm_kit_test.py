@@ -69,7 +69,7 @@ def main() -> int:
               "research-stage enable --dry-run passes from the Director's pane")
         check("Delivered queued notification" in out and "to vmt-main:0.0" in out,
               "the listener delivered a real notification into main's pane")
-        check(f"{name}: gone (its supervisor and qemu have ended; overlay, seed and key removed" in out,
+        check(f"{name}: gone (its supervisor and qemu have ended; overlay, seed and keys removed" in out,
               "the VM was powered off and proved gone")
         check(not list((state / "vms").glob("*")), "nothing of it is left: no VM directory")
     finally:

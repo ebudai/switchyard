@@ -18,9 +18,11 @@ import io
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -82,6 +84,7 @@ def test_standin_refuses_outside_a_kit_vm() -> None:
         module = load_standin()
         module.HOME = home / ".codex"
         module.MARKER = Path(tmp) / "marker"
+        module.MARKER_OWNER = os.getuid()  # this marker's owner passes: its text is what differs
         module.MARKER.write_text("switchyard-test-vm\n")
         code, out, err = run_standin(module, ["login", "status"])
         check(code == 3 and "Logged in" not in out, f"a marker without the kit's exact text is refused too: {err}")
@@ -100,12 +103,52 @@ def test_role_runner_refuses_outside_a_kit_vm() -> None:
           f"role_run refuses on a host without the kit's marker: {done}")
 
 
+def load_role_run():
+    spec = importlib.util.spec_from_file_location("role_run_under_test", KIT / "role_run.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_marker_is_roots_exact_text_never_through_a_link() -> None:
+    standin, role_run = load_standin(), load_role_run()
+    check(standin.MARKER_TEXT == role_run.MARKER_TEXT == vm_kit.MARKER_TEXT and
+          standin.MARKER_OWNER == role_run.MARKER_OWNER == 0,
+          "the kit writes, and both readers require, one text, owned by root")
+    for label, module in (("the stand-in", standin), ("role_run", role_run)):
+        with tempfile.TemporaryDirectory() as tmp:
+            good = Path(tmp) / "marker"
+            good.write_text(vm_kit.MARKER_TEXT)
+            module.MARKER_OWNER = 0
+            check(not module.marker_holds(good), f"{label}: the kit's text in a file root does not own is refused")
+            module.MARKER_OWNER = os.getuid()  # the owner it requires, pointed at this suite's own account
+            check(module.marker_holds(good), f"{label}: the kit's text, owned as required, is the marker")
+            other = Path(tmp) / "other"
+            other.write_text(vm_kit.MARKER_TEXT.upper())
+            check(not module.marker_holds(other), f"{label}: other text, owned as required, is refused")
+            longer = Path(tmp) / "longer"
+            longer.write_text(vm_kit.MARKER_TEXT + "and more\n")
+            check(not module.marker_holds(longer), f"{label}: the kit's text and more is refused")
+            link = Path(tmp) / "link"
+            link.symlink_to(good)
+            check(not module.marker_holds(link), f"{label}: a link to the marker is refused, never followed")
+            os.mkfifo(Path(tmp) / "fifo")
+            answer: list[bool] = []
+            reader = threading.Thread(target=lambda: answer.append(module.marker_holds(Path(tmp) / "fifo")),
+                                      daemon=True)
+            reader.start()
+            reader.join(10)
+            check(answer == [False], f"{label}: a FIFO is refused at once, without hanging: {answer}")
+            check(not module.marker_holds(Path(tmp) / "absent"), f"{label}: no marker, no VM")
+
+
 def test_standin_inside_a_kit_vm() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         module = load_standin()
         module.MARKER = tmp_path / "marker"
         module.MARKER.write_text(vm_kit.MARKER_TEXT)
+        module.MARKER_OWNER = os.getuid()  # stands in for root: the suite cannot make a root-owned file
         module.HOME = tmp_path / "home" / ".codex"
         module.HOME.mkdir(parents=True)
         events = tmp_path / "events.jsonl"
@@ -186,6 +229,222 @@ def test_the_scripts_run_in_the_vm_parse_and_keep_install_status() -> None:
               f"./install's question is answered yes, and its own status is the script's: {done.returncode} {done.stdout}")
 
 
+def keygen(path: Path) -> None:
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(path)], check=True,
+                   stdin=subprocess.DEVNULL, timeout=60)
+
+
+def test_the_guest_host_key_is_seeded_and_pinned() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp)
+        keygen(directory / vm_kit.HOST_KEY)
+        config = vm_kit.cloud_config(directory, "pin", "ssh-ed25519 AAAA operator")
+        check(config["ssh_keys"] == {"ed25519_private": (directory / vm_kit.HOST_KEY).read_text(),
+                                     "ed25519_public": (directory / f"{vm_kit.HOST_KEY}.pub").read_text().strip()}
+              and config["ssh_genkeytypes"] == [] and config["ssh_deletekeys"] is True,
+              "the guest's sshd gets the host key made on the host, and generates none of its own")
+        marker = config["write_files"][0]
+        check(marker["path"] == vm_kit.MARKER and marker["owner"] == "root:root"
+              and marker["content"] == vm_kit.MARKER_TEXT, "the marker is written root's, with the kit's text")
+        vm_kit.pin_host_key(directory, "pin")
+        options = vm_kit.ssh_options(directory, {"name": "pin", "port": 1})
+        check("StrictHostKeyChecking=yes" in options and f"UserKnownHostsFile={directory / 'known_hosts'}" in options
+              and "HostKeyAlias=switchyard-test-vm-pin" in options and "StrictHostKeyChecking=no" not in options,
+              f"ssh and scp believe only the pinned key, from the VM's own known_hosts: {options}")
+        check(options[:2] == ["-F", "/dev/null"], "and read no ssh config that could loosen that")
+
+
+def test_a_guest_showing_another_host_key_is_refused() -> None:
+    """A real sshd on loopback, as another account binding the VM's port first would be."""
+    sshd = Path("/usr/sbin/sshd")
+    check(sshd.is_file(), "this suite needs OpenSSH's sshd, to stand in for a guest")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        directory = root / "vms" / "pin"
+        directory.mkdir(parents=True)
+        directory.chmod(0o700)
+        for key in ("key", vm_kit.HOST_KEY):
+            keygen(directory / key)
+        vm_kit.pin_host_key(directory, "pin")
+        keygen(root / "impostor")
+        port = vm_kit.free_port()
+        info = {"name": "pin", "port": port}
+        for label, host_key in (("the seeded key", directory / vm_kit.HOST_KEY), ("another key", root / "impostor")):
+            config = root / "sshd_config"
+            config.write_text(f"Port {port}\nListenAddress 127.0.0.1\nHostKey {host_key}\nPidFile {root}/sshd.pid\n"
+                              "UsePAM no\nStrictModes no\nAuthorizedKeysFile none\nPasswordAuthentication no\n")
+            server = subprocess.Popen([str(sshd), "-f", str(config), "-D", "-e"], stdin=subprocess.DEVNULL,
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+            try:
+                for _ in range(100):
+                    with socket.socket() as probe:
+                        if probe.connect_ex(("127.0.0.1", port)) == 0:
+                            break
+                    time.sleep(0.05)
+                ran = root / "ran"
+                done = vm_kit.ssh(directory, info, ["touch", str(ran)], timeout=30, check=False, capture=True)
+                pushed = subprocess.run(["scp", "-q", *vm_kit.ssh_options(directory, info), "-P", str(port),
+                                         str(directory / "known_hosts"), f"{vm_kit.USER}@127.0.0.1:"],
+                                        capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30)
+            finally:
+                server.terminate()
+                server.wait(timeout=30)
+            verified = "Host key verification failed" not in done.stderr + pushed.stderr
+            if label == "the seeded key":
+                check(done.returncode != 0 and verified and "Permission denied" in done.stderr,
+                      f"showing the seeded key, the server is believed (and only then refuses the login): {done}")
+            else:
+                check(done.returncode == 255 and not verified and "Permission denied" not in done.stderr
+                      and pushed.returncode != 0 and not ran.exists(),
+                      f"showing another key, ssh and scp stop before sending anything: {done} {pushed}")
+
+
+def boot_stand_ins(root: Path, *, qemu: str, real_qemu_img: bool = False) -> Path:
+    """Fakes for everything boot runs but a real VM: qemu (given), qemu-img (unless the real one is wanted), and an
+    ssh nobody answers."""
+    bin_dir = root / "bin"
+    bin_dir.mkdir()
+    fakes = [("qemu-system-x86_64", qemu), ("ssh", "#!/bin/sh\nexit 255\n")]
+    if not real_qemu_img:
+        fakes.append(("qemu-img", '#!/bin/sh\nfor a; do last2=$prev; prev=$a; done\n: > "$last2"\n'))
+    for name, body in fakes:
+        (bin_dir / name).write_text(body)
+        (bin_dir / name).chmod(0o755)
+    return bin_dir
+
+
+def run_check(root: Path, bin_dir: Path, name: str) -> tuple[str, str]:
+    image = root / "base.qcow2"
+    if not image.exists():
+        image.write_text("not an image")
+    saved_path, saved_access = os.environ.get("PATH", ""), vm_kit.os.access
+    os.environ["PATH"] = f"{bin_dir}:{saved_path}"
+    vm_kit.os.access = lambda path, mode: True if str(path) == "/dev/kvm" else saved_access(path, mode)
+    out = io.StringIO()
+    try:
+        with redirect_stdout(out):
+            vm_kit.check(root, repo=ROOT, commit="HEAD", name=name, slug="vmt", image=str(image), keep_logs=None,
+                         lifetime=60)
+    except SystemExit as exc:
+        return str(exc), out.getvalue()
+    finally:
+        os.environ["PATH"], vm_kit.os.access = saved_path, saved_access
+    return "", out.getvalue()
+
+
+def test_check_ends_with_down_when_qemu_dies_during_boot() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        bin_dir = boot_stand_ins(root, qemu="#!/bin/sh\nexit 1\n")
+        error, out = run_check(root, bin_dir, "dies")
+        check("qemu ended during boot" in error, f"check says qemu ended during boot: {error}")
+        check("dies: gone" in out and not (root / "vms" / "dies").exists(),
+              f"and it still ends with down: the VM's directory is gone, and said to be: {out}")
+
+
+def test_an_early_boot_failure_says_why_and_leaves_nothing() -> None:
+    """Before boot records anything: an image qemu-img cannot use, and a host with no tool to build the seed."""
+    real_which = vm_kit.shutil.which
+    for label, real_qemu_img, which, cause in (
+            ("an unusable --image", True, real_which, "not in qcow2 format"),
+            ("no ISO tool", False, lambda name, *a, **k: None if name in ("xorriso", "mkisofs", "genisoimage")
+             else real_which(name, *a, **k), "building the seed needs xorriso, mkisofs or genisoimage")):
+        if real_qemu_img and not real_which("qemu-img"):
+            check(False, "this case needs the real qemu-img")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = boot_stand_ins(root, qemu="#!/bin/sh\nexit 1\n", real_qemu_img=real_qemu_img)
+            vm_kit.shutil.which = which
+            try:
+                for attempt in ("first", "again, under the same name"):
+                    error, out = run_check(root, bin_dir, "early")
+                    check(cause in error and "boot it first" not in error and "already exists" not in error,
+                          f"{label}, {attempt}: the real cause is the error: {error}")
+                    check(not (root / "vms" / "early").exists(),
+                          f"{label}, {attempt}: no vms/early is left, keys and all: "
+                          f"{sorted(p.name for p in (root / 'vms').glob('*/*'))}")
+            finally:
+                vm_kit.shutil.which = real_which
+
+
+def test_boot_itself_removes_what_an_early_failure_left() -> None:
+    """boot alone, not through check: its own cleanup, before anything of the VM runs."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        image = root / "base.qcow2"
+        image.write_text("not an image")
+        real_access, real_which = vm_kit.os.access, vm_kit.shutil.which
+        vm_kit.os.access = lambda path, mode: True if str(path) == "/dev/kvm" else real_access(path, mode)
+        vm_kit.shutil.which = lambda name, *a, **k: None if name in ("xorriso", "mkisofs", "genisoimage") \
+            else real_which(name, *a, **k)
+        try:
+            vm_kit.boot(root, "alone", image=str(image), cpus=1, mem=64, lifetime=60)
+        except SystemExit as exc:
+            check("building the seed needs" in str(exc), f"boot's own error is the one raised: {exc}")
+        else:
+            check(False, "boot went on without a seed")
+        finally:
+            vm_kit.os.access, vm_kit.shutil.which = real_access, real_which
+        check(not (root / "vms" / "alone").exists(), "and boot itself removed the directory it made, keys and all")
+
+
+def test_a_failed_cleanup_is_said_as_well_never_instead() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        bin_dir = boot_stand_ins(root, qemu="#!/bin/sh\nexit 1\n")
+        real_down = vm_kit.down
+
+        def failing_down(*args, **kwargs):
+            raise vm_kit.KitError("cleanup could not finish")
+
+        vm_kit.down = failing_down
+        err = io.StringIO()
+        try:
+            with redirect_stderr(err):
+                error, _ = run_check(root, bin_dir, "twice")
+        finally:
+            vm_kit.down = real_down
+            if (root / "vms" / "twice").exists():
+                real_down(root, "twice", wait=1)
+        check("qemu ended during boot" in error and "cleanup could not finish" not in error,
+              f"the boot's own error is the one check raises: {error}")
+        check("taking it down failed too" in err.getvalue() and "cleanup could not finish" in err.getvalue(),
+              f"and the cleanup's failure is said as well: {err.getvalue()}")
+
+
+def test_down_and_list_handle_a_directory_with_nothing_recorded() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        stray = root / "vms" / "half"
+        stray.mkdir(parents=True)
+        for leftover in ("key", "key.pub", vm_kit.HOST_KEY, "known_hosts", "seed.iso"):
+            (stray / leftover).write_text("x")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            vm_kit.list_vms(root)
+        check("half\tincomplete" in out.getvalue(), f"list shows a VM directory with nothing recorded: {out.getvalue()}")
+        out = io.StringIO()
+        try:
+            with redirect_stdout(out):
+                vm_kit.down(root, "half", wait=1)
+        except SystemExit as exc:
+            out.write(f"refused: {exc}")
+        check("half: gone" in out.getvalue() and not stray.exists(),
+              f"and down removes it, since nothing of it ever ran: {out.getvalue()}")
+
+
+def test_check_never_takes_down_a_vm_it_did_not_make() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        theirs = root / "vms" / "taken"
+        theirs.mkdir(parents=True)
+        (theirs / "vm.json").write_text(json.dumps({"name": "taken", "supervisor": 0}))
+        bin_dir = boot_stand_ins(root, qemu="#!/bin/sh\nexit 1\n")
+        error, out = run_check(root, bin_dir, "taken")
+        check("already exists" in error and (theirs / "vm.json").exists() and "gone" not in out,
+              f"a VM of that name already there is refused and left exactly as it was: {error} {out}")
+
+
 def test_names_and_lifetimes_are_refused() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -210,11 +469,14 @@ def test_names_and_lifetimes_are_refused() -> None:
             vm_kit.os.access = real_access
 
 
+LEFTOVERS = ("overlay.qcow2", "seed.iso", "key", "key.pub", vm_kit.HOST_KEY, f"{vm_kit.HOST_KEY}.pub")
+
+
 def fake_vm(root: Path, name: str, *, lifetime: float) -> tuple[Path, dict]:
     """A VM directory as boot leaves it, with a fake qemu on PATH that just runs until stopped."""
     directory = root / "vms" / name
     directory.mkdir(parents=True)
-    for leftover in ("overlay.qcow2", "seed.iso", "key", "key.pub"):
+    for leftover in LEFTOVERS:
         (directory / leftover).write_text("x")
     info = {"name": name, "port": 1, "cpus": 1, "mem": 64, "image": "none", "lifetime": lifetime,
             "deadline": time.time() + lifetime, "booted_at": time.time()}
@@ -281,8 +543,8 @@ def test_a_vm_ends_at_its_lifetime() -> None:
         ended = json.loads((directory / "ended.json").read_text())
         check(ended["reason"] == "lifetime reached", f"it powered the VM off at its lifetime: {ended}")
         check(not alive(qemu_pid(directory)) and not vm_kit.survivors(directory), "and its qemu has ended")
-        check(not any((directory / f).exists() for f in ("overlay.qcow2", "seed.iso", "key", "key.pub")),
-              "and the overlay, seed and key are gone")
+        check(not any((directory / f).exists() for f in LEFTOVERS),
+              "and the overlay, seed and keys are gone")
 
 
 def test_down_stops_a_running_vm_and_proves_it_gone() -> None:

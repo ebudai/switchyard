@@ -49,18 +49,35 @@ against the mirror's published SHA-256 (`fetch-image` does just that).
   none is refused. At the lifetime, the supervisor presses the virtual power
   button, gives the guest 90 seconds, then stops qemu.
 - **Cleanup does not depend on how qemu ended.** Either way, the supervisor
-  removes the overlay, the seed and the VM's key.
+  removes the overlay, the seed and the VM's keys.
 - **`down` proves the VM is gone.** It powers the guest off, presses the button
   if that fails, and then stops the supervisor. Then it checks that neither
   process it started (the supervisor and qemu) still runs, each confirmed by
   the pid it recorded and its command line, and that the overlay is gone, and
-  says both. `check` always ends with `down`, pass or fail.
+  says both.
+- **`check` always ends with `down`** for a VM it created: pass or fail, and
+  also when qemu ends or ssh never answers during boot. A boot that fails
+  before its supervisor starts (an image `qemu-img` cannot use, no tool to
+  build the seed) removes the directory it made, keys and all, and its own
+  error is the one reported. A cleanup that fails is reported as well, never
+  instead. `down` also removes a VM directory that recorded nothing, and
+  `list` shows one as incomplete. It never takes down a
+  VM of the same name that was there before it: it refuses that name, and
+  `boot` creates a VM's directory atomically, so two runs cannot share one.
 
 **Effect on the host.** The kit refuses to run as root, and never uses sudo on
 the host. It changes nothing on the host except its own directory
 (`$XDG_CACHE_HOME/switchyard-test-vm`, or `--state-dir`). It looks at no other
 process on the host, and signals only a VM's own supervisor (the supervisor
-stops its own qemu), so it cannot reach another VM. Inside the VM it is root, with no live tenant to reach.
+stops its own qemu), so it cannot reach another VM. Inside the VM it is root,
+with no live tenant to reach.
+
+**Only the VM gets the kit's files.** `boot` picks a free loopback port for the
+guest's ssh, but another local account could bind it first. So the kit makes
+the guest's ssh host key on the host, seeds it through cloud-init (the guest
+generates none of its own), and pins it in a `known_hosts` in the VM's 0700
+directory. ssh and scp read no ssh config (`-F /dev/null`) and run with
+`StrictHostKeyChecking=yes` against that file alone. A server showing any other key is refused before anything is sent.
 
 ## Past sign-in, offline: stand-in CLIs, not a flag
 
@@ -90,12 +107,14 @@ so the review exercises exactly the code a real tenant runs.
 - **It is never installed on a host.** It lives under `tests/`, and only the
   kit copies it, into a VM it booted. A release does carry `tests/`, but never
   on any PATH.
-- **It refuses to run without the kit's marker.** It needs `/etc/switchyard-test-vm`,
-  root-owned and holding the kit's exact text. Only the kit's first-boot seed
-  writes that file. Anywhere else it exits 3, says it is not a review VM,
+- **It refuses to run without the kit's marker.** It needs `/etc/switchyard-test-vm`
+  to be a regular file, owned by root, holding exactly the kit's text. It opens
+  the path once, without following a link (or waiting on a FIFO), and makes
+  every check on that open file. Only the kit's first-boot seed writes that
+  file. Anywhere else it exits 3, says it is not a review VM,
   and records nothing: no sign-in, no trust, no config. A suite checks that
   on the host where the suites run.
-- **`role_run.py` refuses the same way.**
+- **`role_run.py` refuses the same way,** with the same check.
 
 ## Running a command as a role
 
@@ -141,12 +160,21 @@ the release layout. The VM is the check of the whole install.
 
 - **`tests/vm_kit_refusals_test.py`** (no KVM, runs in the sweep sandbox):
   - the stand-in and the role runner refuse without the marker, and record
-    nothing;
+    nothing; each refuses a marker that is not root's, other text, a link and
+    a FIFO, and accepts the kit's text owned as required;
   - with the marker, the stand-in signs in, trusts its folder, fires the hooks
     around each line, and runs a `!` line;
   - the kit's artifact and workflow load through the product's own
     validators;
   - names and lifetimes are refused;
+  - the cloud-config seeds the host key made on the host and no other, and a
+    real `sshd` on loopback is believed only when it shows that key: showing
+    another, ssh and scp stop before sending anything;
+  - `check` ends with `down` when a fake qemu dies during boot, and refuses,
+    untouched, a VM of the same name that was already there;
+  - an unusable `--image` or no ISO tool: the real cause is the error, no VM
+    directory is left, and a re-run under the same name works; `down` and
+    `list` handle a directory that recorded nothing;
   - with a fake qemu: a supervisor powers its VM off at its lifetime, `down`
     stops a running VM and proves it gone, and a supervisor killed outright
     takes its qemu with it.

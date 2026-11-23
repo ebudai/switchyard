@@ -43,6 +43,7 @@ from scripts.ticket_board.plan_gate import with_plan_gate  # noqa: E402
 from scripts.ticket_board.publisher_stage import with_publisher  # noqa: E402
 from scripts.ticket_board.research_stage import with_research_stage  # noqa: E402
 from scripts.ticket_board.router_setup import with_router  # noqa: E402
+from scripts.ticket_board import close_commit  # noqa: E402
 from scripts.ticket_board.workflow_config import validate  # noqa: E402
 
 REFUSAL = "a move into done must require the commit it closes on (require_commit): "
@@ -75,6 +76,16 @@ def loose(document: dict) -> dict:
     return edited
 
 
+def borrowed_name(document: dict) -> dict:
+    """`document`'s close renamed close_on_finding, with no commit: what the research exemption must not let through
+    on a board that declares no research stage."""
+    edited = copy.deepcopy(document)
+    for move in edited["transitions"]:
+        if move["action"] == "mark_done":
+            move.update(action="close_on_finding", require_commit=False)
+    return edited
+
+
 def refusal(document: dict) -> str:
     try:
         validate(copy.deepcopy(document))
@@ -101,6 +112,14 @@ def test_python(tmp: Path) -> list[dict]:
           f"the shipped workflow and every composer still validate: {why!r}")
     check(any(t["action"] == "close_on_finding" and not t["require_commit"] for t in good[1]["transitions"]),
           "with the research stage, close_on_finding closes a finding without a commit and is accepted")
+    # SYRD-865: the exemption is the research stage's alone. With no research stage, a commit-less close named
+    # close_on_finding is refused: by the close check itself, and by validate (whose research check also refuses it).
+    borrowed = borrowed_name(good[0])
+    check(not any(stage["name"] == "research" for stage in borrowed["stages"])
+          and close_commit.closes_without_commit(borrowed) == ["close_on_finding (director_review -> done)"]
+          and refusal(borrowed),
+          f"with no research stage, a close named close_on_finding without a commit is refused: "
+          f"{close_commit.closes_without_commit(borrowed)} {refusal(borrowed)!r}")
     defaults = 0
     for implementers in (("main",), ("main", "app", "ops")):
         for audit in ((), ("audit",), ("audit", "inspector")):
@@ -135,6 +154,12 @@ def test_database(cluster, good: list[dict]) -> None:
     asked = sql(admin, f"SELECT ticket_board.validate_declared_workflow($doc${json.dumps(bad)}$doc$::jsonb);")
     check(asked.returncode != 0 and REFUSAL + "mark_done (director_review -> done)" in asked.stderr,
           f"the database's validate_declared_workflow refuses it, naming the move: {asked.stderr[-400:]}")
+    # SYRD-865: the database holds the exemption to a board that declares the research stage, too.
+    borrowed = borrowed_name(good[0])
+    asked = sql(admin, f"SELECT ticket_board.validate_declared_workflow($doc${json.dumps(borrowed)}$doc$::jsonb);")
+    check(asked.returncode != 0 and REFUSAL + "close_on_finding (director_review -> done)" in asked.stderr,
+          f"with no research stage the database refuses a close named close_on_finding without a commit, naming it: "
+          f"{asked.stderr[-400:]}")
     for label, document in (("the shipped workflow", good[0]), ("every composer", good[1])):
         asked = sql(admin, f"SELECT ticket_board.validate_declared_workflow($doc${json.dumps(document)}$doc$::jsonb);")
         check(asked.returncode == 0, f"and accepts {label}: {asked.stderr[-400:]}")

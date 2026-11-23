@@ -1972,6 +1972,15 @@ the [plan guide](onboarding/switchyard-plan-guide.md) and `switchyard plan-gate
 --help`; [SYRD-843](syrd-843-plan-gate.md) is historical design and rollout
 evidence.
 
+`add-role` and `set-vcs-close-role`, below, edit a workflow kept as table rows:
+a project made before `switchyard new` declared a workflow for every project
+([SYRD-860](syrd-860-declared-by-default.md)). On a project that declares its
+workflow, which is every project made since, each changes nothing and prints
+that project's path with every command filled in. For `add-role`, that is a pool
+worker through `switchyard worker-pool`, or a role added to the workflow document.
+For `set-vcs-close-role`, it is a stage and `mark_done` changed in the document.
+Either document change is applied with `ticket-board-workflow apply`.
+
 `switchyard add-role <project> <role> --cli <cli>` adds another implementer role
 after provisioning. `switchyard add-role <project> <role> --audit --cli <cli>`
 adds an auditor role instead. Auditor additions widen the Audit stage owners,
@@ -1998,8 +2007,9 @@ become the seventh visible role in the automatic window. Use `--detached` for
 the added role, or detach another visible role first, when the project already
 has six visible panes.
 
-`switchyard set-vcs-close-role <project> <role>` changes an existing
-provisioned project's terminal close role without re-provisioning. The role must
+`switchyard set-vcs-close-role <project> <role>` changes the terminal close role
+of an existing provisioned project whose workflow is table rows, without
+re-provisioning. The role must
 already exist, so add it first with `add-role` when needed. The command updates
 the generated plan, board unit, and workflow SQL, applies the workflow change to
 Postgres, and restarts the tenant board so both the HTTP gate and SQL transition

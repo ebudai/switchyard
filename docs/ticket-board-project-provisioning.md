@@ -56,12 +56,17 @@ The output directory contains:
   `<role> -> done`. The board service unit also exports
   `TICKET_BOARD_OPERATION_ALLOWED_ROLES=mark_done=<role>` so the HTTP gate
   permits that deployment-specific close request to reach the database.
-  For an existing provisioned project, first add the close role if necessary,
-  then run `switchyard set-vcs-close-role <project> <role>`. That command
-  refuses unknown roles, updates the generated plan and board unit, applies the
-  workflow transition update in Postgres, and restarts the tenant board. The
-  built-in `pgu` workflow remains fixed; this command is only for provisioned
-  tenant projects.
+  For an existing provisioned project whose workflow is table rows (one made
+  before `switchyard new` declared a workflow for every project), first add the
+  close role if necessary, then run `switchyard set-vcs-close-role <project>
+  <role>`. That command refuses unknown roles, updates the generated plan and
+  board unit, applies the workflow transition update in Postgres, and restarts
+  the tenant board. The built-in `pgu` workflow remains fixed; this command is
+  only for provisioned tenant projects. On a project that declares its workflow,
+  it changes nothing and names the document change instead: a stage owned by the
+  role between `director_review` and `done`, holding the approval, with the role
+  as `mark_done`'s actor, applied with `ticket-board-workflow apply`
+  ([SYRD-860](syrd-860-declared-by-default.md)).
   The default implementation-stage owners are `app` and `main`; pass
   `--implementer-role <role>` more than once to seed a project-specific
   implementer set instead.

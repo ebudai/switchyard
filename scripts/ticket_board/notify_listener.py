@@ -49,7 +49,7 @@ from .pane_activity_gate import (
 )
 from .idle_nudges import IdleNudges
 from . import reminder_snooze
-from . import background_authorization, board_stall, blocked_pane, capacity_retry, delivery_proof, execution_lease_pass, handoff_children, publisher_pass, pull_pickup, quota_hold, replaced_delivery, report_closure, research_finding, review_balance, stall_episode, work_pause
+from . import background_authorization, board_stall, blocked_pane, capacity_retry, commit_refresh, delivery_proof, execution_lease_pass, handoff_children, publisher_pass, pull_pickup, quota_hold, replaced_delivery, report_closure, research_finding, review_balance, stall_episode, work_pause
 from .notification_ledger import NotificationLedger
 from .notification_activity_hold import (
     NotificationActivityHold, ActivityTrace, SELF_REMINDER_KINDS,
@@ -1228,7 +1228,7 @@ def main(argv: list[str] | None = None) -> int:
         poll_seconds=args.poll_seconds,
         pre_send_recheck_delay_seconds=args.pre_send_recheck_delay_seconds,
     )
-    listener.image_handoffs = image_handoff.from_environment(listener.project, log=LOGGER.info); listener.report_closures = True  # SYRD-247; SYRD-827: the service alone asks upstream
+    listener.image_handoffs = image_handoff.from_environment(listener.project, log=LOGGER.info); listener.report_closures = True; commit_refresh.start(listener)  # SYRD-247; SYRD-827: the service alone asks upstream; SYRD-872: the cache's refresh is the owner's
     # Rediscovery on every start. A restarted listener re-reads whatever the
     # hooks have written since, and says out loud which directory that is --
     # so a disagreement appears in the log at startup instead of only as

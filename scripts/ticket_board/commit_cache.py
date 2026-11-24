@@ -3,7 +3,9 @@
 Every function takes the root-configured repository paths explicitly and runs
 local git against them. The only network use is refresh_commit_repos fetching
 each repository from its own configured origin, bounded by a timeout; no
-caller can name a remote. TicketBoardApp keeps commit_hash policy, publication
+caller can name a remote. That fetch is the cache owner's, run by the tenant's
+listener (commit_refresh), never by the board service, whose boundary keeps
+the cache read-only (SYRD-872). TicketBoardApp keeps commit_hash policy, publication
 authority and every database transaction.
 """
 
@@ -230,7 +232,10 @@ def resolve_known_commit(commit_git_dirs: tuple[Path, ...], value: str) -> tuple
 
 
 def refresh_commit_repos(commit_git_dirs: tuple[Path, ...]) -> bool:
-    """Fetch each verification repository from its own configured remote.
+    """Fetch each verification repository from its own configured remote, as the account that owns it.
+
+    The tenant's listener runs this when the board asks (commit_refresh); the board service never does. A fetch runs
+    the repository's own hooks and follows its own config, which the owner writes (SYRD-872).
 
     Bounded and credential-free by construction: the remote is whatever that
     repository already names -- for a tenant's cache, the project's public
@@ -251,11 +256,11 @@ def refresh_commit_repos(commit_git_dirs: tuple[Path, ...]) -> bool:
             if not held:
                 continue
             try:
-                kept = publisher_kept(git_args)
+                refspecs = refresh_refspecs(git_args)
                 fetched = subprocess.run(
                     [*git_args, "-c", "remote.origin.uploadpack=git-upload-pack",
                      "-c", "core.sshCommand=/usr/bin/ssh", "-c", "core.gitProxy=",
-                     "fetch", "--quiet", "--prune", "origin", *kept],
+                     "fetch", "--quiet", "origin", *refspecs],
                     capture_output=True,
                     text=True,
                     check=False,
@@ -268,16 +273,18 @@ def refresh_commit_repos(commit_git_dirs: tuple[Path, ...]) -> bool:
     return refreshed
 
 
-def publisher_kept(git_args: list[str]) -> list[str]:
-    """The refresh's refspecs when the Publisher has marked its integration branch in this cache: every branch
-    but that one, whose tracking ref only the Publisher moves (SYRD-754). None otherwise, so the cache's own
-    configured refspecs apply as before. Bounded like the fetch: a read that hangs skips this repository."""
+def refresh_refspecs(git_args: list[str]) -> list[str]:
+    """What the refresh fetches, always named here and never the cache's configured refspec: origin's branches into
+    PUBLISHED_REF_NAMESPACE and nowhere else, and with no prune, so the refresh adds and moves tracking refs and
+    deletes none. A cache configured `+refs/*:refs/*` (mefp's) would otherwise have its `refs/remotes/origin/*`
+    -- where publication writes the refs the board's proofs read -- pruned away by the first refresh (SYRD-872).
+    When the Publisher has marked its integration branch, that branch is left out: its tracking ref only the
+    Publisher moves (SYRD-754). Bounded like the fetch: a read that hangs skips this repository."""
     marked = subprocess.run([*git_args, "symbolic-ref", "-q", INTEGRATION_REF], capture_output=True, text=True,
                             check=False, env=_git_env(), timeout=COMMIT_REFRESH_TIMEOUT_SECONDS).stdout.strip()
     branch = marked[len(PUBLISHED_REF_NAMESPACE) + 1:] if marked.startswith(PUBLISHED_REF_NAMESPACE + "/") else ""
-    if not PUBLISHABLE_REF.fullmatch(branch):
-        return []
-    return ["--refmap=", f"+refs/heads/*:{PUBLISHED_REF_NAMESPACE}/*", f"^refs/heads/{branch}"]
+    every = ["--refmap=", f"+refs/heads/*:{PUBLISHED_REF_NAMESPACE}/*"]
+    return [*every, f"^refs/heads/{branch}"] if PUBLISHABLE_REF.fullmatch(branch) else every
 
 
 def _first_answer(commit_git_dirs: tuple[Path, ...], args: list[str]) -> str | None:

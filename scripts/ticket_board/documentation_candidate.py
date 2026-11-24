@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import commit_cache
+from . import commit_cache, commit_refresh
 from .documentation_gate import DOCUMENTATION_STAGE, KICK_BACK, NO_CHANGE, SIGN_OFF, candidate_ref, outside_documentation
 
 #: The longest reason, findings or note a decision may carry.
@@ -56,7 +56,7 @@ def _bounded(payload: dict[str, Any], key: str, what: str) -> str:
 def _published_at(app: Any, ref: str) -> str:
     """What the trusted cache says `ref` is published at, after one refresh if it does not know yet."""
     published = app.published_ref_commit(ref)
-    if not published and commit_cache.refresh_commit_repos(app.commit_git_dirs):
+    if not published and commit_refresh.ask(app):
         published = app.published_ref_commit(ref)
     return published
 

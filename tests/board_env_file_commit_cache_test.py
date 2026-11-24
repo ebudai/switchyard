@@ -203,6 +203,7 @@ def test_a_stale_env_file_cannot_move_the_running_board_off_the_managed_cache() 
 def test_a_newly_published_commit_verifies_with_no_manual_fetch() -> None:
     """What the ticket is for: the next candidate is not an unknown commit."""
     from scripts.ticket_board.app import TicketBoardApp
+    from commit_refresh_test import answer_asks
 
     tenant = Tenant()
     try:
@@ -223,12 +224,14 @@ def test_a_newly_published_commit_verifies_with_no_manual_fetch() -> None:
         # verifies a submission.
         app = TicketBoardApp(frame_dir=tenant.tmp / "f", asset_dir=tenant.tmp / "a",
                              commit_git_dir=os.pathsep.join(reported), database_url="")
+        answer_asks(app)  # the tenant's listener, in process: it refreshes the cache, never the board (SYRD-872)
         assert app._validate_commit_hash(candidate) == candidate
 
         # And verification is not relaxed: the cache the stale file named still
         # refuses it, and so does the managed one for a commit nobody published.
         stale = TicketBoardApp(frame_dir=tenant.tmp / "f", asset_dir=tenant.tmp / "a",
                                commit_git_dir=str(tenant.stale), database_url="")
+        answer_asks(stale)
         for board, value in ((stale, candidate), (app, "0" * 40)):
             try:
                 board._validate_commit_hash(value)

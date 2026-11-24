@@ -863,9 +863,51 @@ cannot put a commit in the board's copy that the public ref does not carry.
 
 A refresh that cannot run says so and exits non-zero, naming both halves: the
 ref IS published, and submitting may still be refused. Re-running is safe -- the
-push is a no-op and the refresh is retried. The board keeps its own
-credential-free fetch on a miss as the backstop, so an older board, or a run
-from outside a role pane, still converges.
+push is a no-op and the refresh is retried. The backstop for a commit pushed
+some other way is the board's ask, below.
+
+**On a miss, the board asks the cache's owner to refresh; it never fetches
+itself (SYRD-872).** The trusted cache belongs to the project account: its
+config, hooks and refs are that account's to write. The board service runs as
+`boardsvc`, one account shared by every tenant's board, and its unit keeps the
+cache read-only by design (`ProtectHome=read-only`, `ReadWritePaths=` only its
+assets and frames, and a named `boardsvc:rX` grant on the store alone). A fetch
+run as `boardsvc` into that cache would run commands the owner configures
+there (measured: `core.alternateRefsCommand` with an owner-named alternate) and
+would follow the owner's `remote.origin.url`, so a tenant could act as the
+account that serves every board.
+
+- **The ask.** When a submission names a commit the cache does not have, the
+  board sends `refresh:<random token>` with `pg_notify` on
+  `ticket_board_commit_refresh`. It sends it from a connection of its own,
+  closed before it waits, so no transaction or lock is held. Then it re-reads
+  the cache. The wait scales from the listener's last measured fetch (three
+  times it, plus a quarter second to gather and the two-second interval). It
+  is at least 4 s and at most 8 s, inside the write client's 10 s request
+  timeout.
+- **The answer.** The project's listener runs as the owner. A worker thread,
+  on its own LISTEN connection, accepts only that exact form and runs the
+  existing refresh: the configured origin, the integration lock, the
+  Publisher-mark refspecs, the pinned `safe.directory`, and the transport
+  limits. It always names its own refspec, origin's branches into
+  `refs/remotes/origin/*`, and never prunes. So whatever the cache is
+  configured to fetch (mefp's is `+refs/*:refs/*`), the refresh deletes no
+  ref, and the published refs that publication writes, which the board's
+  proofs read, stay readable. It records the tokens it served, and how long the fetch took, in
+  `switchyard-refresh-served.json` in the cache's git directory. The store's
+  default ACL lets the board read that file.
+- **Coalesced.** One fetch runs at a time, at most one every two seconds.
+  Asks gathered for a quarter second after the first are served by one fetch.
+  An ask that arrives during a fetch is served by the next one. At most 256
+  are held, and the rest are dropped.
+- **No listener.** If the listener is down or crash-looping, the board
+  refuses within the bound and names `switchyard-publish-candidate`, which
+  brings the commit in from the pane.
+- **pgu and otto.** Their caches are under `/data/git` and owned by `eric`,
+  and their listeners run as `agent` and `otto-agent`. So the listener's
+  refresh cannot write those caches, just as the board's own fetch never
+  could. SYRD-872 left them as they were. Who should write them is a
+  separate decision.
 
 **A push that fails is the implementer's to retry.** Nothing is recorded, the
 remote is unchanged, and re-running the command after fixing the cause is the

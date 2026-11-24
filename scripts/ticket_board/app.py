@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import attachment_store, audit_return, commit_cache, extension_operations, new_asset_files, peer_identity, test_tier, ui_delegation, workflow_locking
+from . import attachment_store, audit_return, commit_cache, commit_refresh, extension_operations, new_asset_files, peer_identity, test_tier, ui_delegation, workflow_locking
 from .commit_cache import COMMIT_REFRESH_TIMEOUT_SECONDS, PUBLISHABLE_REF, PUBLISHED_REF_NAMESPACE
 from .commit_repos import commit_git_dirs_for_project
 from .image_asset_policy import (  # re-exported: callers import these from the app
@@ -1328,6 +1328,7 @@ ORDER BY rank;
 
     def _pg_update_ticket(self, ticket_id: str, patch: dict[str, Any], *, caller_role: str | None = None) -> dict[str, Any]:
         ticket_id = str(ticket_id).strip().upper()
+        commit_refresh.ask_first(self, patch)  # SYRD-872: any wait for the listener comes before the transaction, holding nothing
         with self._pg_connect() as conn:
             with self._attachment_transaction(conn) as new_files:
                 if caller_role:
@@ -1726,21 +1727,19 @@ SELECT EXISTS (
         resolved, missing_repos = self._resolve_known_commit(value)
         if resolved:
             return resolved
-        # Not here yet. Implementers publish by pushing to the project's remote
-        # (SYRD-123), so a commit this board has never seen is the ordinary case
-        # for work that has just been published rather than a sign of anything
-        # wrong. The cache is refreshed once, from its own configured remote,
-        # and the question is asked again.
-        if commit_cache.refresh_commit_repos(self.commit_git_dirs):
+        # Not here yet: the ordinary case for work just pushed (SYRD-123). The
+        # project's listener refreshes the cache once, as the account that owns
+        # it -- never this service (SYRD-872) -- and the question is asked again.
+        if commit_refresh.ask(self, value):
             resolved, missing_repos = self._resolve_known_commit(value)
             if resolved:
                 return resolved
         if missing_repos and len(missing_repos) == len(self.commit_git_dirs):
             raise ValueError(commit_cache.missing_repository_refusal(missing_repos, project=self.project))
         raise ValueError(
-            f"unknown commit_hash: {value}. It is not in this board's copy of the project "
-            "repository, even after refreshing it -- push the commit to the project remote "
-            "and submit it again."
+            f"unknown commit_hash: {value}. It is not in this board's copy of the project repository, and this "
+            "project's listener did not bring it in when asked (it refreshes that copy as the project account; "
+            "if it is down, publish the commit with switchyard-publish-candidate, which does) -- then submit it again."
         )
 
     def _resolve_known_commit(self, value: str) -> tuple[str, list[Path]]:

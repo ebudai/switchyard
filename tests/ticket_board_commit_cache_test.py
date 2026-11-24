@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
 from scripts.ticket_board import app as app_module  # noqa: E402
 from scripts.ticket_board import commit_cache  # noqa: E402
 from scripts.ticket_board.app import TicketBoardApp  # noqa: E402
+from commit_refresh_test import answer_asks  # noqa: E402
 
 GIT_ENV = {
     "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
@@ -189,7 +190,8 @@ def test_refresh_is_bounded_origin_only_and_skips_failures() -> None:
             assert rec.calls == [([*secure_git(repos.cache), "symbolic-ref", "-q", "refs/publisher/integration"], 30),
                                  ([*secure_git(repos.cache), "-c", "remote.origin.uploadpack=git-upload-pack",
                                   "-c", "core.sshCommand=/usr/bin/ssh", "-c", "core.gitProxy=",
-                                  "fetch", "--quiet", "--prune", "origin"], 30)], rec.calls
+                                  "fetch", "--quiet", "origin", "--refmap=", "+refs/heads/*:refs/remotes/origin/*"],
+                                  30)], rec.calls
         with Recorder() as rec:
             assert commit_cache.refresh_commit_repos(dirs) is True
         assert [call[1] for call in rec.calls] == [30, 30]
@@ -312,6 +314,7 @@ def test_validate_refreshes_once_and_keeps_its_text() -> None:
     with tempfile.TemporaryDirectory(prefix="syrd502-validate.") as tmp:
         repos = Repos(Path(tmp).resolve())
         app = bare_app((repos.cache,))
+        answer_asks(app)  # the tenant's listener, in process: the board itself never fetches (SYRD-872)
         assert app._validate_commit_hash(None) == "" and app._validate_commit_hash("  ") == ""
         assert refusal(lambda: app._validate_commit_hash(5)) == "commit_hash must be a string"
         assert refusal(lambda: app._validate_commit_hash("g" * 12)) == "commit_hash must be a 7-40 character hex commit"
@@ -319,8 +322,9 @@ def test_validate_refreshes_once_and_keeps_its_text() -> None:
         with Recorder(fetch="hang") as rec:
             unknown = refusal(lambda: app._validate_commit_hash(repos.b))
         assert unknown == (
-            f"unknown commit_hash: {repos.b}. It is not in this board's copy of the project repository, even after "
-            "refreshing it -- push the commit to the project remote and submit it again."
+            f"unknown commit_hash: {repos.b}. It is not in this board's copy of the project repository, and this "
+            "project's listener did not bring it in when asked (it refreshes that copy as the project account; "
+            "if it is down, publish the commit with switchyard-publish-candidate, which does) -- then submit it again."
         )
         assert sum("fetch" in argv for argv, _ in rec.calls) == 1
         with Recorder() as rec:

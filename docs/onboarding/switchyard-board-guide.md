@@ -266,6 +266,11 @@ the project runs the plan gate)
   a ref that is the branch the remote's HEAD names, a symbolic ref, or the target of one,
   and a commit already on that branch. Its push runs no hook of your worktree's. If the
   branch moved onto your commit while it ran, it fails: do not submit, tell the Director.
+- A commit the board's copy doesn't have yet (pushed some other way) isn't fetched by the
+  board itself. It asks your project's listener, which refreshes the copy as the project
+  account, and waits up to 8 seconds. If the listener doesn't bring it in, the submission is
+  refused as `unknown commit_hash`, naming `switchyard-publish-candidate`. Publish with that
+  and submit again.
 
 **Director**
 - `route` — the general move, from almost anywhere to almost anywhere. Director-only.

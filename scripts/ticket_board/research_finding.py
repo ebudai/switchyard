@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import commit_cache
+from . import commit_cache, commit_refresh
 from .research_stage import (CLOSE, HAND_BACK, KICK_BACK, RESEARCH_STAGE, RETURN, SIGN_OFF, SUBMIT, SUBMIT_NO_CODE,
                              outside_finding, research_directory, research_path, timebox_seconds)
 
@@ -52,7 +52,7 @@ def _bounded(payload: dict[str, Any], key: str, what: str, limit: int = REASON_M
 def _known(app: Any, commit: str) -> list[str] | None:
     """The commit's parents in the trusted cache, after one refresh if it does not know the commit yet."""
     parents = commit_cache.commit_parents(app.commit_git_dirs, commit)
-    if parents is None and commit_cache.refresh_commit_repos(app.commit_git_dirs):
+    if parents is None and commit_refresh.ask(app):
         parents = commit_cache.commit_parents(app.commit_git_dirs, commit)
     return parents
 

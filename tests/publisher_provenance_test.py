@@ -27,6 +27,9 @@ SYRD625_CASES picks cases, as in publisher_board_test.
 from __future__ import annotations
 
 import subprocess
+import threading
+import time
+import urllib.request
 import sys
 import tempfile
 from pathlib import Path
@@ -39,7 +42,8 @@ for extra in (str(ROOT), str(ROOT / "tests")):
 import publisher_board_test as pb  # noqa: E402
 from publisher_board_test import (Bench, Crash, Runner, attempts, check, chosen, comments, escalated,  # noqa: E402
                                   failed, fixture, git, retry, short, temporary_cluster)
-from scripts.ticket_board import commit_cache  # noqa: E402
+import psycopg  # noqa: E402
+from scripts.ticket_board import commit_cache, commit_refresh  # noqa: E402
 
 
 def provenance(bench: Bench) -> None:
@@ -274,14 +278,72 @@ def cache_race(bench: Bench) -> None:
     bench.made.append(t)
     fixture.seed_postgres_ticket(board.admin, t, title=f"Fixture {t}", state="analysis", assignee="director")
     check(short(board.act(t, "route", "director", state="in_progress", assignee="app")) == "ok", f"{t} routed")
-    unseen = world.commit([proven], {f"src/{t.lower()}.py": "x\n"}, f"{t}: published, not yet in the cache")
-    git("push", "-q", str(world.public), f"{unseen}:refs/heads/roles/app/{t.lower()}", cwd=world.dev)
-    answer = board.act(t, "submit_to_audit", "app", commit_hash=unseen)
-    check(short(answer) == "ok" and git("--git-dir", str(world.cache), "rev-parse",
-                                        f"refs/remotes/origin/roles/app/{t.lower()}") == unseen,
-          f"the board's refresh-on-miss still brings a published candidate in: {short(answer)}")
-    check(world.cache_main() == proven, f"and leaves the cache's main at the proven {proven[:12]}, not the "
-                                        f"unreviewed {unreviewed[:12]}: {world.cache_main()[:12]}")
+    # SYRD-872: the board only asks. The tenant's listener -- its refresh worker, on a LISTEN connection of its own,
+    # as the listener's database role -- fetches as the account that owns the cache.
+    stop = threading.Event()
+    conn = psycopg.connect(board.listener_url, autocommit=True)
+    worker = threading.Thread(target=commit_refresh.serve, args=(conn, (world.cache,)), kwargs={"stop": stop},
+                              daemon=True)
+    worker.start()
+    started = time.monotonic()
+    while commit_refresh.served((world.cache,))[1] is None and time.monotonic() - started < 60:
+        time.sleep(0.05)
+    try:
+        unseen = world.commit([proven], {f"src/{t.lower()}.py": "x\n"}, f"{t}: published, not yet in the cache")
+        git("push", "-q", str(world.public), f"{unseen}:refs/heads/roles/app/{t.lower()}", cwd=world.dev)
+        answer = board.act(t, "submit_to_audit", "app", commit_hash=unseen)
+        check(short(answer) == "ok" and git("--git-dir", str(world.cache), "rev-parse",
+                                            f"refs/remotes/origin/roles/app/{t.lower()}") == unseen,
+              f"the board's ask, answered by the listener's refresh, brings a published candidate in: {short(answer)}")
+        check(world.cache_main() == proven, f"and leaves the cache's main at the proven {proven[:12]}, not the "
+                                            f"unreviewed {unreviewed[:12]}: {world.cache_main()[:12]}")
+    finally:
+        stop.set()
+        worker.join(timeout=30)
+        conn.close()
+    check(not worker.is_alive(), "the refresh worker stops with its listener")
+    # No listener running: the board refuses within its bound, naming the publication path, and holds nothing
+    # while it waits; another request is served meanwhile.
+    bench.number += 1
+    t2 = f"PGU-{bench.number}"
+    bench.made.append(t2)
+    fixture.seed_postgres_ticket(board.admin, t2, title=f"Fixture {t2}", state="analysis", assignee="director")
+    check(short(board.act(t2, "route", "director", state="in_progress", assignee="app")) == "ok", f"{t2} routed")
+    orphan = world.commit([proven], {f"src/{t2.lower()}.py": "y\n"}, f"{t2}: published, and nobody refreshes")
+    git("push", "-q", str(world.public), f"{orphan}:refs/heads/roles/app/{t2.lower()}", cwd=world.dev)
+    bound = commit_refresh.wait_bound(commit_refresh.served((world.cache,))[1])
+    result: dict = {}
+
+    def submit() -> None:
+        began = time.monotonic()
+        result["answer"] = board.act(t2, "submit_to_audit", "app", commit_hash=orphan)
+        result["took"] = time.monotonic() - began
+
+    real_urlopen = urllib.request.urlopen  # the fixture's client gives up at 5s; the real one at 10s, past the bound
+
+    def patient(request, timeout=None, **kwargs):
+        return real_urlopen(request, timeout=bound + 10, **kwargs)
+    urllib.request.urlopen = patient
+    waiting = threading.Thread(target=submit)
+    waiting.start()
+    time.sleep(min(1.0, bound / 2))
+    held = board.sql(f"SELECT count(*) FROM pg_stat_activity a WHERE a.usename = '{fixture.SERVICE_ROLE}' "
+                     "AND a.datname = current_database() AND (a.xact_start IS NOT NULL OR EXISTS "
+                     "(SELECT 1 FROM pg_locks l WHERE l.pid = a.pid))")
+    began = time.monotonic()
+    read = fixture.get_ticket(board.base, t)
+    served_in = time.monotonic() - began
+    still_waiting = waiting.is_alive()
+    waiting.join(timeout=bound + 30)
+    urllib.request.urlopen = real_urlopen
+    check(still_waiting and held == "0", f"while the board waits for the listener it holds no transaction or lock: "
+                                         f"waiting={still_waiting} service backends holding anything={held}")
+    check(read.get("id") == t and served_in < 1.0, f"and another request is served meanwhile, in {served_in:.2f}s")
+    check("switchyard-publish-candidate" in str(result.get("answer")) and "listener did not bring it in"
+          in str(result.get("answer")), f"with no listener the submission is refused, naming the publication path: "
+                                        f"{result.get('answer')}")
+    check(result.get("took", 1e9) <= bound + 2.0, f"within the bound scaled from the listener's measured fetch: "
+                                                  f"{result.get('took', 0):.2f}s for {bound:.2f}s")
     git("--git-dir", str(world.public), "update-ref", "refs/heads/main", proven)
 
 

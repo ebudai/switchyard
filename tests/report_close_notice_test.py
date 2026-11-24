@@ -23,6 +23,8 @@ Here:
 * SYRD-870: only a recorded release notice that named the report ends that wait -- of two notices, an older one
   naming nothing and a newer one naming it, the close ends quietly; a notice carrying the fix that named nothing does
   not, and the close is told late, once; a pending record the listener cannot read counts as owed;
+* SYRD-871: naming is exact -- a notice naming PGU-30 and PGU-31 does not name PGU-3, and one naming PGU-4 on another
+  upstream board's line does not name this board's PGU-4: each is told late, once;
 * a cancelled report gives its Director's reason, a commit or none; a Done close with no commit, or on a commit
   whether the release contains cannot be told, gives one notice each;
 * SYRD-868, the Director's cases: a no-code close (the board's own no-code submission, then Done) carries the reason
@@ -232,7 +234,7 @@ def test_report_close_notices() -> None:
                 report(up, up_admin, "PGU-10", "sapi", title="Long ago")
                 report(up, up_admin, "PGU-11", "mefp", title="A report of another project")
                 for ticket in ("PGU-12", "PGU-13", "PGU-14", "PGU-15", "PGU-16", "PGU-18", "PGU-19", "PGU-21",
-                               "PGU-22", "PGU-23", "PGU-30"):
+                               "PGU-22", "PGU-23", "PGU-30", "PGU-3", "PGU-4"):
                     report(up, up_admin, ticket, "sapi", title=f"Report {ticket}")
                 check(tell() == [] and rep.sql("SELECT count(*) FROM ticket_board.report_closures;") == "0",
                       "nothing is told, or recorded, while every report is open")
@@ -416,6 +418,22 @@ def test_report_close_notices() -> None:
                 check(tell() == [], "and once only")
                 listener._report_closure_installed = release
 
+                # SYRD-871: a notice names a report by its exact id, on this upstream board's line.
+                end(up, "PGU-3", "done", outside)
+                end(up, "PGU-4", "done", outside)
+                check(tell() == [], "PGU-3, PGU-4: neither release carries it: silent")
+                notice("b" * 40, "Release ... ready for sapi.\nThis release resolves your reports PGU-30, PGU-31 and 4 more "
+                                 "on syrd's board.\nThis release resolves your report PGU-4 on otherboard's board.")
+                listener._report_closure_installed = carrying
+                told = tell()
+                said = {ticket: [m for m in told if f" {ticket} " in m] for ticket in ("PGU-3", "PGU-4")}
+                check(len(said["PGU-3"]) == 1 and installed_line in said["PGU-3"][0],
+                      f"a notice naming PGU-30 and PGU-31 does not name PGU-3: told late, once: {told}")
+                check(len(said["PGU-4"]) == 1 and installed_line in said["PGU-4"][0] and len(told) == 2,
+                      f"a notice naming PGU-4 on otherboard's board does not name syrd's PGU-4: told late, once: {told}")
+                check(tell() == [], "and once only, each")
+                listener._report_closure_installed = release
+
                 reopen(up, "PGU-7")
                 check(tell() == [], "a reopened report is open again: nothing is told")
                 end(up, "PGU-7", "done", inside)
@@ -429,9 +447,9 @@ def test_report_close_notices() -> None:
                                                "WHERE ticket_id = 'PGU-10';") == "false"
                       and rep.sql("SELECT count(*) FROM ticket_board.report_closures WHERE ticket_id = 'PGU-11';") == "0",
                       "a close older than 30 days is recorded, not told; another project's is neither")
-                check(rep.sql("SELECT count(*) FROM ticket_board.report_closures WHERE told;") == "16",
-                      "sixteen closes told in all: PGU-7 twice, PGU-8, PGU-21, PGU-22, PGU-23 and PGU-30's second "
-                      "late, PGU-9, PGU-12 to PGU-16, PGU-18 twice, PGU-19")
+                check(rep.sql("SELECT count(*) FROM ticket_board.report_closures WHERE told;") == "18",
+                      "eighteen closes told in all: PGU-7 twice, PGU-3, PGU-4, PGU-8, PGU-21, PGU-22, PGU-23 and "
+                      "PGU-30's second late, PGU-9, PGU-12 to PGU-16, PGU-18 twice, PGU-19")
                 check(not [line for line in records.lines if line.startswith(("ERROR", "WARNING"))],
                       f"and no pass failed or warned along the way: {records.lines}")
 

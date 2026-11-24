@@ -105,7 +105,8 @@ def announced(conn: Any, ticket_id: str, target_role: str, message: str) -> str:
 
 def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: str,
             ticket_id: str | None = None) -> dict[str, Any]:
-    """force_fresh_context: the database checks the Director's authority and that nothing was decided yet."""
+    """force_fresh_context: the database checks the Director's authority and that nothing was decided yet -- or, for a
+    review parked on a saved conversation its reviewer cannot restore, starts that review fresh (SYRD-873)."""
     if operation not in OPERATIONS or ticket_id is None or set(payload) - {"reason"}:
         raise ValueError("force_fresh_context takes a ticket and a reason")
     with app._pg_connect() as conn:

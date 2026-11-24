@@ -76,6 +76,11 @@ DECLARED: dict[str, OlderCode] = {
     "pgu1058_syrd870_release_notice_message.sql": OlderCode(
         True, "adds a nullable message column to release_notices and replaces note_release_available with the same "
         "signature, storing the message as well; older code reads neither"),
+    "pgu1059_syrd873_review_placement.sql": OlderCode(
+        True, "adds the review-placement and fresh-review tables, a trigger writing only the first, and a balancer "
+        "variant; replaces balance_review_stage, resolve_ticket_context_restore, request_fresh_ticket_context and "
+        "board_stall_runnable with the same signatures. Older code's balancer call now also leaves a review the "
+        "Director placed where it is, and its other calls behave as before"),
 }
 
 

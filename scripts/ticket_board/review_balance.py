@@ -11,6 +11,13 @@ rules what may move: only a review waiting behind its reviewer's current ticket,
 held, blocked or awaited work, never a re-review its reviewer began, and only to an owner holding nothing in the
 stage and not provider-held. A moved ticket is recorded on the ticket and handed to its new owner as a reassignment
 is; the notice still queued for the old owner no longer names the assignee and is dropped.
+
+SYRD-873: live and idle is not enough. A review whose hand-off to that owner would park -- the owner holds the ticket's
+saved conversation from an earlier round and cannot restore it (`session_context.why_not_restorable`: a runtime with no
+verified in-session resume, an unconfirmed binding, another runtime), or a restore of it already failed -- is skipped:
+the delivery would park it, as on MEFP-1234. Read from durable records (the binding, the failed restore) and the
+declared runtime, never from the pane, so the judgement cannot flap. The board itself never moves a review the Director
+placed in the stage (`balance_review_stage_skipping`); a parked hand-off is its owner's current ticket, never taken.
 """
 
 from __future__ import annotations
@@ -18,24 +25,48 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from . import session_context
 from .pull_pickup import why_not_eligible
 
+#: SYRD-873's balancer, which takes the tickets to skip; SYRD-745's is the fallback on an older board.
+SKIPPING = "ticket_board.balance_review_stage_skipping(text, text, timestamptz, text[])"
+PLAIN = "ticket_board.balance_review_stage(text, text, timestamptz)"
 
-def _present(listener: Any, conn: Any) -> bool:
+
+def _present(listener: Any, conn: Any) -> str:
+    """The balancer this board has: SKIPPING, PLAIN, or '' for none."""
     present = getattr(listener, "_review_balance_present", None)
     if present is None:
-        row = conn.execute("SELECT to_regprocedure('ticket_board.balance_review_stage(text, text, timestamptz)') "
-                           "IS NOT NULL AS present").fetchone()
-        present = bool(row and (row["present"] if isinstance(row, dict) else row[0]))
+        present = ""
+        for signature in (SKIPPING, PLAIN):
+            row = conn.execute("SELECT to_regprocedure(%s) IS NOT NULL AS present", (signature,)).fetchone()
+            if row and (row["present"] if isinstance(row, dict) else row[0]):
+                present = signature
+                break
         listener._review_balance_present = present
     return present
+
+
+def would_park(listener: Any, conn: Any, stage: str, role: str) -> list[str]:
+    """The reviews waiting in `stage` with another owner whose hand-off to `role` would park."""
+    rows = conn.execute("SELECT id FROM ticket_board.tickets WHERE state = %s AND assignee <> %s ORDER BY ticket_number",
+                        (stage, role)).fetchall()
+    skipped = []
+    for row in rows:
+        ticket = session_context._text(row["id"] if isinstance(row, dict) else row[0])
+        status = session_context._status(conn, ticket, role)
+        if status.get("parked") or (status.get("context") is not None
+                                    and session_context.why_not_restorable(listener, role, status["context"])):
+            skipped.append(ticket)
+    return skipped
 
 
 def run(listener: Any, conn: Any) -> int:
     """One pass; how many waiting reviews moved. Never fatal to the pass."""
     gate = getattr(listener.activity_gate, "__self__", None)
     stages = [s for s in ((listener.workflow or {}).get("stages") or []) if s.get("kind") == "review" and len(s.get("owners") or []) > 1]
-    if gate is None or not hasattr(gate, "background_work_roles") or not stages or not _present(listener, conn):
+    balancer = _present(listener, conn) if gate is not None and hasattr(gate, "background_work_roles") and stages else ""
+    if not balancer:
         return 0
     from . import work_pause
 
@@ -47,8 +78,12 @@ def run(listener: Any, conn: Any) -> int:
             try:
                 if why_not_eligible(gate, role):
                     continue
-                row = conn.execute("SELECT ticket_board.balance_review_stage(%s, %s, clock_timestamp())",
-                                   (stage["name"], role)).fetchone()
+                if balancer == SKIPPING:
+                    row = conn.execute("SELECT ticket_board.balance_review_stage_skipping(%s, %s, clock_timestamp(), %s)",
+                                       (stage["name"], role, would_park(listener, conn, stage["name"], role))).fetchone()
+                else:
+                    row = conn.execute("SELECT ticket_board.balance_review_stage(%s, %s, clock_timestamp())",
+                                       (stage["name"], role)).fetchone()
             except Exception as exc:  # logged; never fatal to the pass
                 listener.logger.warning("Review balance for %s in %s failed: %s", role, stage["name"], exc)
                 continue

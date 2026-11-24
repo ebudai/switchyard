@@ -324,12 +324,15 @@ def candidate(got: dict) -> None:
           f"a re-review audit already began stays with audit, while another waiting review goes to audit-2: {affinity}")
     check(affinity["current"] == "audit", f"audit's current review is never taken: {affinity}")
     schema = (ROOT / "scripts/ticket_board/schema.sql").read_text()
-    mine = (ROOT / "scripts/ticket_board/migrations/pgu1033_syrd745_review_balance.sql").read_text()
-    # SYRD-795 (pgu1044) changed enforce_declared_ticket_update since, so its copy is that migration's.
+    # SYRD-795 (pgu1044) changed enforce_declared_ticket_update since, so its copy is that migration's; SYRD-873
+    # (pgu1059) made balance_review_stage the skipping balancer's older call, which now does the moving.
     later = (ROOT / "scripts/ticket_board/migrations/pgu1044_syrd795_dispatched_work_queues_in_place.sql").read_text()
-    for name, owner, label in (("enforce_declared_ticket_update", later, "pgu1044"), ("balance_review_stage", mine, "pgu1033")):
+    placement = (ROOT / "scripts/ticket_board/migrations/pgu1059_syrd873_review_placement.sql").read_text()
+    for name, owner, label in (("enforce_declared_ticket_update", later, "pgu1044"),
+                               ("balance_review_stage", placement, "pgu1059"),
+                               ("balance_review_stage_skipping", placement, "pgu1059")):
         start = schema.rindex(f"CREATE OR REPLACE FUNCTION ticket_board.{name}(")
-        check(schema[start:schema.index("\n$$;\n", schema.index("AS $$", start)) + 5] in owner,
+        check(schema[start:schema.index("\n$$;\n", schema.index("$$", start)) + 5] in owner,
               f"schema.sql's {name}, the one a board built from it runs, is {label}'s")
     reassigned = got["reassigned"]
     check(reassigned["delivery"] == "delivered" and reassigned["to_audit_2"] == [reassigned["ticket"]],

@@ -327,6 +327,24 @@ survivor is not automatically a ticket. When audit records something three times
 declines to file it, say on the ticket that this was accepted deliberately — otherwise a
 future reader cannot tell "considered and accepted" from "missed".
 
+**A review stage with two owners balances itself, and your placement wins.** A waiting review goes
+to an idle, empty owner of the same stage. Two exceptions:
+- **A review you move stays where you put it.** It is the board's to move only again after it
+  leaves the stage. That holds even when the owner you chose is busy: the review then waits its
+  turn there.
+- **A review goes to an owner only if the hand-off can be delivered.** An ephemeral reviewer that
+  holds the ticket's saved conversation from an earlier round, on a runtime that cannot resume it
+  (Codex, agy, Hermes), is not a target for it.
+
+**A parked review is yours.** You are told once, naming the ticket, the reviewer, the reason and the
+exact candidate. The stall alert counts it as waiting on you, not as the reviewer stalling. Recover
+it one of two ways:
+- reassign it to another owner of the stage;
+- `ticket-board-write force-fresh-context <ticket> --reason-file PATH`. This sets that reviewer's
+  saved conversation of the ticket aside (kept in the board's record) and hands the review over
+  afresh: the pane is cleared at its next idle moment, never mid-turn, and the review of the exact
+  candidate is delivered once. The earlier findings stay in the comments.
+
 ---
 
 ## Routing and holding

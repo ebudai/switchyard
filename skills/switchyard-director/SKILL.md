@@ -128,7 +128,12 @@ advance it or defer it deliberately - never both nothing.
   right place and the wrong hands - a role that is not running, an implementer
   who is oversubscribed. It is an ordinary operation, not an override, and the
   reason it records is what the next person reads. Moving the ticket somewhere
-  else is `route`'s job, not this one.
+  else is `route`'s job, not this one. In a review stage with two owners, the
+  board's balancer never moves a review you placed this way while it stays in
+  that stage.
+- A review whose hand-off parked (its reviewer cannot restore the ticket's saved
+  conversation) is yours. You are told once. Reassign it to another owner of the
+  stage, or start it fresh with `force-fresh-context <id> --reason-file PATH`.
 - Send it back to the backlog with `defer` when nobody is working it, and
   unassign it, because an assigned ticket sitting in backlog is nudged.
 

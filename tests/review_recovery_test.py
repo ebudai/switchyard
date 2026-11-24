@@ -1,0 +1,495 @@
+#!/usr/bin/env python3
+"""SYRD-873: the review balancer keeps the Director's placement and never hands a review to a reviewer whose hand-off
+would park; a parked review is the Director's, with a fresh review as one supported recovery.
+
+MEFP-1234 (2026-11-24): Audit is owned by audit and audit-2, an ephemeral Codex reviewer, under a pull policy. audit-2
+kicked a candidate back, and its pane was then cleared for another ticket. The resubmission waited behind audit's
+current review, and the balancer moved it to idle audit-2. Its hand-off needed audit-2's saved conversation restored,
+Codex has no verified in-session resume, so the delivery parked it. The Director reassigned it to audit; 23 seconds
+later the balancer moved it back, because audit was busy and audit-2 live and idle.
+
+A production-built board runs here (schema.sql, rbac.sql) with the shipped example workflow under a pull policy, and
+audit-2 added to Audit as MEFP has it: ephemeral, on Codex. The real HTTP server and notify listener run, with the
+real gate reading hook state the real pane hook's writer records. The panes are recording providers: a `/clear`
+starts a new session announced with SessionStart(clear); a reviewer handed a ticket stays busy with it until the test
+ends its turn. All tickets are synthetic.
+
+Main runs first, from a git archive: the resubmission goes to audit-2 and parks, and the Director's reassignment of
+another review to busy audit is undone. Then this tree:
+- **Not eligible:** the resubmission stays with audit; audit-2 is sent nothing about it.
+- **Placement kept:** a review the Director moves to busy audit stays there while audit-2 is idle and empty, and is
+  delivered to audit, once, when audit frees up.
+- **Parked is the Director's:** an older listener's balancer call (which skips nothing) moving the resubmission to
+  audit-2 parks it, with one notice naming the ticket, the reviewer, the reason, the exact candidate and both
+  recoveries; it is counted as the Director's next action, and the balancer never moves it to audit once audit is free.
+- **Fresh review:** `force-fresh-context` sets audit-2's records of it aside (kept), and the review is handed to audit-2
+  afresh -- cleared only once idle, never while busy -- once, naming the exact candidate. Stage, owner and candidate
+  are unchanged.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import logging
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+#: Main's commit this ticket is cut from: the before-run's tree.
+BEFORE = "45f0d9f7fc2ee079671996894c3a7ffd4cc80fd3"
+PANE_ENV_PREFIXES = ("TICKET_BOARD_", "PGU_TICKET_BOARD_", "DIRECTORCTL", "SWITCHYARD_")
+ROLES = ("director", "main", "app", "ops", "audit", "audit-2", "inspector")
+CANDIDATE = "c873" + "0" * 36
+CHECKS = 0
+
+
+def check(condition: object, detail: object) -> None:
+    global CHECKS
+    if not condition:
+        raise AssertionError(f"FAILED CHECK: {detail}")
+    CHECKS += 1
+
+
+def scenario(root: Path) -> dict:
+    for extra in (str(root), str(root / "tests")):
+        if extra not in sys.path:
+            sys.path.insert(0, extra)
+    for key in [key for key in os.environ if key.startswith(PANE_ENV_PREFIXES) or key in ("TMUX", "TMUX_PANE")]:
+        del os.environ[key]
+    from tmux_bus_isolation import isolate_tmux_bus
+
+    isolate_tmux_bus()
+    import ticket_board_write_api_test as fixture
+    from pull_claim_postgres_test import build
+    from pull_pickup_test import Gate, proc_entry
+    from pull_scheduling_policy_test import pull_document
+    from ticket_context_restore_test import HOOK_MODULE
+    from scripts.ticket_board import session_context
+    from scripts.ticket_board.notify_listener import PaneHookStateStore, TicketBoardNotifyListener
+    from scripts.ticket_board.peer_identity import SessionIdentity
+    from temporary_cluster import temporary_cluster
+
+    session_context.BIND_SECONDS = 1.5
+    session_context.CONFIRM_SECONDS = 1.5
+    session_context.RESUME_WAIT_SECONDS = 0.6
+    from scripts.ticket_board.peer_identity import read_process
+
+    targets = {role: f"pgu-{role}:0.0" for role in ROLES}
+    by_target = {target: role for role, target in targets.items()}
+    # Every role a live stand-in provider process, registered as a pane registers it (the listener types into none
+    # that is not); the gate and the hook records name the same process.
+    sleepers = {role: subprocess.Popen(["sleep", "3600"]) for role in ROLES}
+    identities = {role: (p.pid, read_process(p.pid).start_time) for role, p in sleepers.items()}
+    seen: dict = {}
+    with temporary_cluster(prefix="s873", shutdown="immediate") as cluster:
+        admin = build(cluster, "board", "fresh")
+        tmp = Path(tempfile.mkdtemp(prefix="syrd873."))
+        app = fixture.TicketBoardApp(cluster.root / "f", cluster.root / "a", project="pgu", ticket_prefix="PGU",
+                                     database_url=fixture.conninfo(cluster.socket_dir, cluster.port, "board", fixture.SERVICE_ROLE))
+        server = fixture.TicketBoardServer(("127.0.0.1", 0), app, director_notifier=fixture.QuietNotifier())
+        fixture.TEST_WRITE_TOKEN = server.write_token
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        try:
+            def sql(statement: str) -> str:
+                return fixture.psql(admin, statement).strip()
+
+            def act(ticket: str, op: str, who: str, **body):
+                return fixture.post_json(base, f"/api/tickets/{ticket}/actions/{op}", body, caller=who)
+
+            def where(ticket: str) -> str:
+                return sql(f"SELECT state || '/' || assignee FROM ticket_board.tickets WHERE id='{ticket}';")
+
+            doc = pull_document()
+            doc["project"] = "pgu"
+            audit = next(r for r in doc["roles"] if r["name"] == "audit")
+            doc["roles"].append({**audit, "name": "audit-2", "label": "Audit 2", "target": targets["audit-2"],
+                                 "slot": None, "runtime": "codex", "ephemeral": True, "template_role": "audit"})
+            for role in doc["roles"]:
+                if role["name"] in targets:
+                    role["target"] = targets[role["name"]]
+                elif role.get("target"):
+                    role["target"] = role["target"].replace("cerulean-", "pgu-", 1)
+            for stage in doc["stages"]:
+                if stage["name"] == "audit":
+                    stage["owners"] = ["audit", "audit-2"]
+            for transition in doc["transitions"]:
+                if transition["from"] == "audit" and "audit" in transition["actors"]:
+                    transition["actors"] = sorted(set(transition["actors"]) | {"audit-2"})
+            app.apply_workflow(doc, expected_revision=0, dry_run=False, caller_role="director")
+            runtimes = {r["name"]: r.get("runtime") for r in doc["roles"]}
+            for role, (pid, start) in identities.items():
+                sql("INSERT INTO ticket_board.role_runtime_assignments (role, runtime, actual_target, worktree, session_dir, "
+                    f"process_pid, process_start_time, process_uid) VALUES ('{role}', '{runtimes[role]}', '{targets[role]}', "
+                    f"'/work/{role}', '/s/{role}', {pid}, {start}, {os.getuid()});")
+
+            state_dir = tmp / "state"
+            gate = Gate(state_store=PaneHookStateStore(state_dir))
+            gate.proc_root = tmp / "proc"
+            gate.role_targets = dict(targets)
+            gate.busy = set()
+            gate.role_identities = {}
+            for role, (pid, start) in identities.items():
+                proc_entry(gate.proc_root, pid, start)
+                gate.role_identities[role] = SessionIdentity(pid, start)
+            sent: list = []
+            counter = {"n": 0}
+
+            def session_start(role: str, session_id: str, source: str) -> None:
+                pid, start = identities[role]
+                HOOK_MODULE._write_state(state_dir, targets[role], "idle", source="claude.SessionStart", session_start={
+                    "session_id": session_id, "source": source, "at": time.time(), "pane_pid": pid,
+                    "pane_start_time": start, "checkout": {"cwd": f"/work/{role}", "branch": "topic", "head": "d" * 40}})
+
+            def idle(role: str) -> None:
+                gate.busy.discard(targets[role])
+                HOOK_MODULE._write_state(state_dir, targets[role], "idle", source="claude.Stop",
+                                         checkout={"cwd": f"/work/{role}", "branch": "topic", "head": "d" * 40,
+                                                   "at": time.time()})
+
+            def busy(role: str) -> None:
+                gate.busy.add(targets[role])
+                HOOK_MODULE._write_state(state_dir, targets[role], "busy", source="claude.UserPromptSubmit")
+
+            def panes(target: str, text: str) -> None:
+                role = by_target.get(target)
+                sent.append((role, text))
+                if role in (None, "director"):
+                    return
+                if text == "/clear":
+                    counter["n"] += 1
+                    session_start(role, f"{role}-s{counter['n']}", "clear")
+                elif text.startswith("/"):
+                    pass  # a /resume: Codex has none, and nothing here answers one
+                elif role in ("audit", "audit-2") and " -- " in text:
+                    busy(role)  # a reviewer handed a ticket reviews it until its turn ends
+                else:
+                    idle(role)
+
+            for role in ROLES:
+                session_start(role, f"{role}-launch", "startup")
+
+            def listener() -> TicketBoardNotifyListener:
+                made = TicketBoardNotifyListener(
+                    conninfo=fixture.conninfo(cluster.socket_dir, cluster.port, "board", "ticket_board_listener"),
+                    sender=panes, activity_gate=gate.is_working, target_exists=lambda _t: True,
+                    submission_witness=lambda *_a: True, poll_seconds=0, session_clear_settle_seconds=0,
+                    project="pgu", logger=logging.getLogger("syrd873"))
+                made.role_targets = dict(targets)
+                made.unresolved_turn_grace_seconds = 3600
+                return made
+
+            current = listener()
+
+            def settle(count: int = 6) -> None:
+                for _ in range(count):
+                    current.listen_once(max_notifications=20)
+                    time.sleep(0.2)
+
+            def handed(role: str, ticket: str, since: int = 0) -> list:
+                return [text for r, text in sent[since:] if r == role and text.startswith(ticket + " -- ")]
+
+            def to_audit(ticket: str, author: str) -> None:
+                sql(f"SET ticket_board.caller_role = 'director'; UPDATE ticket_board.tickets SET commit_exempt = true "
+                    f"WHERE id = '{ticket}';")
+                act(ticket, "submit_to_inspection", author)
+                if where(ticket).startswith("inspection/"):
+                    act(ticket, "inspector_sign_off", "inspector")
+
+            def seeded(ticket: str, author: str) -> None:
+                fixture.seed_postgres_ticket(admin, ticket, title=ticket, state="in_progress", assignee=author,
+                                             commit_exempt=True)
+
+            # History: audit-2 reviews PGU-1 (its first hand-off binds its conversation) and kicks it back.
+            seeded("PGU-1", "app")
+            to_audit("PGU-1", "app")
+            act("PGU-1", "reassign", "director", assignee="audit-2", reason="audit-2 reviews it")
+            settle()
+            seen["history_bound"] = sql("SELECT coalesce((SELECT state FROM ticket_board.ticket_role_contexts "
+                                        "WHERE ticket_id='PGU-1' AND role='audit-2'), '');")
+            act("PGU-1", "audit_kick_back", "audit-2", reason="Two findings in the citations.")
+            idle("audit-2")
+            # audit-2 then reviews PGU-2, which clears its pane for it: PGU-1's conversation is no longer the pane's.
+            seeded("PGU-2", "ops")
+            to_audit("PGU-2", "ops")
+            act("PGU-2", "reassign", "director", assignee="audit-2", reason="audit-2 reviews it")
+            settle()
+            act("PGU-2", "audit_sign_off", "audit-2", text="Audited.")
+            idle("audit-2")
+            # audit takes PGU-3 and is busy reviewing it.
+            seeded("PGU-3", "main")
+            to_audit("PGU-3", "main")
+            settle(3)
+            seen["audit_current"] = where("PGU-3")
+            # A placement ends when its ticket leaves the stage: PGU-6, placed by the Director with audit, kicked back
+            # and resubmitted, is the board's to balance again -- to idle audit-2, never handed it, so a first hand-off.
+            busy("audit-2")
+            seeded("PGU-6", "ops")
+            to_audit("PGU-6", "ops")
+            act("PGU-6", "reassign", "director", assignee="audit-2", reason="audit-2 reviews it")
+            act("PGU-6", "reassign", "director", assignee="audit", reason="audit takes it after its current review")
+            act("PGU-6", "audit_kick_back", "audit", reason="One finding.")
+            to_audit("PGU-6", "ops")
+            mark = len(sent)
+            idle("audit-2")
+            settle(4)
+            seen["stale"] = {"where": where("PGU-6"), "to_audit_2": handed("audit-2", "PGU-6", mark)}
+            if where("PGU-6") == "audit/audit-2":
+                act("PGU-6", "audit_sign_off", "audit-2", text="Audited.")  # which frees ops for PGU-4
+            elif where("PGU-6") == "audit/audit":
+                act("PGU-6", "audit_sign_off", "audit", text="Audited.")
+            idle("audit-2")
+
+            # 1. The rework of PGU-1, its exact candidate recorded, comes back to Audit while audit is busy.
+            act("PGU-1", "add_comment", "app", text="Reworked both findings.")
+            to_audit("PGU-1", "app")
+            sql(f"SET session_replication_role = replica; UPDATE ticket_board.tickets SET commit_hash = '{CANDIDATE}' "
+                "WHERE id = 'PGU-1';")
+            mark = len(sent)
+            idle("audit-2")
+            settle(6)
+            time.sleep(session_context.CONFIRM_SECONDS + 0.3)
+            settle(3)
+            director = [text for role, text in sent if role == "director" and "PGU-1" in text and "restored" in text]
+            seen["rework"] = {"where": where("PGU-1"), "to_audit_2": [t for r, t in sent[mark:] if r == "audit-2"],
+                              "parked": sql("SELECT ticket_board.ticket_context_parked('PGU-1', 'audit-2');") == "t",
+                              "director": director}
+
+            # 2. The Director places a review with busy audit while audit-2 is idle and empty. On main that is MEFP's own
+            # sequence: PGU-1, parked with audit-2, reassigned to audit by the Director.
+            if where("PGU-1") == "audit/audit-2":
+                act("PGU-1", "reassign", "director", assignee="audit",
+                    reason="audit-2's hand-off cannot be delivered; audit takes it after its current review")
+                idle("audit-2")
+                settle(4)
+                seen["placed"] = {"ticket": "PGU-1", "after": where("PGU-1")}
+                return seen
+            # PGU-4 is placed by the Director with busy audit. It was never handed to audit-2 (busy while the Director
+            # moved it), so audit-2, idle and empty, could take it as a first hand-off.
+            busy("audit-2")
+            seeded("PGU-4", "ops")
+            to_audit("PGU-4", "ops")
+            act("PGU-4", "reassign", "director", assignee="audit-2", reason="audit-2 reviews it")
+            act("PGU-4", "reassign", "director", assignee="audit",
+                reason="audit-2's hand-off cannot be delivered; audit takes it after its current review")
+            mark = len(sent)
+            idle("audit-2")
+            settle(4)
+            seen["placed"] = {"ticket": "PGU-4", "stale": seen.pop("stale", None), "after": where("PGU-4"),
+                              "to_audit_2": handed("audit-2", "PGU-4", mark), "to_audit": handed("audit", "PGU-4", mark)}
+
+            if sql("SELECT to_regprocedure('ticket_board.balance_review_stage_skipping(text, text, timestamptz, text[])') "
+                   "IS NOT NULL;") == "t":
+                # 3. An older listener's balancer call -- balance_review_stage, which skips nothing, as during an upgrade
+                # or a rollback -- moves PGU-1 to idle audit-2. Its hand-off parks, and the Director is told, once.
+                mark = len(sent)
+                older = json.loads(sql("SET ROLE ticket_board_listener; SELECT ticket_board.balance_review_stage("
+                                       "'audit', 'audit-2', clock_timestamp())::text;").splitlines()[-1])
+                settle(4)
+                time.sleep(session_context.CONFIRM_SECONDS + 0.3)
+                settle(3)
+                notices = [text for role, text in sent[mark:] if role == "director" and "PGU-1's review" in text]
+                stall = json.loads(sql("SET ROLE ticket_board_listener; SELECT coalesce(json_agg(json_build_object("
+                                       "'role', role, 'why', why_not)), '[]')::text FROM ticket_board.board_stall_runnable("
+                                       "clock_timestamp()) WHERE ticket_id = 'PGU-1';").splitlines()[-1])
+                # audit signs off PGU-3 and is idle and empty: PGU-4, placed with it, is its next review, delivered
+                # once; PGU-1, parked with audit-2 (and not placed), is not balanced to it either.
+                act("PGU-3", "audit_sign_off", "audit", text="Audited.")
+                idle("audit")
+                settle(4)
+                pgu4_to_audit = handed("audit", "PGU-4")
+                if where("PGU-4") == "audit/audit":  # audit reviews PGU-4 and is idle and empty once more
+                    act("PGU-4", "audit_sign_off", "audit", text="Audited.")
+                idle("audit")
+                settle(4)
+                seen["parked"] = {"older": older, "where": where("PGU-1"), "notices": notices, "stall": stall,
+                                  "to_audit_2": [t for r, t in sent[mark:] if r == "audit-2"],
+                                  "pgu4_to_audit": pgu4_to_audit, "audit_after": handed("audit", "PGU-1", mark),
+                                  "parked": sql("SELECT ticket_board.ticket_context_parked('PGU-1', 'audit-2');") == "t"}
+                # 4. The fresh review: never while audit-2 is busy; once it is idle, cleared, then handed it, once.
+                busy("audit-2")
+                mark = len(sent)
+                try:
+                    result = act("PGU-1", "force_fresh_context", "director", reason="Codex cannot resume; review afresh")
+                except AssertionError as exc:  # a refusal is an answer
+                    result = {"refused": str(exc)[:300]}
+                settle(3)
+                while_busy = [t for r, t in sent[mark:] if r == "audit-2"]
+                idle("audit-2")
+                settle(6)
+                seen["fresh"] = {
+                    "result": result, "while_busy": while_busy, "after": [t for r, t in sent[mark:] if r == "audit-2"],
+                    "where": where("PGU-1"),
+                    "commit": sql("SELECT commit_hash FROM ticket_board.tickets WHERE id='PGU-1';"),
+                    "parked": sql("SELECT ticket_board.ticket_context_parked('PGU-1', 'audit-2');") == "t",
+                    "archive": json.loads(sql("SELECT coalesce(json_agg(json_build_object('role', role, 'candidate', "
+                                              "candidate, 'sessions', set_aside->'contexts', 'restores', "
+                                              "jsonb_array_length(set_aside->'restores'))), '[]')::text "
+                                              "FROM ticket_board.fresh_review_archive;")),
+                    "bound": sql("SELECT coalesce((SELECT session_id || '/' || state FROM ticket_board.ticket_role_contexts "
+                                 "WHERE ticket_id='PGU-1' AND role='audit-2'), '');"),
+                    "comment": [c["text"] for c in app.get_ticket("PGU-1")["comments"] if "fresh review" in c["text"]]}
+                settle(3)
+                seen["fresh"]["later"] = [t for r, t in sent[mark:] if r == "audit-2"]
+        finally:
+            server.shutdown()
+            server.server_close()
+            shutil.rmtree(tmp, ignore_errors=True)
+            for sleeper in sleepers.values():
+                sleeper.kill()
+                sleeper.wait()
+    return seen
+
+
+def would_park_unit() -> list:
+    """`review_balance.would_park` against a stand-in board: which waiting reviews the listener skips for audit-2."""
+    for extra in (str(ROOT), str(ROOT / "tests")):
+        if extra not in sys.path:
+            sys.path.insert(0, extra)
+    from types import SimpleNamespace
+    from scripts.ticket_board import review_balance
+
+    bound = {"state": "bound", "runtime": "claude", "session_id": "s"}
+    statuses = {
+        "PGU-1": {"parked": True, "context": bound},                       # a restore failed, on a runtime that resumes
+        "PGU-2": {"parked": False, "context": {**bound, "runtime": "codex"}},  # a conversation it cannot restore
+        "PGU-3": {"parked": False, "context": bound},                       # one it can
+        "PGU-4": {"parked": False, "context": None},                        # never handed to it: a first hand-off
+    }
+
+    class Rows:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def fetchall(self):
+            return self.rows
+
+        def fetchone(self):
+            return self.rows[0]
+
+    class Conn:
+        def execute(self, statement, params=()):
+            if "FROM ticket_board.tickets" in statement:
+                return Rows([{"id": ticket} for ticket in statuses])
+            return Rows([{"s": json.dumps(statuses[params[0]])}])
+
+    runtimes = {"audit-2": "claude"}
+    skipped = review_balance.would_park(SimpleNamespace(role_runtimes=runtimes), Conn(), "audit", "audit-2")
+    runtimes["audit-2"] = "codex"
+    return [skipped, review_balance.would_park(SimpleNamespace(role_runtimes=runtimes), Conn(), "audit", "audit-2")]
+
+
+def tree_at(commit: str, into: Path) -> Path:
+    archive = subprocess.run(["git", "-C", str(ROOT), "archive", commit, "scripts", "examples", "tests"],
+                             check=True, capture_output=True).stdout
+    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+        tar.extractall(into, filter="data")
+    shutil.copy2(Path(__file__).resolve(), into / "tests" / Path(__file__).name)  # this scenario, on that tree
+    return into
+
+
+def run(root: Path) -> dict:
+    env = {k: v for k, v in os.environ.items() if not k.startswith(PANE_ENV_PREFIXES)}
+    child = subprocess.run([sys.executable, str(root / "tests" / Path(__file__).name), "--scenario", str(root)],
+                           capture_output=True, text=True, timeout=900, stdin=subprocess.DEVNULL,
+                           env={**env, "PYTHONDONTWRITEBYTECODE": "1"})
+    assert child.returncode == 0, child.stdout[-2000:] + child.stderr[-4000:]
+    return json.loads(child.stdout.strip().splitlines()[-1])
+
+
+def before(got: dict) -> None:
+    rework = got["rework"]
+    check(got["history_bound"] == "bound", f"main: audit-2's first review of PGU-1 bound its conversation: {got}")
+    check(rework["where"] == "audit/audit-2" and rework["parked"] and len(rework["director"]) == 1,
+          f"main: the resubmission is balanced to idle audit-2 and its hand-off parks (MEFP-1234): {rework}")
+    placed = got["placed"]
+    check(placed == {"ticket": "PGU-1", "after": "audit/audit-2"},
+          f"main: the Director's reassignment of parked PGU-1 to busy audit is undone by the balancer: {placed}")
+
+
+def candidate(got: dict) -> None:
+    check(got["history_bound"] == "bound" and got["audit_current"] == "audit/audit",
+          f"audit-2's first review of PGU-1 bound its conversation; audit is reviewing PGU-3: {got}")
+    rework = got["rework"]
+    check(rework["where"] == "audit/audit" and rework["to_audit_2"] == [] and not rework["parked"]
+          and rework["director"] == [],
+          f"the resubmission stays with audit: idle audit-2 cannot restore its saved conversation of it, so it is not "
+          f"a target, is sent nothing, and nothing parks: {rework}")
+    placed = got["placed"]
+    check(placed["stale"]["where"] == "audit/audit-2" and len(placed["stale"]["to_audit_2"]) == 1,
+          f"a placement ends when its ticket leaves the stage: PGU-6, placed with audit, kicked back and resubmitted, "
+          f"is balanced to idle audit-2 and handed to it: {placed['stale']}")
+    check(placed["ticket"] == "PGU-4" and placed["after"] == "audit/audit" and placed["to_audit_2"] == [],
+          f"PGU-4, placed by the Director with busy audit, stays with audit while audit-2 is idle and empty and could "
+          f"take it: {placed}")
+    check(placed["to_audit"] == [], f"busy audit is not interrupted with it: {placed}")
+    parked = got["parked"]
+    check(parked["older"].get("moved") is True and parked["older"].get("ticket") == "PGU-1",
+          f"an older listener's call, skipping nothing, still moves the waiting PGU-1 to audit-2: {parked['older']}")
+    check(parked["where"] == "audit/audit-2" and parked["parked"] and parked["to_audit_2"] == [],
+          f"so its hand-off parks: audit-2 is sent nothing, no /resume, no clear: {parked}")
+    check(len(parked["notices"]) == 1, f"the Director is told once: {parked['notices']}")
+    notice = parked["notices"][0] if parked["notices"] else ""
+    for part in ("PGU-1's review by audit-2 is parked", "codex has no verified in-session resume", CANDIDATE,
+                 "reassign PGU-1 to another owner of audit", "force-fresh-context PGU-1"):
+        check(part in notice, f"the notice names {part!r}: {notice}")
+    check(parked["stall"] == [{"role": "director", "why": "its next action is the Director's"}],
+          f"the stall clock counts it as the Director's next action, not audit-2 stalling: {parked['stall']}")
+    check(len(parked["pgu4_to_audit"]) == 1, f"audit, free again, is handed PGU-4 -- placed with it -- once: {parked}")
+    check(parked["where"] == "audit/audit-2" and parked["audit_after"] == [],
+          f"and, once audit is idle and empty, parked PGU-1 is not balanced to it: its recovery is the Director's: "
+          f"{parked}")
+    fresh = got["fresh"]
+    check(fresh["result"].get("fresh_review") is True and fresh["result"].get("candidate") == CANDIDATE,
+          f"force-fresh-context starts a fresh review of the exact candidate: {fresh['result']}")
+    check(fresh["while_busy"] == [], f"nothing reaches busy audit-2: no clear, no ticket: {fresh['while_busy']}")
+    after = fresh["after"]
+    check(after[:1] == ["/clear"] and len([t for t in after if t.startswith("PGU-1 -- ")]) == 1
+          and not any(t.startswith("/resume") for t in after),
+          f"once idle, audit-2 is cleared and then handed PGU-1, once, never resumed: {after}")
+    handoff = next((t for t in after if t.startswith("PGU-1 -- ")), "")
+    check("fresh review of the exact candidate " + CANDIDATE in handoff,
+          f"the hand-off names the exact candidate: {handoff}")
+    check(fresh["where"] == "audit/audit-2" and fresh["commit"] == CANDIDATE and not fresh["parked"],
+          f"stage, owner and candidate are unchanged, and it is no longer parked: {fresh}")
+    check(len(fresh["archive"]) == 1 and fresh["archive"][0]["role"] == "audit-2"
+          and fresh["archive"][0]["candidate"] == CANDIDATE and fresh["archive"][0]["restores"] == 1
+          and (fresh["archive"][0]["sessions"] or [{}])[0].get("session_id", "").startswith("audit-2-s"),
+          f"audit-2's records of PGU-1's old conversation are set aside, kept whole: {fresh['archive']}")
+    check(fresh["bound"].endswith("/bound") and not fresh["bound"].startswith(
+          (fresh["archive"][0]["sessions"] or [{}])[0].get("session_id", "?") + "/"),
+          f"the fresh review is bound to its own new conversation: {fresh['bound']}")
+    check(len(fresh["comment"]) == 1 and "Codex cannot resume" in fresh["comment"][0],
+          f"the fresh review is recorded on the ticket with the Director's reason: {fresh['comment']}")
+    check(fresh["later"] == fresh["after"], f"and nothing more is sent: delivered once: {fresh['later']}")
+
+
+def main() -> int:
+    if len(sys.argv) == 3 and sys.argv[1] == "--scenario":
+        print(json.dumps(scenario(Path(sys.argv[2]))))
+        return 0
+    if os.environ.get("SYRD873_MUTATION_SKIP_BEFORE") != "1":  # a mutant changes this tree only
+        with tempfile.TemporaryDirectory(prefix="syrd873-before.", dir="/tmp") as tmp:
+            before(run(tree_at(BEFORE, Path(tmp) / "before")))
+    claude, codex = would_park_unit()
+    check(claude == ["PGU-1", "PGU-2"],
+          f"for a Claude audit-2: a failed restore and a conversation from another runtime are skipped; one it can "
+          f"resume and a first hand-off are not: {claude}")
+    check(codex == ["PGU-1", "PGU-2", "PGU-3"],
+          f"for a Codex audit-2, which resumes no saved conversation: every review it holds one of is skipped, and only "
+          f"a first hand-off is not: {codex}")
+    candidate(run(ROOT))
+    print(f"review_recovery_test: {CHECKS} checks ok")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

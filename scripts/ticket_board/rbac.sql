@@ -591,6 +591,7 @@ GRANT EXECUTE ON FUNCTION ticket_board.notify_pull_pinned_rework_strands(jsonb, 
 
 -- SYRD-745: the listener hands a waiting review to an idle owner of the same review stage.
 GRANT EXECUTE ON FUNCTION ticket_board.balance_review_stage(text, text, timestamptz) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.balance_review_stage_skipping(text, text, timestamptz, text[]) TO ticket_board_listener;  -- SYRD-873
 
 -- SYRD-668: last, after every grant above. The board's own principals are the
 -- role users this file creates and its service and listener, and nothing is

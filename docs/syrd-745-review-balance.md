@@ -61,6 +61,10 @@ listener.
 - The new owner is handed it as a reassignment is. The notice still queued for the old owner no longer names the
   assignee, so it is dropped.
 
+**SYRD-873 additions** (docs/syrd-873-review-recovery.md):
+- a review the Director placed in the stage is never moved;
+- nor is one given to an owner whose hand-off of it would park.
+
 **What it does not change:**
 - Where a submission first lands: still the first owner.
 - A busy, held or stopped second reviewer is never given anything.

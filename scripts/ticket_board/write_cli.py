@@ -768,7 +768,8 @@ def _build_parser() -> argparse.ArgumentParser:
     add_free_text_argument(audit_return, "--reason", required=True, help="why the return goes there")
     fresh_context = subparsers.add_parser(
         "force-fresh-context",
-        help="Director: start a ticket in a fresh conversation at a package boundary, before its hand-off (SYRD-626)",
+        help="Director: start a ticket in a fresh conversation: at a package boundary, before its hand-off (SYRD-626), "
+             "or a review parked on a saved conversation its reviewer cannot restore (SYRD-873)",
     )
     fresh_context.add_argument("ticket_id")
     add_free_text_argument(fresh_context, "--reason", required=True, help="why this ticket starts fresh")

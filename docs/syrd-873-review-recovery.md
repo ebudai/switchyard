@@ -105,6 +105,17 @@ provider processes registered as panes register them. All tickets are synthetic.
     hand-off naming the candidate, never a `/resume`;
   - the old records are archived, and the new conversation is bound.
 
+- **What a placement is** (SYRD-874):
+  - PGU-9 is moved to `audit-2` by the balancer alone. It waits there behind `audit-2`'s current review, which a
+    non-Director change through the balancer's window put there. Once `audit` is idle and empty, PGU-9 is balanced on
+    to `audit` and handed to it once. Neither move leaves a row in `review_placements`.
+  - PGU-10 is reassigned back to busy `audit` through the board UI's delegated authority (a real minted and consumed
+    grant, caller the User, actor the Director). That records the Director's placement, and the balancer keeps PGU-10
+    with `audit` while `audit-2` is idle and empty.
+  - Two mutants each fail by an assertion, and each also fails on the behaviour check alone (with the row checks
+    off): every actor's change counted as a placement, and the delegated actor dropped from the trigger's
+    `coalesce`.
+
 `review_balance.would_park` is also checked against a stand-in board, for a Claude reviewer and a Codex reviewer.
 
 **Mutation:** 17 mutants, each killed by an assertion. Two clauses that nothing could reach were removed: a placement's

@@ -327,8 +327,9 @@ within one, the hand-offs still queued for that stage and owner are retired:
 never delivered, traced as dropped (`left_its_entry`). A notice deferred while
 its owner was busy therefore can't come back as a second hand-off if the
 ticket returns to the same owner. A hand-off already typed into its pane, with
-its delivery proof still open, is left to that proof. See
-docs/syrd-881-handoff-per-entry.md.
+its delivery proof still open, is left to that proof. A copy the listener had
+already claimed is sent only if its queued row is still there under the
+delivery hold (SYRD-883). See docs/syrd-881-handoff-per-entry.md.
 
 The listener no longer screen-scrapes pane output. Each agent CLI must run
 `scripts/ticket-board-pane-idle-hook` from its lifecycle hooks so the listener

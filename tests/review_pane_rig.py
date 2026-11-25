@@ -222,7 +222,7 @@ def review_board(root: Path, prefix: str, *, extra_reviewers: tuple[str, ...] = 
             yield SimpleNamespace(
                 sql=sql, act=act, where=where, settle=settle, handed=handed, to_audit=to_audit, seeded=seeded,
                 idle=idle, busy=busy, hold=hold, release=release, stop=stop, start=start, comments=comments,
-                session_start=session_start,
+                session_start=session_start, listener=current,
                 sent=sent, app=app, cluster=cluster, fixture=fixture, session_context=session_context, admin=admin)
         finally:
             server.shutdown()

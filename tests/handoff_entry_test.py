@@ -28,6 +28,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 #: Main's commit this ticket is cut from: the before-run's tree.
 BEFORE = "f7e7731a6619c6159a3094196639217374808cce"
+#: Main as SYRD-883 is cut from it: SYRD-881's retirement, and the race between a claim and its hold.
+BEFORE_883 = "a5fc71b49536f481c3652cb5043b68e9b7be3a00"
 from review_pane_rig import PANE_ENV_PREFIXES  # noqa: E402  (beside this file)
 
 CHECKS = 0
@@ -100,6 +102,35 @@ def scenario(root: Path) -> dict:
         settle(3)
         seen["owner_change"] = {"landed": where("PGU-2"), **freed_twice("PGU-2", since)}
         act("PGU-2", "audit_sign_off", "audit", text="Audited.")
+        rig.idle("audit")
+        rig.idle("audit-2")
+
+        # 4. SYRD-883: claimed, then the ticket left and came back before the hold. audit is free, so the listener
+        # claims PGU-4's hand-off and goes to deliver it; between that claim and its hold (a seam on the hold, never a
+        # sleep) audit kicks PGU-4 back and the rework returns to it: the claimed row is retired, a new one queued.
+        since = sql("SELECT clock_timestamp()::text;")
+        rig.seeded("PGU-4", "main")
+        rig.to_audit("PGU-4", "main")
+        eligibility = rig.listener.eligibility
+        real_hold, moved = eligibility.hold_for_delivery, []
+
+        def moved_before_the_hold(conn, connect, ticket_id, target_role, payload=""):
+            if ticket_id == "PGU-4" and not moved:
+                moved.append(act("PGU-4", "audit_kick_back", "audit", reason="One finding."))
+                rig.to_audit("PGU-4", "main")
+                moved.append(where("PGU-4"))
+            return real_hold(conn, connect, ticket_id, target_role, payload)
+
+        eligibility.hold_for_delivery = moved_before_the_hold
+        try:
+            settle(3)
+        finally:
+            eligibility.hold_for_delivery = real_hold
+        seen["claimed"] = {"moved": [str(m)[:60] for m in moved], **freed_twice("PGU-4", since),
+                           "retired": sql("SELECT coalesce(string_agg(busy_reason, ','), '') FROM "
+                                          "ticket_board.notification_trace WHERE ticket_id = 'PGU-4' AND event = 'drop';")}
+        act("PGU-4", "audit_sign_off", "audit", text="Audited.")
+        rig.idle("audit")
 
         # 3. A hand-off already typed into its pane, its delivery proof open (SYRD-565: unsubmitted), is that proof's
         # to settle -- it tells the Director to clear the text left in the composer -- so a move never retires it.
@@ -149,16 +180,39 @@ def common(got: dict, tree: str) -> None:
           f"proof: {got['typed']}")
 
 
+def claimed_common(got: dict, tree: str) -> dict:
+    c = got["claimed"]
+    check(len(c["moved"]) == 2 and c["moved"][1] == "audit/audit" and c["where"] == "audit/audit",
+          f"{tree}: between the claim and the hold, PGU-4 left audit and came back to it: {c}")
+    check(c["first"] >= 1, f"{tree}: audit is handed PGU-4's entry: {c}")
+    return c
+
+
 def before(got: dict) -> None:
-    common(got, "main")
+    common(got, "main before SYRD-881")
     for case in ("reentry", "owner_change"):
         c = got[case]
-        check(c["after_turn"] == 2, f"main, {case}: audit is handed this one entry twice -- the hand-off left from "
-                                    f"before the ticket left, and the new one (SYRD-881): {c}")
+        check(c["after_turn"] == 2, f"main before SYRD-881, {case}: audit is handed this one entry twice -- the hand-off "
+                                    f"left from before the ticket left, and the new one (SYRD-881): {c}")
+
+
+def before_883(got: dict) -> None:
+    common(got, "main before SYRD-883")
+    for case in ("reentry", "owner_change"):
+        check(got[case]["after_turn"] == 1, f"main before SYRD-883, {case}: SYRD-881 already delivers it once: {got[case]}")
+    c = claimed_common(got, "main before SYRD-883")
+    check(c["after_turn"] == 2, f"main before SYRD-883: the copy claimed before PGU-4 left is sent beside the new "
+                                f"entry's own hand-off: two hand-offs for one entry: {c}")
 
 
 def candidate(got: dict) -> None:
     common(got, "this tree")
+    c = claimed_common(got, "this tree")
+    check(c["first"] == 1 and c["after_turn"] == 1 and len(c["handed"]) == 1,
+          f"claimed before PGU-4 left and returned, the old copy is not sent: audit is handed the entry once, also "
+          f"after its turn ends while it still holds the ticket: {c}")
+    check("retired_after_claim" in c["retired"].split(","),
+          f"the claimed copy is dropped under the hold, traced as retired_after_claim: {c['retired']}")
     for case, left in (("reentry", "in_progress"), ("owner_change", "audit-2")):
         c = got[case]
         check(c["first"] == 1 and c["after_turn"] == 1 and len(c["handed"]) == 1,
@@ -174,8 +228,9 @@ def main() -> int:
         print(json.dumps(scenario(Path(sys.argv[2]))))
         return 0
     if os.environ.get("SYRD881_MUTATION_SKIP_BEFORE") != "1":  # a mutant changes this tree only
-        with tempfile.TemporaryDirectory(prefix="syrd881-before.", dir="/tmp") as tmp:
-            before(run(tree_at(BEFORE, Path(tmp) / "before")))
+        for commit, verdict in ((BEFORE, before), (BEFORE_883, before_883)):
+            with tempfile.TemporaryDirectory(prefix="syrd881-before.", dir="/tmp") as tmp:
+                verdict(run(tree_at(commit, Path(tmp) / "before")))
     candidate(run(ROOT))
     print(f"handoff_entry_test: {CHECKS} checks ok")
     return 0

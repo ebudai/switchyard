@@ -85,3 +85,26 @@ stale, or delivered as a second hand-off.
   - It now compares main's delivery less that one duplicate.
   - The trace leaves out notices that ended in a drop (main's late `stale_notification`, this tree's
     `left_its_entry`); the queue and the sends are compared whole.
+
+## SYRD-883: a copy claimed before the move
+
+Audit's finding on SYRD-881: retirement removes the queued row, but the listener may already have claimed it. That
+claim holds no lock, so a ticket could leave and come back to the same owner between the claim and the hold. The held
+recheck found the ticket current, and the copy claimed into memory was sent beside the new entry's own hand-off. That
+gives two hand-offs again, in the window from the claim to the hold, which includes a session clear.
+
+**The rule:** under the hold, the claimed row must still be queued (`drop_if_stale`, phase `held_recheck`). Otherwise
+the copy is dropped and traced as `retired_after_claim`.
+- **Why it can't be stale:** the hold locks the ticket row, which every move must update. So a retirement either
+  committed before the hold, and the row is gone, or it waits until after the send. This is the same lock SYRD-631's
+  recheck decides under.
+- **Why existence, not `claimed_at`:** Audit suggested also matching `claimed_at`. The claim doesn't carry it into
+  memory, and queue ids are never reused, so existence of the claimed id is the same decision.
+
+**Test** (`handoff_entry_test`, case 4, PGU-4): a seam on `hold_for_delivery`, never a sleep, kicks PGU-4 back and
+resubmits it to `audit` between the claim and the hold.
+- **Main before this fix (a5fc71b4):** two sends.
+- **This tree:** one send, and `retired_after_claim` traced.
+
+The suite now runs main twice: f7e7731a for SYRD-881's own cases, and a5fc71b4 for this one. Dropping the recheck,
+or reading a retired row as queued, each fail by an assertion.

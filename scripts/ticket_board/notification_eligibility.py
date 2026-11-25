@@ -49,6 +49,22 @@ SUPERSEDED_QUEUE_NOTICE = "superseded_serial_focus_queue"
 UNNAMED_RESERVATION = "active work"
 
 
+def claimed_row_still_queued(conn: Any, notification_id: int) -> bool:
+    """False only when the board answers that the claimed row is gone; an answer that says nothing either way (no
+    row, another shape) keeps the notice, as before SYRD-883 -- a real board always answers EXISTS."""
+    result = conn.execute("SELECT EXISTS (SELECT FROM ticket_board.ticket_notification_queue WHERE id = %s) AS queued",
+                          (notification_id,))
+    row = result.fetchone() if result is not None and hasattr(result, "fetchone") else None
+    if isinstance(row, dict):
+        queued = row.get("queued")
+    else:
+        try:
+            queued = row[0] if row is not None and len(row) == 1 else None
+        except TypeError:
+            queued = None
+    return queued is not False
+
+
 class NotificationEligibility:
     def __init__(self, *, logger: Any, ledger: Any, workflow: Callable[[], Any], decode_text: Callable[[Any], str]) -> None:
         self.logger = logger
@@ -232,7 +248,23 @@ WHERE q.id = %s AND q.ticket_id = %s
 
         Asked when a notification is claimed and again immediately before its
         send (`phase` "pre_send_recheck"), so a hold never outlives the facts
-        that made the notice deliverable (SYRD-631)."""
+        that made the notice deliverable (SYRD-631).
+
+        Under the hold (`phase` "held_recheck") the claimed row must also still be
+        queued (SYRD-883). A ticket that left its stage or owner after the claim
+        had that row retired (SYRD-881); if it came back before the hold, it looks
+        current again, and the copy claimed into memory would be sent beside the
+        new entry's own hand-off. The hold locks the ticket row, which every move
+        must update, so a retirement either committed before it -- and the row is
+        gone here -- or waits until after the send."""
+        if phase == "held_recheck" and not claimed_row_still_queued(conn, notification_id):
+            self.logger.info("Dropping notification %s for %s: its queued row was retired after it was claimed",
+                             notification_id, ticket_id)
+            self.ledger.trace(conn, notification_id=notification_id, ticket_id=ticket_id, target_role=target_role,
+                              kind=kind, event="drop", busy_reason="retired_after_claim",
+                              detail={"payload": self.ledger.safe_json_payload(payload), "phase": phase})
+            self.ledger.forget(notification_id)
+            return True
         if self._notification_is_current(conn, ticket_id, target_role, payload):
             return False
         self.logger.info("Dropping stale notification %s for %s%s: %s", notification_id, ticket_id,

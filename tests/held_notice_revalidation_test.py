@@ -142,6 +142,13 @@ class Board:
             f"FROM ticket_board.notification_trace WHERE ticket_id = '{ticket}' AND target_role = '{role}' "
             "AND event = 'drop' AND busy_reason = 'stale_notification';"))
 
+    def held_ends(self, ticket: str, role: str) -> list[dict]:
+        """Drops that end a hand-over at a recheck: found stale, or (SYRD-883) its claimed row retired before the hold."""
+        return json.loads(self.sql(
+            "SELECT coalesce(jsonb_agg(jsonb_build_object('kind', kind, 'detail', detail) ORDER BY id), '[]') "
+            f"FROM ticket_board.notification_trace WHERE ticket_id = '{ticket}' AND target_role = '{role}' "
+            "AND event = 'drop' AND busy_reason IN ('stale_notification', 'retired_after_claim');"))
+
     def retired(self, ticket: str, role: str) -> list[dict]:
         """`drops`, and since SYRD-881 a hand-off retired when its ticket moved (`left_its_entry`): either way, the
         notice was never delivered and its end is recorded."""
@@ -314,7 +321,9 @@ def main() -> int:
             finally:
                 board.listener._defer_for_background_work = background
             handed = [m for m in about(sent, "app", WB2) if "entered Implementation" in m]
-            check(landed == ["ok"] and handed == [] and [d["detail"].get("phase") for d in board.drops(WB2, "app")
+            # SYRD-883: the reassignment retires the claimed row as it commits (SYRD-881), so under the hold the copy
+            # in memory is dropped as retired after its claim -- at the same recheck, and never sent.
+            check(landed == ["ok"] and handed == [] and [d["detail"].get("phase") for d in board.held_ends(WB2, "app")
                                                          if d["kind"] == "transition"] == ["held_recheck"],
                   f"a reassignment between the two reads is caught under the hold: {landed} {handed} {board.drops(WB2, 'app')}")
 

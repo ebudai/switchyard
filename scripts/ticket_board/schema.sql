@@ -8320,7 +8320,7 @@ DECLARE cfg jsonb:=ticket_board.declared_workflow(); doc jsonb:=to_jsonb(propose
         nullif(current_setting('ticket_board.workflow_actor',true),''),
         ticket_board.current_app_actor()); target text;
     reset text; flag record; owners text[]; fallback text; loops int:=0;
-    queued_for text; reserved_by text; origin jsonb;
+    queued_for text; reserved_by text; origin jsonb; returned_to text; return_why text;
 BEGIN
     IF actor IS NULL THEN RAISE EXCEPTION 'configured ticket writes require a registered actor' USING ERRCODE='42501'; END IF;
     -- A narrated override moves a ticket the declared workflow will not: that
@@ -8638,6 +8638,21 @@ BEGIN
     ELSIF tr->>'primitive'='return' THEN
         SELECT last_implementer_assignee INTO fallback FROM ticket_board.ticket_notification_state WHERE ticket_id=previous.id;
         IF fallback=ANY(owners) THEN proposed.assignee:=fallback; END IF;
+    ELSIF dest->>'kind'='review' AND NOT proposed.assignee=ANY(owners) THEN
+        -- SYRD-875: work re-entering a shared review stage, naming no owner, returns to the reviewer whose kick-back
+        -- last sent it out (review_returns), when that reviewer can take it. Otherwise it lands with the first owner,
+        -- below, and the ticket says why (record_review_return). A first submission has no such reviewer, and lands as
+        -- before.
+        returned_to:=ticket_board.review_return_reviewer(previous.id,target);
+        IF returned_to IS NOT NULL THEN
+            return_why:=ticket_board.review_return_unavailable(target,returned_to,clock_timestamp());
+            IF return_why IS NULL THEN
+                proposed.assignee:=returned_to;
+            ELSE
+                PERFORM set_config('ticket_board.review_return_fallback',jsonb_build_object('ticket',previous.id,
+                    'stage',target,'role',returned_to,'why',return_why)::text,true);
+            END IF;
+        END IF;
     END IF;
     IF cardinality(owners)>0 AND NOT proposed.assignee=ANY(owners)
        AND NOT ticket_board.router_holds(target,proposed.assignee) THEN proposed.assignee:=owners[1]; END IF;
@@ -28463,5 +28478,342 @@ BEGIN
         waiting_since := greatest(r.entered_current_state_at, r.current_assignment_at);
         RETURN NEXT;
     END LOOP;
+END;
+$$;
+
+
+-- SYRD-875 (pgu1060): a resubmitted review returns to the reviewer who kicked it back (enforce_declared_ticket_update
+-- above), stays with it, falls back to the first owner when that reviewer cannot take it, and starts a fresh review
+-- instead of parking. See migrations/pgu1060_syrd875_review_return.sql.
+
+CREATE TABLE IF NOT EXISTS ticket_board.review_returns (
+    ticket_id text NOT NULL REFERENCES ticket_board.tickets(id) ON DELETE CASCADE,
+    stage text NOT NULL,
+    role text NOT NULL,
+    action text NOT NULL,
+    returned_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (ticket_id, stage)
+);
+REVOKE ALL ON ticket_board.review_returns FROM PUBLIC;
+
+-- The reviewer whose kick-back last sent p_ticket out of review stage p_stage, or NULL: it never left that way, or its
+-- last exit from the stage was something else (a sign-off), or the return has since been given up.
+CREATE OR REPLACE FUNCTION ticket_board.review_return_reviewer(p_ticket text, p_stage text)
+RETURNS text LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+    SELECT role FROM ticket_board.review_returns WHERE ticket_id = p_ticket AND stage = p_stage;
+$$;
+REVOKE ALL ON FUNCTION ticket_board.review_return_reviewer(text, text) FROM PUBLIC;
+
+-- Whether p_ticket is with the reviewer whose kick-back last sent it out of the stage it is in now. Such a rework stays
+-- with that reviewer, queued behind its current review while it is busy: the balancer never moves it.
+CREATE OR REPLACE FUNCTION ticket_board.review_return_held(p_ticket text)
+RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+    SELECT EXISTS (SELECT FROM ticket_board.tickets t
+                    WHERE t.id = p_ticket AND ticket_board.review_return_reviewer(t.id, t.state) = t.assignee);
+$$;
+REVOKE ALL ON FUNCTION ticket_board.review_return_held(text) FROM PUBLIC;
+
+-- Why p_role cannot take back the rework it kicked out of p_stage, as far as the board itself knows, or NULL. Whether its
+-- provider process is still running is the listener's to see (review_return_fall_back). A work pause is not a reason: it
+-- holds every reviewer alike, and the rework waits for this one.
+CREATE OR REPLACE FUNCTION ticket_board.review_return_unavailable(p_stage text, p_role text, p_now timestamptz)
+RETURNS text LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+    SELECT CASE
+        WHEN NOT EXISTS (SELECT FROM jsonb_array_elements(coalesce(ticket_board.declared_workflow()->'stages', '[]'::jsonb)) s
+                          WHERE s->>'name' = p_stage AND coalesce(s->'owners' ? p_role, false)) THEN
+            format('it no longer owns %s', p_stage)
+        WHEN NOT EXISTS (SELECT FROM jsonb_array_elements(coalesce(ticket_board.declared_workflow()->'roles', '[]'::jsonb)) r
+                          WHERE r->>'name' = p_role AND coalesce((r->>'active')::boolean, false)) THEN
+            'it is not an active role'
+        WHEN NOT EXISTS (SELECT FROM ticket_board.role_runtime_assignments a WHERE a.role = p_role) THEN
+            'it is not registered'
+        WHEN ticket_board.role_account_hold(p_role) IS NOT NULL THEN
+            'its provider account is held'
+        -- role_provider_hold_is_current's quota half (its other halves are a work pause and the account hold above).
+        WHEN EXISTS (SELECT FROM ticket_board.provider_quota_holds h
+                       JOIN ticket_board.role_runtime_assignments a ON a.role = h.role AND a.generation = h.generation
+                      WHERE h.role = p_role
+                        AND ((h.state = 'held' AND h.deadline > p_now)
+                             OR (h.state = 'released' AND h.released_at > p_now - interval '10 minutes'))) THEN
+            'its provider is out of quota'
+    END;
+$$;
+REVOKE ALL ON FUNCTION ticket_board.review_return_unavailable(text, text, timestamptz) FROM PUBLIC;
+
+-- Each exit from a review stage that more than one role owns: a kick-back (a declared `return` out of it) records the
+-- owner that held the ticket as the reviewer the rework returns to; any other exit ends the record. And a rework that
+-- could not return to its reviewer (enforce_declared_ticket_update) says so on the ticket, in one line, when it lands.
+CREATE OR REPLACE FUNCTION ticket_board.record_review_return()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+DECLARE action_name text := nullif(current_setting('ticket_board.workflow_action', true), '');
+    fallback jsonb := nullif(current_setting('ticket_board.review_return_fallback', true), '')::jsonb;
+BEGIN
+    IF ticket_board.declared_stage_kind(OLD.state) = 'review' THEN
+        IF action_name IS NOT NULL
+           AND EXISTS (SELECT FROM jsonb_array_elements(ticket_board.declared_workflow()->'transitions') x
+                        WHERE x->>'from' = OLD.state AND x->>'action' = action_name AND x->>'primitive' = 'return')
+           AND EXISTS (SELECT FROM jsonb_array_elements(ticket_board.declared_workflow()->'stages') s
+                        WHERE s->>'name' = OLD.state AND jsonb_array_length(coalesce(s->'owners', '[]'::jsonb)) > 1) THEN
+            INSERT INTO ticket_board.review_returns(ticket_id, stage, role, action)
+            VALUES (NEW.id, OLD.state, OLD.assignee, action_name)
+            ON CONFLICT (ticket_id, stage) DO UPDATE SET role = EXCLUDED.role, action = EXCLUDED.action,
+                                                         returned_at = clock_timestamp();
+        ELSE
+            DELETE FROM ticket_board.review_returns WHERE ticket_id = NEW.id AND stage = OLD.state;
+        END IF;
+    END IF;
+    IF fallback->>'ticket' = NEW.id AND fallback->>'stage' = NEW.state THEN
+        PERFORM set_config('ticket_board.review_return_fallback', '', true);
+        DELETE FROM ticket_board.review_returns WHERE ticket_id = NEW.id AND stage = NEW.state;
+        PERFORM ticket_board.append_ticket_comment(NEW.id, 'ticket_board_service', format(
+            'Review return in %s: %s kicked this back, but cannot take the rework (%s), so it lands with %s, the first '
+            'owner, and may be balanced.', NEW.state, fallback->>'role', fallback->>'why', NEW.assignee));
+    END IF;
+    RETURN NULL;
+END;
+$$;
+REVOKE ALL ON FUNCTION ticket_board.record_review_return() FROM PUBLIC;
+DROP TRIGGER IF EXISTS tickets_z_review_return ON ticket_board.tickets;
+CREATE TRIGGER tickets_z_review_return AFTER UPDATE OF state ON ticket_board.tickets
+    FOR EACH ROW WHEN (OLD.state IS DISTINCT FROM NEW.state)
+    EXECUTE FUNCTION ticket_board.record_review_return();
+
+-- The listener's half of the fallback: a rework waiting with the reviewer that kicked it back, not yet handed to it in
+-- this round and not placed by the Director, whose reviewer cannot take it -- the board's reasons, or p_not_running
+-- ({role: why}), the owners of p_stage the listener sees with no live registered provider process. The return is
+-- given up: the rework goes to the stage's first owner, as a first submission does, and may be balanced; the ticket
+-- says why in one line.
+CREATE OR REPLACE FUNCTION ticket_board.review_return_fall_back(p_stage text, p_now timestamptz, p_not_running jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+DECLARE cfg jsonb := ticket_board.declared_workflow(); owners text[]; r record; why text; moved ticket_board.tickets;
+    fell jsonb := '[]'::jsonb;
+BEGIN
+    PERFORM ticket_board.require_ticket_board_listener('review_return_fall_back');
+    SELECT ARRAY(SELECT jsonb_array_elements_text(x->'owners')) INTO owners
+      FROM jsonb_array_elements(coalesce(cfg->'stages', '[]'::jsonb)) x WHERE x->>'name' = p_stage AND x->>'kind' = 'review';
+    IF coalesce(cardinality(owners), 0) < 2 THEN
+        RETURN fell;
+    END IF;
+    FOR r IN
+        SELECT t.id, t.assignee FROM ticket_board.tickets t
+          JOIN ticket_board.review_returns rr ON rr.ticket_id = t.id AND rr.stage = t.state AND rr.role = t.assignee
+          JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
+         WHERE t.state = p_stage
+           AND NOT ticket_board.review_placement_current(t.id)
+           AND NOT EXISTS (SELECT FROM ticket_board.notification_trace nt
+                            WHERE nt.ticket_id = t.id AND nt.target_role = t.assignee AND nt.ticket_state_at_event = p_stage
+                              AND nt.kind = 'transition' AND nt.event = 'send'
+                              AND nt.ts >= coalesce(ns.entered_current_state_at, '-infinity'::timestamptz))
+         ORDER BY ns.entered_current_state_at, t.ticket_number
+    LOOP
+        why := coalesce(ticket_board.review_return_unavailable(p_stage, r.assignee, p_now),
+                        nullif(btrim(coalesce(p_not_running->>r.assignee, '')), ''));
+        CONTINUE WHEN why IS NULL;
+        DELETE FROM ticket_board.review_returns WHERE ticket_id = r.id AND stage = p_stage;
+        moved := NULL;
+        IF r.assignee <> owners[1] THEN
+            PERFORM set_config('ticket_board.review_balance_ticket', r.id, true);
+            PERFORM set_config('ticket_board.workflow_actor', 'board', true);
+            UPDATE ticket_board.tickets SET assignee = owners[1]
+             WHERE id = r.id AND state = p_stage AND assignee = r.assignee
+            RETURNING * INTO moved;
+            PERFORM set_config('ticket_board.workflow_actor', '', true);
+            PERFORM set_config('ticket_board.review_balance_ticket', '', true);
+            CONTINUE WHEN moved.id IS NULL;  -- moved by someone else meanwhile
+            PERFORM ticket_board.enqueue_transition_notification(
+                moved.id, moved.title, p_stage, moved.state, moved.assignee, moved.updated_at, moved.ticket_number,
+                moved.id || CASE WHEN moved.title <> '' THEN ' -- ' || moved.title ELSE '' END || ' is now assigned to you');
+        END IF;
+        PERFORM ticket_board.append_ticket_comment(r.id, 'ticket_board_service', format(
+            'Review return in %s: %s kicked this back, but cannot take the rework (%s), so it lands with %s, the first '
+            'owner, and may be balanced.', p_stage, r.assignee, why, owners[1]));
+        fell := fell || jsonb_build_object('ticket', r.id, 'from', r.assignee, 'to', owners[1], 'why', why);
+    END LOOP;
+    RETURN fell;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION ticket_board.review_return_fall_back(text, timestamptz, jsonb) FROM PUBLIC;
+
+-- A reviewer's records of a ticket's conversation, set aside whole in fresh_review_archive, so that reviewer's next
+-- hand-off of it is a first one: its pane is cleared at an idle boundary, as for any new ticket, and it reviews afresh.
+CREATE OR REPLACE FUNCTION ticket_board.set_aside_review_conversation(p_ticket text, p_role text, p_by text, p_reason text)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+DECLARE t ticket_board.tickets; set_aside jsonb;
+BEGIN
+    SELECT * INTO t FROM ticket_board.tickets WHERE id = p_ticket;
+    set_aside := jsonb_build_object(
+        'contexts', (SELECT coalesce(jsonb_agg(to_jsonb(x)), '[]'::jsonb) FROM ticket_board.ticket_role_contexts x
+                      WHERE x.ticket_id = p_ticket AND x.role = p_role),
+        'clears', (SELECT coalesce(jsonb_agg(to_jsonb(c)), '[]'::jsonb) FROM ticket_board.ticket_role_session_clears c
+                    WHERE c.ticket_id = p_ticket AND c.role = p_role),
+        'restores', (SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY r.id), '[]'::jsonb) FROM ticket_board.ticket_context_restores r
+                      WHERE r.ticket_id = p_ticket AND r.role = p_role),
+        'continuations', (SELECT coalesce(jsonb_agg(to_jsonb(k)), '[]'::jsonb) FROM ticket_board.ticket_context_continuations k
+                           WHERE k.ticket_id = p_ticket AND k.role = p_role));
+    INSERT INTO ticket_board.fresh_review_archive(ticket_id, role, stage, candidate, requested_by, reason, set_aside)
+    VALUES (p_ticket, p_role, t.state, t.commit_hash, p_by, btrim(p_reason), set_aside);
+    DELETE FROM ticket_board.ticket_context_restores WHERE ticket_id = p_ticket AND role = p_role;
+    DELETE FROM ticket_board.ticket_role_contexts WHERE ticket_id = p_ticket AND role = p_role;
+    DELETE FROM ticket_board.ticket_role_session_clears WHERE ticket_id = p_ticket AND role = p_role;
+    DELETE FROM ticket_board.ticket_context_continuations WHERE ticket_id = p_ticket AND role = p_role;
+    PERFORM ticket_board.enqueue_transition_notification(
+        t.id, t.title, t.state, t.state, p_role, t.updated_at, t.ticket_number,
+        t.id || CASE WHEN t.title <> '' THEN ' -- ' || t.title ELSE '' END || ' is now assigned to you for a fresh '
+        'review of the exact candidate ' || coalesce(nullif(t.commit_hash, ''), '(none recorded)')
+        || '; the earlier findings are in its comments');
+END;
+$$;
+REVOKE ALL ON FUNCTION ticket_board.set_aside_review_conversation(text, text, text, text) FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION ticket_board.balance_review_stage_skipping(p_stage text, p_to text, p_now timestamptz,
+                                                                     p_skip text[])
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+DECLARE cfg jsonb := ticket_board.declared_workflow(); owners text[]; candidate record; busy_with text;
+    moved ticket_board.tickets;
+BEGIN
+    PERFORM ticket_board.require_ticket_board_listener('balance_review_stage_skipping');
+    SELECT ARRAY(SELECT jsonb_array_elements_text(x->'owners')) INTO owners
+      FROM jsonb_array_elements(coalesce(cfg->'stages', '[]'::jsonb)) x WHERE x->>'name' = p_stage AND x->>'kind' = 'review';
+    IF coalesce(cardinality(owners), 0) < 2 OR NOT p_to = ANY(owners) THEN
+        RETURN jsonb_build_object('moved', false, 'reason', 'not an owner of a shared review stage');
+    END IF;
+    IF EXISTS (SELECT FROM ticket_board.tickets t WHERE t.state = p_stage AND t.assignee = p_to) THEN
+        RETURN jsonb_build_object('moved', false, 'reason', 'it already holds work in this stage');
+    END IF;
+    IF ticket_board.role_provider_hold_is_current(p_to, p_now) THEN
+        RETURN jsonb_build_object('moved', false, 'reason', 'its provider is held');
+    END IF;
+    FOR candidate IN
+        SELECT t.id, t.assignee FROM ticket_board.tickets t JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
+         WHERE t.state = p_stage AND t.assignee = ANY(owners) AND t.assignee <> p_to
+           AND coalesce(btrim(ns.awaiting_role), '') = ''
+           AND NOT ticket_board.ticket_has_unresolved_blockers(t.id)
+           -- SYRD-873: the listener's own judgement of p_to: tickets whose hand-off to it would park.
+           AND NOT t.id = ANY(coalesce(p_skip, '{}'::text[]))
+           -- SYRD-873: the reviewer the Director placed it with keeps it while it stays in this stage.
+           AND NOT ticket_board.review_placement_current(t.id)
+           -- SYRD-875: a rework with the reviewer that kicked it back stays with it, handed over or not yet.
+           AND NOT ticket_board.review_return_held(t.id)
+           AND NOT EXISTS (SELECT FROM ticket_board.notification_trace nt
+                            WHERE nt.ticket_id = t.id AND nt.target_role = t.assignee AND nt.ticket_state_at_event = p_stage
+                              AND nt.kind = 'transition' AND nt.event = 'send')
+         ORDER BY ns.entered_current_state_at, t.ticket_number
+    LOOP
+        busy_with := nullif(ticket_board.finish_current_stage_blocker(candidate.id, candidate.assignee, p_stage, p_now), '');
+        CONTINUE WHEN busy_with IS NULL;  -- its reviewer's current ticket: never taken from it
+        PERFORM set_config('ticket_board.review_balance_ticket', candidate.id, true);
+        PERFORM set_config('ticket_board.workflow_actor', 'board', true);
+        UPDATE ticket_board.tickets SET assignee = p_to
+         WHERE id = candidate.id AND state = p_stage AND assignee = candidate.assignee
+        RETURNING * INTO moved;
+        PERFORM set_config('ticket_board.workflow_actor', '', true);
+        PERFORM set_config('ticket_board.review_balance_ticket', '', true);
+        CONTINUE WHEN moved.id IS NULL;  -- moved by someone else meanwhile
+        PERFORM ticket_board.append_ticket_comment(moved.id, 'ticket_board_service', format(
+            'Board balance in %s: %s -> %s. %s is reviewing %s, and %s was live and idle with nothing in %s, so this '
+            'waiting review goes to it.', p_stage, candidate.assignee, p_to, candidate.assignee, busy_with, p_to, p_stage));
+        PERFORM ticket_board.enqueue_transition_notification(
+            moved.id, moved.title, p_stage, moved.state, moved.assignee, moved.updated_at, moved.ticket_number,
+            moved.id || CASE WHEN moved.title <> '' THEN ' -- ' || moved.title ELSE '' END || ' is now assigned to you');
+        RETURN jsonb_build_object('moved', true, 'ticket', moved.id, 'from', candidate.assignee, 'to', p_to, 'behind', busy_with);
+    END LOOP;
+    RETURN jsonb_build_object('moved', false, 'reason', 'no review is waiting');
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.resolve_ticket_context_restore(p_attempt bigint, p_outcome text, p_detail jsonb)
+RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+DECLARE attempt ticket_board.ticket_context_restores; t ticket_board.tickets;
+BEGIN
+    PERFORM ticket_board.require_ticket_board_listener('resolve_ticket_context_restore');
+    UPDATE ticket_board.ticket_context_restores SET outcome=p_outcome, resolved_at=clock_timestamp(),
+           detail=detail || coalesce(p_detail, '{}'::jsonb)
+     WHERE id=p_attempt AND outcome IS NULL RETURNING * INTO attempt;
+    IF NOT FOUND THEN RETURN false; END IF;
+    SELECT * INTO t FROM ticket_board.tickets WHERE id = attempt.ticket_id;
+    IF p_outcome='failed' AND ticket_board.declared_stage_kind(t.state) = 'review' AND t.assignee = attempt.role
+       AND ticket_board.review_return_held(t.id)
+       AND NOT EXISTS (SELECT FROM ticket_board.fresh_review_archive a
+                         JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = a.ticket_id
+                        WHERE a.ticket_id = t.id AND a.role = attempt.role
+                          AND a.archived_at >= coalesce(ns.entered_current_state_at, '-infinity'::timestamptz)) THEN
+        -- SYRD-875: a rework back with the reviewer that kicked it back, whose saved conversation of it cannot be
+        -- restored, is reviewed afresh by that same reviewer instead of parking: the exact candidate, with its earlier
+        -- findings in the ticket's comments. The parked hand-off's notice is dropped; the fresh hand-off replaces it.
+        -- Once a round: a fresh hand-off that fails again parks, and is the Director's, below -- never a loop.
+        PERFORM ticket_board.append_ticket_comment(t.id, 'ticket_board_service', format(
+            'Fresh review in %s: %s kicked this back and takes the rework, but its saved conversation of %s cannot be '
+            'restored (%s). It is set aside (kept in the board''s record), and %s reviews %s afresh: the exact candidate '
+            '%s, with its earlier findings in these comments.', t.state, attempt.role, t.id,
+            coalesce(p_detail->>'reason', 'unknown'), attempt.role, t.id, coalesce(nullif(t.commit_hash, ''), '(none recorded)')));
+        PERFORM ticket_board.set_aside_review_conversation(t.id, attempt.role, 'board',
+            'the reviewer that kicked it back takes the rework, and cannot restore its saved conversation: '
+            || coalesce(p_detail->>'reason', 'unknown'));
+    ELSIF p_outcome='failed' AND ticket_board.declared_stage_kind(t.state) = 'review' AND t.assignee = attempt.role THEN
+        -- SYRD-873: a parked review. Its recoveries are the stage's other owners and a fresh review of the exact candidate.
+        PERFORM ticket_board.notify_ticket_context_exception(attempt.ticket_id, attempt.role, 'restore_failed',
+            format('%s''s review by %s is parked: %s''s saved conversation of %s could not be restored (%s), so %s is sent '
+                   'nothing about it and the conversation%s is kept. Recover it: reassign %s to another owner of %s '
+                   '(ticket-board-write reassign %s --assignee <owner> --reason ...), or start a fresh review by %s from the '
+                   'ticket''s record -- the exact candidate %s and the earlier findings in its comments -- with '
+                   'ticket-board-write force-fresh-context %s --reason ....',
+                   attempt.ticket_id, attempt.role, attempt.role, attempt.ticket_id, coalesce(p_detail->>'reason', 'unknown'),
+                   attempt.role, coalesce(' ' || attempt.session_id, ''), attempt.ticket_id, t.state, attempt.ticket_id,
+                   attempt.role, coalesce(nullif(t.commit_hash, ''), '(none recorded)'), attempt.ticket_id),
+            'ticket-context-restore:' || attempt.id);
+    ELSIF p_outcome='failed' THEN
+        PERFORM ticket_board.notify_ticket_context_exception(attempt.ticket_id, attempt.role, 'restore_failed',
+            format('%s''s saved conversation for %s could not be restored (%s). Its hand-off is parked: %s is sent nothing about %s, '
+                   'and its saved conversation%s is kept. To retry once the cause is fixed, defer %s and admit it again; '
+                   'started on another implementer it begins in that implementer''s own new conversation.',
+                   attempt.role, attempt.ticket_id, coalesce(p_detail->>'reason', 'unknown'), attempt.role, attempt.ticket_id,
+                   coalesce(' ' || attempt.session_id, ''), attempt.ticket_id),
+            'ticket-context-restore:' || attempt.id);
+    END IF;
+    RETURN true;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.request_fresh_ticket_context(p_ticket text, p_reason text)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+DECLARE who text; decided ticket_board.ticket_context_continuations; saved ticket_board.ticket_context_fresh_requests;
+    t ticket_board.tickets;
+BEGIN
+    PERFORM ticket_board.require_actor(ARRAY['director'], 'director_edit');
+    who := ticket_board.current_app_actor();
+    -- The same lock decide_ticket_context_continuation takes first: a request and
+    -- a decision never both see the other absent.
+    SELECT * INTO t FROM ticket_board.tickets WHERE id = p_ticket FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket % does not exist', p_ticket;
+    END IF;
+    IF btrim(coalesce(p_reason, '')) = '' THEN
+        RAISE EXCEPTION 'force_fresh_context needs a reason';
+    END IF;
+    -- SYRD-873: a review parked on a saved conversation its reviewer cannot restore starts fresh instead. That
+    -- reviewer's records of this ticket's conversation are set aside -- kept, whole, in fresh_review_archive -- so its
+    -- next hand-off is a first one: the pane is cleared at an idle boundary, as for any new ticket, and handed the
+    -- review of the exact candidate. Nothing else about the ticket changes: stage, owner, candidate, sign-offs.
+    IF ticket_board.declared_stage_kind(t.state) = 'review' AND ticket_board.ticket_context_parked(p_ticket, t.assignee) THEN
+        PERFORM ticket_board.append_ticket_comment(p_ticket, who, format(
+            'Director fresh review in %s: %s''s saved conversation of %s could not be restored, so it is set aside (kept '
+            'in the board''s record) and %s reviews %s afresh: the exact candidate %s, with the earlier findings in these '
+            'comments. Reason: %s', t.state, t.assignee, p_ticket, t.assignee, p_ticket,
+            coalesce(nullif(t.commit_hash, ''), '(none recorded)'), btrim(p_reason)));
+        PERFORM ticket_board.set_aside_review_conversation(p_ticket, t.assignee, who, p_reason);
+        RETURN jsonb_build_object('fresh_review', true, 'ticket', p_ticket, 'role', t.assignee, 'stage', t.state,
+                                  'candidate', t.commit_hash);
+    END IF;
+    SELECT * INTO decided FROM ticket_board.ticket_context_continuations WHERE ticket_id = p_ticket ORDER BY decided_at LIMIT 1;
+    IF FOUND THEN
+        RAISE EXCEPTION '%''s context was already decided for % at %: % (%)', p_ticket, decided.role, decided.decided_at,
+            decided.decision, decided.reason;
+    END IF;
+    INSERT INTO ticket_board.ticket_context_fresh_requests(ticket_id, requested_by, reason)
+    VALUES (p_ticket, who, btrim(p_reason))
+    ON CONFLICT (ticket_id) DO UPDATE SET requested_by = EXCLUDED.requested_by, reason = EXCLUDED.reason,
+                                          requested_at = clock_timestamp()
+    RETURNING * INTO saved;
+    RETURN to_jsonb(saved);
 END;
 $$;

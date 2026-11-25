@@ -66,8 +66,8 @@ sign-off are unchanged. Before a hand-off, `force-fresh-context` behaves as it d
 
 **Unchanged:**
 - exact-candidate and independent-review provenance;
-- where a submission first lands;
-- the return of a rework to the reviewer who kicked it back, when that reviewer can take it;
+- where a submission first lands (SYRD-875 since returns a rework to the reviewer who kicked it back, and starts a fresh
+  review there instead of parking: docs/syrd-875-review-return.md);
 - delivery once;
 - no clear or interruption of a busy pane.
 
@@ -88,6 +88,9 @@ compatible with older code.
 **`tests/review_recovery_test.py`** runs on a production-built board under a pull policy, with Audit owned by `audit`
 (Claude) and `audit-2` (ephemeral, Codex). It uses the real server, the real listener, the hook writer, and stand-in
 provider processes registered as panes register them. All tickets are synthetic.
+The board is `tests/review_pane_rig.py`'s, shared with SYRD-875's test. Since SYRD-875 a rework returns to the reviewer
+that kicked it back, so the two resubmissions whose landing this test reads are made while that reviewer's provider is
+held: they land with `audit`, as on main, and each ticket says why.
 - **Main, from a git archive:**
   - the rework is balanced to `audit-2` and parks;
   - the Director's reassignment of it to busy `audit` is undone.

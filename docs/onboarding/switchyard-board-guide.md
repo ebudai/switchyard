@@ -1107,12 +1107,29 @@ ticket's `context_continuation`. A check that cannot be completed starts fresh a
 once. To start a package's first ticket fresh anyway, before it is handed over, run
 `ticket-board-write force-fresh-context <ticket> --reason-file PATH` (SYRD-626).
 
-**A review parked on a saved conversation starts fresh the same way.** Under a pull policy, an
-ephemeral reviewer that kicked a ticket back holds its saved conversation. If that reviewer's
-runtime cannot resume it (Codex, agy, Hermes), its hand-off of the rework parks: the reviewer is
-sent nothing, and the Director is told once. The balancer never sends a review to such a reviewer,
-and never moves a review the Director placed in the stage. The Director recovers it in one of two
-ways:
+**A rework returns to the reviewer that kicked it back.** In a review stage with more than one
+owner, a resubmission lands with the owner whose kick-back last sent it out, not the first owner,
+and stays there, queued behind that reviewer's current review while it is busy. An owner named on
+the submission is kept, and the Director's reassignment still wins. If that reviewer cannot take
+it, the rework lands with the first owner as a first submission does, and the ticket says why in
+one line. That happens when the reviewer:
+- no longer owns the stage;
+- is not registered, or its process is not running;
+- is provider-held.
+
+(SYRD-875)
+
+**A review whose saved conversation cannot be restored starts fresh.** Under a pull policy, an
+ephemeral reviewer that kicked a ticket back holds its saved conversation. If its runtime cannot
+resume it (Codex, agy, Hermes), the rework returned to it is not parked:
+- the old conversation is set aside;
+- the pane is cleared at an idle boundary;
+- the review of the exact candidate is handed over as a new one, once;
+- the ticket records this.
+
+A review that reaches such a reviewer any other way still parks: the reviewer is sent nothing, and
+the Director is told once. The balancer never sends a review to such a reviewer, and never moves a
+review the Director placed in the stage. The Director recovers a parked review in one of two ways:
 - reassign it to another owner of the stage;
 - run `force-fresh-context` on it: the reviewer's records of the old conversation are set aside, and
   the review of the exact candidate is handed over as a new one (SYRD-873).

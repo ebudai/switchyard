@@ -52,6 +52,7 @@ listener.
 - a blocked or awaited ticket;
 - a re-review its reviewer already began, meaning it was handed to that reviewer in this stage before. A returned
   ticket's re-audit stays with the auditor who knows it.
+- a rework with the reviewer that kicked it back, handed over or not yet (SYRD-875).
 
 **What a move does:**
 - It changes only the owner, inside a one-ticket window that `enforce_declared_ticket_update` admits beside Router's.
@@ -66,7 +67,8 @@ listener.
 - nor is one given to an owner whose hand-off of it would park.
 
 **What it does not change:**
-- Where a submission first lands: still the first owner.
+- Where a first submission lands: still the first owner. Since SYRD-875 a resubmission returns to the reviewer that
+  kicked it back (docs/syrd-875-review-return.md).
 - A busy, held or stopped second reviewer is never given anything.
 - A board with one owner per review stage runs nothing new.
 

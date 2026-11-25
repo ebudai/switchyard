@@ -81,6 +81,13 @@ DECLARED: dict[str, OlderCode] = {
         "variant; replaces balance_review_stage, resolve_ticket_context_restore, request_fresh_ticket_context and "
         "board_stall_runnable with the same signatures. Older code's balancer call now also leaves a review the "
         "Director placed where it is, and its other calls behave as before"),
+    "pgu1060_syrd875_review_return.sql": OlderCode(
+        True, "adds the review-return table, a trigger writing only it, and listener-only functions; replaces "
+        "enforce_declared_ticket_update, balance_review_stage_skipping, resolve_ticket_context_restore and "
+        "request_fresh_ticket_context with the same signatures. Older code's submissions now land with the reviewer "
+        "that kicked the work back when it can take it, its balancer call leaves such a rework there, and a restore "
+        "that cannot be made for that reviewer starts a fresh review instead of parking; older code never calls the "
+        "listener's fallback, so a rework returned to a reviewer that stopped waits for it"),
 }
 
 

@@ -327,6 +327,16 @@ survivor is not automatically a ticket. When audit records something three times
 declines to file it, say on the ticket that this was accepted deliberately — otherwise a
 future reader cannot tell "considered and accepted" from "missed".
 
+**A rework goes back to the reviewer that kicked it back.** Round 2 lands with round 1's reviewer, not the first
+owner, and waits for it while it is busy. If that reviewer cannot take it, the rework lands with the first owner, and
+the ticket says why in one line. That happens when the reviewer:
+- no longer owns the stage;
+- is not registered or not running;
+- is provider-held.
+
+If its saved conversation cannot be restored, the board starts a fresh review of the exact candidate by that same
+reviewer, instead of parking it. To have another reviewer take a rework, reassign it.
+
 **A review stage with two owners balances itself, and your placement wins.** A waiting review goes
 to an idle, empty owner of the same stage. Two exceptions:
 - **A review you move stays where you put it.** It is the board's to move only again after it

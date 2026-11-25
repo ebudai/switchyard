@@ -18,6 +18,11 @@ verified in-session resume, an unconfirmed binding, another runtime), or a resto
 the delivery would park it, as on MEFP-1234. Read from durable records (the binding, the failed restore) and the
 declared runtime, never from the pane, so the judgement cannot flap. The board itself never moves a review the Director
 placed in the stage (`balance_review_stage_skipping`); a parked hand-off is its owner's current ticket, never taken.
+
+SYRD-875: a resubmission lands with the reviewer that kicked it back, and the balancer never moves it from there. When
+that reviewer's provider process is not running, the pass gives the return up before the hand-off
+(`review_return_fall_back`): the rework goes to the stage's first owner, as a first submission does, the ticket says
+why, and it may then be balanced like any other waiting review.
 """
 
 from __future__ import annotations
@@ -26,11 +31,13 @@ import json
 from typing import Any
 
 from . import session_context
-from .pull_pickup import why_not_eligible
+from .pull_pickup import NOT_RUNNING, why_not_eligible
 
 #: SYRD-873's balancer, which takes the tickets to skip; SYRD-745's is the fallback on an older board.
 SKIPPING = "ticket_board.balance_review_stage_skipping(text, text, timestamptz, text[])"
 PLAIN = "ticket_board.balance_review_stage(text, text, timestamptz)"
+#: SYRD-875: the listener's half of a returned rework's fallback; absent on an older board.
+FALL_BACK = "ticket_board.review_return_fall_back(text, timestamptz, jsonb)"
 
 
 def _present(listener: Any, conn: Any) -> str:
@@ -47,6 +54,31 @@ def _present(listener: Any, conn: Any) -> str:
     return present
 
 
+def _has(listener: Any, conn: Any, signature: str) -> bool:
+    known = getattr(listener, "_review_functions_present", None)
+    if known is None:
+        known = listener._review_functions_present = {}
+    if signature not in known:
+        row = conn.execute("SELECT to_regprocedure(%s) IS NOT NULL AS present", (signature,)).fetchone()
+        known[signature] = bool(row and (row["present"] if isinstance(row, dict) else row[0]))
+    return known[signature]
+
+
+def fall_back(listener: Any, conn: Any, stage: str, eligibility: dict[str, str]) -> list:
+    """Give up the return of each rework in `stage` whose reviewer is not running (or that the board finds unavailable)."""
+    if not _has(listener, conn, FALL_BACK):
+        return []
+    not_running = {role: why for role, why in eligibility.items() if why in NOT_RUNNING}
+    row = conn.execute("SELECT ticket_board.review_return_fall_back(%s, clock_timestamp(), %s::jsonb)",
+                       (stage, json.dumps(not_running, sort_keys=True))).fetchone()
+    result = (next(iter(row.values())) if isinstance(row, dict) else row[0]) if row else None
+    result = json.loads(result) if isinstance(result, (str, bytes)) else result
+    for fell in result or []:
+        listener.logger.info("Review return: %s goes to %s in %s, not back to %s (%s)", fell.get("ticket"),
+                             fell.get("to"), stage, fell.get("from"), fell.get("why"))
+    return result or []
+
+
 def would_park(listener: Any, conn: Any, stage: str, role: str) -> list[str]:
     """The reviews waiting in `stage` with another owner whose hand-off to `role` would park."""
     rows = conn.execute("SELECT id FROM ticket_board.tickets WHERE state = %s AND assignee <> %s ORDER BY ticket_number",
@@ -59,6 +91,14 @@ def would_park(listener: Any, conn: Any, stage: str, role: str) -> list[str]:
                                     and session_context.why_not_restorable(listener, role, status["context"])):
             skipped.append(ticket)
     return skipped
+
+
+def _eligibility(listener: Any, gate: Any, role: str) -> str:
+    try:
+        return why_not_eligible(gate, role)
+    except Exception as exc:  # logged; never fatal to the pass, and never read as eligible
+        listener.logger.warning("Review balance could not judge %s: %s", role, exc)
+        return f"eligibility unknown: {exc}"
 
 
 def run(listener: Any, conn: Any) -> int:
@@ -74,9 +114,14 @@ def run(listener: Any, conn: Any) -> int:
         return 0  # SYRD-756: no review moves while work is paused
     moved = 0
     for stage in stages:
+        eligibility = {role: _eligibility(listener, gate, role) for role in stage["owners"]}
+        try:
+            fall_back(listener, conn, stage["name"], eligibility)
+        except Exception as exc:  # logged; never fatal to the pass
+            listener.logger.warning("Review return fallback in %s failed: %s", stage["name"], exc)
         for role in stage["owners"]:
             try:
-                if why_not_eligible(gate, role):
+                if eligibility[role]:
                     continue
                 if balancer == SKIPPING:
                     row = conn.execute("SELECT ticket_board.balance_review_stage_skipping(%s, %s, clock_timestamp(), %s)",

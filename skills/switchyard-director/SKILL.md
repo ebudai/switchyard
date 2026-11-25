@@ -130,7 +130,8 @@ advance it or defer it deliberately - never both nothing.
   reason it records is what the next person reads. Moving the ticket somewhere
   else is `route`'s job, not this one. In a review stage with two owners, the
   board's balancer never moves a review you placed this way while it stays in
-  that stage.
+  that stage. A rework returns to the reviewer that kicked it back; reassign it
+  if another reviewer should take it.
 - A review whose hand-off parked (its reviewer cannot restore the ticket's saved
   conversation) is yours. You are told once. Reassign it to another owner of the
   stage, or start it fresh with `force-fresh-context <id> --reason-file PATH`.

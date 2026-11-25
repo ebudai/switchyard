@@ -138,6 +138,12 @@ same code):
 Two mutants fail by an assertion: the fallback's join without `rr.role = t.assignee`, and the once-a-round guard
 without its `archived_at` bound. The rig takes `extra_reviewers` for the third owner.
 
+**SYRD-879 pins delivery once when the first owner gives up its own return.** `audit` kicks a rework back, and its
+process is gone when the rework re-enters. The fallback leaves the rework with `audit`, writes one line naming `audit`
+and the reason, and gives the return up. Back, `audit` is handed the rework exactly once: also after its turn ends while
+it still holds the ticket, which is when a second queued hand-off would arrive. The mutant that makes the fallback
+"move" the rework to the owner it already has (`IF true`) fails by an assertion.
+
 **`tests/review_recovery_test.py`** (SYRD-873) holds the kick-back reviewer's provider at the two resubmissions whose
 landing it reads, so they land with `audit` as on main. It also checks each fallback line. The second of those has
 `audit`, the first owner, giving its own return up.

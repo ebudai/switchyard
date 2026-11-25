@@ -324,6 +324,40 @@ def scenario_named(root: Path) -> dict:
             steps.sign_off(ticket)
             for role in ("audit", "audit-2", "audit-3"):
                 rig.idle(role)
+        # SYRD-879: the first owner gives up its own return. audit kicks PGU-32 back with no one else holding it, and
+        # its process is gone when the rework re-enters. The rework stays with audit (there is no one to move it to),
+        # and audit is handed it once when it is back. Gone here means the gate's eligibility sees no process, and
+        # the pane is held busy, so the listener types nothing into its live stand-in until it is back.
+        # Round 1 is handed to audit and reviewed, so nothing from it is left queued for audit. (A notice audit was
+        # never handed stays queued, and is delivered again if the ticket comes back to it: not the fallback's doing.)
+        rig.seeded("PGU-32", "ops")
+        rig.to_audit("PGU-32", "ops")
+        rig.settle(3)
+        round_1 = rig.handed("audit", "PGU-32")
+        rig.act("PGU-32", "audit_kick_back", "audit", reason="One finding.")
+        kicked = steps.returns("PGU-32")
+        rig.busy("audit")
+        rig.stop("audit")
+        since = rig.sql("SELECT clock_timestamp()::text;")
+        rig.to_audit("PGU-32", "ops")
+        landed = rig.where("PGU-32")
+        rig.settle(4)
+        gone = {"where": rig.where("PGU-32"), "returns": steps.returns("PGU-32"),
+                "comments": rig.comments("PGU-32", "Review return")}
+        rig.start("audit")
+        rig.idle("audit")
+        rig.settle(6)  # handed the rework: audit is busy reviewing it
+        rig.idle("audit")  # its turn ends while it still holds the ticket: anything still queued for it arrives now
+        rig.settle(4)
+        sends = rig.sql("SELECT count(*) FROM ticket_board.notification_trace WHERE ticket_id = 'PGU-32' "
+                        "AND target_role = 'audit' AND ticket_state_at_event = 'audit' AND kind = 'transition' "
+                        f"AND event = 'send' AND ts >= '{since}'::timestamptz;")
+        rig.settle(3)
+        seen["own_return"] = {"round_1": round_1, "kicked": kicked, "landed": landed, "gone": gone, "sends": sends,
+                              "later": rig.sql("SELECT count(*) FROM ticket_board.notification_trace WHERE ticket_id = "
+                                               "'PGU-32' AND target_role = 'audit' AND event = 'send' "
+                                               f"AND kind = 'transition' AND ts >= '{since}'::timestamptz;"),
+                              "where": rig.where("PGU-32")}
     return seen
 
 
@@ -509,6 +543,22 @@ def own_reviewer(got: dict) -> None:
               f"and audit-2's kick-back record is untouched: {case['returns']}")
 
 
+def own_return_given_up(got: dict) -> None:
+    case = got["own_return"]
+    check(len(case["round_1"]) == 1 and case["kicked"] == [{"stage": "audit", "role": "audit", "action": "audit_kick_back"}],
+          f"audit, the first owner, was handed round 1 of PGU-32 once and kicked it back, and the return is recorded: "
+          f"{case}")
+    check(case["landed"] == "audit/audit" and case["gone"]["where"] == "audit/audit" and case["where"] == "audit/audit",
+          f"the rework lands with audit and stays there through the fallback: there is no one to move it to: {case}")
+    check(case["gone"]["comments"] == [
+        "Review return in audit: audit kicked this back, but cannot take the rework (registered provider process is "
+        "gone), so it lands with audit, the first owner, and may be balanced."] and case["gone"]["returns"] == [],
+        f"exactly one line names audit and the reason, and the return is given up: {case['gone']}")
+    check(case["sends"] == "1" and case["later"] == "1",
+          f"back, audit is handed the rework exactly once, also after its turn ends while it still holds it: the "
+          f"fallback queues no second hand-off for the owner the rework already has: {case}")
+
+
 def fresh_each_round(got: dict) -> None:
     check(got["round_1"] == {"where": "audit/audit-2", "audit": "audit/audit"},
           f"round 1 of PGU-40 is balanced to idle audit-2 while audit reviews PGU-41: {got['round_1']}")
@@ -536,7 +586,9 @@ def main() -> int:
         with tempfile.TemporaryDirectory(prefix="syrd875-before.", dir="/tmp") as tmp:
             before(run(tree_at(BEFORE, Path(tmp) / "before")))
     candidate(run(ROOT))
-    own_reviewer(run(ROOT, "--scenario-named"))  # SYRD-877: claims main shares, pinned on this tree
+    named = run(ROOT, "--scenario-named")  # SYRD-877 and SYRD-879: claims main shares, pinned on this tree
+    own_reviewer(named)
+    own_return_given_up(named)
     fresh_each_round(run(ROOT, "--scenario-rounds"))
     print(f"review_return_test: {CHECKS} checks ok")
     return 0

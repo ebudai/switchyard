@@ -34,7 +34,10 @@ ROLES = ("director", "main", "app", "ops", "audit", "audit-2", "inspector")
 
 
 @contextmanager
-def review_board(root: Path, prefix: str) -> Iterator[SimpleNamespace]:
+def review_board(root: Path, prefix: str, *, extra_reviewers: tuple[str, ...] = ()) -> Iterator[SimpleNamespace]:
+    """`extra_reviewers` are more owners of Audit after `audit` and `audit-2`: Claude, not ephemeral, templated on audit."""
+    roles = ROLES + tuple(extra_reviewers)
+    reviewers = ("audit", "audit-2", *extra_reviewers)
     for extra in (str(root), str(root / "tests")):
         if extra not in sys.path:
             sys.path.insert(0, extra)
@@ -57,11 +60,11 @@ def review_board(root: Path, prefix: str) -> Iterator[SimpleNamespace]:
     session_context.CONFIRM_SECONDS = 1.5
     session_context.RESUME_WAIT_SECONDS = 0.6
 
-    targets = {role: f"pgu-{role}:0.0" for role in ROLES}
+    targets = {role: f"pgu-{role}:0.0" for role in roles}
     by_target = {target: role for role, target in targets.items()}
     # Every role a live stand-in provider process, registered as a pane registers it (the listener types into none
     # that is not); the gate and the hook records name the same process.
-    sleepers = {role: subprocess.Popen(["sleep", "3600"]) for role in ROLES}
+    sleepers = {role: subprocess.Popen(["sleep", "3600"]) for role in roles}
     identities = {role: (p.pid, read_process(p.pid).start_time) for role, p in sleepers.items()}
     with temporary_cluster(prefix=prefix, shutdown="immediate") as cluster:
         admin = build(cluster, "board", "fresh")
@@ -89,6 +92,9 @@ def review_board(root: Path, prefix: str) -> Iterator[SimpleNamespace]:
             audit = next(r for r in doc["roles"] if r["name"] == "audit")
             doc["roles"].append({**audit, "name": "audit-2", "label": "Audit 2", "target": targets["audit-2"],
                                  "slot": None, "runtime": "codex", "ephemeral": True, "template_role": "audit"})
+            for name in extra_reviewers:
+                doc["roles"].append({**audit, "name": name, "label": name.title(), "target": targets[name],
+                                     "slot": None, "template_role": "audit"})
             for role in doc["roles"]:
                 if role["name"] in targets:
                     role["target"] = targets[role["name"]]
@@ -96,10 +102,10 @@ def review_board(root: Path, prefix: str) -> Iterator[SimpleNamespace]:
                     role["target"] = role["target"].replace("cerulean-", "pgu-", 1)
             for stage in doc["stages"]:
                 if stage["name"] == "audit":
-                    stage["owners"] = ["audit", "audit-2"]
+                    stage["owners"] = list(reviewers)
             for transition in doc["transitions"]:
                 if transition["from"] == "audit" and "audit" in transition["actors"]:
-                    transition["actors"] = sorted(set(transition["actors"]) | {"audit-2"})
+                    transition["actors"] = sorted(set(transition["actors"]) | set(reviewers[1:]))
             app.apply_workflow(doc, expected_revision=0, dry_run=False, caller_role="director")
             runtimes = {r["name"]: r.get("runtime") for r in doc["roles"]}
             for role, (pid, start) in identities.items():
@@ -145,12 +151,12 @@ def review_board(root: Path, prefix: str) -> Iterator[SimpleNamespace]:
                     session_start(role, f"{role}-s{counter['n']}", "clear")
                 elif text.startswith("/"):
                     pass  # a /resume: Codex has none, and nothing here answers one
-                elif role in ("audit", "audit-2") and " -- " in text:
+                elif role in reviewers and " -- " in text:
                     busy(role)  # a reviewer handed a ticket reviews it until its turn ends
                 else:
                     idle(role)
 
-            for role in ROLES:
+            for role in roles:
                 session_start(role, f"{role}-launch", "startup")
 
             def listener() -> TicketBoardNotifyListener:

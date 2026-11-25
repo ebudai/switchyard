@@ -36,6 +36,7 @@ import tarfile
 import tempfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 #: Main's commit this ticket is cut from: the before-run's tree.
@@ -53,6 +54,50 @@ def check(condition: object, detail: object) -> None:
     CHECKS += 1
 
 
+def tools(rig) -> SimpleNamespace:
+    """The steps the scenarios share, on one rig."""
+    sql, act, where, seeded, to_audit, busy = rig.sql, rig.act, rig.where, rig.seeded, rig.to_audit, rig.busy
+
+    def arrive(ticket: str) -> None:
+        """A review arriving in Audit with no author slot involved: from Inspection, to audit, the first owner."""
+        seeded(ticket, "inspector", state="inspection")
+        act(ticket, "inspector_sign_off", "inspector")
+
+    def returns(ticket: str) -> list:
+        if sql("SELECT to_regclass('ticket_board.review_returns') IS NOT NULL;") != "t":
+            return ["(no review_returns on this board)"]
+        return json.loads(sql("SELECT coalesce(json_agg(json_build_object('stage', stage, 'role', role, 'action', "
+                              f"action)), '[]')::text FROM ticket_board.review_returns WHERE ticket_id = '{ticket}';"))
+
+    def sign_off(ticket: str) -> None:
+        """Audit's sign-off by whoever holds the ticket, so a ticket somewhere unexpected is observed, not a crash."""
+        holder = where(ticket)
+        if holder.startswith("audit/"):
+            act(ticket, "audit_sign_off", holder.split("/", 1)[1], text="Audited.")
+
+    def kicked_back_unhanded(ticket: str, author: str) -> None:
+        """audit-2 kicks a review back that it was never handed: the Director's reassignment reaches busy audit-2
+        as a queued notice, and audit-2 acts on the ticket from the board before that notice is delivered."""
+        busy("audit-2")
+        to_audit(ticket, author)
+        act(ticket, "reassign", "director", assignee="audit-2", reason="audit-2 reviews it")
+        act(ticket, "audit_kick_back", "audit-2", reason="One finding.")
+
+    def enter_named(ticket: str, author: str, assignee: str) -> None:
+        """The rework re-enters Audit with its owner named on the entry, as a transition's payload may."""
+        named = json.dumps({"assignee": assignee})
+        sql("SET ticket_board.caller_role = 'director'; UPDATE ticket_board.tickets SET commit_exempt = true "
+            f"WHERE id = '{ticket}';")
+        sql(f"SET ROLE {rig.fixture.SERVICE_ROLE}; SET ticket_board.caller_role = '{author}'; "
+            f"SELECT ticket_board.perform_workflow_action('{ticket}', 'submit_to_inspection', '{named}');")
+        if where(ticket).startswith("inspection/"):
+            sql(f"SET ROLE {rig.fixture.SERVICE_ROLE}; SET ticket_board.caller_role = 'inspector'; "
+                f"SELECT ticket_board.perform_workflow_action('{ticket}', 'inspector_sign_off', '{named}');")
+
+    return SimpleNamespace(arrive=arrive, returns=returns, sign_off=sign_off,
+                           kicked_back_unhanded=kicked_back_unhanded, enter_named=enter_named)
+
+
 def scenario(root: Path) -> dict:
     sys.path.insert(0, str(Path(__file__).resolve().parent))  # the rig, beside this scenario on either tree
     from review_pane_rig import review_board
@@ -62,34 +107,9 @@ def scenario(root: Path) -> dict:
         sql, act, where, settle, handed, to_audit, seeded = (rig.sql, rig.act, rig.where, rig.settle, rig.handed,
                                                              rig.to_audit, rig.seeded)
         idle, busy, sent, session_context = rig.idle, rig.busy, rig.sent, rig.session_context
-
-        def arrive(ticket: str) -> None:
-            """A review arriving in Audit with no author slot involved: from Inspection, to audit, the first owner."""
-            seeded(ticket, "inspector", state="inspection")
-            act(ticket, "inspector_sign_off", "inspector")
-
-        def returns(ticket: str) -> list:
-            if sql("SELECT to_regclass('ticket_board.review_returns') IS NOT NULL;") != "t":
-                return ["(no review_returns on this board)"]
-            return json.loads(sql("SELECT coalesce(json_agg(json_build_object('stage', stage, 'role', role, 'action', "
-                                  f"action)), '[]')::text FROM ticket_board.review_returns WHERE ticket_id = '{ticket}';"))
-
-        def sign_off(ticket: str) -> None:
-            """Audit's sign-off by whoever holds the ticket, so a ticket somewhere unexpected is observed, not a crash."""
-            holder = where(ticket)
-            if holder.startswith("audit/"):
-                act(ticket, "audit_sign_off", holder.split("/", 1)[1], text="Audited.")
-
-        def to_audit_2(ticket: str) -> list:
-            return [t for r, t in sent if r == "audit-2" and (t.startswith(ticket + " -- ") or t.startswith("/"))]
-
-        def kicked_back_unhanded(ticket: str, author: str) -> None:
-            """audit-2 kicks a review back that it was never handed: the Director's reassignment reaches busy audit-2
-            as a queued notice, and audit-2 acts on the ticket from the board before that notice is delivered."""
-            busy("audit-2")
-            to_audit(ticket, author)
-            act(ticket, "reassign", "director", assignee="audit-2", reason="audit-2 reviews it")
-            act(ticket, "audit_kick_back", "audit-2", reason="One finding.")
+        steps = tools(rig)
+        arrive, returns, sign_off, kicked_back_unhanded = (steps.arrive, steps.returns, steps.sign_off,
+                                                           steps.kicked_back_unhanded)
 
         # History, SAPI-148's shape: audit is busy with PGU-11; PGU-1's round 1 lands with audit and the balancer moves
         # it to idle audit-2, which reviews it and kicks it back.
@@ -248,14 +268,7 @@ def scenario(root: Path) -> dict:
         kicked_back_unhanded("PGU-8", "ops")
         arrive("PGU-16")  # audit's current review, so PGU-8 waits behind it
         settle(3)
-        named = "{\"assignee\": \"audit\"}"
-        sql("SET ticket_board.caller_role = 'director'; UPDATE ticket_board.tickets SET commit_exempt = true "
-            "WHERE id = 'PGU-8';")
-        sql(f"SET ROLE {rig.fixture.SERVICE_ROLE}; SET ticket_board.caller_role = 'ops'; "
-            f"SELECT ticket_board.perform_workflow_action('PGU-8', 'submit_to_inspection', '{named}');")
-        if where("PGU-8").startswith("inspection/"):
-            sql(f"SET ROLE {rig.fixture.SERVICE_ROLE}; SET ticket_board.caller_role = 'inspector'; "
-                f"SELECT ticket_board.perform_workflow_action('PGU-8', 'inspector_sign_off', '{named}');")
+        steps.enter_named("PGU-8", "ops", "audit")
         seen["record"].update(named=where("PGU-8"), named_comments=rig.comments("PGU-8", "Review return"))
         idle("audit-2")
         settle(4)
@@ -284,6 +297,93 @@ def scenario(root: Path) -> dict:
     return seen
 
 
+def scenario_named(root: Path) -> dict:
+    """SYRD-877, 1: the listener's fallback acts only on a rework that is with the reviewer that kicked it back. A
+    rework audit-2 kicked back re-enters naming another owner, whose provider process then goes: it is that owner's,
+    waiting for it, and the kick-back record is not the fallback's to spend on it."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from review_pane_rig import review_board
+
+    seen: dict = {}
+    with review_board(root, "s877n", extra_reviewers=("audit-3",)) as rig:
+        steps = tools(rig)
+        for ticket, author, named in (("PGU-30", "app", "audit-3"), ("PGU-31", "main", "audit")):
+            rig.seeded(ticket, author)
+            steps.kicked_back_unhanded(ticket, author)
+            rig.idle("audit-2")  # idle and empty: a target, were the rework anyone's to move
+            rig.stop(named)
+            mark = len(rig.sent)
+            steps.enter_named(ticket, author, named)
+            landed = rig.where(ticket)
+            rig.settle(4)
+            seen[named] = {"landed": landed, "where": rig.where(ticket), "returns": steps.returns(ticket),
+                           "comments": rig.comments(ticket, "Review return"),
+                           "handed": [[r, t] for r, t in rig.sent[mark:] if t.startswith(ticket + " -- ")]}
+            rig.start(named)
+            rig.settle(3)
+            steps.sign_off(ticket)
+            for role in ("audit", "audit-2", "audit-3"):
+                rig.idle(role)
+    return seen
+
+
+def scenario_rounds(root: Path) -> dict:
+    """SYRD-877, 2: a fresh review happens once per round, not once per ticket. Codex audit-2 kicks PGU-40 back twice;
+    each time its pane then moves to another ticket, so each rework's hand-off would need a saved conversation it
+    cannot restore. Round 3 starts fresh as round 2 did, although round 2's fresh review is already archived."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from review_pane_rig import review_board
+
+    seen: dict = {"rounds": {}}
+    with review_board(root, "s877r") as rig:
+        steps = tools(rig)
+        sql, settle, sent, idle = rig.sql, rig.settle, rig.sent, rig.idle
+
+        def moved_on(filler: str) -> None:
+            """audit-2 reviews another ticket, which clears its pane for it: PGU-40's conversation is no longer the pane's."""
+            steps.arrive(filler)
+            settle(4)
+            steps.sign_off(filler)
+            idle("audit-2")
+
+        steps.arrive("PGU-41")  # audit's current review throughout, so audit is never a target
+        settle(3)
+        rig.seeded("PGU-40", "app")
+        rig.to_audit("PGU-40", "app")
+        settle(4)  # round 1: balanced to idle audit-2, handed, its conversation bound
+        seen["round_1"] = {"where": rig.where("PGU-40"), "audit": rig.where("PGU-41")}
+        rig.act("PGU-40", "audit_kick_back", "audit-2", reason="Round 1 findings.")
+        idle("audit-2")
+        moved_on("PGU-42")
+        for number, filler in ((2, "PGU-43"), (3, None)):
+            candidate = f"c877{number}" + "0" * 35
+            rig.act("PGU-40", "add_comment", "app", text=f"Round {number}.")
+            rig.to_audit("PGU-40", "app")
+            # The round's exact candidate, recorded as its author's revision too, as submitting that commit would
+            # record it: audit-2's kick-back of this round returns the work to the author who produced it (SYRD-673).
+            sql(f"SET session_replication_role = replica; UPDATE ticket_board.tickets SET commit_hash = '{candidate}' "
+                f"WHERE id = 'PGU-40'; UPDATE ticket_board.ticket_audit_returns SET producer_commit = '{candidate}' "
+                "WHERE ticket_id = 'PGU-40';")
+            landed = rig.where("PGU-40")
+            mark = len(sent)
+            settle(6)
+            time.sleep(rig.session_context.CONFIRM_SECONDS + 0.3)
+            settle(3)
+            seen["rounds"][str(number)] = {
+                "candidate": candidate, "landed": landed, "where": rig.where("PGU-40"),
+                "to_audit_2": [t for r, t in sent[mark:] if r == "audit-2"],
+                "director": [t for r, t in sent[mark:] if r == "director" and re.search(r"\bPGU-40\b", t)],
+                "parked": sql("SELECT ticket_board.ticket_context_parked('PGU-40', 'audit-2');") == "t",
+                "archived": sql("SELECT count(*) FROM ticket_board.fresh_review_archive WHERE ticket_id = 'PGU-40';"),
+                "fresh": len(rig.comments("PGU-40", "Fresh review in audit"))}
+            if filler:  # audit-2 kicks this round back, and its pane moves on before the next
+                if rig.where("PGU-40") == "audit/audit-2":
+                    rig.act("PGU-40", "audit_kick_back", "audit-2", reason=f"Round {number} findings.")
+                idle("audit-2")
+                moved_on(filler)
+    return seen
+
+
 def tree_at(commit: str, into: Path) -> Path:
     archive = subprocess.run(["git", "-C", str(ROOT), "archive", commit, "scripts", "examples", "tests"],
                              check=True, capture_output=True).stdout
@@ -294,9 +394,9 @@ def tree_at(commit: str, into: Path) -> Path:
     return into
 
 
-def run(root: Path) -> dict:
+def run(root: Path, which: str = "--scenario") -> dict:
     env = {k: v for k, v in os.environ.items() if not k.startswith(PANE_ENV_PREFIXES)}
-    child = subprocess.run([sys.executable, str(root / "tests" / Path(__file__).name), "--scenario", str(root)],
+    child = subprocess.run([sys.executable, str(root / "tests" / Path(__file__).name), which, str(root)],
                            capture_output=True, text=True, timeout=900, stdin=subprocess.DEVNULL,
                            env={**env, "PYTHONDONTWRITEBYTECODE": "1"})
     assert child.returncode == 0, child.stdout[-2000:] + child.stderr[-4000:]
@@ -394,14 +494,50 @@ def candidate(got: dict) -> None:
           f"alike, is not one: {got['unavailable']}")
 
 
+def own_reviewer(got: dict) -> None:
+    for named, first in (("audit-3", False), ("audit", True)):
+        case = got[named]
+        check(case["landed"] == f"audit/{named}",
+              f"the rework audit-2 kicked back, re-entering with {named} named, lands with {named}: {case}")
+        check(case["where"] == f"audit/{named}" and {role for role, _text in case["handed"]} <= {named},
+              f"{named}'s process is gone, and the rework stays with it, and no other reviewer is handed it: the "
+              f"fallback gives up only a return to the reviewer that kicked it back, and {named} did not (the rig "
+              f"stops a process only as the gate sees it, so the listener may still type to its stand-in): {case}")
+        check(case["comments"] == [], f"no 'Review return' line is written for {named}"
+              + (", the first owner, where it would be the only symptom" if first else "") + f": {case['comments']}")
+        check(case["returns"] == [{"stage": "audit", "role": "audit-2", "action": "audit_kick_back"}],
+              f"and audit-2's kick-back record is untouched: {case['returns']}")
+
+
+def fresh_each_round(got: dict) -> None:
+    check(got["round_1"] == {"where": "audit/audit-2", "audit": "audit/audit"},
+          f"round 1 of PGU-40 is balanced to idle audit-2 while audit reviews PGU-41: {got['round_1']}")
+    for number in ("2", "3"):
+        r = got["rounds"][number]
+        after = r["to_audit_2"]
+        check(r["landed"] == "audit/audit-2" and r["where"] == "audit/audit-2",
+              f"round {number} returns to audit-2, which kicked the last round back: {r}")
+        check(after[:1] == ["/clear"] and len([t for t in after if t.startswith("PGU-40 -- ")]) == 1
+              and not any(t.startswith("/resume") for t in after)
+              and any("fresh review of the exact candidate " + r["candidate"] in t for t in after),
+              f"round {number} starts fresh: /clear, then one hand-off naming its own candidate, never a resume: {after}")
+        check(not r["parked"] and r["director"] == [],
+              f"round {number} does not park, and the Director is told nothing: {r}")
+        check(r["archived"] == str(int(number) - 1) and r["fresh"] == int(number) - 1,
+              f"round {number} sets its own conversation aside and says so, beside the earlier rounds': {r}")
+
+
 def main() -> int:
-    if len(sys.argv) == 3 and sys.argv[1] == "--scenario":
-        print(json.dumps(scenario(Path(sys.argv[2]))))
+    scenarios = {"--scenario": scenario, "--scenario-named": scenario_named, "--scenario-rounds": scenario_rounds}
+    if len(sys.argv) == 3 and sys.argv[1] in scenarios:
+        print(json.dumps(scenarios[sys.argv[1]](Path(sys.argv[2]))))
         return 0
     if os.environ.get("SYRD875_MUTATION_SKIP_BEFORE") != "1":  # a mutant changes this tree only
         with tempfile.TemporaryDirectory(prefix="syrd875-before.", dir="/tmp") as tmp:
             before(run(tree_at(BEFORE, Path(tmp) / "before")))
     candidate(run(ROOT))
+    own_reviewer(run(ROOT, "--scenario-named"))  # SYRD-877: claims main shares, pinned on this tree
+    fresh_each_round(run(ROOT, "--scenario-rounds"))
     print(f"review_return_test: {CHECKS} checks ok")
     return 0
 

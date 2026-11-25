@@ -124,6 +124,20 @@ It also gives a provider hold and a gone provider process.
     board's own reasons are checked one by one: not an owner, not active, not registered, account held, out of quota.
     A work pause is not a reason.
 
+**SYRD-877 pins two more claims** in `review_return_test`, each on its own board and on this tree only (main has the
+same code):
+- **The fallback acts only on a rework that is with the reviewer that kicked it back.** A rework `audit-2` kicked back
+  re-enters naming another owner, whose provider process then goes. It stays with that owner, and no other reviewer is
+  handed it. No "Review return" line is written, and `audit-2`'s record is untouched. One variant names `audit-3`, a
+  third owner the rig adds. The other names `audit`, the first owner, where a false line and the lost record would be
+  the only symptoms.
+- **A fresh review happens once per round.** Codex `audit-2` kicks the same ticket back twice, and its pane moves to
+  another ticket each time. Round 3 starts fresh as round 2 did: `/clear`, then one hand-off naming its own candidate,
+  with no park and no Director notice. That holds although round 2's fresh review is already archived.
+
+Two mutants fail by an assertion: the fallback's join without `rr.role = t.assignee`, and the once-a-round guard
+without its `archived_at` bound. The rig takes `extra_reviewers` for the third owner.
+
 **`tests/review_recovery_test.py`** (SYRD-873) holds the kick-back reviewer's provider at the two resubmissions whose
 landing it reads, so they land with `audit` as on main. It also checks each fallback line. The second of those has
 `audit`, the first owner, giving its own return up.

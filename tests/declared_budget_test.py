@@ -39,6 +39,9 @@ from execution_lease_nested_test import Board, defaults, role_pass  # noqa: E402
 SWEEP = ROOT / "tests" / "sweep.py"
 WRAPPER = ROOT / "scripts" / "switchyard-bounded"
 SUITE = "import time\ntime.sleep({seconds})\n"
+#: What the cases start: `sleep` for these durations (the wrapped plans, the undeclared command, a refused plan), and
+#: the fake suites of the sweeps, by their file names.
+MARKERS = ("882.7", "884.9", "882.5", "885.1", "syrd882_sleep_")
 CHECKS = 0
 
 
@@ -66,11 +69,17 @@ def check(condition: object, detail: object) -> None:
     CHECKS += 1
 
 
+#: The sessions this run's tool commands were started in: what `leftovers` may count, and nothing else on the host.
+SESSIONS: set[int] = set()
+
+
 def tool(argv: list[str], state_dir: Path, log: Path, environ: dict[str, str] | None = None) -> subprocess.Popen:
     """A command in a session of its own, as a provider's tool starts one, with the pane-state directory a pane has."""
-    return subprocess.Popen(argv, start_new_session=True, stdin=subprocess.DEVNULL, stdout=log.open("w"),
+    proc = subprocess.Popen(argv, start_new_session=True, stdin=subprocess.DEVNULL, stdout=log.open("w"),
                             stderr=subprocess.STDOUT, preexec_fn=defaults,
                             env={**os.environ, "TICKET_BOARD_PANE_STATE_DIR": str(state_dir), **(environ or {})})
+    SESSIONS.add(proc.pid)  # start_new_session: the command leads its own session, and its orphans keep that id
+    return proc
 
 
 def declared(state_dir: Path, proc: subprocess.Popen, wait: float = 15.0) -> dict | None:
@@ -92,10 +101,69 @@ def told(board: Board, proc: subprocess.Popen) -> int:
     return sum(1 for lease_id, _what in board.alerts if lease_id in ids)
 
 
+def in_session(session: int) -> list[int]:
+    """Live processes of a session: everything a tool command started, its own groups included."""
+    found = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text()
+        except OSError:
+            continue
+        fields = stat[stat.rfind(")") + 2:].split()
+        if len(fields) > 3 and fields[0] != "Z" and fields[3] == str(session):
+            found.append(int(entry.name))
+    return found
+
+
 def stop(proc: subprocess.Popen) -> None:
+    """End a tool command and everything it started (SYRD-885). SIGTERM first: switchyard-bounded stops its command's
+    own process group on it -- a SIGKILL of the wrapper's group alone left that group running. Then whatever is still
+    in the tool's session, which takes in a sweep's suites too."""
     if proc.poll() is None:
-        os.killpg(proc.pid, 9)
-    proc.wait(10)
+        proc.terminate()
+        try:
+            proc.wait(15)
+        except subprocess.TimeoutExpired:
+            pass
+    for _ in range(50):
+        left = in_session(proc.pid)
+        if not left:
+            break
+        for pid in left:
+            try:
+                os.kill(pid, 9)
+            except OSError:
+                pass
+        time.sleep(0.1)
+    proc.poll() if proc.returncode is not None else proc.wait(10)
+
+
+def leftovers(*markers: str) -> list[str]:
+    """Live processes this run started and must not leave behind: in a session one of its tool commands began (an
+    orphan keeps its session), a `sleep` of one of these durations, or a process running one of the fake suite files.
+    Read from each argv, so no shell that merely mentions them counts; and only this run's sessions, so another run's
+    copy of a marker elsewhere on the host never does (SYRD-885, Audit's kick-back)."""
+    durations = {marker for marker in markers if marker[:1].isdigit()}
+    prefixes = tuple(marker for marker in markers if not marker[:1].isdigit())
+    found = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+            continue
+        try:
+            argv = (entry / "cmdline").read_bytes().decode(errors="replace").split("\0")
+            state = (entry / "stat").read_text()
+        except OSError:
+            continue
+        fields = state[state.rfind(")") + 2:].split()
+        if fields[:1] == ["Z"] or len(fields) < 4 or int(fields[3]) not in SESSIONS or not argv or not argv[0]:
+            continue
+        sleeper = Path(argv[0]).name == "sleep" and len(argv) > 1 and argv[1] in durations
+        suite = prefixes and any(Path(arg).name.startswith(prefixes) for arg in argv[1:])
+        if sleeper or suite:
+            found.append(" ".join(argv)[:120])
+    return found
 
 
 def sweep_tree(root: Path, seconds: float) -> list[str]:
@@ -146,6 +214,8 @@ def case(tmp: Path, label: str, argv: list[str], *, cap: str = "") -> dict:
                 os.environ["TICKET_BOARD_LEASE_MAX_DECLARED_SECONDS"] = previous
     result["log"] = log.read_text(errors="replace")
     result["withdrawn"] = not any(execution_lease.lease_dir(state_dir).glob(f"{proc.pid}-*.json"))
+    result["leftovers"] = leftovers(*MARKERS)
+    check(result["leftovers"] == [], f"{label}: nothing the case started outlives it: {result['leftovers']}")
     return result
 
 
@@ -154,6 +224,19 @@ def budget_of(record: dict | None) -> float:
 
 
 def main() -> int:
+    # A decoy: a marker process outside this run, in a session of its own, as another role's run or an older tree's
+    # leak would be. It must neither fail the suite nor be stopped by it.
+    decoy = subprocess.Popen(["sleep", "882.7"], start_new_session=True, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        return run_suite(decoy)
+    finally:
+        if decoy.poll() is None:
+            decoy.kill()
+        decoy.wait(10)
+
+
+def run_suite(decoy: subprocess.Popen) -> int:
     check(execution_lease.plan_budget(33, 90) == 33 * 900 and execution_lease.plan_budget(5, 2) == 5 * 60,
           "a plan's budget is each mutant up to ten times the clean run, at least 60s")
     with tempfile.TemporaryDirectory(prefix="syrd882.") as tmp_name:
@@ -197,9 +280,30 @@ def main() -> int:
                 record = declared(state_dir, proc)
             finally:
                 stop(proc)
+            check(leftovers(*MARKERS) == [], f"{label}: the wrapped plan does not outlive its case: {leftovers(*MARKERS)}")
             check(budget_of(record) == expected,
                   f"{label}: 2 mutants with a 9s clean run declare 2 x {expected // 2}s = {expected}s, the factor above "
                   f"the 60s floor: {record}")
+        # SYRD-885: the plan mode's two refusals: exit 2, the reason, and no lease written.
+        for label, flags, reason in (
+                ("--expect with --mutants", ["--expect", "1h", "--mutants", "2", "--clean", "9s"],
+                 "give --expect or --mutants with --clean, not both"),
+                ("--mutants without --clean", ["--mutants", "2"], "--mutants and --clean go together"),
+                ("--clean without --mutants", ["--clean", "9s"], "--mutants and --clean go together")):
+            state_dir = tmp / f"state-refused-{len(flags)}-{flags[0]}"
+            state_dir.mkdir()
+            log = tmp / f"refused-{len(flags)}-{flags[0].strip('-')}.log"
+            proc = tool([sys.executable, str(WRAPPER), *flags, "--", "sleep", "885.1"], state_dir, log)
+            try:
+                code = proc.wait(10)  # a refusal is immediate; an accepted plan would run its command
+            except subprocess.TimeoutExpired:
+                code = None
+            leases = list(execution_lease.lease_dir(state_dir).glob("*.json"))
+            stop(proc)
+            said = log.read_text(errors="replace")
+            check(code == 2 and reason in said and not leases and leftovers("885.1") == [],
+                  f"{label} is refused: exit 2, saying {reason!r}, with no lease and nothing started: "
+                  f"exit {code}, leases {[l.name for l in leases]}: {said[-300:]}")
         # A sweep inside an outer `switchyard-bounded --expect` (one session) leaves the wrapper's declaration standing.
         outer = case(tmp, "outer", [sys.executable, str(WRAPPER), "--expect", "7m", "--label", "outer", "--", *sweep,
                                     "--out", str(tmp / "out-outer")])
@@ -218,6 +322,8 @@ def main() -> int:
         check(budget_of(record) == 1 * 20 * 2 + 20 and done.returncode == 0
               and not any(execution_lease.lease_dir(state_dir).glob("*.json")),
               f"a finished sweep withdraws its declaration: {record} {(tmp / 'short.log').read_text()[-400:]}")
+    check(decoy.poll() is None and decoy.pid not in SESSIONS,
+          "a marker process outside the run, running throughout, failed no case and was stopped by none")
     print(f"declared_budget_test: {CHECKS} checks ok")
     return 0
 

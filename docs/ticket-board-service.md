@@ -912,9 +912,13 @@ account that serves every board.
 
   docs/syrd-876-pgu-otto-commit-caches.md has the measured values, the
   `--no-local` seed, the upgrade line, the preflight (including pgu's legacy
-  `agent` listener), the proof and the rollback. A listed repository the
-  owner cannot lock, such as pgu's read-only `switchyard.git` entry, is
-  skipped by the refresh, and no git runs in it.
+  `agent` listener), the proof and the rollback.
+- **Only repositories the listener's account owns are refreshed (SYRD-878).**
+  The refresh compares each listed repository's git directory owner with its
+  own effective uid, and skips any other account's repository before its
+  lock is taken and before any git runs. Such an entry, like pgu's read-only
+  `switchyard.git`, eric's, stays in `TICKET_BOARD_COMMIT_GIT_DIR`, and the
+  board still reads it in place.
 
 **A push that fails is the implementer's to retry.** Nothing is recorded, the
 remote is unchanged, and re-running the command after fixing the cause is the

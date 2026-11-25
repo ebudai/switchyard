@@ -5,8 +5,10 @@
   wait scaled from the listener's last measured fetch. No listener: the caller refuses within that bound.
 - The listener's worker accepts only that form, and coalesces: one fetch per interval, every ask that arrived
   before it started served by it, at most PENDING_MAX held.
-- SYRD-876: a listed repository the owner cannot lock (pgu's read-only `/data/git/switchyard.git`) is skipped: the
-  refresh runs no git in it and changes nothing there, and the tenant's own cache is still refreshed.
+- SYRD-876: a listed repository the owner cannot lock is skipped: the refresh runs no git in it and changes nothing
+  there, and the tenant's own cache is still refreshed.
+- SYRD-878: a listed repository another account owns (pgu's read-only `/data/git/switchyard.git`, eric's) is skipped
+  by its owner, before its lock: even with a lock file the refresh could take, no git runs in it.
 - The generated boundary stays read-only: the board unit's ProtectHome/ProtectSystem/NoNewPrivileges and
   ReadWritePaths, the store grant `rX`, and nothing in the service calls the fetch.
 
@@ -460,12 +462,12 @@ def test_the_generated_boundary_stays_read_only() -> None:
 
 
 def test_a_listed_repository_the_owner_cannot_lock_is_never_fetched() -> None:
-    """SYRD-876: pgu's verification list keeps `/data/git/switchyard.git`, eric's repository, as a read-only second
-    entry after pgu's own cache. The listener's account can neither create nor open the integration lock there, so
-    the refresh skips it: no git command of the refresh names it, nothing in it changes, and the tenant's own cache
-    beside it is still refreshed. Two ways the lock is out of reach: a directory the account may not write (pgu's
-    case; root writes anywhere, so it is checked only when this runs as another account), and a lock path that is
-    a symlink, which the lock never follows."""
+    """SYRD-876: a listed repository whose integration lock the listener's account can neither create nor open is
+    skipped: no git command of the refresh names it, nothing in it changes, and the tenant's own cache beside it is
+    still refreshed. Since SYRD-878 another account's repository is skipped earlier, by its owner (the next test);
+    this holds the lock's own refusal, for a repository this account owns. Two ways the lock is out of reach: a
+    directory the account may not write (root writes anywhere, so it is checked only when this runs as another
+    account), and a lock path that is a symlink, which the lock never follows."""
 
     def ways(foreign: Path):
         if os.geteuid() != 0:
@@ -509,6 +511,56 @@ def test_a_listed_repository_the_owner_cannot_lock_is_never_fetched() -> None:
                       f"{name}, {order}: nothing in it changes, not a ref, not a file")
                 check(refreshed is True and repos.knows(repos.b),
                       f"{name}, {order}: the tenant's own cache beside it is still refreshed")
+
+
+def test_a_repository_another_account_owns_is_never_touched() -> None:
+    """SYRD-878: the refresh runs only in a repository the running account owns. pgu lists `/data/git/switchyard.git`,
+    eric's, after its own cache, and a lock file there that the tenant could open would otherwise let the refresh take
+    the lock and run `symbolic-ref` and `fetch` there, as the tenant, under eric's config. The foreign repository is
+    real, with a lock file anyone may open, and the `os.stat` seam reports another owner for it alone -- the same
+    whether or not this runs as root."""
+    for order in ("cache first", "foreign first"):
+        with tempfile.TemporaryDirectory(prefix="syrd878-owner.") as tmp:
+            repos = Repos(Path(tmp))
+            foreign = Path(tmp) / "foreign.git"
+            git("clone", "-q", "--bare", str(repos.origin), str(foreign))
+            git("--git-dir", str(foreign), "update-ref", "refs/heads/main", f"{repos.b}~1")  # as when last pushed
+            git("--git-dir", str(foreign), "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+            lock = foreign / commit_cache.INTEGRATION_LOCK
+            lock.write_text("")
+            lock.chmod(0o666)  # readable and writable by anyone: the lock alone would not stop the refresh
+            listed = ["git", "--git-dir", str(foreign), "for-each-ref", "--format=%(refname) %(objectname)"]
+            before = subprocess.run(listed, capture_output=True, text=True, check=True).stdout
+            entries = sorted(p.name for p in foreign.iterdir())
+            dirs = (repos.cache, foreign) if order == "cache first" else (foreign, repos.cache)
+            calls: list[list[str]] = []
+            real_run, real_stat = commit_cache.subprocess.run, commit_cache.os.stat
+
+            def recording(cmd, *args, **kwargs):
+                calls.append([str(part) for part in cmd])
+                return real_run(cmd, *args, **kwargs)
+
+            def owned_elsewhere(path, *args, **kwargs):
+                found = real_stat(path, *args, **kwargs)
+                if Path(path) == foreign:
+                    values = list(found)
+                    values[4] = os.geteuid() + 1  # st_uid: another account
+                    return os.stat_result(values)
+                return found
+
+            commit_cache.subprocess.run, commit_cache.os.stat = recording, owned_elsewhere
+            try:
+                refreshed = commit_cache.refresh_commit_repos(dirs)
+            finally:
+                commit_cache.subprocess.run, commit_cache.os.stat = real_run, real_stat
+            touching = [cmd for cmd in calls if any(str(foreign) in part for part in cmd)]
+            check(touching == [], f"{order}: no git runs in another account's repository, though its lock file was "
+                                  f"there to take: {touching}")
+            after = subprocess.run(listed, capture_output=True, text=True, check=True).stdout
+            check(after == before and sorted(p.name for p in foreign.iterdir()) == entries,
+                  f"{order}: nothing in it changes, not a ref, not a file")
+            check(refreshed is True and repos.knows(repos.b),
+                  f"{order}: the tenant's own cache beside it is still refreshed")
 
 
 def test_the_listener_starts_its_refresh_worker() -> None:

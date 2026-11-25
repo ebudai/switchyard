@@ -231,11 +231,22 @@ def resolve_known_commit(commit_git_dirs: tuple[Path, ...], value: str) -> tuple
     return "", missing_repos
 
 
+def _owner_uid(git_dir: Path) -> int | None:
+    """The account that owns a repository's git directory, or None when it cannot be read."""
+    try:
+        return os.stat(git_dir).st_uid
+    except OSError:
+        return None
+
+
 def refresh_commit_repos(commit_git_dirs: tuple[Path, ...]) -> bool:
-    """Fetch each verification repository from its own configured remote, as the account that owns it.
+    """Fetch each verification repository this account owns from its own configured remote.
 
     The tenant's listener runs this when the board asks (commit_refresh); the board service never does. A fetch runs
-    the repository's own hooks and follows its own config, which the owner writes (SYRD-872).
+    the repository's own hooks and follows its own config, which the owner writes (SYRD-872). So it runs only where
+    the running account is that owner: a listed repository anyone else owns -- pgu's read-only
+    `/data/git/switchyard.git`, eric's, which the board reads in place -- is skipped before its lock is taken and
+    before any git runs in it, whatever its lock file allows (SYRD-878).
 
     Bounded and credential-free by construction: the remote is whatever that
     repository already names -- for a tenant's cache, the project's public
@@ -250,9 +261,12 @@ def refresh_commit_repos(commit_git_dirs: tuple[Path, ...]) -> bool:
             git_args = commit_repo_git_args(commit_git_dir)
         except ValueError:
             continue
+        git_dir = cache_reader(commit_git_dir).git_dir
+        if _owner_uid(git_dir) != os.geteuid():
+            continue  # another account's repository: never its git, its config or its lock (SYRD-878)
         # Under the Publisher's lock: a refresh never runs between its reading and its moving this cache, and the
         # mark it writes first is seen by every refresh that starts after it (SYRD-754).
-        with integration_lock(cache_reader(commit_git_dir).git_dir, wait=LOCK_WAIT_SECONDS) as held:
+        with integration_lock(git_dir, wait=LOCK_WAIT_SECONDS) as held:
             if not held:
                 continue
             try:

@@ -44,9 +44,11 @@ tenant is upgraded. Nothing below has been run against either tenant.
   - 1 resolves in neither.
 
   It hasn't changed since 2026-09-05, so a second fetch source would add nothing.
-- **The refresh never writes there.** `refresh_commit_repos` takes the integration lock (`switchyard-integration.lock`)
-  in each listed repository before anything else. pgu's account can neither create nor open it in eric's `0755`
-  repository, so that entry is skipped and no git runs in it. `tests/commit_refresh_test.py` pins this.
+- **The refresh never runs there.** `refresh_commit_repos` acts only in a repository its own account owns
+  (SYRD-878). It compares the git directory's owner with its effective uid before taking the lock and before any git
+  runs. `/data/git/switchyard.git` is eric's, so pgu's listener skips it, whatever lock file is or isn't there; the
+  board service still reads it in place. `tests/commit_refresh_test.py` pins this. No lock-file check is needed in the
+  preflight.
 
 **otto: `/home/otto-agent/otto-commit-cache.git`,** with `/data/git/otto_scheduler.git` as its origin. All 254 commits
 otto's tickets cite resolve there.

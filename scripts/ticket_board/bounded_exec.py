@@ -14,6 +14,10 @@ a test, a mutation plan, a comparison.
 * `--run NAME --total DUR` shares one whole-run deadline between every command
   of a run: each gets no more than the run has left, and once it is spent the
   next command is refused (124) without starting.
+* `--mutants N --clean DUR [--factor F]` is `--expect` for a mutation plan,
+  scaled to it (SYRD-882): N mutants, each up to F (10) times the measured
+  clean run and at least 60s, as SYRD-845 bounds one case. Nothing is stopped
+  at it; the board hears only of a plan that outlives its own hang bound.
 * The declaration is written beside the pane-state files for the listener
   (`execution_lease.declare`) and withdrawn when the command ends.
 * SIGINT, SIGTERM or SIGHUP sent to this wrapper -- a person, or the
@@ -195,8 +199,7 @@ def run(argv: Sequence[str], *, deadline: float | None = None, expect: float | N
             return Result("refused", None, 0.0, f"the run {run_name!r} has spent its whole-run budget of {total:g}s")
         limit = left if limit is None else min(limit, left)
     hard = limit is not None
-    session = os.getsid(0)
-    leader = lease.start_ticks(session)
+    own = lease.SessionLease(directory)
     sweep = _subreaper()
     before = _own_children()
     requested: list[int] = []
@@ -208,11 +211,10 @@ def run(argv: Sequence[str], *, deadline: float | None = None, expect: float | N
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         proc = subprocess.Popen(list(argv), cwd=cwd, stdin=subprocess.DEVNULL, stdout=out, stderr=err, process_group=0)
         budget = limit if hard else expect
-        declared = None
-        if budget is not None and leader:
+        if budget is not None:
             try:
-                declared = lease.declare(directory, session, leader, deadline=wall + budget, hard=hard, label=label,
-                                         command=lease.sanitize_command(argv, cwd=cwd or os.getcwd()), run=run_name)
+                own.declare(budget, hard=hard, label=label, now=wall,
+                            command=lease.sanitize_command(argv, cwd=cwd or os.getcwd()), run=run_name)
             except OSError as exc:
                 print(f"switchyard-bounded: the board will not see this budget ({exc})", file=sys.stderr)
 
@@ -234,12 +236,11 @@ def run(argv: Sequence[str], *, deadline: float | None = None, expect: float | N
             sent, left = (stop(proc.pid, gained, grace=grace) if status != "completed" or _group_members(proc.pid)
                           or gained() else ([], []))
             proc.poll()
-            if declared is not None:
-                lease.withdraw(directory, session, leader)
+            own.withdraw()
             for sig, handler in previous.items():
                 signal.signal(sig, handler)
         if status == "interrupted":
-            marker = lease.interrupt_marker(directory, session, leader) if leader else None
+            marker = own.interrupt_marker()
             reason = (f"interrupted by the {marker.get('actor') or 'Director'}: {marker.get('reason') or 'no reason given'}"
                       if marker else f"interrupted by {signal.Signals(requested[0]).name}")
         if sent:
@@ -260,14 +261,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--total", type=lease.parse_duration, help="the run's whole-run deadline (with --run)")
     parser.add_argument("--grace", type=float, default=DEFAULT_GRACE_SECONDS, help="seconds between stop signals")
     parser.add_argument("--output-limit", type=int, default=DEFAULT_OUTPUT_LIMIT, help="bytes of each output kept")
+    parser.add_argument("--mutants", type=int, help="a mutation plan of this many mutants: declare its scaled budget")
+    parser.add_argument("--clean", type=lease.parse_duration, help="the plan's measured clean run (with --mutants)")
+    parser.add_argument("--factor", type=float, default=10.0, help="each mutant's bound, times the clean run (default 10)")
     parser.add_argument("--label", default="", help="what this run is, for the board")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
         parser.error("give the command after --")
+    if (args.mutants is None) != (args.clean is None):
+        parser.error("--mutants and --clean go together")
+    if args.mutants is not None:
+        if args.expect is not None:
+            parser.error("give --expect or --mutants with --clean, not both")
+        args.expect = lease.plan_budget(args.mutants, args.clean, factor=args.factor)
+        honoured, cap = lease.capped(args.expect)
+        print(f"switchyard-bounded: {args.mutants} mutants at up to max(60s, {args.factor:g} x {args.clean:g}s) each: "
+              f"expecting {args.expect:g}s" + (f", capped at the board's {cap:g}s" if honoured < args.expect else ""),
+              file=sys.stderr)
     if args.deadline is None and args.expect is None and args.total is None:
-        parser.error("give --deadline, --expect, or --run with --total")
+        parser.error("give --deadline, --expect, --mutants with --clean, or --run with --total")
     if (args.total is None) != (not args.run):
         parser.error("--run and --total go together")
     result = run(command, deadline=args.deadline, expect=args.expect, grace=args.grace, output_limit=args.output_limit,

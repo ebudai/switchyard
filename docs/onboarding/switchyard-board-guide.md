@@ -486,7 +486,11 @@ checks like any other, so they are scoped the same way:
 - **Scope, not time.** The rule is about what the mutants target, not how long the run
   takes: a long run is fine when the scoped area needs it. It is bounded like any run
   (`switchyard-bounded`, with `--expect` for one that legitimately runs long), which stops
-  a mutant that never ends, not a long but legitimate run.
+  a mutant that never ends, not a long but legitimate run. A mutation plan declares a
+  budget scaled to it: `switchyard-bounded --mutants N --clean DUR -- <driver>`, each
+  mutant up to ten times the measured clean run, as one case is bounded. `tests/sweep.py`
+  declares its own budget from its suites, `--jobs` and `--timeout`. Neither pages the
+  Director unless it outlives that budget.
 - **A whole-corpus run is the exception:** the ticket's test tier is `full`, the project
   asks for one, or it is a milestone-boundary test-integrity pass
   (`adversarial-collaborative-methodology.md`, "Coverage chasing").

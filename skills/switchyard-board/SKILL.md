@@ -296,6 +296,12 @@ background command an end, and finish it before you move the ticket on.
   124, never 0; `--run NAME --total 45m` gives a run of commands one shared
   budget. A command that may legitimately run longer than 15 minutes and must
   not be stopped declares it: `--expect 2h`.
+- **Declare what a long run's own guards allow, so a healthy one never pages
+  the director.** `tests/sweep.py` declares its own budget, scaled to its
+  suites, `--jobs` and `--timeout`, so run it as it is. Run a mutation plan
+  under `switchyard-bounded --mutants N --clean DUR -- <driver>`: N mutants, each
+  up to ten times the clean run you measured, with a minute's floor. Nothing is
+  stopped at that budget; the director hears only of a run that outlives it.
 - **The Director hears of a long command, not you.** Any command under your
   pane still running after 15 minutes, or past the budget it declared, is
   reported to the director once, with your ticket, its pid and how to inspect,

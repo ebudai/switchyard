@@ -192,6 +192,50 @@ def declaration(directory: Path, session: int, leader_ticks: int, *, now: float,
             "label": str(record.get("label") or "")[:120], "run": str(record.get("run") or "")[:120]}
 
 
+def capped(budget: float, environ: dict[str, str] | None = None) -> tuple[float, float]:
+    """`budget` as the board will honour it, and the cap: a declaration is a claim by the role, so it is capped."""
+    cap = configured_seconds(MAX_DECLARED_ENV, DEFAULT_MAX_DECLARED_SECONDS, environ)
+    return min(float(budget), cap), cap
+
+
+def plan_budget(mutants: int, clean_seconds: float, *, factor: float = 10.0, floor: float = 60.0) -> float:
+    """What a mutation plan may take before it is a hang: each mutant up to `factor` times the measured clean run, and
+    at least `floor` seconds -- SYRD-845's per-case bound, max(60s, 10 x clean) -- for every mutant in the plan."""
+    return max(0, int(mutants)) * max(float(floor), float(factor) * float(clean_seconds))
+
+
+class SessionLease:
+    """The declaration for the caller's own session: what `switchyard-bounded` writes, and any long run that knows its
+    own budget (tests/sweep.py) writes the same way (SYRD-882). Keyed by the session's leader and its start tick."""
+
+    def __init__(self, directory: Path | None = None, session: int | None = None) -> None:
+        self.directory = lease_dir() if directory is None else Path(directory)
+        self.session = os.getsid(0) if session is None else session
+        self.leader = start_ticks(self.session)
+        self.declared: Path | None = None
+
+    def standing(self) -> bool:
+        """Whether this session already carries a declaration (an outer `switchyard-bounded`, say)."""
+        return bool(self.leader) and (self.directory / (session_name(self.session, self.leader) + ".json")).is_file()
+
+    def declare(self, budget: float, *, hard: bool, command: str, label: str = "", run: str = "",
+                now: float | None = None) -> Path | None:
+        """Declare `budget` seconds from now for this session; None when it has no readable leader."""
+        if not self.leader:
+            return None
+        self.declared = declare(self.directory, self.session, self.leader, deadline=(time.time() if now is None else now)
+                                + float(budget), hard=hard, command=command, label=label, run=run)
+        return self.declared
+
+    def withdraw(self) -> None:
+        if self.declared is not None:
+            withdraw(self.directory, self.session, self.leader)
+            self.declared = None
+
+    def interrupt_marker(self) -> dict[str, Any] | None:
+        return interrupt_marker(self.directory, self.session, self.leader) if self.leader else None
+
+
 def withdraw(directory: Path, session: int, leader_ticks: int) -> None:
     try:
         (directory / (session_name(session, leader_ticks) + ".json")).unlink()

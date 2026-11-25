@@ -16,11 +16,17 @@ A SUITE is `tests/<name>.py`, `<name>.py` or `<name>`. Each runs:
 A suite declared load-sensitive that fails is run once more, alone, and reported as passing on retry if it does.
 Each suite's output goes to DIR/<name>.log; one line per suite is printed, then a summary. The exit status is 1 when
 any suite failed. It never runs as root: guard-only suites (SYRD-808) are not for a sweep that does.
+
+The sweep tells the board how long its own guards let it run (SYRD-882): ceil(suites / jobs) x timeout, twice for a
+retry, plus one more timeout, declared for its session as `switchyard-bounded --expect` declares one, and withdrawn
+when it ends. So the Director hears only of a sweep that outlives its own guard -- a hang -- not of every long healthy
+one. A declaration already standing for the session (an outer `switchyard-bounded`) is left as it is.
 """
 
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import shutil
 import subprocess
@@ -38,6 +44,8 @@ import live_boundary  # noqa: E402
 import sweep_requirements  # noqa: E402
 
 ROOT = HERE.parent
+sys.path.insert(1, str(ROOT))
+from scripts.ticket_board import execution_lease  # noqa: E402
 PATH = "/usr/local/bin:/usr/bin:/bin"
 LIVE_PANE_STORES = ("TICKET_BOARD_PANE_SESSION_DIR", "TICKET_BOARD_PANE_STATE_DIR")
 _alone = threading.Lock()  # a retry runs with nothing else running
@@ -160,6 +168,33 @@ def run_suite(plan_: Plan, *, root: Path, out: Path, timeout: float) -> Result:
     return Result(plan_, status, time.monotonic() - started, log)
 
 
+def budget(suites: int, jobs: int, timeout: float) -> float:
+    """How long this sweep's own guards let it run: every round of `jobs` suites up to `timeout`, twice for a retry,
+    and one more `timeout` of margin (SYRD-882)."""
+    return math.ceil(max(1, suites) / max(1, jobs)) * timeout * 2 + timeout
+
+
+def declare(suites: int, jobs: int, timeout: float, argv: list[str]) -> execution_lease.SessionLease | None:
+    """Declare this sweep's budget for its session, unless one already stands; say what the board will hold it to."""
+    own = execution_lease.SessionLease()
+    wanted = budget(suites, jobs, timeout)
+    honoured, cap = execution_lease.capped(wanted)
+    if own.standing():
+        print("sweep: this session already declares its budget to the board; leaving it as it is", file=sys.stderr)
+        return None
+    try:
+        declared = own.declare(wanted, hard=False, label=f"sweep of {suites} suites", run="",
+                               command=execution_lease.sanitize_command([Path(sys.argv[0]).name, *argv]))
+    except OSError as exc:
+        print(f"sweep: the board will not see this sweep's budget ({exc})", file=sys.stderr)
+        return None
+    if declared is None:
+        return None
+    print(f"sweep: told the board to expect up to {wanted:.0f}s ({suites} suites, {jobs} jobs, {timeout:g}s each, a retry)"
+          + (f", capped at its {cap:.0f}s" if honoured < wanted else ""), file=sys.stderr)
+    return own
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("suites", nargs="+")
@@ -175,8 +210,13 @@ def main(argv: list[str] | None = None) -> int:
     out = args.out or Path(tempfile.mkdtemp(prefix="sweep-logs."))
     out.mkdir(parents=True, exist_ok=True)
     plans = [plan(suite, sandbox=not args.no_sandbox) for suite in args.suites]
-    with ThreadPoolExecutor(max(1, args.jobs)) as pool:
-        results = list(pool.map(lambda p: run_suite(p, root=root, out=out, timeout=args.timeout), plans))
+    own = declare(len(plans), args.jobs, args.timeout, list(sys.argv[1:] if argv is None else argv))
+    try:
+        with ThreadPoolExecutor(max(1, args.jobs)) as pool:
+            results = list(pool.map(lambda p: run_suite(p, root=root, out=out, timeout=args.timeout), plans))
+    finally:
+        if own is not None:
+            own.withdraw()
     for result in results:
         where = result.plan.where + (f" ({result.plan.why})" if result.plan.why else "")
         print(f"{Path(result.plan.suite).stem} {result.status} {where} {result.seconds:.0f}s")

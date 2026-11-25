@@ -9,6 +9,7 @@
   there, and the tenant's own cache is still refreshed.
 - SYRD-878: a listed repository another account owns (pgu's read-only `/data/git/switchyard.git`, eric's) is skipped
   by its owner, before its lock: even with a lock file the refresh could take, no git runs in it.
+- SYRD-880: and its lock is never asked for, opened or flocked; a hold on it never delays the tenant's own refresh.
 - The generated boundary stays read-only: the board unit's ProtectHome/ProtectSystem/NoNewPrivileges and
   ReadWritePaths, the store grant `rX`, and nothing in the service calls the fetch.
 
@@ -561,6 +562,57 @@ def test_a_repository_another_account_owns_is_never_touched() -> None:
                   f"{order}: nothing in it changes, not a ref, not a file")
             check(refreshed is True and repos.knows(repos.b),
                   f"{order}: the tenant's own cache beside it is still refreshed")
+
+
+def test_another_accounts_lock_is_never_taken() -> None:
+    """SYRD-880: the owner check comes before the lock. Another account's repository is skipped before its
+    `switchyard-integration.lock` is opened or flocked -- not merely before its git runs. Two ways it is seen:
+    `integration_lock` (wrapped, still the real one) is never asked for that repository, with the tenant's cache
+    listed first and second; and while another process holds that lock, the refresh of the tenant's own cache is
+    not held up by it (`LOCK_WAIT_SECONDS` is the wait a lock taken there would cost). As in SYRD-878, the os.stat
+    seam reports the other owner for that path alone, so this holds whether or not it runs as root."""
+    import fcntl
+    import time
+
+    for order in ("cache first", "foreign first"):
+        with tempfile.TemporaryDirectory(prefix="syrd880-lock.") as tmp:
+            repos = Repos(Path(tmp))
+            foreign = Path(tmp) / "foreign.git"
+            git("clone", "-q", "--bare", str(repos.origin), str(foreign))
+            lock = foreign / commit_cache.INTEGRATION_LOCK
+            lock.write_text("")
+            lock.chmod(0o666)
+            dirs = (repos.cache, foreign) if order == "cache first" else (foreign, repos.cache)
+            asked: list[str] = []
+            real_lock, real_stat = commit_cache.integration_lock, commit_cache.os.stat
+
+            def recording_lock(git_dir, *args, **kwargs):
+                asked.append(str(git_dir))
+                return real_lock(git_dir, *args, **kwargs)
+
+            def owned_elsewhere(path, *args, **kwargs):
+                found = real_stat(path, *args, **kwargs)
+                if Path(path) == foreign:
+                    values = list(found)
+                    values[4] = os.geteuid() + 1  # st_uid: another account
+                    return os.stat_result(values)
+                return found
+
+            held = os.open(lock, os.O_RDWR)  # another process's hold on that lock, as far as flock can tell
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            commit_cache.integration_lock, commit_cache.os.stat = recording_lock, owned_elsewhere
+            started = time.monotonic()
+            try:
+                refreshed = commit_cache.refresh_commit_repos(dirs)
+            finally:
+                elapsed = time.monotonic() - started
+                commit_cache.integration_lock, commit_cache.os.stat = real_lock, real_stat
+                os.close(held)
+            check(str(foreign) not in asked and asked == [str(repos.cache)],
+                  f"{order}: the only lock asked for is the tenant's own cache's, never another account's: {asked}")
+            check(refreshed is True and repos.knows(repos.b) and elapsed < commit_cache.LOCK_WAIT_SECONDS / 2,
+                  f"{order}: while another process holds that account's lock, the tenant's cache is refreshed without "
+                  f"waiting on it ({elapsed:.1f}s; a lock taken there costs up to {commit_cache.LOCK_WAIT_SECONDS:.0f}s)")
 
 
 def test_the_listener_starts_its_refresh_worker() -> None:

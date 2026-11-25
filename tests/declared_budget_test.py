@@ -187,6 +187,19 @@ def main() -> int:
         capped = case(tmp, "plan-capped", plan, cap="3s")
         check(capped["within"] == [0, 0, 0] and capped["after"][-1] == 1 and "capped at the board's 3s" in capped["log"],
               f"past its capped budget, still running, the plan is reported once, and said to be capped: {capped}")
+        # SYRD-884: above the floor, the factor decides. Through the real CLI, read from the lease record.
+        for label, extra, expected in (("default factor", [], 2 * 10 * 9), ("--factor 20", ["--factor", "20"], 2 * 20 * 9)):
+            state_dir = tmp / f"state-factor-{len(extra)}"
+            state_dir.mkdir()
+            proc = tool([sys.executable, str(WRAPPER), "--mutants", "2", "--clean", "9s", *extra, "--", "sleep", "884.9"],
+                        state_dir, tmp / f"factor-{len(extra)}.log")
+            try:
+                record = declared(state_dir, proc)
+            finally:
+                stop(proc)
+            check(budget_of(record) == expected,
+                  f"{label}: 2 mutants with a 9s clean run declare 2 x {expected // 2}s = {expected}s, the factor above "
+                  f"the 60s floor: {record}")
         # A sweep inside an outer `switchyard-bounded --expect` (one session) leaves the wrapper's declaration standing.
         outer = case(tmp, "outer", [sys.executable, str(WRAPPER), "--expect", "7m", "--label", "outer", "--", *sweep,
                                     "--out", str(tmp / "out-outer")])

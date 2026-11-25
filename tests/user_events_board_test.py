@@ -157,8 +157,14 @@ def delivery(board: Board) -> dict:
         "queue": board.sql("SELECT coalesce(json_agg(json_build_array(ticket_id, kind, target_role, message, "
                            "attempts, dead_lettered_at IS NOT NULL) ORDER BY ticket_id, kind, target_role, message), '[]') "
                            "FROM ticket_board.ticket_notification_queue;"),
+        # A notice that ended in a drop was never delivered. Since SYRD-881 a hand-off is retired when its ticket
+        # moves (`left_its_entry`), where an older board left it queued and dropped it as stale when next claimed:
+        # different trace rows for the same non-delivery, so neither is compared. The queue and the sends are, whole.
         "trace": board.sql("SELECT coalesce(json_agg(json_build_array(ticket_id, kind, target_role, event) "
-                           "ORDER BY ticket_id, kind, target_role, event), '[]') FROM ticket_board.notification_trace;"),
+                           "ORDER BY ticket_id, kind, target_role, event), '[]') FROM ticket_board.notification_trace t "
+                           "WHERE t.notification_id IS NULL OR t.notification_id NOT IN (SELECT d.notification_id "
+                           "FROM ticket_board.notification_trace d WHERE d.event = 'drop' AND d.notification_id IS NOT "
+                           "NULL AND d.busy_reason IN ('stale_notification', 'left_its_entry'));"),
         "sent": sorted(board.sent),
     }
 
@@ -553,12 +559,29 @@ def resilient(got: dict) -> None:
     check(r["pruned"] and r["recorded_again"] == "1", f"events older than 30 days are pruned as new ones arrive: {r}")
 
 
+def without_syrd881_duplicate(delivery: dict) -> dict:
+    """Main's delivery less the one hand-off SYRD-881 retires. PGU-905 is routed to main, then submitted and kicked back
+    to main before any pass: main's first "entered Implementation" was never delivered while PGU-905 was away, and on
+    main it was delivered on its return, beside the kick-back's own -- two hand-offs for one entry. Since SYRD-881 it
+    is retired when PGU-905 leaves Implementation (a drop, left out of the trace compared above)."""
+    message = "PGU-905 -- PGU-905 title entered Implementation"
+    trace = json.loads(delivery["trace"])
+    for event in ("enqueue", "claim", "listener_claim", "send", "listener_ack", "ack"):
+        trace.remove(["PGU-905", "transition", "main", event])
+    sent = [list(entry) for entry in delivery["sent"]]
+    sent.remove(next(entry for entry in sent if entry[1] == message))
+    return {"queue": delivery["queue"], "trace": json.dumps(trace), "sent": sent}
+
+
 def candidate(got: dict, main: dict) -> None:
     every_step_answered(got["steps"])
     check(got["steps"]["where"] == main["steps"]["where"], f"every ticket ends where it did on main: "
                                                            f"{got['steps']['where']} {main['steps']['where']}")
-    check(got["steps"]["delivery"] == main["steps"]["delivery"],
-          "the role-pane queue, trace and sends are exactly main's: recording the User's events changes no pane's "
+    mine = got["steps"]["delivery"]
+    check({"queue": mine["queue"], "trace": json.dumps(json.loads(mine["trace"])),
+           "sent": [list(entry) for entry in mine["sent"]]} == without_syrd881_duplicate(main["steps"]["delivery"]),
+          "the role-pane queue, trace and sends are exactly main's, less the second hand-off SYRD-881 retires: "
+          "recording the User's events changes no pane's "
           f"delivery: {json.dumps(got['steps']['delivery'])[:1500]}")
     status, text = got["reads"]["all"]
     check(status == 200, f"GET /api/user-events answers: {status} {text[:300]}")

@@ -144,8 +144,21 @@ FROM ticket_board.ticket_notification_queue WHERE ticket_id='{ticket}';"""))
             check(ticket["audit_signoff"] is False or ticket["audit_signoff"] is True,
                   "whatever the audit flag does, it is not what decides recovery")
             check(not ticket.get("awaiting_role"), f"with no awaiting role: {ticket.get('awaiting_role')!r}")
+            # SYRD-881: the Director's row queued here was the seeded entry's own "entered Director review", stale
+            # the moment PGU-202 left that stage; it is retired then, never delivered. SYRD-203's guard must still hold
+            # with a live Director row queued, so one is queued about PGU-202 where it now is -- as a board that
+            # copies the Director on a return does.
+            check("director" not in {row["role"] for row in queued("PGU-202")} and fixture.psql(admin,
+                  "SELECT count(*) FROM ticket_board.notification_trace WHERE ticket_id='PGU-202' "
+                  "AND target_role='director' AND event='drop' AND busy_reason='left_its_entry';").strip() == "1",
+                  f"the Director's notice of the stage PGU-202 left is retired with it: {queued('PGU-202')}")
+            fixture.psql(admin, f"""SELECT ticket_board.enqueue_notification(
+                'PGU-202', 'transition', 'director', 'PGU-202 -- returned to {owner}',
+                jsonb_build_object('kind', 'transition', 'id', 'PGU-202', 'new_state', 'in_progress',
+                                   'assignee', '{owner}', 'target_role', 'director'),
+                'transition:PGU-202:director-copy');""")
             check("director" in {row["role"] for row in queued("PGU-202")},
-                  f"and the Director is notified of their own return: {queued('PGU-202')}")
+                  f"and the Director has a live copy of the return queued: {queued('PGU-202')}")
 
             # The owner reads its transition notification and starts work.
             deliver("PGU-202", owner)

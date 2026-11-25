@@ -142,6 +142,14 @@ class Board:
             f"FROM ticket_board.notification_trace WHERE ticket_id = '{ticket}' AND target_role = '{role}' "
             "AND event = 'drop' AND busy_reason = 'stale_notification';"))
 
+    def retired(self, ticket: str, role: str) -> list[dict]:
+        """`drops`, and since SYRD-881 a hand-off retired when its ticket moved (`left_its_entry`): either way, the
+        notice was never delivered and its end is recorded."""
+        return json.loads(self.sql(
+            "SELECT coalesce(jsonb_agg(jsonb_build_object('kind', kind, 'reason', busy_reason) ORDER BY id), '[]') "
+            f"FROM ticket_board.notification_trace WHERE ticket_id = '{ticket}' AND target_role = '{role}' "
+            "AND event = 'drop' AND busy_reason IN ('stale_notification', 'left_its_entry');"))
+
     def reservation(self, role: str) -> str:
         return self.sql("SELECT coalesce(max(ticket_id), '') FROM ticket_board.serial_reservations() "
                         f"WHERE implementer = '{role}';")
@@ -282,9 +290,11 @@ def main() -> int:
                 check(board.sql(f"SELECT {after} FROM ticket_board.tickets WHERE id = '{ticket}';") == "t",
                       f"{what}: it is in effect")
                 later = [m for m in about(board.one_pass(), "app", ticket) if "entered Implementation" in m]
+                # A reassignment or a cancel moves the ticket, so the hand-over is retired as it commits (SYRD-881);
+                # a blocker moves nothing, and the listener drops it as stale. Either way: never sent, and recorded.
                 check(later == [] and "transition" not in board.pending(ticket, "app")
-                      and "transition" in [d["kind"] for d in board.drops(ticket, "app")],
-                      f"{what}: App's hand-over is dropped as stale, durably recorded: {board.drops(ticket, 'app')}")
+                      and "transition" in [d["kind"] for d in board.retired(ticket, "app")],
+                      f"{what}: App's hand-over is dropped, durably recorded: {board.retired(ticket, 'app')}")
 
             # A write that commits between the first recheck and the hold (here: from the background-work check)
             # is caught by the recheck under the hold.

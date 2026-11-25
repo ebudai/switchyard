@@ -392,7 +392,8 @@ SELECT ticket_board.enqueue_notification(
         sent == [(INSPECTOR_PANE, announcement("PGU-5", "inspection"))],
         fail(f"only the stage the ticket is actually in is announced: {sent}"),
     )
-    stale = [row for row in trace(admin, "PGU-5", events=("drop",)) if row["reason"] == "stale_notification"]
+    # SYRD-881: retired as the ticket left in_progress, not found stale later.
+    stale = [row for row in trace(admin, "PGU-5", events=("drop",)) if row["reason"] == "left_its_entry"]
     check(stale != [], fail(f"and the stale one is dropped, with its reason: {trace(admin, 'PGU-5')}"))
 
     # 7. Narrowness: a held ticket's REMINDERS stay silent. Manual control is

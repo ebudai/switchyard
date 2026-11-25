@@ -88,6 +88,10 @@ DECLARED: dict[str, OlderCode] = {
         "that kicked the work back when it can take it, its balancer call leaves such a rework there, and a restore "
         "that cannot be made for that reviewer starts a fresh review instead of parking; older code never calls the "
         "listener's fallback, so a rework returned to a reviewer that stopped waits for it"),
+    "pgu1061_syrd881_handoff_per_entry.sql": OlderCode(
+        True, "adds an AFTER UPDATE trigger on tickets that deletes only undelivered transition notices naming the "
+        "stage and owner the ticket just left, tracing each as dropped; older code's listener would have found each "
+        "of them stale, or delivered it as a second hand-off for a later entry, and never relied on either"),
 }
 
 

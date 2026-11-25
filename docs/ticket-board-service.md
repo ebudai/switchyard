@@ -321,6 +321,15 @@ between PostgreSQL trigger/cron state and the
 real-time `LISTEN` delivery, replay reconciliation after reconnect, and
 NUDGE-message gating against live pane activity.
 
+**One hand-off per entry (SYRD-881).** A hand-off belongs to the stage entry
+and owner it was queued for. When a ticket leaves a stage, or changes owner
+within one, the hand-offs still queued for that stage and owner are retired:
+never delivered, traced as dropped (`left_its_entry`). A notice deferred while
+its owner was busy therefore can't come back as a second hand-off if the
+ticket returns to the same owner. A hand-off already typed into its pane, with
+its delivery proof still open, is left to that proof. See
+docs/syrd-881-handoff-per-entry.md.
+
 The listener no longer screen-scrapes pane output. Each agent CLI must run
 `scripts/ticket-board-pane-idle-hook` from its lifecycle hooks so the listener
 can read a per-pane state file from

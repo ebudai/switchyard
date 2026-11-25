@@ -5,6 +5,8 @@
   wait scaled from the listener's last measured fetch. No listener: the caller refuses within that bound.
 - The listener's worker accepts only that form, and coalesces: one fetch per interval, every ask that arrived
   before it started served by it, at most PENDING_MAX held.
+- SYRD-876: a listed repository the owner cannot lock (pgu's read-only `/data/git/switchyard.git`) is skipped: the
+  refresh runs no git in it and changes nothing there, and the tenant's own cache is still refreshed.
 - The generated boundary stays read-only: the board unit's ProtectHome/ProtectSystem/NoNewPrivileges and
   ReadWritePaths, the store grant `rX`, and nothing in the service calls the fetch.
 
@@ -455,6 +457,58 @@ def test_the_generated_boundary_stays_read_only() -> None:
     check(any("u:boardsvc:rX" in line for line in grants) and any("d:u:boardsvc:rX" in line for line in grants)
           and not any("w" in part.split(":")[-1] for line in grants for part in line.split() if "boardsvc:" in part),
           f"the store grant stays read-only, with traverse-only ancestors: {grants}")
+
+
+def test_a_listed_repository_the_owner_cannot_lock_is_never_fetched() -> None:
+    """SYRD-876: pgu's verification list keeps `/data/git/switchyard.git`, eric's repository, as a read-only second
+    entry after pgu's own cache. The listener's account can neither create nor open the integration lock there, so
+    the refresh skips it: no git command of the refresh names it, nothing in it changes, and the tenant's own cache
+    beside it is still refreshed. Two ways the lock is out of reach: a directory the account may not write (pgu's
+    case; root writes anywhere, so it is checked only when this runs as another account), and a lock path that is
+    a symlink, which the lock never follows."""
+
+    def ways(foreign: Path):
+        if os.geteuid() != 0:
+            yield "read-only", lambda: foreign.chmod(0o555), lambda: foreign.chmod(0o755)
+        lock = foreign / commit_cache.INTEGRATION_LOCK
+        yield "symlinked lock", lambda: lock.symlink_to(foreign / "nowhere"), lambda: lock.unlink()
+
+    names = (["read-only"] if os.geteuid() != 0 else []) + ["symlinked lock"]
+    for order in ("cache first", "foreign first"):
+        for name in names:
+            with tempfile.TemporaryDirectory(prefix="syrd876-foreign.") as tmp:
+                repos = Repos(Path(tmp))
+                foreign = Path(tmp) / "foreign.git"
+                git("clone", "-q", "--bare", str(repos.origin), str(foreign))
+                git("--git-dir", str(foreign), "update-ref", "refs/heads/main", f"{repos.b}~1")  # as when last pushed
+                git("--git-dir", str(foreign), "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+                close, reopen = next((c, o) for way, c, o in ways(foreign) if way == name)
+                listed = ["git", "--git-dir", str(foreign), "for-each-ref", "--format=%(refname) %(objectname)"]
+                before = subprocess.run(listed, capture_output=True, text=True, check=True).stdout
+                entries = sorted(p.name for p in foreign.iterdir())
+                dirs = (repos.cache, foreign) if order == "cache first" else (foreign, repos.cache)
+                calls: list[list[str]] = []
+                real_run = commit_cache.subprocess.run
+
+                def recording(cmd, *args, **kwargs):
+                    calls.append([str(part) for part in cmd])
+                    return real_run(cmd, *args, **kwargs)
+
+                close()
+                commit_cache.subprocess.run = recording
+                try:
+                    refreshed = commit_cache.refresh_commit_repos(dirs)
+                finally:
+                    commit_cache.subprocess.run = real_run
+                    reopen()
+                touching = [cmd for cmd in calls if any(str(foreign) in part for part in cmd)]
+                check(touching == [], f"{name}, {order}: the refresh runs no git in the repository it cannot lock: "
+                                      f"{touching}")
+                after = subprocess.run(listed, capture_output=True, text=True, check=True).stdout
+                check(after == before and sorted(p.name for p in foreign.iterdir()) == entries,
+                      f"{name}, {order}: nothing in it changes, not a ref, not a file")
+                check(refreshed is True and repos.knows(repos.b),
+                      f"{name}, {order}: the tenant's own cache beside it is still refreshed")
 
 
 def test_the_listener_starts_its_refresh_worker() -> None:

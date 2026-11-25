@@ -6,6 +6,9 @@ import os
 from pathlib import Path
 
 
+#: The defaults these legacy tenants were provisioned with: their `/data/git` remotes, read in place. A tenant whose
+#: plan records `commit_git_dir` never reads this. pgu's and otto's tenant-owned caches are set when each is next
+#: upgraded (docs/syrd-876-pgu-otto-commit-caches.md).
 LEGACY_PROJECT_COMMIT_REPOS: dict[str, tuple[Path, ...]] = {
     "pgu": (Path("/data/git/switchyard.git"), Path("/data/git/pgu.git")),
     "mefp": (Path("/data/git/stellaris-fixpatch.git"),),

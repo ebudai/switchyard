@@ -1300,8 +1300,8 @@ def test_reload_sync_leaves_config_unchanged_when_live_matches() -> None:
             {1300: [1301]},
             {1300: {"fish", "claude"}, 1301: {"claude"}},
             {
-                1300: ["fish", "-c", "claude", "--model", "claude-opus-5", "--dangerously-skip-permissions"],
-                1301: ["claude", "--model", "claude-opus-5", "--dangerously-skip-permissions"],
+                1300: ["fish", "-c", "claude", "--model", "claude-opus-5-5", "--dangerously-skip-permissions"],
+                1301: ["claude", "--model", "claude-opus-5-5", "--dangerously-skip-permissions"],
             },
         )
         try:

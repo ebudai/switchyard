@@ -183,3 +183,30 @@ On this tree:
   - `switchyard_commands` 119;
   - `switchyard_parsers` 209;
   - the four suites whose launch-read lists gained the gate.
+
+## Since SYRD-886: a stale retired default is not a choice
+
+`claude-opus-5`, the model this ticket's Otto roles were configured with, is a
+retired default (`runtime_catalog.RETIRED_DEFAULT_MODELS`). The User,
+2026-11-26: "I have been manually changing model versions myself, nothing used
+opus 5 for a while now". So:
+
+- **What moves.** `switchyard upgrade` moves a Claude role configured with
+  `claude-opus-5` to `claude-opus-5-5` without asking for `--role-models`, but
+  only when all three hold:
+  - the tenant was made while Opus 5 was the default (artifact
+    `catalog_version` below 2, or no artifact);
+  - nothing recorded the model as a choice (no `model_selected_at`);
+  - the tenant hasn't been moved before (no `retired_defaults_moved`).
+- **The move.** Its dry run lists each role first. The move is written only
+  once every phase of the upgrade has succeeded. Only the model changes:
+  effort, runtime, conversation and `model_selected_at` stay as they are, and
+  nothing is restarted. The role records `retired_default_moved`, and the tenant
+  is marked so it never moves again.
+- **Drift.** A moved role's session still running `claude-opus-5` isn't drift
+  until it has run 5.5 since the move: it takes 5.5 at its next ordinary
+  restart. Any other drift is held exactly as above, judged against the moved
+  configuration.
+
+`tests/role_model_selection_test.py` now builds its generic drift tenant on
+`claude-sonnet-5`, and covers the retired default in its own case.

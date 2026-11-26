@@ -132,6 +132,8 @@ def _add_role_payload(
     slot: int | None,
     directorctl: str = "",
 ) -> dict[str, Any]:
+    from scripts import team_launcher as launcher
+
     payload: dict[str, Any] = {
         "cli": [cli],
         "live_commands": [cli],
@@ -140,6 +142,11 @@ def _add_role_payload(
         "tmux_session": f"{config.project}-{role_name}",
         "yolo": True,
     }
+    # A Claude role is configured with the catalog's Claude default, as `switchyard new` configures one, rather than
+    # left to whatever the installed claude picks (SYRD-886). Other runtimes keep their own default.
+    model = launcher.runtime_catalog.default_model(cli)
+    if model:
+        payload["model"] = model
     if directorctl:
         payload["env"] = {"TICKET_BOARD_DIRECTORCTL": directorctl}
     if not detached:

@@ -947,7 +947,7 @@ def test_pgu_launch_commands_include_model_and_bypass_flags() -> None:
     # its own transcript into the pane's scrollback, and the raw-output override
     # that was briefly sent here was withdrawn (SYRD-91).
     expected_by_role = {
-        "director": ["claude", "--model", "claude-opus-5", "--effort", "high", "--dangerously-skip-permissions"],
+        "director": ["claude", "--model", "claude-opus-5-5", "--effort", "high", "--dangerously-skip-permissions"],
         "main": [
             "codex",
             "--model",
@@ -966,7 +966,7 @@ def test_pgu_launch_commands_include_model_and_bypass_flags() -> None:
             "--dangerously-bypass-approvals-and-sandbox",
             "--dangerously-bypass-hook-trust",
         ],
-        "research": ["claude", "--model", "claude-opus-5", "--effort", "high", "--dangerously-skip-permissions"],
+        "research": ["claude", "--model", "claude-opus-5-5", "--effort", "high", "--dangerously-skip-permissions"],
         "ops": [
             "codex",
             "--model",
@@ -976,7 +976,7 @@ def test_pgu_launch_commands_include_model_and_bypass_flags() -> None:
             "--dangerously-bypass-approvals-and-sandbox",
             "--dangerously-bypass-hook-trust",
         ],
-        "audit": ["claude", "--model", "claude-opus-5", "--effort", "high", "--dangerously-skip-permissions"],
+        "audit": ["claude", "--model", "claude-opus-5-5", "--effort", "high", "--dangerously-skip-permissions"],
         "inspector": ["agy", "--model", "gemini-3.7-flash-high", "--dangerously-skip-permissions"],
     }
 

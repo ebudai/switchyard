@@ -160,10 +160,11 @@ def test_the_seams_the_modules_own_names_and_the_launchers_file() -> None:
     # SYRD-667: the layout is read through the launcher's `_read_layout_text`, where it was `read_text` by path (79).
     # SYRD-702: `_install_and_restart_board_unit` a second time, to put the previous unit back when the board under
     # root's exact render does not attest (80).
-    check(sum(through_all.values()) == 80 and through_all.get("__file__") == 1 and through_all.get("TEAM_LAUNCHER_NAME") == 1
+    # SYRD-886: the payload reads `runtime_catalog` for a Claude role's default model (81).
+    check(sum(through_all.values()) == 81 and through_all.get("__file__") == 1 and through_all.get("TEAM_LAUNCHER_NAME") == 1
           and through_all.get("write_owner_file") == 3 and through_all.get("read_owner_json") == 2
           and through_all.get("_read_layout_text") == 1,
-          f"80 call-time reads, the launcher's own file once: {sum(through_all.values())} {through_all.get('__file__')}")
+          f"81 call-time reads, the launcher's own file once: {sum(through_all.values())} {through_all.get('__file__')}")
     bare_file = [n for n in ast.walk(module) if isinstance(n, ast.Name) and n.id == "__file__"]
     check(not bare_file, "this module's own file is never used")
     default = functions["add_project_role_command"].args.kw_defaults[functions["add_project_role_command"].args.kwonlyargs.index(

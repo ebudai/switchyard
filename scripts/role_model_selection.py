@@ -28,6 +28,19 @@ either until somebody says which one it keeps:
   live roles whose process does not run it, through the ordinary reload, which
   resumes the recorded conversation (`reconcile_role_models_command`).
 
+A configuration naming a model Switchyard once gave as its default
+(`runtime_catalog.RETIRED_DEFAULT_MODELS`: `claude-opus-5`, SYRD-886) is a
+stale default, not a choice, where three things hold: the tenant was made when
+it was still the default (its artifact's `catalog_version` is older than
+`RETIRED_DEFAULT_SINCE_CATALOG`, or it has none), nothing recorded it as a
+choice (no `model_selected_at`), and no upgrade has moved the tenant before
+(`retired_defaults_moved`). `switchyard upgrade` moves each such role to the
+replacement once, listing it on a dry run first (`retired_default_moves`), and
+changes nothing else about it. A role it moved carries `retired_default_moved`,
+and its session running the retired model is no drift until it has run the
+replacement since: the process from before the move takes it at its next
+ordinary restart. Every explicit pick, and any other drift, is held as above.
+
 Launcher facilities are read from `scripts.team_launcher` when a function runs.
 This module never imports `team_launcher` at its top.
 """
@@ -39,7 +52,7 @@ import os
 import re
 import stat
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
@@ -50,6 +63,10 @@ if TYPE_CHECKING:
 #: When a role's model or effort was last chosen through Switchyard: turns its
 #: conversation ran before then were already answered.
 SELECTED_AT_KEY = "model_selected_at"
+#: The retired defaults an upgrade has already moved this tenant off, at the configuration's top (SYRD-886).
+TENANT_MOVED_KEY = "retired_defaults_moved"
+#: On a role an upgrade moved: {"from": the retired default, "at": when}. A later recorded choice clears it.
+ROLE_MOVED_KEY = "retired_default_moved"
 KEEP_RUNNING = "running"
 KEEP_CONFIGURED = "configured"
 KEEP_CHOICES = (KEEP_RUNNING, KEEP_CONFIGURED)
@@ -159,6 +176,38 @@ def last_turn(transcript: Path, *, after: datetime | None = None) -> LastTurn | 
     return None
 
 
+def ran_since(transcript: Path, model: str, after: datetime) -> bool:
+    """Whether the transcript has an assistant turn on `model` that ran after `after`.
+
+    Read backwards like `last_turn`, and only as far as the first turn at or before `after`.
+    """
+    try:
+        descriptor = os.open(transcript, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return False
+    with os.fdopen(descriptor, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            return False
+        end, carried, read = info.st_size, b"", 0
+        while end > 0 and read < TRANSCRIPT_READ_LIMIT:
+            start = max(0, end - min(_CHUNK, TRANSCRIPT_READ_LIMIT - read))
+            handle.seek(start)
+            lines = (handle.read(end - start) + carried).split(b"\n")
+            read, end = read + (end - start), start
+            carried = lines.pop(0) if start > 0 else b""
+            for raw in reversed(lines):
+                turn = _assistant_turn(raw)
+                if turn is None:
+                    continue
+                when = _parse_time(turn.at)
+                if when is None or when <= after:
+                    return False
+                if same_model(model, turn.model):
+                    return True
+    return False
+
+
 def same_model(configured: str, running: str) -> bool:
     """Whether a configured name means the model a turn ran on.
 
@@ -188,17 +237,38 @@ def _selected_at(config_path: Path) -> dict[str, datetime]:
     return stamps
 
 
+def _moved(config_path: Path) -> dict[str, tuple[str, datetime]]:
+    """Each role an upgrade moved off a retired default: (the retired model, when)."""
+    from scripts import team_launcher as launcher
+
+    raw, _problem = launcher.read_tenant_document_no_follow(config_path, what="the project configuration")
+    moved: dict[str, tuple[str, datetime]] = {}
+    for entry in (raw or {}).get("roles") or []:
+        record = entry.get(ROLE_MOVED_KEY) if isinstance(entry, dict) else None
+        if isinstance(record, dict) and isinstance(record.get("from"), str):
+            when = _parse_time(record.get("at"))
+            if when is not None:
+                moved[str(entry.get("role") or "")] = (record["from"], when)
+    return moved
+
+
 def role_model_drift(
     config: ProjectConfig,
     *,
     config_path: Path,
     roles: Sequence[RoleConfig] | None = None,
+    moving: Mapping[str, tuple[str, str]] | None = None,
 ) -> list[RoleDrift]:
-    """Claude roles whose own session last ran a model or effort other than the configured one."""
+    """Claude roles whose own session last ran a model or effort other than the configured one.
+
+    `moving` names roles an upgrade is about to move off a retired default, (old, new), judged as moved now.
+    """
     from scripts import team_launcher as launcher
     from scripts.provider_resume import claude_session_store_exists
 
     stamps = _selected_at(config_path)
+    now = datetime.now(timezone.utc)
+    moved = {**_moved(config_path), **{name: (old, now) for name, (old, _new) in (moving or {}).items()}}
     drifts: list[RoleDrift] = []
     for role in config.roles if roles is None else roles:
         if launcher._role_cli_name(role) != "claude" or launcher._uses_fresh_session_per_ticket(role):
@@ -218,6 +288,16 @@ def role_model_drift(
         if turn is None:
             continue
         model_differs = bool(configured_model) and not same_model(configured_model, turn.model)
+        # A role an upgrade moved off a retired default whose process from before still runs it takes the
+        # replacement at its next restart -- until it has run the replacement since, after which the retired
+        # model is a pick like any other (SYRD-886).
+        if model_differs and role.role in moved:
+            old, at = moved[role.role]
+            model_differs = not (
+                turn.model == old
+                and launcher.runtime_catalog.retired_default_replacement("claude", old) == configured_model
+                and not ran_since(Path(location), configured_model, at)
+            )
         effort_differs = bool(configured_effort and turn.effort) and configured_effort != turn.effort
         if model_differs or effort_differs:
             drifts.append(
@@ -240,11 +320,12 @@ def record_role_selections(
     """Write each role's chosen model and effort (None keeps the field) and when it was chosen.
 
     The project artifact's `role_models` and `role_efforts`, which recorded what
-    `switchyard new` was given, follow where they name the role.
+    `switchyard new` was given, follow where they name the role. A recorded
+    choice ends a retired default's move record (SYRD-886).
     """
     from scripts import team_launcher as launcher
 
-    stamp = now or _now()
+    when = now or _now()
     owner = config.run_as_user or ""
     raw, problem = launcher.read_tenant_document_no_follow(config_path, what=f"{config.project}'s configuration")
     if raw is None:
@@ -259,7 +340,8 @@ def record_role_selections(
                 entries[role_name].pop(key, None)
                 if value:
                     entries[role_name][key] = value
-        entries[role_name][SELECTED_AT_KEY] = stamp
+        entries[role_name][SELECTED_AT_KEY] = when
+        entries[role_name].pop(ROLE_MOVED_KEY, None)
     launcher._write_json_atomic(config_path, raw, owner_user=owner)
     artifact_path = config_path.parent.parent / f"{config.project}.project.json"
     artifact, _problem = (
@@ -338,6 +420,99 @@ def _role_selections(config_path: Path) -> dict[str, tuple[str, str, str]]:
     return selections
 
 
+def _tenant_retired_state(config_path: Path) -> tuple[dict[str, Any], int, dict[str, Any] | None, Path]:
+    """The configuration, its artifact's catalog version (0 for none), the artifact, and its path."""
+    from scripts import team_launcher as launcher
+
+    raw, problem = launcher.read_tenant_document_no_follow(config_path, what="the project configuration")
+    if raw is None:
+        raise SystemExit(f"switchyard: {problem}. Nothing was changed.")
+    artifact_path = config_path.parent.parent / f"{raw.get('project')}.project.json"
+    artifact, _problem = (launcher.read_tenant_document_no_follow(artifact_path, what="the project artifact")
+                          if artifact_path.is_file() else (None, ""))
+    project = (artifact or {}).get("project")
+    version = project.get("catalog_version") if isinstance(project, dict) else 0
+    return raw, version if isinstance(version, int) and not isinstance(version, bool) else 0, artifact, artifact_path
+
+
+def retired_default_moves(config_path: Path) -> dict[str, tuple[str, str]]:
+    """Each role still on a stale retired default, and the model that replaced it (SYRD-886).
+
+    Stale only when the tenant was made while it was the default (`RETIRED_DEFAULT_SINCE_CATALOG`), no upgrade has
+    moved this tenant off it before (`TENANT_MOVED_KEY`), and nothing recorded it as the role's choice
+    (`model_selected_at`). Anything else is somebody's pick, kept.
+    """
+    from scripts import team_launcher as launcher
+
+    catalog = launcher.runtime_catalog
+    raw, version, _artifact, _path = _tenant_retired_state(config_path)
+    done = raw.get(TENANT_MOVED_KEY)
+    done = set(done) if isinstance(done, list) else set()
+    moves: dict[str, tuple[str, str]] = {}
+    for entry in raw.get("roles") or []:
+        if not isinstance(entry, dict) or entry.get(SELECTED_AT_KEY):
+            continue
+        cli = entry.get("cli")
+        model = str(entry.get("model") or "").strip()
+        replacement = catalog.retired_default_replacement(str(cli[0]) if isinstance(cli, list) and cli else "", model)
+        if replacement and model not in done and version < catalog.RETIRED_DEFAULT_SINCE_CATALOG.get(model, 0):
+            moves[str(entry.get("role") or "")] = (model, replacement)
+    return moves
+
+
+class HeldRoleSelections(dict):
+    """Each role's (cli, model, effort) before an upgrade, and the retired-default moves it makes once it succeeds.
+
+    A dict, so every reader of the selections reads them as before. `moves` is written only by
+    `role_selections_after_upgrade`, after the upgrade's phases succeeded and only when `apply` (not a dry run): a
+    failed upgrade leaves the tenant's configuration as it was (SYRD-886).
+    """
+
+    moves: Mapping[str, tuple[str, str]] = {}
+    apply: bool = False
+
+
+def _held(config_path: Path, moves: Mapping[str, tuple[str, str]], *, apply: bool) -> HeldRoleSelections:
+    held = HeldRoleSelections(_role_selections(config_path))
+    held.moves, held.apply = dict(moves), apply
+    return held
+
+
+def _record_retired_moves(config: ProjectConfig | None, *, config_path: Path, moves: Mapping[str, tuple[str, str]]) -> bool:
+    """Move each role to its replacement, model only, mark the tenant moved, and say whether anything was written.
+
+    `model_selected_at` is left alone: the move is nobody's choice, so turns before it still count as drift.
+    """
+    from scripts import team_launcher as launcher
+
+    raw, _version, artifact, artifact_path = _tenant_retired_state(config_path)
+    retired = sorted(model for table in launcher.runtime_catalog.RETIRED_DEFAULT_MODELS.values() for model in table)
+    done = raw.get(TENANT_MOVED_KEY) if isinstance(raw.get(TENANT_MOVED_KEY), list) else []
+    if not moves and set(retired) <= set(done):
+        return False
+    when = _now()
+    for entry in raw.get("roles") or []:
+        name = str(entry.get("role") or "") if isinstance(entry, dict) else ""
+        if name in moves:
+            entry["model"] = moves[name][1]
+            entry[ROLE_MOVED_KEY] = {"from": moves[name][0], "at": when}
+    raw[TENANT_MOVED_KEY] = sorted(set(done) | set(retired))
+    owner = str(raw.get("run_as_user") or "") if config is None else (config.run_as_user or "")
+    launcher._write_json_atomic(config_path, raw, owner_user=owner)
+    table = (artifact or {}).get("project", {}).get("role_models") if isinstance((artifact or {}).get("project"), dict) else None
+    if isinstance(table, dict) and any(table.get(name) == old for name, (old, _new) in moves.items()):
+        for name, (old, new) in moves.items():
+            if table.get(name) == old:
+                table[name] = new
+        launcher._write_json_atomic(artifact_path, artifact, owner_user=owner)
+    return True
+
+
+def _move_text(project: str, role_name: str, old: str, new: str) -> str:
+    return (f"{project}'s {role_name} from {old}, a retired default, to {new}; its effort, runtime and conversation "
+            "stay as they are, and nothing restarts it for this")
+
+
 def hold_role_selections_for_upgrade(
     config: ProjectConfig,
     *,
@@ -351,8 +526,21 @@ def hold_role_selections_for_upgrade(
     None means the upgrade must not go on. A drift with nothing said about it
     is refused, because every later phase that restarts a role would settle it
     by putting the configured model back.
+
+    A role on a stale retired default is judged as if already on its
+    replacement. The selections returned carry the moves, which
+    `role_selections_after_upgrade` writes once the upgrade has succeeded; the
+    tenant is then marked so it never moves again (SYRD-886). The dry run, and a
+    refusal, list what would move.
     """
-    drifts = role_model_drift(config, config_path=config_path)
+    moves = retired_default_moves(config_path)
+    judged = replace(config, roles=tuple(
+        replace(role, model=moves[role.role][1]) if role.role in moves else role for role in config.roles))
+    drifts = role_model_drift(judged, config_path=config_path, moving=moves)
+    refused = bool(drifts and not keep)
+    if dry_run or refused:
+        for role_name, (old, new) in moves.items():
+            print_func(f"switchyard: would move {_move_text(config.project, role_name, old, new)}")
     for drift in drifts:
         print_func(f"switchyard: {drift.describe()}")
     if drifts and not keep:
@@ -361,7 +549,7 @@ def hold_role_selections_for_upgrade(
                 f"switchyard: an upgrade of {config.project} would refuse here: restarting those roles "
                 "would replace what they chose. Name which each keeps with --role-models running|configured."
             )
-            return _role_selections(config_path)
+            return _held(config_path, moves, apply=False)
         print_func(
             f"switchyard: refusing to upgrade {config.project}: restarting those roles would replace "
             "what they chose. Nothing was stopped or written. Re-run with --role-models running to keep "
@@ -371,16 +559,19 @@ def hold_role_selections_for_upgrade(
             print_func(line)
         return None
     if drifts:
+        # Keeping the configuration of a role about to move keeps what it moves to: the retired default is no choice.
         selections = {
-            drift.role: drift.running_selection() if keep == KEEP_RUNNING else (None, None) for drift in drifts
+            drift.role: drift.running_selection() if keep == KEEP_RUNNING
+            else ((moves[drift.role][1], None) if drift.role in moves else (None, None))
+            for drift in drifts
         }
         verb = "would record" if dry_run else "recorded"
         for role_name, (model, effort) in selections.items():
             kept = " and ".join(f"{name} {value}" for name, value in (("model", model), ("effort", effort)) if value)
             print_func(f"switchyard: {verb} {role_name}'s {kept or 'configured model and effort'} as its choice")
         if not dry_run:
-            record_role_selections(config, config_path=config_path, selections=selections)
-    return _role_selections(config_path)
+            record_role_selections(judged, config_path=config_path, selections=selections)
+    return _held(config_path, moves, apply=not dry_run)
 
 
 def role_selections_after_upgrade(
@@ -406,7 +597,18 @@ def role_selections_after_upgrade(
                     f"switchyard: the upgrade changed {role_name}'s {name} from {old or 'unset'} to "
                     f"{new or 'unset'}, which nothing asked it to do"
                 )
-    return 1 if changed else code
+    result = 1 if changed else code
+    # Only now, after every phase succeeded: a failed upgrade leaves the configuration as it was (SYRD-886).
+    if isinstance(before, HeldRoleSelections) and before.apply:
+        moves = retired_default_moves(config_path) if result == 0 else before.moves
+        project = str(_tenant_retired_state(config_path)[0].get("project") or config_path.stem)
+        if result == 0:
+            _record_retired_moves(None, config_path=config_path, moves=moves)
+        for role_name, (old, new) in moves.items():
+            print_func(f"switchyard: {'moved' if result == 0 else 'did not move'} "
+                       f"{_move_text(project, role_name, old, new)}"
+                       + ("" if result == 0 else ": the upgrade did not succeed, so the next one moves it"))
+    return result
 
 
 def reconcile_role_models_command(

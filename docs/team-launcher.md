@@ -1986,7 +1986,10 @@ after provisioning. `switchyard add-role <project> <role> --audit --cli <cli>`
 adds an auditor role instead. Auditor additions widen the Audit stage owners,
 audit sign-off/kick-back role lists, board assignee/caller constraints, and
 notification target constraint; they do not widen implementation ownership or
-implementer operations. By default the command creates a visible role and starts
+implementer operations. A Claude role is configured with the catalog's Claude
+default, `claude-opus-5-5`, the model `switchyard new` offers first. Choose
+another later with `switchyard set-role-runtime <project> <role> --cli claude
+--model <model>`. Any other runtime is left to choose its own model. By default the command creates a visible role and starts
 only that role's tmux session. If the project's layout template is a recognised
 generated layout, the command regenerates it for the new visible count. If the
 layout is hand-maintained or otherwise unrecognised, the command does not

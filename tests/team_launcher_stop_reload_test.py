@@ -416,7 +416,7 @@ def test_resume_commands_use_cli_specific_shapes_and_front_position() -> None:
 
         assert any(entry.startswith(f"PATH={default_user_bin()}:") for entry in _env_entries(director_command))
         assert _command_tail(director_command)[:3] == ["claude", "--resume", session_id]
-        assert _command_tail(director_command)[3:7] == ["--model", "claude-opus-5", "--effort", "high"]
+        assert _command_tail(director_command)[3:7] == ["--model", "claude-opus-5-5", "--effort", "high"]
 
         assert any(entry.startswith(f"PATH={default_user_bin()}:") for entry in _env_entries(ops_command))
         assert _command_tail(ops_command)[:3] == ["codex", "resume", session_id]

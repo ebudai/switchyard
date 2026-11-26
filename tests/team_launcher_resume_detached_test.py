@@ -296,7 +296,7 @@ def test_start_runs_research_detached_before_opening_visible_layout() -> None:
         assert research_new_session[5:7] == ["-c", str(tmp_path / "repo")]
         assert "TICKET_BOARD_PANE_TARGET=pgu-research:0.0" in tmux_first_command(research_new_session)[-1]
         assert "PGU_PANE_TARGET=pgu-research:0.0" in tmux_first_command(research_new_session)[-1]
-        assert "--model claude-opus-5" in tmux_first_command(research_new_session)[-1]
+        assert "--model claude-opus-5-5" in tmux_first_command(research_new_session)[-1]
         state = _read_pane_state(tmp_path / "pane-state", "pgu-research:0.0")
         assert state["state"] == "idle"
         assert state["source"] == "team_launcher.start"

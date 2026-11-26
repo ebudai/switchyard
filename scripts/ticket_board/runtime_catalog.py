@@ -43,12 +43,12 @@ from scripts.ticket_board.prompt_schema import Choice
 
 #: Bumped when the recorded tables below change, so a project can record which
 #: version of this data it was configured against.
-CATALOG_VERSION = 3
+CATALOG_VERSION = 4
 
 #: When the recorded tables were last checked against the repository. A date an
 #: operator can compare against, in the shape the launcher already uses for
 #: vendor strings it knows will drift.
-CATALOG_RECORDED = "2026-11-15"
+CATALOG_RECORDED = "2026-11-26"
 
 PROVENANCE_RECORDED = "recorded"
 #: The `unverified_because` of a caller that has already said, once, why its recorded lists are not checked against
@@ -107,12 +107,16 @@ RUNTIMES: tuple[Choice, ...] = (
 #: Models this repository has actually been configured with, per runtime.
 #:
 #: Sources, one per entry, all in-tree:
-#:   claude/codex/agy -- `config/team-launcher/pgu.json`, the live launcher
-#:     configuration: claude-opus-5 (director, research, audit), gpt-5.6-sol
-#:     (main), gpt-5.5 (app, ops), gemini-3.7-flash-high (inspector).
+#:   codex/agy -- `config/team-launcher/pgu.json`, the bundled launcher
+#:     configuration: gpt-5.6-sol (main), gpt-5.5 (app, ops),
+#:     gemini-3.7-flash-high (inspector).
 #:   claude -- claude-opus-5-5, first and so the default a Claude role is
-#:     offered: the User's decision on SYRD-778 (2026-11-15), the model the
-#:     installed claude (2.1.318) already runs for live Directors.
+#:     offered and given (`default_model`): the User's decisions on SYRD-778
+#:     (2026-11-15) and SYRD-886 (2026-11-26, "I would like the default version
+#:     for opus to be 5.5 instead of 5"). The bundled config's director,
+#:     research and audit run it too.
+#:   claude -- claude-opus-5, which that bundled config named until SYRD-886:
+#:     kept as an explicit choice, never a default.
 #:   claude -- claude-haiku-5-5, Router's default (`router_setup.ROUTER_DEFAULT_MODEL`):
 #:     the User's decision on SYRD-779, and what syrd's own Router runs
 #:     (`.switchyard/provision/syrd.json`, effort high).
@@ -128,7 +132,7 @@ RUNTIMES: tuple[Choice, ...] = (
 RECORDED_MODELS: dict[str, tuple[Choice, ...]] = {
     "claude": (
         Choice("claude-opus-5-5", "Opus 5.5", "the default for a Claude role"),
-        Choice("claude-opus-5", "Opus 5", "configured for director, research and audit"),
+        Choice("claude-opus-5", "Opus 5", "the previous default, still chosen explicitly"),
         Choice("claude-haiku-5-5", "Haiku 5.5", "Router's default"),
     ),
     "codex": (
@@ -192,6 +196,39 @@ RECORDED_EFFORT: dict[str, tuple[Choice, ...]] = {
 LIVE_MODEL_COMMANDS: dict[str, tuple[str, ...]] = {
     "agy": ("agy", "models"),
 }
+
+
+#: Models Switchyard once configured by default and has since replaced, per runtime: retired -> replacement.
+#:
+#: The User, 2026-11-26 (SYRD-886): "I have been manually changing model versions myself, nothing used opus 5 for a
+#: while now". A configuration still naming `claude-opus-5` is a stale default the User overrode by hand, not a pick.
+#: `switchyard upgrade` moves such a role to the replacement (`role_model_selection.retired_default_moves`), and a
+#: role's session running the retired model while configured with its replacement is no drift
+#: (`role_model_selection.role_model_drift`): it takes the replacement at its next ordinary restart.
+RETIRED_DEFAULT_MODELS: dict[str, dict[str, str]] = {
+    "claude": {"claude-opus-5": "claude-opus-5-5"},
+}
+
+#: The catalog version from which each retired default was no longer the default. A tenant whose project artifact
+#: records this version or later chose it explicitly, so an upgrade leaves it alone. `claude-opus-5` stopped being
+#: Claude's default at v2, when SYRD-778 put Opus 5.5 first.
+RETIRED_DEFAULT_SINCE_CATALOG: dict[str, int] = {"claude-opus-5": 2}
+
+
+def retired_default_replacement(runtime: str, model: str) -> str:
+    """What replaces `model` on `runtime` when it is a retired default, else ""."""
+    return RETIRED_DEFAULT_MODELS.get(runtime, {}).get(model.strip(), "")
+
+
+def default_model(runtime: str) -> str:
+    """The model a new role on `runtime` is configured with when nobody names one, or "" for the runtime's own.
+
+    Claude's is its first recorded model, the one `switchyard new` offers first, so `add-role` and `new` cannot
+    disagree (SYRD-886). Every other runtime is left to choose its own, as `add-role` always has: a recorded
+    table describes a vendor, not the owner's account, and only Claude's default is the User's decision.
+    """
+    recorded = RECORDED_MODELS.get(runtime, ()) if runtime == "claude" else ()
+    return recorded[0].value if recorded else ""
 
 
 def runtime_takes_effort(runtime: str) -> bool:

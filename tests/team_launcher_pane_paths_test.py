@@ -220,7 +220,7 @@ def test_pgu_config_matches_director_supplied_live_role_assignments() -> None:
         assert role.workdir == str(expected_repository), role_name
     assert (roles["director"].cli, roles["director"].model, roles["director"].effort) == (
         ["claude"],
-        "claude-opus-5",
+        "claude-opus-5-5",
         "high",
     )
     assert (roles["director"].resume_mode, roles["director"].resume_flag) == ("flag", "--resume")
@@ -247,13 +247,13 @@ def test_pgu_config_matches_director_supplied_live_role_assignments() -> None:
     assert (roles["app"].resume_mode, roles["app"].resume_subcommand) == ("subcommand", "resume")
     assert (roles["research"].cli, roles["research"].model, roles["research"].effort) == (
         ["claude"],
-        "claude-opus-5",
+        "claude-opus-5-5",
         "high",
     )
     assert (roles["research"].resume_mode, roles["research"].resume_flag) == ("flag", "--resume")
     assert (roles["audit"].cli, roles["audit"].model, roles["audit"].effort) == (
         ["claude"],
-        "claude-opus-5",
+        "claude-opus-5-5",
         "high",
     )
     assert (roles["audit"].resume_mode, roles["audit"].resume_flag) == ("flag", "--resume")

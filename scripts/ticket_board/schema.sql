@@ -27631,7 +27631,7 @@ $$;
 CREATE OR REPLACE FUNCTION ticket_board.request_scope_change(p_ticket text, p_reason text)
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
 DECLARE who text; ticket ticket_board.tickets; plan jsonb := ticket_board.plan_policy(); plan_id text; created boolean := false;
-    reason text := btrim(coalesce(p_reason, '')); impl text; blockers text[];
+    reason text := btrim(coalesce(p_reason, '')); impl text; impl_to text; blockers text[];
 BEGIN
     PERFORM ticket_board.require_actor(ARRAY['director'], 'set_blockers');
     who := ticket_board.current_app_actor();
@@ -27661,14 +27661,18 @@ BEGIN
         UPDATE ticket_board.tickets SET workflow_flags = coalesce(workflow_flags, '{}'::jsonb) || '{"plan_change": true}'::jsonb
          WHERE id = plan_id;
         -- The Director's own declared move from where the new ticket waits into Implementation, to the plan owner.
-        SELECT x->>'action' INTO impl FROM jsonb_array_elements(ticket_board.declared_workflow()->'transitions') x
+        -- Performed with its target named: the same action can leave triage for more than one stage (SYRD-888: route
+        -- to in_progress and to user_review), and the executor refuses a bare name that matches more than one move.
+        SELECT x->>'action', x->>'to' INTO impl, impl_to
+          FROM jsonb_array_elements(ticket_board.declared_workflow()->'transitions') x
           JOIN jsonb_array_elements(ticket_board.declared_workflow()->'stages') s ON s->>'name' = x->>'to'
          WHERE x->>'from' = (SELECT state FROM ticket_board.tickets WHERE id = plan_id) AND s->>'kind' = 'implementation'
-           AND x->>'primitive' = 'move' AND x->'actors' ? 'director' ORDER BY x->>'action' LIMIT 1;
+           AND x->>'primitive' = 'move' AND x->'actors' ? 'director' ORDER BY x->>'action', x->>'to' LIMIT 1;
         IF impl IS NULL THEN
             RAISE EXCEPTION 'this workflow has no Director move from triage into Implementation for the plan ticket';
         END IF;
-        PERFORM ticket_board.perform_workflow_action(plan_id, impl, jsonb_build_object('assignee', plan->>'owner'));
+        PERFORM ticket_board.perform_workflow_action(plan_id, impl,
+            jsonb_build_object('assignee', plan->>'owner', 'target', impl_to));
         created := true;
     ELSE
         PERFORM ticket_board.append_ticket_comment(plan_id, who,

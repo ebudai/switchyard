@@ -92,6 +92,10 @@ DECLARED: dict[str, OlderCode] = {
         True, "adds an AFTER UPDATE trigger on tickets that deletes only undelivered transition notices naming the "
         "stage and owner the ticket just left, tracing each as dropped; older code's listener would have found each "
         "of them stale, or delivered it as a second hand-off for a later entry, and never relied on either"),
+    "pgu1062_syrd888_scope_change_route_target.sql": OlderCode(
+        True, "replaces request_scope_change with the same signature, only naming the target stage of the move it "
+        "already chose; older code calls it the same way and gets the same result, or a scope change where it was "
+        "refused as ambiguous"),
 }
 
 

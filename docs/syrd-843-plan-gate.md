@@ -92,7 +92,9 @@ All of it applies only where the declared workflow has the `plan` policy.
   - Or it takes `unplanned` with a reason.
 - **`request_scope_change`** is the Director's (`set_blockers`).
   - It opens a plan ticket for the owner: created, flagged, needing the User,
-    and moved by the board's own declared Director move into Implementation.
+    and moved by the board's own declared Director move into Implementation,
+    performed with its target stage named, so a workflow whose `route` leaves
+    triage for more than one stage still opens it (SYRD-888).
   - Or it extends the open plan ticket with a comment.
   - Either way, the waiting ticket is then blocked on it.
 - **The milestone-complete notice.** When every deliverable of a milestone has

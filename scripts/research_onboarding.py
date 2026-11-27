@@ -26,15 +26,47 @@ import dataclasses
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from scripts.ticket_board.research_stage import RESEARCHER_ROLE
+from scripts.ticket_board.research_stage import RESEARCHER_DEFAULT_RUNTIME, RESEARCHER_ROLE, researcher_default_model
 
 #: The role plan's stand-in for "an existing implementer researches": never a role.
 STAGE_MARKER = "research-stage"
 STAGES = ("off", "role", "researcher")
 RESEARCHER_KEYS = ("runtime", "model", "effort")
 _RECORD_KEYS = frozenset({"stage", "role", *RESEARCHER_KEYS})
-#: The runtime the menu offers first for a Researcher: reading, measuring and writing up.
-RESEARCHER_DEFAULT_CLI = "claude"
+#: The runtime the menu offers first for a Researcher, agy, whose model question then offers Gemini 4 Hydrogen (High)
+#: first (SYRD-889; `research_stage.RESEARCHER_DEFAULT_MODEL`).
+RESEARCHER_DEFAULT_CLI = RESEARCHER_DEFAULT_RUNTIME
+
+
+def researcher_launcher_settings(runtime: str, *, model: str = "") -> dict[str, str]:
+    """What a new Researcher's projected launcher entry is given in place of its template role's (SYRD-889): `model`
+    when named, else `research_stage.researcher_default_model(runtime)`, and no effort on a runtime that takes none.
+    {} -- the template's model and effort stay -- when there is neither, which is `--runtime` on anything but agy with
+    no --model, as before. Here rather than in research_stage, which the board serves and so must not import the
+    runtime catalog."""
+    from scripts.ticket_board.runtime_catalog import runtime_takes_effort
+
+    chosen = model.strip() or researcher_default_model(runtime)
+    if not chosen:
+        return {}
+    return {"model": chosen, **({} if runtime_takes_effort(runtime) else {"effort": ""})}
+
+
+def researcher_entry_settings(runtime: str, *, model: str = "", retired: dict[str, Any] | None = None,
+                              template: dict[str, Any] | None = None) -> dict[str, str]:
+    """What `research-stage enable` writes on a new Researcher's projected launcher entry.
+
+    A Researcher turned back on is projected from its own retired entry (`workflow_launcher.project_roles`), which
+    resets only the CLI when the runtime changes. A model and effort chosen for another runtime -- agy's Gemini 4
+    Hydrogen and no effort, since SYRD-889 the default -- would start a Claude or Codex pane on a model it cannot run
+    (Audit, SYRD-889). So when `retired` ran another runtime, the model and effort start from the `template` role's,
+    as a first enable's do; `researcher_launcher_settings` then applies the named model or agy's default over them.
+    """
+    base: dict[str, str] = {}
+    if retired is not None and (list(retired.get("cli") or [""]) or [""])[0] != runtime:
+        chosen = template or {}
+        base = {"model": str(chosen.get("model") or ""), "effort": str(chosen.get("effort") or "")}
+    return {**base, **researcher_launcher_settings(runtime, model=model)}
 
 
 def research_field(implementers: Sequence[str]) -> Any:
@@ -53,7 +85,8 @@ def research_field(implementers: Sequence[str]) -> Any:
             launcher.Choice("off", "off", "no research stage"),
             *(launcher.Choice(f"role:{name}", name, f"research done by {name}; no extra session or cost")
               for name in implementers),
-            launcher.Choice("researcher", "researcher", "research done by a Researcher, as one more model session"),
+            launcher.Choice("researcher", "researcher", "research done by a Researcher, as one more model session; "
+                            "it starts on agy with Gemini 4 Hydrogen (High), and you can choose others next"),
         ),
         default="off",
     )
@@ -83,11 +116,42 @@ def prompt_research(
     if RESEARCHER_ROLE in implementers:
         raise SystemExit(f"switchyard: an implementer is named {RESEARCHER_ROLE!r}, which the Researcher needs; "
                          "rename it, or let that implementer do the research")
-    return launcher._prompt_role_runtime_plan(
-        RESEARCHER_ROLE, default_cli=RESEARCHER_DEFAULT_CLI, configured=launcher.RoleSelection(RESEARCHER_ROLE, ""),
-        runner=runner, owner_args=owner_args,
-        unverified_because=unverified_because, input_func=input_func, print_func=print_func,
-    )
+    return prompt_researcher_runtime(runner=runner, owner_args=owner_args, unverified_because=unverified_because,
+                                     input_func=input_func, print_func=print_func)
+
+
+def prompt_researcher_runtime(
+    *,
+    runner: Callable[..., Any] | None,
+    owner_args: Sequence[str],
+    unverified_because: str,
+    input_func: Callable[[str], str],
+    print_func: Callable[[str], None],
+) -> Any:
+    """The Researcher's runtime, then that runtime's model and effort: the fields every role is asked with
+    (`_prompt_role_runtime_plan`), with the model's default chosen once the runtime is known, as Router's is. On agy,
+    Gemini 4 Hydrogen (High) (SYRD-889); on any other runtime, its own first model, as before. agy takes no effort, so
+    none is asked for it."""
+    from scripts import team_launcher as launcher
+
+    select = launcher.terminal_select.select_one
+    answers: dict[str, Any] = {}
+    try:
+        answers["runtime"] = select(launcher._runtime_field(RESEARCHER_ROLE, default=RESEARCHER_DEFAULT_CLI), answers,
+                                    input_func=input_func, print_func=print_func)
+        model_field = dataclasses.replace(
+            launcher._model_field(RESEARCHER_ROLE, runner=runner, owner_args=owner_args,
+                                  unverified_because=unverified_because, print_func=print_func),
+            default=researcher_default_model(answers["runtime"]) or None)
+        answers["model"] = select(model_field, answers, input_func=input_func, print_func=print_func) \
+            if model_field.choices_for(answers) or model_field.allow_custom else ""
+        answers["effort"] = select(launcher._effort_field(RESEARCHER_ROLE), answers, input_func=input_func,
+                                   print_func=print_func) \
+            if launcher.runtime_catalog.runtime_takes_effort(answers["runtime"]) else ""
+    except launcher.terminal_select.Cancelled:
+        raise SystemExit("switchyard: too many invalid answers for the Researcher") from None
+    return launcher.RoleSelection(role=RESEARCHER_ROLE, cli=answers["runtime"], model=answers["model"],
+                                  effort=answers["effort"])
 
 
 def split_role_plan(role_plan: Sequence[Any]) -> tuple[tuple[Any, ...], tuple[tuple[str, str], ...]]:

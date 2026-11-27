@@ -723,7 +723,8 @@ def command(cluster) -> None:
         config_path = launcher_dir / f"{SLUG}.json"
         config_path.write_text(json.dumps({
             "project": SLUG, "layout": "layout.json", "board_url": board.base,
-            "roles": [{"role": "main", "cli": ["/nonexistent/claude"], "slot": 3, "model": "the-template-model"}],
+            "roles": [{"role": "main", "cli": ["/nonexistent/claude"], "slot": 3, "model": "the-template-model",
+                       "effort": "the-template-effort"}],
             "worktree_base": str(cluster.root / "worktrees"), "repository": str(project_dir),
         }))
         os.environ["TICKET_BOARD_WRITE_TOKEN"] = board.server.write_token
@@ -754,8 +755,10 @@ def command(cluster) -> None:
             before = stored()
             code, out, _ = run(SLUG, "enable", "--role", "main", "--dry-run")
             check(code == 0 and '"start_research"' in out and stored() == before, f"a dry run changes nothing: {code}")
-            code, _, err = run(SLUG, "enable")
-            check(code != 0 and "one of the two" in err, f"enable needs --role or --runtime: {err[-200:]}")
+            code, _, err = run(SLUG, "enable", "--role", "main", "--runtime", "codex")
+            check(code != 0 and "not both" in err, f"--role or a new Researcher's --runtime, not both: {err[-200:]}")
+            code, _, err = run(SLUG, "enable", "--role", "main", "--model", "m")
+            check(code != 0 and "not both" in err, f"a model is a new Researcher's: {err[-200:]}")
             code, _, err = run(SLUG, "enable", "--role", "main", "--template-role", "main")
             check(code != 0 and "needs --runtime" in err, f"a template role is for a new Researcher: {err[-200:]}")
             code, _, err = run(SLUG, "enable", "--role", "main", "--research-directory", "spikes")
@@ -774,6 +777,29 @@ def command(cluster) -> None:
             check(code == 0 and not role(stored(), "researcher")["active"]
                   and not any(r["role"] == "researcher" for r in json.loads(config_path.read_text())["roles"]),
                   f"disable turns the Researcher off on the board and in the launcher: {code} {err[-300:]}")
+            # SYRD-889: plain enable is a new Researcher on agy with Gemini 4 Hydrogen (High), and no effort. A
+            # Researcher turned back on is projected from its own retired launcher entry
+            # (workflow_launcher.project_roles); turned on again on another runtime than that entry ran, its model and
+            # effort are the template's again, never agy's Hydrogen on a Claude or Codex pane (Audit's finding).
+            template = ("the-template-model", "the-template-effort")
+            for args, runtime, model, effort in (
+                    (("--runtime", "claude", "--model", "claude-opus-5-5"), "claude", "claude-opus-5-5", template[1]),
+                    ((), "agy", rs.RESEARCHER_DEFAULT_MODEL, None),
+                    (("--runtime", "agy"), "agy", rs.RESEARCHER_DEFAULT_MODEL, None),
+                    (("--runtime", "agy", "--model", "gemini-4-hydrogen-xhigh"), "agy", "gemini-4-hydrogen-xhigh", None),
+                    (("--runtime", "claude"), "claude", *template),
+                    ((), "agy", rs.RESEARCHER_DEFAULT_MODEL, None),
+                    (("--runtime", "codex"), "codex", *template),
+                    ((), "agy", rs.RESEARCHER_DEFAULT_MODEL, None),
+                    (("--runtime", "claude", "--model", "claude-opus-5-5"), "claude", "claude-opus-5-5", template[1])):
+                code, _, err = run(SLUG, "enable", *args)
+                entry = next((r for r in json.loads(config_path.read_text())["roles"] if r["role"] == "researcher"), {})
+                check(code == 0 and role(stored(), "researcher")["runtime"] == runtime and entry.get("cli") == [runtime]
+                      and entry.get("model") == model and entry.get("effort") == effort,
+                      f"enable {' '.join(args) or '(plain)'}: {runtime}, {model}, effort {effort}: {code} {entry} "
+                      f"{err[-300:]}")
+                code, _, err = run(SLUG, "disable")
+                check(code == 0, f"and disable again: {code} {err[-300:]}")
         finally:
             launcher.DEFAULT_CONFIG_DIR = previous
             os.environ.pop("TICKET_BOARD_WRITE_TOKEN", None)

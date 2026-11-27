@@ -793,13 +793,18 @@ evidence is reviewed, and the finding handed back to you. Turn it on once per
 project:
 
 ```bash
+switchyard research-stage <project> enable   # a new Researcher: agy, gemini-4-hydrogen-high
 switchyard research-stage <project> enable --role main --dry-run   # an existing role researches
-switchyard research-stage <project> enable --runtime claude [--template-role audit]   # a new Researcher
+switchyard research-stage <project> enable --runtime claude [--model M] [--template-role audit]   # another runtime
 switchyard research-stage <project> disable   # refused while a ticket is in Research or its review
 ```
 
-`--runtime` declares a detached `researcher` role on that agent CLI, copying
-its template's model and effort (as the Librarian and Router are declared);
+Plain `enable` declares a detached `researcher` role on agy with
+`gemini-4-hydrogen-high` (agy takes no effort level; "high" is part of the
+model id). `--runtime` puts it on another agent CLI. There it copies its
+template's model and effort, as the Librarian and Router are declared;
+`--model` replaces only the model, and the template's effort stays.
+`--runtime agy` without `--model` takes the same default.
 `--research-directory` changes where findings files go (default
 `docs/research`). `switchyard new` offers the same choice, off by default.
 

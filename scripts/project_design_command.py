@@ -192,7 +192,9 @@ def design_project_command(
 
     research = research_onboarding.artifact_research(
         {"stage": "role", "role": research_role} if research_role else
-        {"stage": "researcher", "runtime": researcher_runtime, "model": researcher_model or "",
+        {"stage": "researcher", "runtime": researcher_runtime,
+         # Gemini 4 Hydrogen (High) on agy when no model is named, as new's menu offers (SYRD-889).
+         "model": researcher_model or research_onboarding.researcher_default_model(researcher_runtime),
          "effort": researcher_effort or ""} if researcher_runtime else None,
         path=target_artifact, role_names=[*resolved_implementer_roles, *resolved_audit_roles, "director", "designer"],
         implementers=resolved_implementer_roles,

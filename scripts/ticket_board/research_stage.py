@@ -110,6 +110,12 @@ DIRECTOR_ACTIONS = (START, RETURN, CLOSE)
 ACTIONS = (*DIRECTOR_ACTIONS, *RESEARCHER_ACTIONS, *REVIEW_ACTIONS, *PUBLICATION_ACTIONS)
 RESEARCHER_ROLE = "researcher"
 RESEARCHER_KIND = "support"
+#: A new Researcher's runtime and model when nobody names their own: agy, on Gemini 4 Hydrogen (High). The User's
+#: decision, 2026-11-27 (SYRD-889): "lets change that to gemini 4 hydrogen high please". agy takes no effort level,
+#: so "high" is part of the model id. `switchyard new` offers both first, and `switchyard research-stage <project>
+#: enable` uses both when it is given neither --role nor --runtime (or --runtime agy without --model).
+RESEARCHER_DEFAULT_RUNTIME = "agy"
+RESEARCHER_DEFAULT_MODEL = "gemini-4-hydrogen-high"
 #: A Researcher comments and records waits; it routes, edits, files and publishes nothing on the board.
 RESEARCHER_CAPABILITIES = ("add_comment", "await_role", "clear_awaiting_role")
 POLICY_KEY = "research"
@@ -119,6 +125,13 @@ NOT_RESEARCHERS = frozenset({"director", "user", "unassigned", "router", "librar
 _DIRECTORY = re.compile(r"^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$")
 #: The Publisher's stages and role (publisher_stage.py), named here so this module imports nothing from it.
 PUBLICATION, PUBLICATION_FAILED, PUBLISHER = "publication", "publication_failed", "publisher"
+
+
+def researcher_default_model(runtime: str) -> str:
+    """The model a new Researcher on `runtime` starts on when nobody names one: Gemini 4 Hydrogen (High) on agy, and ""
+    on any other runtime, where `switchyard new` offers that runtime's own first model and `research-stage enable`
+    keeps the template role's, as both did before SYRD-889."""
+    return RESEARCHER_DEFAULT_MODEL if runtime == RESEARCHER_DEFAULT_RUNTIME else ""
 
 
 #: The timebox a brief may set, in seconds: 15 minutes to 30 days, as the database checks.

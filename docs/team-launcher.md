@@ -1941,12 +1941,16 @@ is historical design and rollout evidence.
 documentation gate, `new` asks `Research stage (optional)`: off; one of the
 project's implementers by name, which creates no role and no session; or
 `researcher`, a new Researcher whose runtime, model and effort are asked the way
-every role's are. `new` prints the choice before anything is created. It is
+every role's are. agy is offered first, and on agy `gemini-4-hydrogen-high` is
+the model preselected (SYRD-889). agy takes no effort level, so none is asked.
+Any other runtime offers its own first model, as before. `new` prints the choice
+before anything is created. It is
 recorded as `project.research = {"stage": "role", "role": <implementer>}` or
 `{"stage": "researcher", "runtime": ..., "model": ..., "effort": ...}`; no field,
 or `{"stage": "off"}`, means off. Noninteractively, `team-launcher <project>
 design --research-role <implementer>` or `--researcher-runtime <cli>
-[--researcher-model M] [--researcher-effort E]` records it. The project starts with
+[--researcher-model M] [--researcher-effort E]` records it; `--researcher-runtime
+agy` without a model records `gemini-4-hydrogen-high`. The project starts with
 a declared workflow carrying the stage, added by the same `with_research_stage`
 that `switchyard research-stage <project> enable` uses, after Router and the
 documentation gate. A Researcher takes the next free display slot like the

@@ -200,6 +200,27 @@ def _with_router_settings(files: dict, args: argparse.Namespace, parser: argpars
     return {**files, args.config: json.dumps(payload, indent=2, sort_keys=True) + "\n"}
 
 
+def _with_researcher_settings(files: dict, args: argparse.Namespace, parser: argparse.ArgumentParser) -> dict:
+    """SYRD-889: a new Researcher's launcher entry with its own model -- the one named, else Gemini 4 Hydrogen (High) on
+    agy -- in place of its template role's, and no effort on a runtime that takes none. On any other runtime with no
+    --model, the template's model and effort stay, as before."""
+    from scripts.research_onboarding import researcher_launcher_settings
+    from scripts.ticket_board.research_stage import RESEARCHER_ROLE
+
+    settings = researcher_launcher_settings(args.runtime, model=args.model or "")
+    if not settings:
+        return files
+    payload = json.loads(files[args.config])
+    entry = next((role for role in payload.get("roles", []) if role.get("role") == RESEARCHER_ROLE), None)
+    if entry is None:
+        parser.error(f"{args.config} has no projected {RESEARCHER_ROLE} role")
+    for key, value in settings.items():
+        entry.pop(key, None)
+        if value:
+            entry[key] = value
+    return {**files, args.config: json.dumps(payload, indent=2, sort_keys=True) + "\n"}
+
+
 def _document_with_designer_implementation(current: dict, args: argparse.Namespace,
                                            parser: argparse.ArgumentParser) -> dict:
     """SYRD-678: the tenant's own document with its designer also an Implementation owner."""
@@ -242,22 +263,27 @@ def _document_with_documentation_gate(current: dict, args: argparse.Namespace, p
 def _document_with_research_stage(current: dict, args: argparse.Namespace, parser: argparse.ArgumentParser) -> dict:
     """SYRD-842: the tenant's own document with the research stage on (an existing role, or a new Researcher) or off."""
     from scripts.ticket_board.documentation_gate import free_visible_slot
-    from scripts.ticket_board.research_stage import DEFAULT_DIRECTORY, with_research_stage, without_research_stage
+    from scripts.ticket_board.research_stage import (
+        DEFAULT_DIRECTORY, RESEARCHER_DEFAULT_RUNTIME, with_research_stage, without_research_stage)
 
     if not current.get("document"):
         parser.error(undeclared(parser))
     try:
         if args.operation == "disable-research-stage":
-            if args.role or args.runtime or args.template_role or args.research_directory:
-                parser.error("disable-research-stage takes no --role, --runtime, --template-role or --research-directory")
+            if args.role or args.runtime or args.template_role or args.research_directory or args.model:
+                parser.error("disable-research-stage takes no --role, --runtime, --template-role, --model or "
+                             "--research-directory")
             return without_research_stage(current["document"])
-        if bool(args.role) == bool(args.runtime):
-            parser.error("enable-research-stage needs --role <an existing role> or --runtime <cli> for a new "
-                         "Researcher, one of the two")
+        if args.role and (args.runtime or args.model):
+            parser.error("enable-research-stage takes --role <an existing role>, or a new Researcher's --runtime "
+                         "and --model, not both")
         if args.template_role and not args.runtime:
-            parser.error("--template-role chooses a new Researcher's model, so it needs --runtime")
+            parser.error("--template-role chooses the launcher entry a new Researcher on a runtime you name starts "
+                         "from, so it needs --runtime")
         researcher = None
-        if args.runtime:
+        if not args.role:
+            # A new Researcher. Without --runtime, the default one: agy on Gemini 4 Hydrogen (High) (SYRD-889).
+            args.runtime = args.runtime or RESEARCHER_DEFAULT_RUNTIME
             researcher = {"runtime": args.runtime, "template_role": args.template_role,
                           # The window's next free display slot, or the background when all six are taken.
                           "slot": free_visible_slot(current["document"])}
@@ -591,7 +617,9 @@ def main(argv=None):
                                                 "(never its model or effort); enable-documentation-gate: the role "
                                                 "whose launcher model the Librarian starts from")
     parser.add_argument("--model", help="enable-router: Router's model; default claude-haiku-5-5 on claude, the "
-                                        "runtime's own default on any other")
+                                        "runtime's own default on any other. enable-research-stage: a new "
+                                        "Researcher's model; default gemini-4-hydrogen-high on agy, the template "
+                                        "role's on any other")
     parser.add_argument("--effort", help="enable-router: Router's effort; default high on claude, the runtime's "
                                          "own default on any other")
     parser.add_argument("--research-directory", help="enable-research-stage: the repository directory findings files "
@@ -794,6 +822,8 @@ def main(argv=None):
     files = projection_files(args.config, cfg)
     if args.operation == "enable-router":
         files = _with_router_settings(files, args, parser)
+    if args.operation == "enable-research-stage" and not args.role:
+        files = _with_researcher_settings(files, args, parser)
     expected = (
         args.expected_revision
         if args.expected_revision is not None

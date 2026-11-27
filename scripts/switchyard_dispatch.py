@@ -402,8 +402,9 @@ def switchyard_main(argv: list[str] | None = None) -> int:
                 "or a no-commit reason that is the finding. Audit reviews its evidence when the ticket keeps "
                 "needs_audit, and the finding comes back to the Director in triage to close on (publish-finding, "
                 "where the Publisher runs and the finding has a commit), act on with new tickets, or return. The Director is told once when a timebox passes with no finding; the board "
-                "stops nothing. --role gives the research to an existing role; --runtime declares a new detached "
-                "Researcher on that agent CLI. disable is refused while a ticket is in Research or its review."
+                "stops nothing. Plain enable declares a new detached Researcher on agy with gemini-4-hydrogen-high; "
+                "--role gives the research to an existing role instead, and --runtime and --model choose the "
+                "Researcher's own. disable is refused while a ticket is in Research or its review."
             ) if research else (
                 "Turn the optional plan gate on or off. With it, a designer owns the project's implementation plan "
                 "-- milestones, deliverables, tickets, with a machine-readable index -- and changes it only through "
@@ -448,9 +449,12 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         if research:
             parser.add_argument("action", choices=("enable", "disable"))
             parser.add_argument("--role", help="enable: an existing role that does the research")
-            parser.add_argument("--runtime", help="enable: the agent CLI a new Researcher role runs on")
-            parser.add_argument("--template-role", help="enable --runtime: the role whose model and effort the "
-                                                        "Researcher starts from")
+            parser.add_argument("--runtime", help="enable: the agent CLI a new Researcher role runs on (default agy)")
+            parser.add_argument("--model", help="enable: a new Researcher's model (default gemini-4-hydrogen-high on "
+                                                "agy, the template role's on any other runtime)")
+            parser.add_argument("--template-role", help="enable --runtime: the role whose launcher entry the "
+                                                        "Researcher starts from, and its model and effort on any "
+                                                        "runtime but agy")
             parser.add_argument("--research-directory", help="enable: where findings files go in the repository "
                                                              "(default docs/research)")
         if design_stage or router or gate or publisher or research or plan:
@@ -502,7 +506,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             return workflow_manage.main(forwarded + (["--dry-run"] if args.dry_run else []))
         if research:
             forwarded = [f"{args.action}-research-stage", "--board-url", config.board_url, "--config", str(entry.config_path)]
-            for flag, value in (("--role", args.role), ("--runtime", args.runtime),
+            for flag, value in (("--role", args.role), ("--runtime", args.runtime), ("--model", args.model),
                                 ("--template-role", args.template_role), ("--research-directory", args.research_directory)):
                 forwarded += [flag, value] if value else []
             return workflow_manage.main(forwarded + (["--dry-run"] if args.dry_run else []))

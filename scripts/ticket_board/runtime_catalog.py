@@ -43,12 +43,12 @@ from scripts.ticket_board.prompt_schema import Choice
 
 #: Bumped when the recorded tables below change, so a project can record which
 #: version of this data it was configured against.
-CATALOG_VERSION = 4
+CATALOG_VERSION = 5
 
 #: When the recorded tables were last checked against the repository. A date an
 #: operator can compare against, in the shape the launcher already uses for
 #: vendor strings it knows will drift.
-CATALOG_RECORDED = "2026-11-26"
+CATALOG_RECORDED = "2026-11-27"
 
 PROVENANCE_RECORDED = "recorded"
 #: The `unverified_because` of a caller that has already said, once, why its recorded lists are not checked against
@@ -122,6 +122,12 @@ RUNTIMES: tuple[Choice, ...] = (
 #:     (`.switchyard/provision/syrd.json`, effort high).
 #:   agy -- `tests/team_launcher_test_helpers.py`'s agy catalog, the shape
 #:     `agy models` returns: gemini-3.7-flash-high, gemini-3.7-pro.
+#:   agy -- gemini-4-hydrogen-high, a new Researcher's default
+#:     (`research_stage.RESEARCHER_DEFAULT_MODEL`): the User's decision on
+#:     SYRD-889 (2026-11-27, "lets change that to gemini 4 hydrogen high
+#:     please"), and listed by `agy models` on this host that day as
+#:     "gemini-4-hydrogen-high  Gemini 4 Hydrogen (High)", beside -low, -medium
+#:     and -xhigh. Last, so no other role's agy default moves.
 #:   hermes -- nothing. See the module docstring.
 #:   copilot -- the built-in catalog `copilot help config` printed on 1.0.101
 #:     (tests/fixtures/copilot-1.0.101/help-config.txt), first entries only. It is
@@ -142,6 +148,7 @@ RECORDED_MODELS: dict[str, tuple[Choice, ...]] = {
     "agy": (
         Choice("gemini-3.7-flash-high", "Gemini 3.7 Flash High", "configured for inspector"),
         Choice("gemini-3.7-pro", "Gemini 3.7 Pro"),
+        Choice("gemini-4-hydrogen-high", "Gemini 4 Hydrogen (High)", "a new Researcher's default"),
     ),
     "hermes": (),
     "copilot": (

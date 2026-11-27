@@ -1062,7 +1062,9 @@ the refusal and names the likely cause, the most likely first:
   too, and the re-login did not help.
 - **agy's own permission layer refused:** the role is running without `--dangerously-skip-permissions`.
 
-A role whose calls start running again is not told about again. A new run of refusals, in a new conversation or
+Only calls since the role's pane last started count: a restart that fixed it is not reported on the refusals the
+resumed conversation still ends on, and a run that goes on after a restart is reported once more, from its first call
+in the new pane. A role whose calls start running again is not told about again. A new run of refusals, in a new conversation or
 after a call ran, is told once more. A role with no current ticket is told about once it has one.
 
 ## When the Director's model is at capacity

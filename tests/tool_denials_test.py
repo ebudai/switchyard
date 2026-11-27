@@ -14,6 +14,9 @@ with no reason, for two hours on OCSTAB-4, and no alert reached the Director or 
   (the 403 `fetch_config` line, read from the newest log of the transcript's home) follows it, or comes first without
   it, with the re-login; a hook's reason is pointed at; agy's own permission layer is named; anything else is quoted
   as it is. The quoted refusal and log line are one line with no control characters (SYRD-893).
+* **The current pane's calls** (SYRD-894): only outcomes agy recorded since the role's current pane registered count,
+  so a run from before a restart is not reported after it (ocstab's false alert), and a run that goes on after it
+  counts, and is keyed, from its first call in the new pane.
 * **The role's own record** (`observe`): the transcript its SessionStart record names; nothing below `THRESHOLD`; a
   record naming anything but agy's transcript file is not read; an unchanged transcript is answered from the cache.
 * **The board**, built fresh from schema.sql and upgraded from the parent tree through its migrations (pgu1063), with
@@ -22,7 +25,8 @@ with no reason, for two hours on OCSTAB-4, and no alert reached the Director or 
   the Director's pane; the next pass queues nothing; a run in a new conversation is told again; a role with no ticket
   is told once it has one; a notice whose ticket moved before delivery is dropped; a role whose calls run is never
   told; the Director's own pane is never told about, though it has a ticket; only
-  the listener may report; a workflow with no agy role is asked nothing. schema.sql's note_tool_denials is pgu1063's.
+  the listener may report; a workflow with no agy role is asked nothing; after a restart (the pane registers again) a
+  run from before it is not told, and a new run in the new pane is, once. schema.sql's note_tool_denials is pgu1063's.
 """
 
 from __future__ import annotations
@@ -34,6 +38,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -112,6 +118,24 @@ def test_what_agy_records() -> None:
           "a tail's cut first line is skipped")
 
 
+def test_only_the_current_panes_calls_count() -> None:
+    """SYRD-894: a run counts only calls agy recorded since the role's current pane started."""
+    start = 1_800_000_000.25
+    old = retimed("denied_no_reason.jsonl", start - 60)
+    check(td.streak(old, since=start) is None, "denials all from before the pane's start: no run")
+    check((td.streak(old) or {}).get("denied") == 3, "with no start known, as before: the run of three")
+    spanning = retimed("denied_no_reason.jsonl", start - 20) + retimed("denied_no_reason.jsonl", start + 10, 20)[1:]
+    seen = td.streak(spanning, since=start) or {}
+    check(seen.get("denied") == 3 and seen.get("first_step") == 22 and seen.get("ran_before") == 0,
+          f"a run that goes on after the restart counts from its first call in this pane, keyed by it: {seen}")
+    untimed = [call(1), json.dumps({"step_index": 2, "type": "GENERIC", "status": "ERROR", "error": DENY})]
+    check(td.streak(untimed, since=start) is None, "an outcome with no time cannot be placed in this pane")
+    same_second = [call(1), json.dumps({"step_index": 2, "type": "GENERIC", "status": "ERROR", "error": DENY,
+                                        "created_at": stamp(start)})]
+    check((td.streak(same_second, since=start) or {}).get("denied") == 1,
+          "agy's whole second of the start counts: it cannot say which side of the start it fell")
+
+
 def test_the_likely_cause() -> None:
     with tempfile.TemporaryDirectory(prefix="syrd891-home.") as tmp:
         home = Path(tmp) / ".gemini"
@@ -147,12 +171,29 @@ def test_the_likely_cause() -> None:
           "not recognise"), "anything else is quoted as it is")
 
 
-def session(root: Path, target: str, conversation: str, fixture_name: str) -> Path:
-    """The role's SessionStart record, as the pane hook writes it, naming agy's transcript in its home."""
+def stamp(epoch: float) -> str:
+    """An epoch as agy writes `created_at`: whole seconds, UTC."""
+    return datetime.fromtimestamp(int(epoch), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def retimed(fixture_name: str, at: float, first_index: int = 0) -> list[str]:
+    """A recorded transcript's steps as if agy had written them from `at`, one second apart; step indexes from
+    `first_index`. Only the time and the index change: agy's words, types and statuses are as recorded."""
+    out = []
+    for i, line in enumerate(lines(fixture_name)):
+        step = json.loads(line)
+        step["created_at"], step["step_index"] = stamp(at + i), first_index + i
+        out.append(json.dumps(step))
+    return out
+
+
+def session(root: Path, target: str, conversation: str, fixture_name: str, at: float | None = None) -> Path:
+    """The role's SessionStart record, as the pane hook writes it, naming agy's transcript in its home. The transcript's
+    steps are the recorded fixture's, timed from `at` (now, by default: after the role's current pane registered)."""
     home = root / f"home-{conversation}" / ".gemini"
     transcript = home / "antigravity-cli" / "brain" / conversation / ".system_generated" / "logs" / "transcript_full.jsonl"
     transcript.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(FIXTURES / fixture_name, transcript)
+    transcript.write_text("\n".join(retimed(fixture_name, time.time() if at is None else at)) + "\n")
     sessions = root / "sessions"
     sessions.mkdir(exist_ok=True)
     safe = "".join(ch if ch.isalnum() or ch in ".-" else "_" for ch in target)
@@ -205,6 +246,8 @@ def test_the_roles_own_record() -> None:
         cache: dict = {}
         first = td.observe(str(sessions), "pgu-main:0.0", cache)
         check(td.observe(str(sessions), "pgu-main:0.0", cache) is first, "an unchanged transcript is answered from the cache")
+        check(first is not None and td.observe(str(sessions), "pgu-main:0.0", cache, since=time.time() + 5) is None,
+              "but not across a restart: the same transcript, a pane started after its run, no run (SYRD-894)")
         transcript = Path(json.loads((sessions / "pgu-main_0.0.json").read_text())["payload"]["transcriptPath"])
         with transcript.open("a") as f:
             f.write(call(8) + "\n" + outcome(9) + "\n")
@@ -286,6 +329,20 @@ def board_scenario(board: Board, name: str, tmp: Path) -> None:
     with psycopg.connect(board.listener_url, autocommit=True) as conn:
         session(tmp / "main", "pgu-main:0.0", "conv-c", "ran.jsonl")
         check(td.run(listener, conn) == 0, f"{name}: a role whose calls run is never told")
+        # SYRD-894: ocstab's false alert. Denials from before the pane's current start, then a restart (the pane
+        # registers again), then a pass before the new pane's first call: the resumed transcript still ends on the
+        # old run, and it is not this pane's.
+        sessions = session(tmp / "main", "pgu-main:0.0", "conv-r", "denied_no_reason.jsonl", at=time.time() - 120)
+        board.sql("UPDATE ticket_board.role_runtime_assignments SET generation = generation + 1, "
+                  "registered_at = clock_timestamp() WHERE role = 'main';")
+        check(td.run(listener, conn) == 0,
+              f"{name}: a run that ended before the pane's current start is not reported after the restart")
+        transcript = Path(json.loads((sessions / "pgu-main_0.0.json").read_text())["payload"]["transcriptPath"])
+        time.sleep(1.1)  # the new pane's calls land after its registration, in a later second
+        with transcript.open("a") as f:
+            f.write("\n".join(retimed("denied_no_reason.jsonl", time.time(), first_index=20)[1:]) + "\n")
+        check(td.run(listener, conn) == 1, f"{name}: a new run in the new pane's generation is told")
+        check(td.run(listener, conn) == 0, f"{name}: once")
         fixture.seed_postgres_ticket(board.admin, "PGU-973", title="Triage", state="analysis", assignee="director")
         director = json.dumps({"director": {"episode": "d:1", "denied": 5, "suspects": []}})
         check(conn.execute("SELECT ticket_board.note_tool_denials(%s::jsonb)", (director,)).fetchone()[0] == 0,
@@ -297,7 +354,7 @@ def board_scenario(board: Board, name: str, tmp: Path) -> None:
     except psycopg.Error as exc:
         refused = str(exc)
     check(refused, f"{name}: only the listener may report")
-    check(board.sql("SELECT count(*) FROM ticket_board.tool_denial_alerts;") == "3",
+    check(board.sql("SELECT count(*) FROM ticket_board.tool_denial_alerts;") == "4",
           f"{name}: one record per role and run")
 
 

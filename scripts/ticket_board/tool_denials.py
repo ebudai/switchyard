@@ -14,7 +14,9 @@ keeps -- has the call (`PLANNER_RESPONSE` with `tool_calls`) and then one step p
 
 Each listener pass, for every role the board has registered on agy: the role's session record (`<session_dir>/<target
 >.json`, written by the pane's own SessionStart hook) names the transcript; its tail is read; a trailing run of at
-least `THRESHOLD` refused calls, with nothing run since, is reported to the board (`note_tool_denials`), which keeps
+least `THRESHOLD` refused calls, with nothing run since -- counting only calls agy recorded since the role's current
+pane registered, so a restart that ended a run is not reported on the history it resumes (SYRD-894) -- is reported to
+the board (`note_tool_denials`), which keeps
 one record per role and run -- the conversation and the step the run began at -- and queues one notice to the Director
 naming the role, its ticket, how many calls and since when, agy's last refusal word for word -- one line, without
 control characters (SYRD-893) -- and the likely cause:
@@ -31,6 +33,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -58,9 +61,23 @@ def _tail(path: Path, size: int = TAIL_BYTES) -> list[str]:
     return lines[1:] if end > size else lines  # the first line of a cut is partial
 
 
-def streak(lines: Iterable[str]) -> dict[str, Any] | None:
+def _epoch(stamp: str) -> float | None:
+    """agy's `created_at` (`2026-11-27T19:08:30Z`) as epoch seconds, or None."""
+    try:
+        return datetime.fromisoformat(stamp.strip().replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def streak(lines: Iterable[str], since: float | None = None) -> dict[str, Any] | None:
     """The trailing run of refused tool calls in a transcript's lines, or None when the last call ran (or none was
-    made). {"denied", "ran_before", "first_step", "first_at", "last_at", "last_error"}."""
+    made). {"denied", "ran_before", "first_step", "first_at", "last_at", "last_error"}.
+
+    `since` is when the role's current pane started (its registration, SYRD-894): only calls whose outcome agy recorded
+    then or later count. A restarted pane resumes the same conversation, so until its first call lands the transcript
+    still ends on the run the restart may have ended; that run is not this pane's. agy records whole seconds, so the
+    start is compared at the second it fell in. An outcome with no readable time cannot be placed, so it does not count
+    once a start is known."""
     outcomes: list[tuple[Any, str, bool, str]] = []
     pending = 0
     for line in lines:
@@ -83,6 +100,9 @@ def streak(lines: Iterable[str]) -> dict[str, Any] | None:
             outcomes.append((step.get("step_index"), str(step.get("created_at") or ""),
                              status == "ERROR" and bool(DENIED.search(error)), error))
             pending -= 1
+    if since is not None:
+        start = float(int(since))
+        outcomes = [o for o in outcomes if (_epoch(o[1]) or -1.0) >= start]
     run: list[tuple[Any, str, bool, str]] = []
     for outcome in reversed(outcomes):
         if not outcome[2]:
@@ -139,10 +159,11 @@ def suspects(seen: dict[str, Any], scope: str) -> list[str]:
     return found or ["a cause Switchyard does not recognise: agy's refusal is quoted as it is"]
 
 
-def observe(session_dir: str, target: str, cache: dict | None = None) -> dict[str, Any] | None:
+def observe(session_dir: str, target: str, cache: dict | None = None, since: float | None = None
+            ) -> dict[str, Any] | None:
     """The role's run of refused calls, from its own session record's transcript, when it is long enough to report.
-    `cache` keeps each answer against the record's and the transcript's mtime and size, so an unchanged transcript is
-    not read again on the next pass."""
+    `cache` keeps each answer against the record's and the transcript's mtime and size and `since`, so an unchanged
+    transcript is not read again on the next pass. `since`: when the role's current pane started (`streak`)."""
     safe = "".join(ch if ch.isalnum() or ch in ".-" else "_" for ch in target)
     path = Path(session_dir) / f"{safe}.json"
     try:
@@ -154,10 +175,10 @@ def observe(session_dir: str, target: str, cache: dict | None = None) -> dict[st
         if transcript.name not in TRANSCRIPT_NAMES or not conversation or not transcript.is_file():
             return None
         transcript_stat = transcript.stat()
-        key = (record_stat.st_mtime_ns, record_stat.st_size, transcript_stat.st_mtime_ns, transcript_stat.st_size)
+        key = (record_stat.st_mtime_ns, record_stat.st_size, transcript_stat.st_mtime_ns, transcript_stat.st_size, since)
         if cache is not None and cache.get(str(path), (None,))[0] == key:
             return cache[str(path)][1]
-        seen = streak(_tail(transcript))
+        seen = streak(_tail(transcript), since)
     except (OSError, ValueError, AttributeError):
         return None
     answer = _answer(seen, conversation, transcript)
@@ -203,13 +224,15 @@ def run(listener: Any, conn: Any) -> int:
     try:
         if not _present(listener, conn):
             return 0
-        rows = conn.execute("SELECT role, actual_target, session_dir FROM ticket_board.role_runtime_assignments "
-                            "WHERE runtime = 'agy' ORDER BY role").fetchall()
+        # registered_at: when the role's current pane started (each start registers again, SYRD-894).
+        rows = conn.execute("SELECT role, actual_target, session_dir, extract(epoch FROM registered_at) AS since "
+                            "FROM ticket_board.role_runtime_assignments WHERE runtime = 'agy' ORDER BY role").fetchall()
         report = {}
         for row in rows:
-            role, target, session_dir = (row["role"], row["actual_target"], row["session_dir"]) \
-                if isinstance(row, dict) else (row[0], row[1], row[2])
-            seen = observe(_text(session_dir), _text(target), listener.__dict__.setdefault("_tool_denials_cache", {}))
+            role, target, session_dir, since = (row["role"], row["actual_target"], row["session_dir"], row["since"]) \
+                if isinstance(row, dict) else (row[0], row[1], row[2], row[3])
+            seen = observe(_text(session_dir), _text(target), listener.__dict__.setdefault("_tool_denials_cache", {}),
+                           float(since) if since is not None else None)
             if seen is not None:
                 report[_text(role)] = seen
         if not report:

@@ -72,6 +72,20 @@ From Audit's non-blocking notes on SYRD-891:
 - **Plain text.** The quoted refusal and agy's log line go through `report_closure.plain` (no C0/C1 control
   characters or DEL), with every run of whitespace, newlines and tabs included, made one space.
 
+## Since: SYRD-894
+
+ocstab deployed d5cdb26c, restarted its agy Researcher, and about a minute later the Director was told "last 9 tool
+calls denied". All nine were from the pane before the restart. A restarted pane resumes the same conversation, so its
+transcript ends on the old run until the new pane's first call lands, and a pass in between read that history.
+
+- **The fix.** Only outcomes agy recorded since the role's current pane registered count
+  (`role_runtime_assignments.registered_at`, refreshed at every start, compared at agy's whole second).
+- **No alert on history.** A run that ended before the restart is not reported.
+- **A run that goes on is.** A run that continues after the restart counts from its first call in the new pane, and is
+  keyed by it, so the Director is told once more that the restart did not fix it.
+- **No PostToolUse hook needed** for agy, which ocstab suggested: a call that runs is a `DONE` step in the transcript,
+  and it already ends a run (SYRD-891's measurement, `ran.jsonl`).
+
 ## Not done
 
 - **agy's denial text itself** (ask 2) can't be changed. When agy denies on its own, our guard is not the one

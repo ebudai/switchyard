@@ -49,7 +49,7 @@ from .pane_activity_gate import (
 )
 from .idle_nudges import IdleNudges
 from . import reminder_snooze
-from . import background_authorization, board_stall, blocked_pane, capacity_retry, commit_refresh, delivery_proof, execution_lease_pass, handoff_children, publisher_pass, pull_pickup, quota_hold, replaced_delivery, report_closure, research_finding, review_balance, stall_episode, work_pause
+from . import background_authorization, board_stall, blocked_pane, capacity_retry, commit_refresh, delivery_proof, execution_lease_pass, handoff_children, publisher_pass, pull_pickup, quota_hold, replaced_delivery, report_closure, research_finding, review_balance, stall_episode, tool_denials, work_pause
 from .notification_ledger import NotificationLedger
 from .notification_activity_hold import (
     NotificationActivityHold, ActivityTrace, SELF_REMINDER_KINDS,
@@ -1133,7 +1133,7 @@ WHERE (r.definition->>'active')::boolean
                 self.process_idle_turn_end_nudges(conn)
                 self.process_idle_stall_nudges(conn)
                 self.process_serial_focus_queue_wakeups(conn)
-                pull_pickup.run(self, conn); review_balance.run(self, conn); delivery_proof.run(self, conn); replaced_delivery.run(self, conn); capacity_retry.run(self, conn); stall_episode.run(self, conn); publisher_pass.run(self, conn); board_stall.run(self, conn); handoff_children.run(self, conn); execution_lease_pass.run(self, conn); report_closure.run(self, conn); research_finding.run(self, conn)  # SYRD-539/745/565/589/594/595/625/637/636/616/827/842
+                pull_pickup.run(self, conn); review_balance.run(self, conn); delivery_proof.run(self, conn); replaced_delivery.run(self, conn); capacity_retry.run(self, conn); stall_episode.run(self, conn); publisher_pass.run(self, conn); board_stall.run(self, conn); handoff_children.run(self, conn); execution_lease_pass.run(self, conn); report_closure.run(self, conn); research_finding.run(self, conn); tool_denials.run(self, conn)  # SYRD-539/745/565/589/594/595/625/637/636/616/827/842/891
                 image_handoff.run(self)  # SYRD-247: images the desktop owner handed over
                 delivered = self.process_due_notifications(conn, max_notifications=max_notifications)
                 if max_notifications is not None and self.delivered_count >= max_notifications:

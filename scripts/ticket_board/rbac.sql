@@ -760,4 +760,8 @@ GRANT EXECUTE ON FUNCTION ticket_board.plan_status() TO ticket_board_service, ti
 REVOKE ALL ON FUNCTION ticket_board.publication_documentation_pair(text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION ticket_board.publication_documentation_pair(text) TO ticket_board_listener;
 
+-- SYRD-891: the listener reports agy roles whose tool calls are all denied; it reads nothing of the record.
+REVOKE ALL ON ticket_board.tool_denial_alerts FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ticket_board.note_tool_denials(jsonb) TO ticket_board_listener;
+
 COMMIT;

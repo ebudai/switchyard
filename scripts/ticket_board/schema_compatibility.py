@@ -96,6 +96,9 @@ DECLARED: dict[str, OlderCode] = {
         True, "replaces request_scope_change with the same signature, only naming the target stage of the move it "
         "already chose; older code calls it the same way and gets the same result, or a scope change where it was "
         "refused as ambiguous"),
+    "pgu1063_syrd891_tool_denial_alerts.sql": OlderCode(
+        True, "adds the tool-denial record and the listener-only note_tool_denials that writes it and queues a "
+        "Director notice; older code never calls it, and an older listener drops a notice it already queued as stale"),
 }
 
 

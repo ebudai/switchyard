@@ -1047,6 +1047,22 @@ A role can run Hermes on the host's local model service (`--local-qwen`; see
   `--no-local-qwen --model <hosted model>` takes a role off it. `local-model remove`
   takes the service off the host, and only after it has stopped.
 
+## When an agy role's tool calls are all being denied
+
+agy writes each tool call's outcome to its own transcript. When an agy role's last three or more tool calls were all
+refused, with none run since, the listener tells you once for that run, on the role's current ticket. The notice
+reads "`<role>`, on agy, has had its last N tool calls denied and none run since ...". It quotes agy's own words for
+the refusal and names the likely cause:
+
+- **agy's log says the login lacked an OAuth scope** (a 403 on `fetch_config` at session start): sign agy in again
+  as the tenant's owner, then restart the role.
+- **A pre-tool hook denied with no reason:** this is what agy 1.5.17 does to a hook answer with no decision.
+  Upgrade the tenant to a release with SYRD-890's fix, then restart the role.
+- **agy's own permission layer refused:** the role is running without `--dangerously-skip-permissions`.
+
+A role whose calls start running again is not told about again. A new run of refusals, in a new conversation or
+after a call ran, is told once more. A role with no current ticket is told about once it has one.
+
 ## When the Director's model is at capacity
 
 A Codex pane whose model is full ends its turn with `■ Selected model is at capacity. Please try a different

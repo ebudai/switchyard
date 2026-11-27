@@ -62,6 +62,16 @@ whose declared workflow runs no role on agy is asked nothing. For each role the 
 
 Nothing asks agy or the provider anything. Nothing changes a file outside the board's own row.
 
+## Since: SYRD-893
+
+From Audit's non-blocking notes on SYRD-891:
+
+- **Cause order.** When a hook's empty-reason denial is seen, its fix comes first. It is evidence about the refused
+  calls; agy's 403 line is a session-start warning, and on ocstab the re-login did not help. Without that denial, the
+  login still comes first.
+- **Plain text.** The quoted refusal and agy's log line go through `report_closure.plain` (no C0/C1 control
+  characters or DEL), with every run of whitespace, newlines and tabs included, made one space.
+
 ## Not done
 
 - **agy's denial text itself** (ask 2) can't be changed. When agy denies on its own, our guard is not the one

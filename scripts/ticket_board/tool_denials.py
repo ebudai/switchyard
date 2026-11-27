@@ -16,10 +16,12 @@ Each listener pass, for every role the board has registered on agy: the role's s
 >.json`, written by the pane's own SessionStart hook) names the transcript; its tail is read; a trailing run of at
 least `THRESHOLD` refused calls, with nothing run since, is reported to the board (`note_tool_denials`), which keeps
 one record per role and run -- the conversation and the step the run began at -- and queues one notice to the Director
-naming the role, its ticket, how many calls and since when, agy's last refusal word for word, and the likely cause:
+naming the role, its ticket, how many calls and since when, agy's last refusal word for word -- one line, without
+control characters (SYRD-893) -- and the likely cause:
+- a pre-tool hook denying with no reason -- what agy 1.5.17 does to an answer with no decision (SYRD-890); first when it
+  is there, since it is evidence about the call itself (SYRD-893);
 - agy's own log saying the login lacked an OAuth scope (the 403 `fetch_config` line ocstab's log had) -- sign agy in
-  again as the tenant owner;
-- a pre-tool hook denying with no reason -- what agy 1.5.17 does to an answer with no decision (SYRD-890);
+  again as the tenant owner; on ocstab it was there too, and the re-login did not help;
 - agy's own permission layer -- the role runs without `--dangerously-skip-permissions`;
 - otherwise agy's refusal as it is.
 A call that runs ends the run. Nothing here asks agy or the provider anything, or changes any file.
@@ -31,6 +33,8 @@ import json
 import re
 from pathlib import Path
 from typing import Any, Iterable
+
+from .report_closure import plain
 
 #: Refused calls in a row, with none run since, before the Director is told: more than a model's retry of one call.
 THRESHOLD = 3
@@ -104,18 +108,31 @@ def scope_line(transcript: Path) -> str:
     return ""
 
 
+def one_line(text: str) -> str:
+    """`text` as one line of a notice: no control characters (`plain`, as report_closure's notices are), and every run
+    of whitespace, newlines and tabs included, one space (SYRD-893). agy's refusal is partly shaped by the role's own
+    command. Whitespace is split first, so a tab or newline between two words stays a space between them."""
+    return " ".join(plain(" ".join(text.split())).split())
+
+
 def suspects(seen: dict[str, Any], scope: str) -> list[str]:
-    """The likely causes, most likely first, each with what to do."""
+    """The likely causes, most likely first, each with what to do.
+
+    A pre-tool hook's denial with no reason is evidence about the refused call itself, so it comes first; agy's 403
+    scope line is a warning at session start, so it comes after it -- on ocstab both were there, and the re-login did
+    not help (SYRD-893). With no such denial, the login comes first."""
     error = str(seen.get("last_error") or "")
     found = []
-    if scope:
-        found.append(f"agy's own log says its login lacked an OAuth scope ({scope}): sign agy in again as the "
-                     "tenant's owner, then restart the role")
-    if error.rstrip().endswith("denied by pre-tool hook:"):
+    login = (f"agy's own log says its login lacked an OAuth scope ({scope}): sign agy in again as the tenant's owner, "
+             "then restart the role") if scope else ""
+    empty_hook = error.rstrip().endswith("denied by pre-tool hook:")
+    if empty_hook:
         found.append("a pre-tool hook denied with no reason, which is what agy 1.5.17 does to an answer with no "
                      "decision (SYRD-890): check that the role's ~/.gemini/config/hooks.json runs a release with that "
                      "fix (switchyard upgrade), then restart the role")
-    elif "pre-tool hook" in error or "denied with reason" in error:
+    if login:
+        found.append(login)
+    if not empty_hook and ("pre-tool hook" in error or "denied with reason" in error):
         found.append("a pre-tool hook refused it, for the reason quoted")
     if re.search(r"denied permission|auto-denied|Action denied", error, re.IGNORECASE):
         found.append("agy's own permission layer refused it: the role should run with --dangerously-skip-permissions")
@@ -153,9 +170,10 @@ def _answer(seen: dict[str, Any] | None, conversation: str, transcript: Path) ->
     if seen is None or seen["denied"] < THRESHOLD:
         return None
     try:
-        scope = scope_line(transcript)
+        scope = one_line(scope_line(transcript))
     except OSError:
         scope = ""
+    seen = {**seen, "last_error": one_line(str(seen.get("last_error") or ""))}
     return {**seen, "conversation": conversation, "episode": f"{conversation}:{seen['first_step']}",
             "suspects": suspects(seen, scope)}
 

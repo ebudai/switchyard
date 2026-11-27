@@ -9,10 +9,11 @@ with no reason, for two hours on OCSTAB-4, and no alert reached the Director or 
   run is none; one refusal with the guard's reason is a run of one. And on written transcripts: a call that runs ends
   the run; each call of a response counts; a user's new prompt ends an unanswered response; an error that is not a
   refusal ends the run; the first, cut line of a tail is skipped.
-* **The likely cause** (`suspects`): agy's own log saying its login lacked an OAuth scope (the 403 `fetch_config`
-  line ocstab's log had, read from the newest log of the transcript's home) comes first, with the re-login; a hook's
-  denial with no reason names SYRD-890's fix; a hook's reason is pointed at; agy's own permission layer is named;
-  anything else is quoted as it is.
+* **The likely cause** (`suspects`): a hook's denial with no reason names SYRD-890's fix, first (SYRD-893: on ocstab
+  agy's 403 line was there too, and the re-login did not help); agy's own log saying its login lacked an OAuth scope
+  (the 403 `fetch_config` line, read from the newest log of the transcript's home) follows it, or comes first without
+  it, with the re-login; a hook's reason is pointed at; agy's own permission layer is named; anything else is quoted
+  as it is. The quoted refusal and log line are one line with no control characters (SYRD-893).
 * **The role's own record** (`observe`): the transcript its SessionStart record names; nothing below `THRESHOLD`; a
   record naming anything but agy's transcript file is not read; an unchanged transcript is answered from the cache.
 * **The board**, built fresh from schema.sql and upgraded from the parent tree through its migrations (pgu1063), with
@@ -124,9 +125,20 @@ def test_the_likely_cause() -> None:
         newer = log / "cli-20261127_090000.log"
         newer.write_text("I1127 a clean start after the re-login\n")
         check(td.scope_line(transcript) == "", "only the newest log counts: a clean start after a re-login says nothing")
-        found = td.suspects({"last_error": DENY}, SCOPE)
-    check(found[0].startswith("agy's own log says its login lacked an OAuth scope") and "sign agy in again" in found[0]
-          and "SYRD-890" in found[1], f"the login comes first, with the re-login; then SYRD-890's fix: {found}")
+        newer.unlink()  # back to ocstab's case: the 403 line in the newest log, and the refusals with no reason
+        sessions = session(Path(tmp), "pgu-main:0.0", "c1", "denied_no_reason.jsonl")
+        record = json.loads((sessions / "pgu-main_0.0.json").read_text())
+        record["payload"]["transcriptPath"] = str(transcript)  # the transcript in the home whose log has the 403 line
+        (sessions / "pgu-main_0.0.json").write_text(json.dumps(record))
+        found = (td.observe(str(sessions), "pgu-main:0.0") or {}).get("suspects", [])
+    check(len(found) == 2 and "SYRD-890" in found[0] and found[1].startswith("agy's own log says its login lacked an "
+          "OAuth scope") and "sign agy in again" in found[1],
+          f"SYRD-893: with both, as on ocstab, the hook's empty denial -- evidence about the call -- comes first, and "
+          f"the login after it: {found}")
+    found = td.suspects({"last_error": DENY + "Switchyard refused this command"}, SCOPE)
+    check(found[0].startswith("agy's own log says its login lacked an OAuth scope")
+          and found[1] == "a pre-tool hook refused it, for the reason quoted",
+          f"without the empty denial, the login still comes first: {found}")
     check(td.suspects({"last_error": DENY + "Switchyard refused this command"}, "")
           == ["a pre-tool hook refused it, for the reason quoted"], "a hook's own reason is pointed at")
     check("--dangerously-skip-permissions" in td.suspects({"last_error": "User denied permission to run command:"}, "")[0],
@@ -149,6 +161,29 @@ def session(root: Path, target: str, conversation: str, fixture_name: str) -> Pa
         "payload": {"conversationId": conversation, "hookEventName": "SessionStart",
                     "transcriptPath": str(transcript)}}))
     return sessions
+
+
+def test_the_quoted_refusal_is_one_plain_line() -> None:
+    """SYRD-893: agy's refusal, partly shaped by the role's own command, and agy's log line reach the notice without
+    control characters, on one line, as report_closure's notices are."""
+    nasty = "tool call denied with reason: \x1b[31mrm -rf /\x1b[0m\nnext line\x07\tend\x9b2J"
+    with tempfile.TemporaryDirectory(prefix="syrd893-plain.") as tmp:
+        root = Path(tmp)
+        sessions = session(root, "pgu-main:0.0", "c-9", "denied_no_reason.jsonl")
+        transcript = Path(json.loads((sessions / "pgu-main_0.0.json").read_text())["payload"]["transcriptPath"])
+        with transcript.open("a") as f:
+            f.write(call(8) + "\n" + outcome(9, nasty) + "\n")
+        log = transcript.parents[4] / "log"
+        log.mkdir(parents=True)
+        (log / "cli-20261127_082700.log").write_text("W\x1b[33m " + SCOPE + "\x1b[0m\n")
+        seen = td.observe(str(sessions), "pgu-main:0.0") or {}
+    error, text = seen.get("last_error", ""), " ".join(seen.get("suspects", []))
+    controls = [c for c in error + text if ord(c) < 0x20 or 0x7f <= ord(c) <= 0x9f]
+    check(seen.get("denied") == 4 and not controls and "\n" not in error,
+          f"no escape, BEL, tab, newline or C1 character reaches the notice: {controls} {error!r}")
+    check(error == "tool call denied with reason: [31mrm -rf /[0m next line end2J",
+          f"and the words stay, on one line: {error!r}")
+    check("lacked OAuth scope" in text and "\x1b" not in text, f"agy's own log line too: {text!r}")
 
 
 def test_the_roles_own_record() -> None:
@@ -228,7 +263,7 @@ def board_scenario(board: Board, name: str, tmp: Path) -> None:
           f"{name}: one notice, for main, on its ticket; ops has no ticket yet: {queued} {notices}")
     message = notices[0]["message"]
     check(message.startswith("main, on agy, has had its last 3 tool calls denied and none run since ")
-          and f'agy said "{DENY}"' in message and "SYRD-890" in message and "PGU-971" in message,
+          and f'agy said "{DENY.strip()}"' in message and "SYRD-890" in message and "PGU-971" in message,
           f"{name}: naming the role, the count, agy's words and SYRD-890's fix: {message}")
     sent = board.one_pass()
     check(any(target == "pgu-director:0.0" and "has had its last 3 tool calls denied" in text for target, text in sent),

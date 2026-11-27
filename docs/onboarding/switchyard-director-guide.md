@@ -1052,12 +1052,14 @@ A role can run Hermes on the host's local model service (`--local-qwen`; see
 agy writes each tool call's outcome to its own transcript. When an agy role's last three or more tool calls were all
 refused, with none run since, the listener tells you once for that run, on the role's current ticket. The notice
 reads "`<role>`, on agy, has had its last N tool calls denied and none run since ...". It quotes agy's own words for
-the refusal and names the likely cause:
+the refusal and names the likely cause, the most likely first:
 
-- **agy's log says the login lacked an OAuth scope** (a 403 on `fetch_config` at session start): sign agy in again
-  as the tenant's owner, then restart the role.
 - **A pre-tool hook denied with no reason:** this is what agy 1.5.17 does to a hook answer with no decision.
-  Upgrade the tenant to a release with SYRD-890's fix, then restart the role.
+  Upgrade the tenant to a release with SYRD-890's fix, then restart the role. When this is named, it comes first,
+  because it is evidence about the refused calls themselves.
+- **agy's log says the login lacked an OAuth scope** (a 403 on `fetch_config` at session start): sign agy in again
+  as the tenant's owner, then restart the role. This is only a warning from session start: on ocstab it was there
+  too, and the re-login did not help.
 - **agy's own permission layer refused:** the role is running without `--dangerously-skip-permissions`.
 
 A role whose calls start running again is not told about again. A new run of refusals, in a new conversation or

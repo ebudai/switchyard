@@ -143,7 +143,7 @@ Each was read from what the installed CLI ships. No model call was made.
 |---|---|---|---|
 | Claude Code 2.1.318 | PreToolUse, no matcher | `tool_input.command` | `hookSpecificOutput.permissionDecision: deny` |
 | Codex 0.166 | PreToolUse, no matcher (own group) | `tool_input.command` / `cmd`, a string or `[bash, -lc, ...]` | the same; Codex's schema (`PreToolUsePermissionDecisionWire`, "Command blocked by PreToolUse hook") |
-| agy 1.5.1 | PreToolUse, matcher group `""` | `toolCall.args.CommandLine` | `{"decision": "deny"}`; every answer must be a JSON object, so it allows with `{}` (its embedded hook contract) |
+| agy 1.5.1 | PreToolUse, matcher group `""` | `toolCall.args.CommandLine` | `{"decision": "deny"}`; every answer must be a JSON object, so it allows with `{}` (its embedded hook contract). Since SYRD-890 it allows with `{"decision": "allow"}`: agy 1.5.17 denies on an answer without a decision |
 | Copilot 1.0.10x | preToolUse | `toolName: bash`, `toolArgs` (a JSON string or object) with `command` | `{"permissionDecision": "deny"}` (its SDK docs) |
 | Hermes 0.15 | pre_tool_call | `tool_input.command` (tool `terminal`) | `{"decision": "block"}` (`agent/shell_hooks.py`'s wire protocol) |
 

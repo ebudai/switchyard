@@ -11,7 +11,9 @@ of the repository on the path -- against a database of its own, and answers READ
 
 1. Every import statement in every module the board server or the listener can import, inside functions too,
    resolves in the release layout, and every one of those modules imports there. (An import that has an ImportError
-   fallback beside it is the fallback's business.)
+   fallback beside it is the fallback's business.) Then the release's shell guard, run as agy runs its PreToolUse
+   hook, answers an ordinary call `allow` and board prose `deny` with a reason: agy 1.5.17 denies every tool call on
+   an answer with no decision (SYRD-890).
 2. A throwaway PostgreSQL cluster, in a private directory and on a Unix socket only, is built the way provisioning
    builds a board: the release's schema.sql, its migrations (`ticket-board-migrate`), then its rbac.sql.
 3. The release's real `scripts/ticket-board.py` serves it, and answers `configure_workflow` dry runs for the tenant's
@@ -185,6 +187,39 @@ def check_imports(release: Path, python: str) -> list[str]:
 
 
 # -- 2. the database ----------------------------------------------------------------------------------------------
+
+
+#: SYRD-890: agy's PreToolUse calls, as agy sends them, and what the guard must answer. agy 1.5.17 requires a
+#: `decision` on every answer and denies, with no reason, on an answer without one -- the guard's old `{}` denied every
+#: tool call an agy role made. (call, decision, reason required)
+AGY_GUARD_CALLS = (
+    ({"toolCall": {"name": "run_command", "args": {"CommandLine": "pwd"}}}, "allow", False),
+    ({"toolCall": {"name": "read_file", "args": {"AbsolutePath": "/etc/hostname"}}}, "allow", False),
+    # Board prose in double quotes with a backtick command in it, which the shell would run: the guard refuses it.
+    ({"toolCall": {"name": "run_command", "args": {"CommandLine": " ".join(
+        ["ticket-board-write", "add-comment", "X-1", "--text", '"Run `printf marker` first."'])}}}, "deny", True),
+)
+
+
+def check_agy_guard(release: Path, python: str) -> list[str]:
+    """The release's shell guard, run as agy runs its PreToolUse hook, answers every call with a decision agy reads:
+    `allow` for an ordinary call, `deny` with a reason for board prose the shell would expand."""
+    guard = release / "scripts" / "ticket-board-shell-guard"
+    problems = []
+    for call, wanted, reason in AGY_GUARD_CALLS:
+        done = subprocess.run([python, "-E", "-s", "-B", str(guard), "--runtime", "agy"], input=json.dumps(call),
+                              capture_output=True, text=True, timeout=60, cwd=str(release))
+        try:
+            answer = json.loads(done.stdout)
+        except ValueError:
+            answer = None
+        if done.returncode != 0 or not isinstance(answer, dict) or answer.get("decision") != wanted \
+                or (reason and not str(answer.get("reason") or "").strip()):
+            problems.append(f"the shell guard answers agy's {call['toolCall']['name']} call "
+                            f"{call['toolCall']['args']} with {done.stdout.strip()!r} (exit {done.returncode}); agy "
+                            f"needs decision {wanted!r}{' with a reason' if reason else ''}, and denies every tool "
+                            f"call on an answer without a decision")
+    return problems
 
 
 def _run(argv: list[str], what: str, **kwargs: Any) -> str:
@@ -401,6 +436,10 @@ def smoke(release: Path, *, project: str, document: dict[str, Any] | None, pytho
         return ["a module the board server or listener can import does not import from the release layout:"]\
             + problems
     say("release smoke: every module the board server and listener can import imports from the release layout")
+    problems = check_agy_guard(release, python)
+    if problems:
+        return problems
+    say("release smoke: the shell guard answers agy's pre-tool calls with a decision agy reads")
     if document is None:
         # The example as it ships: its roles' targets name its own project, so the throwaway board takes that name
         # and `project` names nothing here (Audit, SYRD-854: renamed, every dry run was refused).

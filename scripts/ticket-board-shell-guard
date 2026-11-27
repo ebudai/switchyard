@@ -23,8 +23,8 @@ $(git rev-parse HEAD)`) and every other command are none of this program's busin
 
 The refusal tells the model the safe form. The answer is written in each runtime's own shape (`--runtime`):
 Claude Code and Codex read PreToolUse `permissionDecision`, Copilot reads `permissionDecision` at the top level,
-agy reads `decision: deny`, Hermes reads `decision: block`. A payload this program cannot read, or a command
-naming no board command, is allowed: it never stands between a role and its ordinary tools.
+agy reads `decision: deny` (and `allow`, required: 1.5.17 denies on none), Hermes `decision: block`. A payload this
+program cannot read, or a command naming no board command, is allowed: it never stands between a role and its tools.
 
 Standard library only: it is staged beside `ticket-board-pane-idle-hook` and run from a role's home.
 """
@@ -1242,7 +1242,7 @@ def main(argv: list[str] | None = None) -> int:
     if problems:
         sys.stdout.write(json.dumps(answer(args.runtime, refusal(problems))) + "\n")
     elif args.runtime == "agy":
-        sys.stdout.write("{}\n")  # agy reads a JSON object from every hook
+        sys.stdout.write('{"decision": "allow"}\n')  # agy 1.5.17 reads a missing decision as a deny (SYRD-890)
     return 0
 
 

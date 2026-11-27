@@ -13,7 +13,9 @@ from the repository root, where `scripts.ticket_board` imports; the served proce
      handler: NOT READY at the configure_workflow dry run, with "No module named 'scripts'";
    - HEAD whose Publisher fails before it records anything: the listener logs "was not recorded", which is no
      outcome: NOT READY;
-   - HEAD whose listener never claims a notice: the Publisher's outcome alone is not READY.
+   - HEAD whose listener never claims a notice: the Publisher's outcome alone is not READY;
+   - HEAD whose shell guard answers agy `{}`, as f05a1b37's did (SYRD-890: agy 1.5.17 denies every tool call on an
+     answer without a decision): NOT READY, before any board is built.
 2. Root's entries, through a stand-in for `runuser` that runs the same argv as this account: `run_as` reads the
    declared workflow as `postgres` and starts the smoke as the owner with `python3 -I`; `for_tenant` takes the
    database and interpreter from the tenant's board unit; with no declared workflow, any project name is READY on
@@ -105,11 +107,22 @@ def test_releases(tmp: Path) -> Path:
     check(not problems and any("whose board is 'cerulean'" in line for line in said),
           f"with no declared workflow, any --project is READY on the example, under the example's own name: "
           f"{problems} {said}")
-    for step in ("imports from the release layout", "built from the release's schema, migrations and grants",
+    for step in ("imports from the release layout", "answers agy's pre-tool calls with a decision agy reads",
+                 "built from the release's schema, migrations and grants",
                  "the release's board serves", "configure_workflow dry-runs the declared workflow",
                  "with the documentation gate", "with the Router", "with the Publisher", "with the research stage",
                  "with the plan gate", "its Publisher recorded", "claimed and routed the notice", "still running"):
         check(any(step in line for line in said), f"and the smoke said it ran this step ({step}): {said}")
+
+    silent = tmp / "silent"  # SYRD-890: f05a1b37's guard, which answered agy {} and so denied every tool call
+    shutil.copytree(head, silent)
+    edit(silent / "scripts/ticket-board-shell-guard",
+         """        sys.stdout.write('{"decision": "allow"}\\n')""", """        sys.stdout.write("{}\\n")""")
+    problems, said = smoke(silent)
+    joined = "\n".join(problems)
+    check("answers agy's run_command call" in joined and "with '{}'" in joined and "needs decision 'allow'" in joined
+          and not any("built from the release's schema" in line for line in said),
+          f"a guard that answers agy without a decision is NOT READY, before any board is built: {joined[:1500]}")
 
     reraised = tmp / "reraised"
     shutil.copytree(head, reraised)

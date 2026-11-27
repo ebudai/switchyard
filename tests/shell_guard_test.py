@@ -164,9 +164,13 @@ def payload(runtime: str, command: str) -> dict:
 
 
 def refused(runtime: str, answer: str) -> bool:
-    if not answer.strip() or answer.strip() == "{}":
-        # agy reads a JSON object from every hook; the others take silence for "no decision".
-        assert answer.strip() == ("{}" if runtime == "agy" else ""), (runtime, answer)
+    if runtime == "agy" and answer.strip() and json.loads(answer).get("decision") != "deny":
+        # agy requires a decision on every PreToolUse answer: 1.5.17 reads {} as a deny with no reason (SYRD-890).
+        assert json.loads(answer) == {"decision": "allow"}, (runtime, answer)
+        return False
+    if not answer.strip():
+        # The others take silence for "no decision"; agy never gets silence.
+        assert runtime != "agy", (runtime, answer)
         return False
     data = json.loads(answer)
     reason = ""

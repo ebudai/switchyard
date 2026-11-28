@@ -137,7 +137,7 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert peer_auth_command in combined
     assert combined.index("sudo useradd -r -M -d /nonexistent") < combined.index("--apply-peer-auth")
     assert combined.index("--apply-peer-auth") < combined.index("sudo cat \"$provision_dir\"/'stellaris-database.sql'")
-    assert combined.index("--apply-peer-auth") < combined.index("curl -fsS http://127.0.0.1:8871/api/board")
+    assert combined.index("--apply-peer-auth") < combined.index("curl -fsS http://127.0.0.1:8871/api/build")
     assert "sudo cat \"$provision_dir\"/'stellaris-workflow.sql' | sudo -u postgres psql -X -v ON_ERROR_STOP=1 'postgresql:///stellaris_ticket_board?host=/var/run/postgresql' -f -" in combined
     assert combined.index("ticket_board/schema.sql") < combined.index("scripts/ticket-board-migrate")
     assert combined.index("scripts/ticket-board-migrate") < combined.index("sudo cat \"$provision_dir\"/'stellaris-workflow.sql'")

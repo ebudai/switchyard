@@ -247,13 +247,13 @@ def test_the_board_answers_only_if_opening_entering_and_leaving_succeed() -> Non
     from scripts import team_launcher as t
 
     for label, opener, answer, steps in (
-            ("answers", lambda log: (lambda url: log.append(url) or Opened(log)), True, ["http://127.0.0.1:8363/api/board", "enter", "exit"]),
+            ("answers", lambda log: (lambda url: log.append(url) or Opened(log)), True, ["http://127.0.0.1:8363/api/build", "enter", "exit"]),
             ("open fails", lambda log: (lambda url: log.append(url) or (_ for _ in ()).throw(OSError("refused"))), False,
-             ["http://127.0.0.1:8363/api/board"]),
+             ["http://127.0.0.1:8363/api/build"]),
             ("enter fails", lambda log: (lambda url: log.append(url) or Opened(log, enter=ValueError("bad"))), False,
-             ["http://127.0.0.1:8363/api/board", "enter"]),
+             ["http://127.0.0.1:8363/api/build", "enter"]),
             ("exit fails", lambda log: (lambda url: log.append(url) or Opened(log, leave=RuntimeError("reset"))), False,
-             ["http://127.0.0.1:8363/api/board", "enter", "exit"])):
+             ["http://127.0.0.1:8363/api/build", "enter", "exit"])):
         log: list = []
         got = judged(t._board_answers, PLAN, opener=opener(log))
         check(got is answer and log == steps, f"{label}: {got}; {log}")

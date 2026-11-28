@@ -99,19 +99,23 @@ def write_root_file(path: Path, text: str, *, mode: int = 0o644) -> None:
 
 
 def default_probe(port: int, timeout: float) -> tuple[bool, str]:
-    """The board answers its own /api/board, as the deploy smoke check asks."""
+    """The board is serving and reaches its database, as the deploy smoke check asks (SYRD-896): /api/build, then
+    /api/workflow, a small read through the database. Never the whole /api/board, which on a large board is not built
+    before a busy host's deadline. Each request may take the time left: nothing caps one at a fixed time."""
     deadline = time.monotonic() + timeout
     last = "not attempted"
+    base = f"http://127.0.0.1:{port}"
     while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/board", timeout=2.0) as response:
-                if response.status == 200:
-                    return True, f"http://127.0.0.1:{port}/api/board answered 200"
-                last = f"HTTP {response.status}"
+            for path in ("/api/build", "/api/workflow"):
+                with urllib.request.urlopen(base + path, timeout=max(deadline - time.monotonic(), 0.1)) as response:
+                    if response.status != 200:
+                        raise urllib.error.URLError(f"{path} answered HTTP {response.status}")
+            return True, f"{base}/api/build and /api/workflow answered 200"
         except (OSError, urllib.error.URLError, http.client.HTTPException) as exc:
             last = clean_text(exc, 300)  # a raw status line or reason phrase can ride in it (SYRD-769)
         time.sleep(0.5)
-    return False, f"http://127.0.0.1:{port}/api/board did not answer within {timeout:g}s: {last}"
+    return False, f"{base} did not answer /api/build and /api/workflow within {timeout:g}s: {last}"
 
 
 class Run:

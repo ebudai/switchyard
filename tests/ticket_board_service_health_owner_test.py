@@ -55,7 +55,8 @@ HEALTH_FUNCTIONS = (
 )
 REFUSED = ("systemctl", "sudo", "pkexec", "loginctl", "systemd-run", "journalctl")
 
-#: The release's board, for the canary: serves /api/board, or refuses to start.
+#: The release's board, for the canary: answers every read (the smoke's /api/build and /api/workflow), or refuses to
+#: start.
 FAKE_RELEASE_BOARD = '''#!/usr/bin/env python3
 import argparse, json, os, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -105,7 +106,7 @@ class LiveBoard(ThreadingHTTPServer):
 
 class LiveHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - http.server naming
-        payload = {"build_id": self.server.build_id} if self.path.startswith("/api/board") else {}
+        payload = {"build_id": self.server.build_id} if self.path.startswith(("/api/board", "/api/build")) else {}
         body = json.dumps(payload).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
@@ -278,7 +279,7 @@ def test_redefinitions_after_sourcing_are_the_ones_that_run(fx: Fixture) -> None
     assert env_file.stat().st_mode & 0o777 == 0o644, oct(env_file.stat().st_mode)
     # A health function redefined by the caller.
     smoke = fx.sourced('smoke_check_url() { echo "redefined $1 $2"; }\nsmoke_check_http', BOARD_PORT="4321")
-    assert smoke.stdout == "redefined http://127.0.0.1:4321/api/board 2\n", smoke.stdout
+    assert smoke.stdout == "redefined http://127.0.0.1:4321/api/build 2\n", smoke.stdout  # SYRD-896: the build alone
     assert fx.refused() == [], fx.refused()
     options = fx.sourced('echo "$-"; shopt -po errexit nounset pipefail')
     assert options.stdout.splitlines()[1:] == ["set -o errexit", "set -o nounset", "set -o pipefail"], options.stdout

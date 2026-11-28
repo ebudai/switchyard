@@ -14,28 +14,49 @@
 # caller that sources the service script and redefines a function still
 # replaces it.
 
+# The board is serving this release and reaches its database (SYRD-896): `url` (default /api/build, the build alone,
+# at any board size) answers 200, then `database_url` (default /api/workflow, a small read that opens a database
+# connection) answers 200 with a JSON object. The whole /api/board -- 29 MB on syrd, built before its first byte --
+# is never read: under load it took 4 s to start answering, and no 1 s attempt could pass. Each request may take the
+# time left before the deadline, so a busy host answers late, not wrong; nothing caps one request at a fixed time.
 smoke_check_url() {
     local url="$1"
     local timeout_seconds="$2"
-    if python3 - "$url" "$timeout_seconds" <<'PY'
+    local database_url="${3:-}"
+    if python3 - "$url" "$timeout_seconds" "$database_url" <<'PY'
+import json
 import sys
 import time
 import urllib.error
 import urllib.request
 
-url = sys.argv[1]
+url, database_url = sys.argv[1], sys.argv[3]
 deadline = time.monotonic() + float(sys.argv[2])
 last_error = "not attempted"
+
+
+def read(target):
+    with urllib.request.urlopen(target, timeout=max(deadline - time.monotonic(), 0.1)) as response:
+        return response.status, response.read()
+
+
 while time.monotonic() < deadline:
     try:
-        with urllib.request.urlopen(url, timeout=1.0) as response:
-            if response.status == 200:
+        status, _body = read(url)
+        if status != 200:
+            last_error = f"HTTP {status}"
+        elif not database_url:
+            sys.exit(0)
+        else:
+            status, body = read(database_url)
+            if status == 200 and isinstance(json.loads(body), dict):
                 sys.exit(0)
-            last_error = f"HTTP {response.status}"
-    except (OSError, urllib.error.URLError) as exc:
+            last_error = f"HTTP {status} from {database_url}"
+    except (OSError, ValueError, urllib.error.URLError) as exc:
         last_error = str(exc)
     time.sleep(0.25)
-print(f"ticket-board smoke check failed for {url}: {last_error}", file=sys.stderr)
+print(f"ticket-board smoke check failed for {url}{' and ' + database_url if database_url else ''}: {last_error}",
+      file=sys.stderr)
 sys.exit(1)
 PY
     then
@@ -46,12 +67,14 @@ PY
 }
 
 smoke_check_http() {
-    smoke_check_url "http://$BOARD_HOST:$BOARD_PORT$SMOKE_PATH" "$SMOKE_TIMEOUT_SECONDS"
+    smoke_check_url "http://$BOARD_HOST:$BOARD_PORT$SMOKE_PATH" "$SMOKE_TIMEOUT_SECONDS" \
+        "http://$BOARD_HOST:$BOARD_PORT$SMOKE_DATABASE_PATH"
 }
 
 verify_live_build_id() {
     local expected_sha="$1"
-    local url="http://$BOARD_HOST:$BOARD_PORT/api/board"
+    # The build alone (SYRD-896), as root reads the live build (SYRD-777): never the whole board.
+    local url="http://$BOARD_HOST:$BOARD_PORT/api/build"
     if python3 - "$url" "$SMOKE_TIMEOUT_SECONDS" "$expected_sha" <<'PY'
 import json
 import sys
@@ -65,7 +88,7 @@ expected = sys.argv[3]
 last_error = "not attempted"
 while time.monotonic() < deadline:
     try:
-        with urllib.request.urlopen(url, timeout=1.0) as response:
+        with urllib.request.urlopen(url, timeout=max(deadline - time.monotonic(), 0.1)) as response:
             if response.status != 200:
                 last_error = f"HTTP {response.status}"
                 continue
@@ -148,7 +171,7 @@ deadline = time.monotonic() + timeout
 last_error = "not attempted"
 while time.monotonic() < deadline:
     try:
-        with urllib.request.urlopen(url, timeout=1.0) as response:
+        with urllib.request.urlopen(url, timeout=max(deadline - time.monotonic(), 0.1)) as response:
             payload = json.load(response)
         actual = payload.get("commit_repositories")
         if not isinstance(actual, list):
@@ -220,7 +243,7 @@ while time.monotonic() < deadline:
         method="POST",
     )
     try:
-        urllib.request.urlopen(request, timeout=1.0).close()
+        urllib.request.urlopen(request, timeout=max(deadline - time.monotonic(), 0.1)).close()
         last_error = "HTTP write unexpectedly succeeded without X-PGU-Write-Token"
     except urllib.error.HTTPError as exc:
         if exc.code == 403:
@@ -366,7 +389,8 @@ run_release_canary() {
         start_canary_systemd "$release_dir" "$port" "$socket_path" "$frame_dir" "$unit_name" "$canary_user" "$canary_log" "$asset_dir" || status=$?
     fi
     if (( status == 0 )); then
-        smoke_check_url "http://$BOARD_HOST:$port$SMOKE_PATH" "$BOARD_CANARY_TIMEOUT_SECONDS" || status=$?
+        smoke_check_url "http://$BOARD_HOST:$port$SMOKE_PATH" "$BOARD_CANARY_TIMEOUT_SECONDS" \
+            "http://$BOARD_HOST:$port$SMOKE_DATABASE_PATH" || status=$?
     fi
     if [[ -n "$pid" ]]; then
         stop_canary_direct "$pid"

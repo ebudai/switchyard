@@ -534,5 +534,5 @@ sudo -u {q_owner_user} -H {q_board_skill_installer} install --home {q_owner_home
 {role_runtime_step}
 {install_tenant_control}
 sudo -u {q_owner_user} env XDG_RUNTIME_DIR="$owner_runtime_dir" DBUS_SESSION_BUS_ADDRESS="unix:path=$owner_bus" systemctl --user enable --now {plan.listener_unit}
-curl -fsS http://127.0.0.1:{plan.port}/api/board >/dev/null
+curl -fsS http://127.0.0.1:{plan.port}/api/build >/dev/null
 """

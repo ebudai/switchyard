@@ -70,7 +70,7 @@ def _owner_unit_is_active(
 
 def _board_answers(plan: "ProjectBoardProvision", *, opener: Callable[[str], Any]) -> bool:
     try:
-        with opener(f"http://127.0.0.1:{plan.port}/api/board"):
+        with opener(f"http://127.0.0.1:{plan.port}/api/build"):  # the build alone, at any board size (SYRD-896)
             return True
     except Exception:  # noqa: BLE001 - any failure to read is "not answering"
         return False

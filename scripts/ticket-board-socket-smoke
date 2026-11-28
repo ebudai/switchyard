@@ -30,16 +30,18 @@ CLAIM_REQUEST = (
     + b"Connection: close\r\n\r\n"
     + CLAIM_BODY
 )
+#: The build alone (SYRD-896): it proves the socket serves at any board size, where the whole /api/board -- 29 MB on
+#: syrd, built before its first byte -- could not answer inside one attempt on a busy host.
 READ_REQUEST = (
-    b"GET /api/board HTTP/1.1\r\n"
+    b"GET /api/build HTTP/1.1\r\n"
     b"Host: localhost\r\n"
     b"Connection: close\r\n\r\n"
 )
 
 
-def send(socket_path, request):
+def send(socket_path, request, timeout):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-        sock.settimeout(1.0)
+        sock.settimeout(timeout)
         sock.connect(socket_path)
         sock.sendall(request)
         return sock.recv(4096)
@@ -55,7 +57,8 @@ def wait_until_serving(socket_path, deadline):
     last_error = "not attempted"
     while time.monotonic() < deadline:
         try:
-            line = status_of(send(socket_path, READ_REQUEST))
+            # The time left, never a fixed cap: a busy host answers late, not wrong (SYRD-896).
+            line = status_of(send(socket_path, READ_REQUEST, max(deadline - time.monotonic(), 0.1)))
             if " 200 " in line:
                 return None
             last_error = line
@@ -84,7 +87,7 @@ def unregistered_problem(wait_seconds=0.0):
     return None if owned is None else "still-owned"
 
 
-def claim_from_orphan(socket_path):
+def claim_from_orphan(socket_path, deadline=None):
     """Make the claim from a process with no pane above it, or say why not.
 
     A deployment authorized through Polkit from a registered role pane is a
@@ -110,7 +113,9 @@ def claim_from_orphan(socket_path):
                 os.write(write_fd, problem.encode("utf-8"))
                 os._exit(0)
             try:
-                os.write(write_fd, status_of(send(socket_path, CLAIM_REQUEST)).encode("utf-8"))
+                # At least a second, and the time left if there is more (SYRD-896).
+                wait = 1.0 if deadline is None else max(deadline - time.monotonic(), 1.0)
+                os.write(write_fd, status_of(send(socket_path, CLAIM_REQUEST, wait)).encode("utf-8"))
             except OSError as exc:
                 os.write(write_fd, ("claim-failed %s" % exc).encode("utf-8"))
         finally:
@@ -183,7 +188,7 @@ def main(argv):
         print("ticket-board Unix socket verification failed for %s: %s" % (socket_path, unreachable),
               file=sys.stderr)
         return 1
-    status, stream, message = verdict(claim_from_orphan(socket_path))
+    status, stream, message = verdict(claim_from_orphan(socket_path, deadline))
     print(message, file=stream)
     return status
 

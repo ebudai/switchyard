@@ -10,6 +10,7 @@ timeout per attempt; at load ~41 its first byte took 3.8-4.0 s, so no attempt co
   - a board whose /api/board is slow and 30 MB still passes, and /api/board is never asked;
   - a board whose /api/build takes 2.5 s to answer -- past the old 1 s cap -- passes inside the deadline;
   - a board whose database read (/api/workflow) fails does not pass, and the failure names the database read;
+  - nor does one whose database read answers 200 with an HTML page or a JSON list, not a JSON object (SYRD-898);
   - the defaults are /api/build and /api/workflow (`scripts/ticket-board-service.sh`).
 * **The live build-id check** (`verify_live_build_id`) reads /api/build: the right build passes, another fails, and
   /api/board is never asked.
@@ -127,6 +128,19 @@ def test_the_http_smoke() -> None:
               f"a board that cannot read its database fails, naming the database read: {done.stderr[-400:]}")
     finally:
         board.shutdown()
+    # SYRD-898: a 200 that is not this release's board reading its database -- another service, or a proxy page
+    # answering every path -- is no proof: the database read must answer a JSON object.
+    for what, body in (("an HTML page", b"<!doctype html><html><body>Welcome to nginx</body></html>"),
+                       ("a JSON list", b"[]")):
+        board = FakeBoard({"/api/build": BUILD, "/api/workflow": (0.0, 200, body)})
+        try:
+            done = health(board, "smoke_check_http", timeout=2)
+            check(done.returncode != 0 and "smoke check failed" in done.stderr and "/api/workflow" in done.stderr
+                  and "HTTP smoke check passed" not in done.stdout,
+                  f"a 200 from the database read whose body is {what}, not a JSON object, fails, naming the database "
+                  f"read: {done.returncode} {done.stderr[-300:]}")
+        finally:
+            board.shutdown()
     defaults = SERVICE.read_text()
     check('SMOKE_PATH="${BOARD_SMOKE_PATH:-/api/build}"' in defaults
           and 'SMOKE_DATABASE_PATH="${BOARD_SMOKE_DATABASE_PATH:-/api/workflow}"' in defaults,

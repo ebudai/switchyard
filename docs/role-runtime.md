@@ -9,7 +9,16 @@ touches belongs to the project owner.
 switchyard set-role-runtime syrd audit --cli agy --dry-run   # every check, no change
 switchyard set-role-runtime syrd audit --cli agy
 switchyard set-role-runtime syrd audit --cli agy --force --reason "provider outage"
+switchyard set-role-runtime syrd researcher --cli agy --model gemini-4-neon-high   # a model, durably
 ```
+
+It is also the one command that changes a role's model (`--model`) or effort
+(`--effort`) durably, for every kind of role: implementers, Audit, and detached
+roles such as the Researcher, Librarian and Router. It writes every place the
+role's runtime, model and effort are recorded, so the choice lasts across
+restarts, reboots, upgrades and a tenant made again with `switchyard new
+--from`, and nothing is edited by hand. `--dry-run` names each of those files
+and fields before anything changes (SYRD-899).
 
 ## Why it is one command
 
@@ -27,7 +36,11 @@ Nothing is written until everything that can be checked has been:
 
 1. The role exists, is one the launcher starts, and the requested runtime is
    supported. Switching to the runtime already configured is reported as
-   nothing to do, not an error.
+   nothing to do, not an error. It still brings into line any tenant copy left
+   naming something else: the launcher's copies of the board's declaration
+   (SYRD-558) and the project artifact's record of the role (step 6). It
+   rewrites only what differs, restarts nothing, and names each file it
+   repaired; an artifact already in line is left alone.
 2. The new runtime could actually start, using the launcher's own first-run
    checks: installed, signed in when it uses a hosted provider, and trusting the
    role's worktree when that runtime requires it. A `--local-qwen` profile signs
@@ -46,7 +59,24 @@ Then, journalling each step so it can be undone in reverse:
    concurrent change is refused rather than overwritten.
 6. Point the launcher config at the new runtime. Resume settings are rewritten
    from the new runtime's defaults, because a resume flag belonging to the old
-   CLI would be handed to one that cannot read it.
+   CLI would be handed to one that cannot read it. The same write records the
+   role's runtime, model and effort in the project artifact,
+   `.switchyard/<project>.project.json`, wherever it records the role, on every
+   tenant, workflow-driven or not:
+   - the Researcher's `project.research` (stage `researcher`), the Librarian's
+     `project.documentation` (gate `librarian`) and Router's `project.router`
+     (enabled);
+   - `project.role_clis`, `project.role_models` and `project.role_efforts`,
+     where they name the role, which covers implementers and Audit.
+
+   They are written as the rewritten launcher entry has them. A setting the
+   entry no longer carries leaves the role's block, and is an empty string in a
+   table, which reads as the runtime's default: a Librarian moved to agy loses
+   its effort. Every file is journalled before it is written, and the launcher
+   config is written last, so an interrupted switch still reads as not made and
+   the same command finishes it. Before SYRD-899 the switch left the artifact's
+   record of the role alone, so the artifact kept the model the role was made
+   with, and a tenant made again from it started on that model.
 7. Stop the old session, clear the resume record — it belongs to the runtime
    being left behind — wait until the stopped pane's process has really gone,
    and start the replacement. On a board that takes runtime registrations, the
@@ -174,10 +204,10 @@ attends. Never choose it for the Director, Audit, Librarian or Inspector, nor fo
 ## When something fails
 
 Every applied step is undone and the command says the switch was undone. The
-undo is not a strict reverse: the launcher config and the workflow document go
-back first, and only then is the worker restarted, because restarting it while
-the config still named the new runtime would bring the role back up under the
-CLI that just failed to start.
+undo is not a strict reverse: the workflow document, then the launcher config
+and the project artifact (byte for byte), go back first, and only then is the
+worker restarted, because restarting it while the config still named the new
+runtime would bring the role back up under the CLI that just failed to start.
 
 Stopping the worker is journalled the moment it happens rather than after the
 replacement starts. A stop recorded only on success is invisible to the undo if
@@ -192,8 +222,9 @@ still wrong, and leaves the journal in place:
 ```
 
 That file holds the previous runtime, the previous workflow document and its
-revision, the previous launcher config, and which steps were applied — enough to
-finish the repair by hand. It is deleted on success and on a clean rollback, so
+revision, the previous launcher config and every other tenant file the switch
+rewrites, the project artifact among them, and which steps were applied —
+enough to finish the repair by hand. It is deleted on success and on a clean rollback, so
 its presence means an operator is needed.
 
 ## What it records

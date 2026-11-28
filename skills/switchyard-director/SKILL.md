@@ -433,11 +433,16 @@ These reshape the running team rather than a ticket, so they belong to you:
   `ticket-board-workflow apply`.
 - `switchyard set-role-runtime <project> <role> --cli <runtime>` moves an
   existing role to a different agent CLI, restarts only that worker, and
-  reconnects the display slots showing it. `--dry-run` runs every check and
-  changes nothing. It refuses while the role is mid-turn; `--force` needs
-  `--reason`, which is recorded. If a step fails it undoes the rest and says so,
-  and if it cannot undo them it names what is left and where the repair journal
-  is - so a blank pane is never reported as success.
+  reconnects the display slots showing it. With `--model` or `--effort` it is
+  the durable way to change any role's model or effort, the Researcher,
+  Librarian and Router included: it writes the launcher entry and every block of
+  the project artifact that records the role, so upgrades and reboots keep the
+  choice; never hand-edit those files. `--dry-run` runs every check, changes
+  nothing, and names each file and field it would write. It refuses while the
+  role is mid-turn; `--force` needs `--reason`, which is recorded. If a step
+  fails it undoes the rest and says so, and if it cannot undo them it names what
+  is left and where the repair journal is - so a blank pane is never reported as
+  success.
 - `switchyard restart-role <project> <role>` restarts one role's pane on the
   current release, prompt and environment, resuming its recorded conversation:
   after an upgrade, a prompt change or a new report link. It refuses while the

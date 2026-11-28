@@ -14,8 +14,11 @@ throttling and starved every tenant.
   afterwards both read 0 0.
 * **Every command's entry**: `scripts/switchyard` and `scripts/team-launcher`, run as themselves, leave their process
   at 0:0, so everything they start, by any path, inherits it.
-* **The drop itself** (`drop_inherited_scheduling`): from a process at nice -4 and, where it may, SCHED_RR: both
+* **The drop itself** (`drop_inherited_scheduling`): from a process at nice -4 and, where it may, SCHED_RR -- and
+  again from SCHED_FIFO (SYRD-897) -- both
   limits 0:0, nice 0, SCHED_OTHER, said in words; and what it starts inherits all of it. A second call changes nothing.
+* **A real-time policy stood in** (SYRD-897): on any host, granted real-time scheduling or not, a process the kernel
+  reports at SCHED_RR or SCHED_FIFO is asked onto SCHED_OTHER at priority 0.
 * **Reading a process** (`process_scheduling`, `too_permissive`) from /proc's own `limits` text.
 * **The readiness check** (`host_diagnostics`, on a fixture tree as root reads it at install-shared-release): a
   registered tenant's tmux server with the launching limits is named, with the restart that clears it, under its own
@@ -228,14 +231,15 @@ try:
         os.setpriority(os.PRIO_PROCESS, 0, -4)
 except OSError:
     pass
-rr = False
+policy = {"RR": os.SCHED_RR, "FIFO": os.SCHED_FIFO}[sys.argv[2]]
+rt = False
 try:
     if resource.getrlimit(resource.RLIMIT_RTPRIO)[0] >= 1:
-        os.sched_setscheduler(0, os.SCHED_RR, os.sched_param(1))
-        rr = True
+        os.sched_setscheduler(0, policy, os.sched_param(1))
+        rt = os.sched_getscheduler(0) == policy
 except OSError:
     pass
-start = {"nice": os.getpriority(os.PRIO_PROCESS, 0), "rr": rr}
+start = {"nice": os.getpriority(os.PRIO_PROCESS, 0), "rt": rt}
 changed = tenant_limits.drop_inherited_scheduling()
 again = tenant_limits.drop_inherited_scheduling()
 child = subprocess.run(["sh", "-c", "grep -E '^Max (realtime|nice) priority' /proc/self/limits; "
@@ -247,7 +251,12 @@ print(json.dumps({"start": start, "changed": changed, "again": again,
 
 
 def test_the_drop() -> None:
-    done = subprocess.run([sys.executable, "-c", DROP, str(ROOT)], capture_output=True, text=True, timeout=60)
+    for policy in ("RR", "FIFO"):  # SYRD-897: both real-time policies, not SCHED_RR alone
+        drop_from(policy)
+
+
+def drop_from(policy: str) -> None:
+    done = subprocess.run([sys.executable, "-c", DROP, str(ROOT), policy], capture_output=True, text=True, timeout=60)
     seen = json.loads(done.stdout)
     check(seen["rtprio"] == [0, 0] and seen["nice_limit"] == [0, 0] and seen["nice"] >= 0
           and seen["policy"] == os.SCHED_OTHER, f"both limits 0:0, nice at least 0, SCHED_OTHER: {seen}")
@@ -257,11 +266,39 @@ def test_the_drop() -> None:
               f"and says what it lowered: {seen['changed']}")
     if seen["start"]["nice"] < 0:
         check(f"nice {seen['start']['nice']} -> 0" in seen["changed"], f"a negative nice is raised: {seen['changed']}")
-    if seen["start"]["rr"]:
-        check("a real-time scheduling policy -> SCHED_OTHER" in seen["changed"], f"SCHED_RR is left: {seen['changed']}")
+    if seen["start"]["rt"]:
+        check("a real-time scheduling policy -> SCHED_OTHER" in seen["changed"],
+              f"SCHED_{policy} is left for SCHED_OTHER, and said: {seen['changed']}")
+    else:
+        print(f"tenant_limits_test: this host grants no SCHED_{policy}; test_a_real_time_policy_stood_in covers it")
     lines = seen["child"].splitlines()
-    check(lines[:2] and all(line.split()[3:5] == ["0", "0"] for line in lines[:2]) and lines[2].split()[0] == "0",
-          f"what it starts inherits it: limits 0 0, nice 0: {lines}")
+    check(lines[:2] and all(line.split()[3:5] == ["0", "0"] for line in lines[:2]) and lines[2].split() == ["0", "0"],
+          f"from SCHED_{policy}, what it starts inherits it: limits 0 0, nice 0, policy 0 (SCHED_OTHER): {lines}")
+
+
+STOOD_IN = r'''
+import json, os, sys
+sys.path.insert(0, sys.argv[1])
+from scripts import tenant_limits
+held = {"RR": os.SCHED_RR, "FIFO": os.SCHED_FIFO}[sys.argv[2]]
+asked = []
+os.sched_getscheduler = lambda pid: held
+os.sched_setscheduler = lambda pid, policy, param: asked.append([pid, policy, param.sched_priority])
+changed = tenant_limits.drop_inherited_scheduling()
+print(json.dumps({"asked": asked, "changed": changed}))
+'''
+
+
+def test_a_real_time_policy_stood_in() -> None:
+    """SYRD-897: on any host, whether or not it grants real-time scheduling: a process the kernel says holds SCHED_RR or
+    SCHED_FIFO is asked onto SCHED_OTHER at priority 0."""
+    for policy in ("RR", "FIFO"):
+        done = subprocess.run([sys.executable, "-c", STOOD_IN, str(ROOT), policy], capture_output=True, text=True,
+                              timeout=60)
+        seen = json.loads(done.stdout or "{}")
+        check(seen.get("asked") == [[0, os.SCHED_OTHER, 0]]
+              and "a real-time scheduling policy -> SCHED_OTHER" in seen.get("changed", []),
+              f"a process held at SCHED_{policy} is moved to SCHED_OTHER: {seen or done.stderr[-400:]}")
 
 
 LIMITS = """Limit                     Soft Limit           Hard Limit           Units

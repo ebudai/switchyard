@@ -436,6 +436,10 @@ def test_either_import_order_gives_one_set_of_objects_and_no_defaults() -> None:
 
 def test_the_seams_read_through_the_launcher_and_nothing_bound() -> None:
     tree = ast.parse((ROOT / "scripts" / "process_inspection.py").read_text(encoding="utf-8"))
+    #: SYRD-895: the two owner-account runners drop the launching user's real-time priority and negative nice before
+    #: anything runs as the project -- the one import each may add beside the launcher's.
+    DROPS = {name: ["from scripts.tenant_limits import drop_inherited_scheduling"]
+             for name in ("role_process_runner_for", "_owner_process_runner")}
     for name in FUNCTIONS:
         node = next(n for n in tree.body if getattr(n, "name", None) == name)
         through: dict[str, int] = {}
@@ -446,9 +450,10 @@ def test_the_seams_read_through_the_launcher_and_nothing_bound() -> None:
         check(through == expected, f"{name}: each launcher name, siblings included, read through it exactly as often as before: {through}")
         imports = [ast.unparse(x) for x in ast.walk(node) if isinstance(x, (ast.Import, ast.ImportFrom))]
         first = 1 if ast.get_docstring(node) is not None else 0
-        check(imports == (["from scripts import team_launcher as launcher"] if expected else [])
+        check(imports == (["from scripts import team_launcher as launcher"] if expected else []) + DROPS.get(name, [])
               and (not expected or ast.unparse(node.body[first]) == imports[0]),
-              f"{name}: the launcher imported first thing when it reads one, and nothing else imported: {imports}")
+              f"{name}: the launcher imported first thing when it reads one, and nothing else imported but the "
+              f"SYRD-895 drop: {imports}")
         skip = {id(y) for part in [node.returns, *(a.annotation for a in node.args.args + node.args.kwonlyargs), *[d for d in node.args.kw_defaults if d]]
                 if part is not None for y in ast.walk(part)}
         bare = sorted({x.id for x in ast.walk(node) if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Load) and x.id in expected and id(x) not in skip})

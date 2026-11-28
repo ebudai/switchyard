@@ -39,9 +39,15 @@ def role_process_runner_for(
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> Callable[..., subprocess.CompletedProcess[Any]]:
-    """A runner for the project account's shared tmux server."""
-    from scripts import team_launcher as launcher
+    """A runner for the project account's shared tmux server.
 
+    This process first drops any real-time priority or negative nice it inherited (SYRD-895): whichever command
+    starts the account's tmux server decides the limits of every pane on it, so anything that may run tmux as the
+    project gives up the launching user's limits before it does."""
+    from scripts import team_launcher as launcher
+    from scripts.tenant_limits import drop_inherited_scheduling
+
+    drop_inherited_scheduling()
     account = launcher.role_run_as_user(config, role)
     if account and launcher.current_user_name() != account:
         return launcher._owner_process_runner(owner_user=account, runner=runner)
@@ -111,6 +117,10 @@ def _owner_process_runner(
     runner: Callable[..., subprocess.CompletedProcess[Any]],
 ) -> Callable[..., subprocess.CompletedProcess[Any]]:
     def wrapped(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        # SYRD-895: never the launching user's real-time priority or negative nice for what runs as the owner.
+        from scripts.tenant_limits import drop_inherited_scheduling
+
+        drop_inherited_scheduling()
         return runner(["sudo", "-u", owner_user, "-H", *args], **kwargs)
 
     return wrapped

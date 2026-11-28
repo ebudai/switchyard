@@ -31,6 +31,11 @@ from scripts.repository_hooks import install_new_registry_entries, registry_snap
 
 
 if __name__ == "__main__":
+    # SYRD-895: nothing this command starts -- a tenant's tmux server and its panes above all -- gets the launching
+    # user's real-time priority or negative nice. Lowering this process's own limits needs no privilege.
+    from scripts.tenant_limits import drop_inherited_scheduling
+
+    drop_inherited_scheduling()
     arguments = sys.argv[1:]
     new_project = bool(
         arguments

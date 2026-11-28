@@ -1246,6 +1246,14 @@ What the output means:
 - Each finding goes to the human as it is printed: the file, its lines, and the command
   that applies them.
 - Items 4 and 5 below are never automated. They stay yours.
+- **Tenant readiness findings (SYRD-895).** Under their own heading, the report names any tenant whose tmux server
+  gives its panes a real-time priority or a negative nice. Such a server keeps the limits of whoever started it, for
+  every pane it opens. Run as you, the check sees only your own tenant's server; root's run sees every tenant's.
+  - **Why it matters:** a pane's process could take SCHED_RR and starve every tenant. That happened on ocstab on
+    2026-11-27, with RT throttling off on this host.
+  - **The fix:** the launcher now drops those limits before it starts a tenant's tmux server. A server started before
+    that keeps them until every role of the tenant stops, so the finding names the restart: `switchyard stop
+    <project>`, then `switchyard start <project>`.
 
 ### What you ensure
 

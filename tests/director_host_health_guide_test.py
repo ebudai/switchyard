@@ -206,6 +206,8 @@ def test_the_check_command_runs_the_shared_releases_module() -> None:
         release = Path(raw) / "release"
         (release / "scripts").mkdir(parents=True)
         shutil.copy2(ROOT / "scripts" / "host_diagnostics.py", release / "scripts" / "host_diagnostics.py")
+        # SYRD-895: the tenant readiness findings read processes through tenant_limits, which a release carries too.
+        shutil.copy2(ROOT / "scripts" / "tenant_limits.py", release / "scripts" / "tenant_limits.py")
         ran = subprocess.run([*argv[:3], argv[3].replace(SHARED_RELEASE, str(release))],
                              capture_output=True, text=True, timeout=60, cwd=raw)
         old = Path(raw) / "old"

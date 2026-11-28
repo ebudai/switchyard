@@ -519,6 +519,29 @@ exit $rc
 """
 
 
+def grant_realtime(root: Path, name: str) -> None:
+    """The kit's user gets what the review host's User has, from the same kind of rule: `@audio - rtprio 99` and
+    `nice -11` in limits.d, through the audio group (SYRD-895). Every later ssh session takes it, so `switchyard new`
+    runs with it, as a tenant launched from that desktop does. Refused unless a fresh session really has it: a check
+    against a user without it would prove nothing."""
+    directory, info = live(root, name)
+    script = f"""set -euo pipefail
+sudo install -d -m 0755 /etc/security/limits.d
+printf '%s\\n' '@audio - rtprio 99' '@audio - nice -11' | sudo tee /etc/security/limits.d/20-audio.conf >/dev/null
+getent group audio >/dev/null || sudo groupadd -r audio
+sudo usermod -aG audio {USER}
+"""
+    granted = remote_script(directory, info, script, timeout=60, check=False, capture=True)
+    if granted.returncode != 0:
+        raise KitError(f"{name}: granting {USER} rtprio 99 failed ({granted.returncode}): "
+                       f"{granted.stdout[-500:]}{granted.stderr[-500:]}")
+    fresh = ssh(directory, info, ["sh", "-c", "ulimit -r"], timeout=60, check=False, capture=True)
+    if fresh.stdout.strip() != "99":
+        raise KitError(f"{name}: {USER} did not get rtprio 99 from limits.d (ulimit -r says {fresh.stdout.strip()!r}"
+                       f"{fresh.stderr[-300:]})")
+    say(f"{name}: {USER} has rtprio 99 and nice -11 through @audio, as the review host's User does")
+
+
 def tenant(root: Path, name: str, slug: str, *, repo: Path) -> None:
     if not (slug.isascii() and slug.isalnum() and slug.islower() and slug[0].isalpha()):
         raise KitError(f"a test tenant's slug is lower-case letters and digits, starting with a letter: {slug!r}")
@@ -676,7 +699,8 @@ def delivery_probe(directory: Path, info: dict, slug: str, *, wait: float = 180)
 def check(root: Path, *, repo: Path, commit: str, name: str, slug: str, image: str | None, keep_logs: Path | None,
           lifetime: int) -> int:
     """Boot, install the commit, create a tenant, then prove: an active declared workflow, `research-stage enable
-    --dry-run` from the Director's pane, and a notification the listener really delivered. It always ends with
+    --dry-run` from the Director's pane, a notification the listener really delivered, and (SYRD-895) a Director pane
+    with no real-time priority and no negative nice though the user who launched it had both. It always ends with
     `down` for a VM it created, however it ends -- qemu dying during boot included -- and never touches a VM of the
     same name that was there before it."""
     directory = vm_dir(root, name)
@@ -693,6 +717,7 @@ def check(root: Path, *, repo: Path, commit: str, name: str, slug: str, image: s
         raise
     try:
         sha = install(root, name, repo=repo, commit=commit)
+        grant_realtime(root, name)
         tenant(root, name, slug, repo=repo)
         directory, info = live(root, name)
         workflow = as_role(directory, info, slug, "director",
@@ -711,9 +736,19 @@ def check(root: Path, *, repo: Path, commit: str, name: str, slug: str, image: s
                            f"{dry_run.stdout[-2000:]}{dry_run.stderr[-1000:]}")
         say(f"{name}: research-stage enable --dry-run passes from {slug}'s Director pane")
         say(f"{name}: listener: {delivery_probe(directory, info, slug).split(' INFO ', 1)[-1][:160]}")
+        limits = as_role(directory, info, slug, "director",
+                         ["sh", "-c", "grep -E '^Max (realtime|nice) priority' /proc/self/limits"])
+        found = {" ".join(line.split()[:3]): line.split()[3:5] for line in limits.stdout.splitlines()
+                 if line.startswith("Max ")}
+        if found.get("Max realtime priority") != ["0", "0"] or found.get("Max nice priority") != ["0", "0"]:
+            raise KitError(f"{name}: {slug}'s Director pane inherited the launching user's scheduling limits: "
+                           f"{found or limits.stdout[-500:] + limits.stderr[-500:]}")
+        say(f"{name}: {slug}'s Director pane has Max realtime priority 0 0 and Max nice priority 0 0, though "
+            f"{USER} who launched it has rtprio 99")
         if keep_logs is not None:
             logs(root, name, keep_logs)
-        say(f"{name}: {sha[:12]} passed: install, tenant, active workflow, research-stage dry run, real delivery")
+        say(f"{name}: {sha[:12]} passed: install, tenant, active workflow, research-stage dry run, real delivery, "
+            "pane scheduling limits")
         return 0
     finally:
         down(root, name)

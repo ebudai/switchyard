@@ -12,6 +12,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# SYRD-895: nothing the launcher starts -- a tenant's tmux server and its panes above all -- gets the launching user's
+# real-time priority or negative nice. Lowering this process's own limits needs no privilege.
+from scripts.tenant_limits import drop_inherited_scheduling  # noqa: E402
+
+drop_inherited_scheduling()
+
 
 def run(argv: list[str]) -> int:
     from scripts.team_launcher import main

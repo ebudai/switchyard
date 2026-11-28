@@ -4,7 +4,9 @@
 `tests/vm_kit/vm_kit.py check` on this tree's HEAD commit: it boots a fresh Arch VM, installs that commit with the
 real `./install`, creates a tenant with the real `switchyard new` (offline: stand-in CLIs, no sign-in to wait for),
 then requires the tenant's board to run a declared workflow, `research-stage enable --dry-run` to pass from its
-Director's pane, and the listener to deliver a real notification into main's pane. It always powers the VM off.
+Director's pane, the listener to deliver a real notification into main's pane, and (SYRD-895) the Director's pane to
+have no real-time priority or negative nice though the kit's user, who launched it, has rtprio 99 through @audio. It
+always powers the VM off.
 
 Everything goes in a scratch state directory, removed at the end. The base image is the one `vm_kit.py
 fetch-image` verified into this account's cache, when there is one (read only); otherwise it is downloaded and
@@ -69,6 +71,9 @@ def main() -> int:
               "research-stage enable --dry-run passes from the Director's pane")
         check("Delivered queued notification" in out and "to vmt-main:0.0" in out,
               "the listener delivered a real notification into main's pane")
+        check("operator has rtprio 99 and nice -11 through @audio" in out
+              and "vmt's Director pane has Max realtime priority 0 0 and Max nice priority 0 0" in out,
+              "SYRD-895: though the launching user has rtprio 99, the tenant's pane has none")
         check(f"{name}: gone (its supervisor and qemu have ended; overlay, seed and keys removed" in out,
               "the VM was powered off and proved gone")
         check(not list((state / "vms").glob("*")), "nothing of it is left: no VM directory")

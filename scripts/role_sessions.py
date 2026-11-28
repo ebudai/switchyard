@@ -1,7 +1,8 @@
 """Starting and stopping a role's tmux session.
 
 - `_start_role_session` starts one role's session on its owner's tmux
-  server. The pane runs the role's CLI either fresh for each ticket
+  server, first dropping any real-time priority or negative nice this process
+  inherited from whoever launched it (SYRD-895, `tenant_limits`). The pane runs the role's CLI either fresh for each ticket
   (`_uses_fresh_session_per_ticket`) or resuming its recorded provider
   session. Before the session starts it seeds the pane's idle state, clears
   the previous session record, and records a resume that has not yet been
@@ -156,7 +157,11 @@ def _start_role_session(
 ) -> int:
     from scripts import team_launcher as launcher
     from scripts.hermes_local_profile import start_refusal
+    from scripts.tenant_limits import drop_inherited_scheduling
 
+    # SYRD-895: before any tmux command that could start the owner's tmux server, which every pane inherits from:
+    # never the launching user's real-time priority or negative nice (the User's @audio rtprio 99 reached every pane).
+    drop_inherited_scheduling()
     # SYRD-693: a local role whose service is stopped (it stops itself once idle) would exit at once, which
     # reads below as a failed resume and sets its conversation aside; it is refused first, changing nothing.
     refusal = start_refusal(role)

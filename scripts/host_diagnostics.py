@@ -8,6 +8,10 @@ remount and reboot that would have kept the writes the hard power-off lost
 (SYRD-553).
 
 These settings are the operator's, host-wide, so nothing here changes them.
+
+It also names a tenant whose tmux server can give its panes real-time scheduling or a negative nice (SYRD-895): a
+server started before the launcher dropped the launching user's limits keeps them for every pane it opens, until every
+role of that tenant stops. Those findings are `kind="isolation"` and are reported under their own heading.
 `host_diagnostics_findings` reads the effective configuration and returns one
 finding per setting that falls short, each with the exact drop-in or sysctl
 file an operator can install and the command that applies it.
@@ -18,10 +22,13 @@ Everything is read under `root`, so a suite can point it at a fixture tree.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+
+from scripts.tenant_limits import process_scheduling, too_permissive
 
 MIB = 1024 * 1024
 GIB = 1024 * MIB
@@ -61,6 +68,8 @@ class HostFinding:
     remedy_path: str
     remedy_text: str
     apply_command: str
+    #: "diagnosis" (SYRD-553's settings), or "isolation": a tenant that can starve the others (SYRD-895).
+    kind: str = "diagnosis"
 
 
 def _size(value: str) -> int | None:
@@ -265,22 +274,77 @@ def _sysrq_findings(root: Path) -> list[HostFinding]:
     )]
 
 
+def _tenant_owners(root: Path) -> dict[int, str]:
+    """uid -> slug, for every registered tenant: its configuration file belongs to its owner."""
+    owners: dict[int, str] = {}
+    for entry in sorted((root / "etc/switchyard/projects").glob("*.json")):
+        try:
+            record = json.loads(entry.read_text(encoding="utf-8"))
+            config = root / str(record.get("config_path") or "").lstrip("/")
+            if str(record.get("config_path") or "").startswith("/"):
+                owners.setdefault(config.stat().st_uid, str(record.get("slug") or entry.stem))
+        except (OSError, ValueError, AttributeError):
+            continue
+    return owners
+
+
+def _tenant_scheduling_findings(root: Path) -> list[HostFinding]:
+    owners = _tenant_owners(root)
+    if not owners:
+        return []
+    servers: dict[str, list[tuple[int, list[str]]]] = {}
+    proc = root / "proc"
+    for entry in proc.glob("[0-9]*"):
+        status = _read(entry / "status")
+        uid = next((line.split()[1] for line in status.splitlines() if line.startswith("Uid:")), "")
+        if _read(entry / "comm") != "tmux: server" or not uid.isdigit() or int(uid) not in owners:
+            continue
+        limits = process_scheduling(int(entry.name), proc)
+        problems = too_permissive(limits) if limits else []
+        if problems:
+            servers.setdefault(owners[int(uid)], []).append((int(entry.name), problems))
+    findings = []
+    for slug, found in sorted(servers.items()):
+        pids = ", ".join(str(pid) for pid, _ in sorted(found))
+        findings.append(HostFinding(
+            item=f"{slug}'s panes",
+            detail=(f"its tmux server (pid {pids}) gives every pane it opens {' and '.join(sorted(found)[0][1])}, "
+                    "inherited from whoever started it: any process in a pane could take real-time scheduling and "
+                    "starve every tenant on this host. A server started by this release's launcher drops them"),
+            remedy_path="", remedy_text="",
+            apply_command=f"switchyard stop {slug}, then switchyard start {slug} (its tmux server exits once every "
+                          "role has stopped, and the next start runs a new one)",
+            kind="isolation",
+        ))
+    return findings
+
+
 def host_diagnostics_findings(root: Path = Path("/")) -> list[HostFinding]:
-    """Every setting on this host that would make an incident hard to diagnose. Reads only."""
-    return [*_journal_findings(root), *_coredump_findings(root), *_sysrq_findings(root)]
+    """Every setting on this host that would make an incident hard to diagnose, and every tenant whose panes can take
+    real-time scheduling (SYRD-895). Reads only."""
+    return [*_journal_findings(root), *_coredump_findings(root), *_sysrq_findings(root),
+            *_tenant_scheduling_findings(root)]
 
 
 def host_diagnostics_report(findings: list[HostFinding]) -> list[str]:
     """What an operator reads: each finding, the file that fixes it, and the command that applies it."""
-    if not findings:
-        return []
-    lines = [
-        "switchyard: host readiness: this host would be hard to diagnose after an incident. "
-        "These are the operator's settings and nothing here changes them:"
-    ]
-    for finding in findings:
+    lines: list[str] = []
+    diagnosis = [finding for finding in findings if finding.kind != "isolation"]
+    isolation = [finding for finding in findings if finding.kind == "isolation"]
+    if diagnosis:
+        lines.append(
+            "switchyard: host readiness: this host would be hard to diagnose after an incident. "
+            "These are the operator's settings and nothing here changes them:"
+        )
+    for finding in diagnosis:
         lines.append(f"switchyard:   {finding.item}: {finding.detail}.")
         lines.append(f"switchyard:     to change it, write {finding.remedy_path} as root:")
         lines.extend(f"switchyard:       {line}" for line in finding.remedy_text.splitlines())
         lines.append(f"switchyard:     then: {finding.apply_command}")
+    if isolation:
+        lines.append("switchyard: tenant readiness: these tenants' panes can take real-time scheduling or a negative "
+                     "nice, and nothing here stops their running panes (SYRD-895):")
+    for finding in isolation:
+        lines.append(f"switchyard:   {finding.item}: {finding.detail}.")
+        lines.append(f"switchyard:     to change it: {finding.apply_command}")
     return lines

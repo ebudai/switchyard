@@ -225,6 +225,8 @@ power-off, a crash loop had left about 930 MB of PostgreSQL core dumps, and
 have kept the last writes. These are the operator's host-wide settings.
 Switchyard does not change them, but `switchyard install-shared-release`
 reports any that fall short, each with the file that fixes it (SYRD-553).
+Under its own heading, the same report names any tenant whose tmux server can give its panes real-time scheduling or
+a negative nice, and the restart that clears it (SYRD-895).
 
 Recommended:
 

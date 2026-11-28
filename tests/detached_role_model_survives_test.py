@@ -373,6 +373,93 @@ def test_a_tenant_without_an_artifact_is_switched_as_before(tmp: Path) -> None:
         host.close()
 
 
+class DeclaredTenant:
+    """ocstab's shape (SYRD-900): a tenant whose config carries the declared workflow, with a detached Researcher on
+    agy declared by `research-stage enable`'s own rule, projected as `workflow apply` projects it, and the artifact
+    holding both the declared `workflow` and the Researcher's `project.research`. The switch then writes the artifact
+    twice over: `projection_files` puts the new `workflow` in it, and the role's record is built on that copy."""
+
+    def __init__(self, tmp: Path) -> None:
+        import role_runtime_projection_test as declared
+        from scripts import workflow_manage
+        from scripts.ticket_board.research_stage import with_research_stage
+        from scripts.workflow_launcher import projection_files
+
+        self.tmp = tmp
+        self.config_path = harness.base._write_config(tmp)
+        raw = json.loads(self.config_path.read_text())
+        (tmp / "repository").mkdir()
+        raw.update(repository=str(tmp / "repository"), worktree_base=str(tmp / "worktrees"))
+        self.config_path.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n")
+        document = with_research_stage(declared.declared(), researcher={"runtime": "agy", "template_role": None,
+                                                                        "slot": None})
+        self.artifact = self.config_path.parent.parent / f"{PROJECT}.project.json"
+        self.artifact.write_text(json.dumps({"workflow": document, "project": {
+            "slug": PROJECT, "research": {"stage": "researcher", "runtime": "agy", "model": "gemini-4-hydrogen-high"},
+        }}, indent=2, sort_keys=True) + "\n")
+        workflow_manage.apply_files(projection_files(self.config_path, document))
+        raw = json.loads(self.config_path.read_text())
+        entry = next(item for item in raw["roles"] if item["role"] == "researcher")
+        entry["model"] = "gemini-4-hydrogen-high"
+        self.config_path.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n")
+        self.board = harness.StrictBoard(document=json.loads(json.dumps(document)))
+        (tmp / "host").mkdir()
+        self.host = harness.Host(tmp / "host", self.config_path, live=("audit", "researcher"))
+
+    def switch(self, runtime: str, model: str):
+        return Tenant.switch(self, self.host, "researcher", runtime, model=model)  # the same supported path
+
+    def written(self) -> tuple[str | None, dict]:
+        """The Researcher's runtime in the artifact's `workflow`, and its `project.research`."""
+        artifact = json.loads(self.artifact.read_text())
+        declared = next(role.get("runtime") for role in artifact["workflow"]["roles"] if role["name"] == "researcher")
+        return declared, artifact["project"]["research"]
+
+
+@sandbox
+def test_ocstab_a_declared_tenant_keeps_the_projected_workflow_beside_the_role_record(tmp: Path) -> None:
+    tenant = DeclaredTenant(tmp)
+    try:
+        check(tenant.written() == ("agy", {"stage": "researcher", "runtime": "agy", "model": "gemini-4-hydrogen-high"}),
+              f"the tenant starts with the Researcher on agy everywhere: {tenant.written()}")
+        result, refused, said = tenant.switch("claude", "claude-opus-5-5")
+        check(result is not None and not refused, f"the switch succeeds: {refused} {said}")
+        check(tenant.board.runtime_of("researcher") == "claude", "the board declares the new runtime")
+        declared, research = tenant.written()
+        check(declared == "claude",
+              f"the artifact carries the workflow the switch projected, not the one it held before: {declared}")
+        check(research == {"stage": "researcher", "runtime": "claude", "model": "claude-opus-5-5"},
+              f"and, in the same file, the Researcher's new record: {research}")
+        config = json.loads(tenant.config_path.read_text())
+        check(json.loads(tenant.artifact.read_text())["workflow"] == tenant.board.document == config["workflow"],
+              "the artifact's workflow is the board's, as the config's is")
+    finally:
+        tenant.host.close()
+
+
+@sandbox
+def test_ocstab_the_no_op_repair_keeps_the_projected_workflow_beside_the_role_record(tmp: Path) -> None:
+    tenant = DeclaredTenant(tmp)
+    try:
+        result, refused, said = tenant.switch("claude", "claude-opus-5-5")
+        check(result is not None, f"switched: {refused} {said}")
+        # Both halves of the artifact left behind: its workflow on agy, its record on Hydrogen.
+        stale = json.loads(tenant.artifact.read_text())
+        next(role for role in stale["workflow"]["roles"] if role["name"] == "researcher")["runtime"] = "agy"
+        stale["project"]["research"].update(runtime="agy", model="gemini-4-hydrogen-high")
+        tenant.artifact.write_text(json.dumps(stale, indent=2, sort_keys=True) + "\n")
+        result, refused, _ = tenant.switch("claude", "claude-opus-5-5")
+        check(result is not None and not result.live_session_changed and result.projection_written
+              and result.projection_repaired == (str(tenant.artifact),),
+              f"the same command repairs the artifact alone, restarting nothing: {refused} {result}")
+        declared, research = tenant.written()
+        check(declared == "claude", f"the repaired artifact carries the board's workflow: {declared}")
+        check(research == {"stage": "researcher", "runtime": "claude", "model": "claude-opus-5-5"},
+              f"and the Researcher's record: {research}")
+    finally:
+        tenant.host.close()
+
+
 def main() -> int:
     for name, case in list(globals().items()):
         if name.startswith("test_") and callable(case):

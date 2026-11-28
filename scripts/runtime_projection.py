@@ -10,6 +10,15 @@ These compute the whole projection by the rule `workflow apply` uses
 previous bytes journalled first, restore it on rollback, and find a projection
 the board's declaration has left behind. `role_runtime` imports them; they reach
 back into it only when they run.
+
+The project artifact is part of the projection on every tenant, workflow-driven
+or not, wherever it records the role: its `role_clis`, `role_models` and
+`role_efforts`, and the Researcher's, Librarian's and Router's own blocks
+(`artifact_role_records`). `set-role-runtime --model` on ocstab's Researcher
+rewrote the launcher entry and left `project.research` on the model the role was
+made with, and the Director hand-edited it (SYRD-899). A switch to what the role
+already runs repairs an artifact left behind (`noop_repair`), and a dry run says
+where the role is recorded (`recorded_where`).
 """
 
 from __future__ import annotations
@@ -58,19 +67,134 @@ def runtime_projection_files(
     else:
         raise rr.RoleRuntimeRefusal(f"switchyard: {config_path} has no role {role_name!r}")
     if not isinstance(raw.get("workflow"), Mapping) or document is None:
-        return {config_path: json.dumps(raw, indent=2, sort_keys=True) + "\n"}
-    from scripts.workflow_launcher import projection_files
+        files = {config_path: json.dumps(raw, indent=2, sort_keys=True) + "\n"}
+    else:
+        from scripts.workflow_launcher import projection_files
 
+        try:
+            files = projection_files(config_path, dict(document), raw=raw, owner_user=owner_user)
+        except (ValueError, KeyError, TypeError, OSError) as exc:
+            raise rr.RoleRuntimeRefusal(
+                f"switchyard: cannot project the declared workflow into {config_path.parent}: {exc}"
+            ) from exc
+    # The project artifact too, wherever it records the role, on any tenant: the entry alone left the artifact naming
+    # the model a Researcher was made with after `set-role-runtime --model` chose another (SYRD-899).
+    files.update(artifact_role_records(config_path, raw, role_name=role_name, runtime=runtime, owner_user=owner_user,
+                                       held=files))
+    return config_last(files, config_path)
+
+
+def config_last(files: Mapping[Path, str], config_path: Path) -> dict[Path, str]:
+    """The launcher config last: it is what says which runtime the role runs, so a write interrupted part-way still
+    reads as a switch not yet made, and the same command finishes it instead of calling it done."""
+    tail = {config_path: files[config_path]} if config_path in files else {}
+    return {**{path: text for path, text in files.items() if path != config_path}, **tail}
+
+
+#: Where a project artifact describes a role `switchyard new` adds of its own, and what marks the block as that role's:
+#: `project.research` with `"stage": "researcher"`, `project.documentation` with `"gate": "librarian"`, and
+#: `project.router` with `"enabled": true` (SYRD-899).
+ARTIFACT_ROLE_BLOCKS: dict[str, tuple[str, str, object]] = {
+    "researcher": ("research", "stage", "researcher"),
+    "librarian": ("documentation", "gate", "librarian"),
+    "router": ("router", "enabled", True),
+}
+
+#: The artifact's per-role tables, and which of the role's settings each records.
+ARTIFACT_ROLE_TABLES = (("role_clis", "runtime"), ("role_models", "model"), ("role_efforts", "effort"))
+
+
+def artifact_role_fields(project: Mapping[str, Any], role_name: str) -> list[str]:
+    """The fields of an artifact's `project` that record `role_name`'s runtime, model or effort."""
+    fields = [f"project.{key}" for key, _setting in ARTIFACT_ROLE_TABLES
+              if isinstance(project.get(key), Mapping) and role_name in project[key]]
+    block = ARTIFACT_ROLE_BLOCKS.get(role_name)
+    if block is not None and isinstance(project.get(block[0]), Mapping) and project[block[0]].get(block[1]) == block[2]:
+        fields.append(f"project.{block[0]}")
+    return fields
+
+
+def _artifact(config_path: Path, raw: Mapping[str, Any], owner_user: str,
+              held: Mapping[Path, str] | None = None) -> tuple[Path, dict[str, Any] | None]:
+    """The project artifact beside the config -- as `held` already projects it, else as it is -- or None."""
+    from scripts import role_runtime as rr
+    from scripts.workflow_launcher import _tenant_json
+
+    path = config_path.parent.parent / f'{raw.get("project")}.project.json'
     try:
-        files = projection_files(config_path, dict(document), raw=raw, owner_user=owner_user)
-    except (ValueError, KeyError, TypeError, OSError) as exc:
-        raise rr.RoleRuntimeRefusal(
-            f"switchyard: cannot project the declared workflow into {config_path.parent}: {exc}"
-        ) from exc
-    # The launcher config last: it is what says which runtime the role runs, so
-    # a write interrupted part-way still reads as a switch not yet made, and the
-    # same command finishes it instead of calling it done.
-    return {**{path: text for path, text in files.items() if path != config_path}, config_path: files[config_path]}
+        text = (held or {}).get(path)
+        artifact = json.loads(text) if text is not None else _tenant_json(path, owner_user)
+    except (OSError, ValueError) as exc:
+        raise rr.RoleRuntimeRefusal(f"switchyard: cannot read {path}, which records the role's model: {exc}") from exc
+    return path, artifact if isinstance(artifact, dict) and isinstance(artifact.get("project"), dict) else None
+
+
+def artifact_role_records(
+    config_path: Path,
+    raw: Mapping[str, Any],
+    *,
+    role_name: str,
+    runtime: str,
+    owner_user: str = "",
+    held: Mapping[Path, str] | None = None,
+) -> dict[Path, str]:
+    """The project artifact recording the role's runtime, model and effort as its launcher entry in `raw` has them.
+
+    {} when there is no artifact, or it records none of the three for this role. `switchyard new --from` makes a
+    tenant again from the artifact, and the Researcher's, Librarian's and Router's own blocks give those roles their
+    model there (`record_researcher_runtime` and its neighbours), so an artifact left on the old model is a model
+    the next tenant made from it starts on. A setting the entry does not carry is left out of the role's block --
+    the runtime's default, as on the entry -- and is an empty string in a table, which the artifact reads as unset.
+    """
+    path, artifact = _artifact(config_path, raw, owner_user, held)
+    if artifact is None:
+        return {}
+    project = artifact["project"]
+    fields = artifact_role_fields(project, role_name)
+    if not fields:
+        return {}
+    entry = next(item for item in raw.get("roles") or [] if isinstance(item, dict) and item.get("role") == role_name)
+    values = {"runtime": runtime, "model": str(entry.get("model") or ""), "effort": str(entry.get("effort") or "")}
+    for key, setting in ARTIFACT_ROLE_TABLES:
+        if f"project.{key}" in fields:
+            project[key][role_name] = values[setting]
+    block = ARTIFACT_ROLE_BLOCKS.get(role_name)
+    if block is not None and f"project.{block[0]}" in fields:
+        record = project[block[0]]
+        for setting, value in values.items():
+            record.pop(setting, None)
+            if value:
+                record[setting] = value
+    return {path: json.dumps(artifact, indent=2, sort_keys=True) + "\n"}
+
+
+def recorded_where(config_path: Path, role_name: str, *, owner_user: str = "") -> list[str]:
+    """Each file that records the role's model, and where in it, as `set-role-runtime --dry-run` says it."""
+    from scripts.workflow_launcher import _tenant_json
+
+    raw = _tenant_json(config_path, owner_user) or {}
+    places = [f"{config_path} (roles: {role_name})"]
+    if not raw.get("project"):
+        return places
+    path, artifact = _artifact(config_path, raw, owner_user)
+    fields = artifact_role_fields(artifact["project"], role_name) if artifact is not None else []
+    if fields:
+        places.append(f"{path} ({', '.join(fields)})")
+    return places
+
+
+def noop_repair(config_path: Path, document: Mapping[str, Any] | None, *, role_name: str, runtime: str,
+                declared: bool) -> dict[Path, str]:
+    """What a switch to what the role already runs rewrites, without a restart: the tenant's copies of the board's
+    declaration (SYRD-558), when the board declares the role, and the artifact's record of the role (SYRD-899) --
+    each only where it differs."""
+    files = declared_projection(config_path, document) if declared and document is not None else {}
+    try:
+        raw = json.loads(files[config_path]) if config_path in files else json.loads(config_path.read_text("utf-8"))
+    except (OSError, ValueError):
+        return stale_projection(files)
+    files.update(artifact_role_records(config_path, raw, role_name=role_name, runtime=runtime, held=files))
+    return stale_projection(config_last(files, config_path))
 
 
 def declared_projection(config_path: Path, document: Mapping[str, Any]) -> dict[Path, str]:

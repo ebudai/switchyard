@@ -272,6 +272,12 @@ def set_project_role_runtime_command(
     if written and not result.configured_changed:
         print_func(f"switchyard: {role_name}'s session keeps running as it is; the profile applies at its next start")
     if dry_run and result.configured_changed:
+        # Every place the switch records the role's runtime, model and effort, so a durable change is seen to be one
+        # before it is made, and nobody goes looking for the files it missed (SYRD-899).
+        from scripts.runtime_projection import recorded_where
+
+        where = recorded_where(config_path, role_name, owner_user=config.run_as_user or "")
+        print_func(f"switchyard: would record {role_name}'s runtime, model and effort in: {'; '.join(where)}")
         # Read as optional: a result that does not say it is a repair is a move.
         if getattr(result, "argument_repair", False):
             print_func(

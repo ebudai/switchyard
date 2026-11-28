@@ -31,12 +31,11 @@ from scripts import presentation_controller, team_launcher
 from scripts import owner_writes, runtime_arguments, stopped_project_model_repair
 from scripts.role_command import role_registers_runtime
 from scripts.runtime_projection import (  # SYRD-558: every tenant copy of the declaration
-    declared_projection as _declared_projection,
+    noop_repair as _noop_repair,
     projection_text as _projection_text,
     required_text as _required_text,
     restore_projection as _restore_projection,
     runtime_projection_files,
-    stale_projection as _stale_projection,
     write_runtime_projection as _write_runtime_projection,
 )
 from scripts.runtime_handover import (
@@ -1076,7 +1075,8 @@ def switch_role_runtime(
         # workflow can still name another runtime: an interrupted write, or a
         # switch made before this one wrote them all (Otto, SYRD-558). The same
         # command brings them in line with the board, with no worker restarted.
-        stale = _stale_projection(_declared_projection(config_path, document)) if checks.board_runtime is not None and os.geteuid() else {}
+        stale = _noop_repair(config_path, document, role_name=role_name, runtime=runtime,
+                             declared=checks.board_runtime is not None) if os.geteuid() else {}  # and the artifact (SYRD-899)
         if stale and not dry_run:
             from scripts.workflow_manage import apply_files
 

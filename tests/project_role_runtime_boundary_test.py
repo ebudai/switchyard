@@ -156,7 +156,8 @@ class Switch:
     def __init__(self, *, cli: str = "codex", model: str = "", offered: tuple = ("m-one", "m-two"), owner: str = "syrd358-owner",
                  picks: tuple = ("claude", "m-picked"), result: Result | None = None, error: Exception | None = None) -> None:
         self.role = SimpleNamespace(role="audit", cli=cli, model=model)
-        self.config = SimpleNamespace(project="p358", roles=[SimpleNamespace(role="main", cli="codex", model=""), self.role])
+        self.config = SimpleNamespace(project="p358", run_as_user="",
+                                      roles=[SimpleNamespace(role="main", cli="codex", model=""), self.role])
         self.offered, self.owner, self.picks = offered, owner, list(picks)
         self.result, self.error = result or Result(), error
         self.log: list[tuple] = []
@@ -319,8 +320,11 @@ def test_the_switch_is_delegated_exactly_and_reported() -> None:
     check(fx.said == ["SWITCHED"], "forced without a reason: nothing more said")
     fx = Switch(result=Result(changed=True))
     check(fx.run(runtime="claude", model="", dry_run=True, interactive=False) == 0
-          and fx.said == ["switchyard: would move audit from codex to claude; every check passed and nothing was changed"],
-          f"a dry run that would change something says so and nothing else: {fx.said}")
+          and fx.said == ["switchyard: would record audit's runtime, model and effort in: "
+                          "/nonexistent/syrd358/p358.json (roles: audit)",
+                          "switchyard: would move audit from codex to claude; every check passed and nothing was changed"],
+          f"a dry run that would change something says where it records the role, that it would, and nothing else "
+          f"(SYRD-899): {fx.said}")
     fx = Switch(result=Result(changed=False))
     fx.run(runtime="claude", model="", dry_run=True, interactive=False)
     check(fx.said == ["SWITCHED"], "a dry run that would change nothing is described as the switch describes it")

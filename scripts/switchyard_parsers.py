@@ -566,7 +566,9 @@ def _build_switchyard_set_role_runtime_parser() -> argparse.ArgumentParser:
         help=(
             "model the role should run, checked against the project owner's own catalog; "
             "pass an empty value to drop it and take the runtime's default. Omit it to keep "
-            "the configured model, or to be asked when it is one the owner does not offer"
+            "the configured model, or to be asked when it is one the owner does not offer. "
+            "Written to the role's launcher entry and wherever the project artifact records the "
+            "role, so it lasts across restarts and upgrades"
         ),
     )
     parser.add_argument(
@@ -585,7 +587,8 @@ def _build_switchyard_set_role_runtime_parser() -> argparse.ArgumentParser:
         help="switch even though the role is mid-turn; requires --reason",
     )
     parser.add_argument("--reason", default="", help="why a busy role was interrupted; recorded with the change")
-    parser.add_argument("--dry-run", action="store_true", help="run every check, change nothing")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="run every check, change nothing, and name each file the change would be recorded in")
     local = parser.add_mutually_exclusive_group()
     local.add_argument(
         "--local-qwen", dest="local", action="store_const", const=True, default=None,
